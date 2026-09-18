@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/review.schema.json",
+  "title": "LoungeReview",
+  "description": "Ajanlar arası kod/mimari inceleme isteği veya sonucu.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "type",
+    "source_agent",
+    "project_id",
+    "summary",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "const": "review"
+    },
+    "source_agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_agent": {
+      "type": ["string", "null"]
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "related_task_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ast_refs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "status": {
+      "type": "string",
+      "enum": ["requested", "approved", "changes_requested", "blocked"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

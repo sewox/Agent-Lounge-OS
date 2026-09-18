@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/task.schema.json",
+  "title": "LoungeTask",
+  "description": "Ajanlar arası görev mesajı. Tam kod transfer edilmez; yalnızca özet ve AST referansları taşınır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "type",
+    "source_agent",
+    "project_id",
+    "summary",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "const": "task"
+    },
+    "source_agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_agent": {
+      "type": ["string", "null"]
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ast_refs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["low", "normal", "high"],
+      "default": "normal"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["general", "code_analysis", "review", "test", "orchestration"],
+      "default": "general"
+    },
+    "repo_path": {
+      "type": ["string", "null"]
+    },
+    "model": {
+      "type": ["string", "null"],
+      "description": "Ollama model etiketi. Boşsa kernel varsayılanı (llama3.1:8b) kullanılır."
+    }
+  }
+}

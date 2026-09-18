@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run types:check
+
+      - name: Build
+        run: npm run build
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            pkg-config \
+            wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  ci:
+    name: CI
+    needs: [frontend, rust]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Require green jobs
+        run: |
+          test "${{ needs.frontend.result }}" = "success"
+          test "${{ needs.rust.result }}" = "success"
