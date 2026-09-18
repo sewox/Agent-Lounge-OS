@@ -1,6 +1,7 @@
 "use client";
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
@@ -496,6 +497,22 @@ export function SettingsPanel() {
 
   return (
     <section className="space-y-3">
+      <div className="rounded-lg border border-outline-variant bg-surface-container">
+        <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+          <div>
+            <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Bağlı araçlar</h2>
+            <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+              Claude Desktop, Cursor MCP ve Ollama yeniden taranır; seçim connected_tools tablosuna yazılır.
+            </p>
+          </div>
+          <Link
+            href="/onboarding"
+            className="rounded bg-primary-container px-2.5 py-1 font-mono text-[11px] font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+          >
+            Yeniden tara
+          </Link>
+        </div>
+      </div>
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Routing Policy</h2>

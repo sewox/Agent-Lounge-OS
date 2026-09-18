@@ -12,7 +12,7 @@ const MIN_COSINE: f32 = 0.22;
 
 #[derive(Clone)]
 pub struct ExperienceStore {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl ExperienceStore {
@@ -189,6 +189,7 @@ fn create_settings_sql() -> &'static str {
 
 fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
+    crate::db::connected_tools::migrate_connected_tools(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;

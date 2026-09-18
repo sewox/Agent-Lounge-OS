@@ -1,11 +1,13 @@
 //! Domain modelleri ve mesaj şemaları.
 
+mod discovery;
 mod memory;
 mod policy;
 mod protocol;
 mod quota;
 mod service;
 
+pub use discovery::{tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource};
 pub use memory::{IndexSnapshot, ProjectList, ProjectSummary};
 pub use policy::{
     decide_route, is_kernel, AgentTrigger, ApprovalKind, ApprovalRequest, QuotaExhaustedAction,

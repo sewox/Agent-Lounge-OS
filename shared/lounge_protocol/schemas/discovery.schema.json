@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/discovery.schema.json",
+  "title": "DiscoveryReport",
+  "description": "Yerel Claude Desktop / Cursor MCP ve Ollama taramasının raporu. MCP env değerleri asla yer almaz.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scanned_at", "sources", "tools"],
+  "properties": {
+    "scanned_at": { "type": "string", "format": "date-time" },
+    "sources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoverySource" }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    }
+  },
+  "$defs": {
+    "DiscoverySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "available"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["claude_desktop", "cursor", "ollama"]
+        },
+        "available": { "type": "boolean" },
+        "origin_path": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "DiscoveredTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "source", "args", "available"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["model", "mcp"] },
+        "source": {
+          "type": "string",
+          "enum": ["claude_desktop", "cursor", "ollama"]
+        },
+        "origin_path": { "type": ["string", "null"] },
+        "command": { "type": ["string", "null"] },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "endpoint": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "available": { "type": "boolean" }
+      }
+    }
+  }
+}

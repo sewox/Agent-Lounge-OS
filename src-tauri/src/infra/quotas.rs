@@ -167,7 +167,7 @@ fn probe_memory(memory: &MemoryBridge) -> ToolQuota {
     }
 }
 
-async fn http_json(url: &str) -> Result<serde_json::Value, String> {
+pub(crate) async fn http_json(url: &str) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         .build()

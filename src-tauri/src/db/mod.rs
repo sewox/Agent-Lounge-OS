@@ -1,5 +1,6 @@
 //! SQLite tecrübe deposu ve semantik (kosinüs) arama.
 
+mod connected_tools;
 mod embedding;
 mod experiences;
 

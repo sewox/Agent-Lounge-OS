@@ -7,12 +7,12 @@ pub mod services;
 use std::path::PathBuf;
 
 use db::ExperienceStore;
-use infra::{probe_quotas, BusManager};
+use infra::{probe_quotas, scan_system, BusManager};
 use kernel::{default_model_lock, Dispatcher};
 use lounge_protocol::LoungeMessage;
 use models::{
-    IndexSnapshot, LoungeExperience, ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport,
-    ToolQuota,
+    ConnectedTool, DiscoveredTool, DiscoveryReport, IndexSnapshot, LoungeExperience,
+    ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport, ToolQuota,
 };
 use services::{MemoryBridge, ServiceManager, SharedServices};
 use tauri::Manager;
@@ -86,7 +86,10 @@ pub fn run() {
             get_routing_policy,
             set_routing_policy,
             resolve_routing,
-            probe_bus
+            probe_bus,
+            discover_system,
+            save_connected_tools,
+            list_connected_tools
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -213,6 +216,38 @@ async fn resolve_routing(
 #[tauri::command]
 async fn probe_bus(state: tauri::State<'_, BusManager>) -> Result<LoungeMessage, String> {
     state.probe().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn discover_system(
+    state: tauri::State<'_, SharedServices>,
+) -> Result<DiscoveryReport, String> {
+    let endpoint = {
+        let manager = state.lock().await;
+        manager.ollama_endpoint()
+    };
+    Ok(scan_system(workspace_root(), endpoint).await)
+}
+
+#[tauri::command]
+async fn save_connected_tools(
+    state: tauri::State<'_, ExperienceStore>,
+    tools: Vec<DiscoveredTool>,
+) -> Result<Vec<ConnectedTool>, String> {
+    state
+        .save_connected_tools(tools)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_connected_tools(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<Vec<ConnectedTool>, String> {
+    state
+        .list_connected_tools()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 fn workspace_root() -> PathBuf {
