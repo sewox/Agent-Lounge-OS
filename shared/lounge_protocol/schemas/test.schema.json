@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/test.schema.json",
+  "title": "LoungeTest",
+  "description": "Doğrulama işi isteği veya sonucu. Payload'da ham test çıktısı yerine özet taşınır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "type",
+    "source_agent",
+    "project_id",
+    "summary",
+    "status",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "const": "test"
+    },
+    "source_agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_agent": {
+      "type": ["string", "null"]
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "related_task_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["requested", "passed", "failed", "skipped"]
+    },
+    "failed_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

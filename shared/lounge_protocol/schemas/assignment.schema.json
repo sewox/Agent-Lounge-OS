@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/assignment.schema.json",
+  "title": "TaskAssignment",
+  "description": "İş Emri ataması. Semantik tecrübe aramasından gelen context ajanına verilir.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task"],
+  "properties": {
+    "task": { "$ref": "task.schema.json" },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "experiences": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/experienceHit" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "experienceHit": {
+      "type": "object",
+      "required": [
+        "id",
+        "project_id",
+        "agent_id",
+        "topic",
+        "solution_summary",
+        "adr_record",
+        "score"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "project_id": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "topic": { "type": "string" },
+        "solution_summary": { "type": "string" },
+        "adr_record": { "type": "string" },
+        "score": { "type": "number" }
+      }
+    }
+  }
+}

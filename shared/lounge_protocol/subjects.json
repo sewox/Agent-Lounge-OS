@@ -1,0 +1,23 @@
+{
+  "task": {
+    "requested": "lounge.task.requested",
+    "assigned": "lounge.task.assigned",
+    "completed": "lounge.task.completed",
+    "failed": "lounge.task.failed"
+  },
+  "experience": {
+    "reported": "lounge.experience.reported"
+  },
+  "review": {
+    "requested": "lounge.review.requested",
+    "completed": "lounge.review.completed"
+  },
+  "test": {
+    "requested": "lounge.test.requested",
+    "completed": "lounge.test.completed"
+  },
+  "agent": {
+    "heartbeat": "lounge.agent.heartbeat",
+    "status": "lounge.agent.status"
+  }
+}

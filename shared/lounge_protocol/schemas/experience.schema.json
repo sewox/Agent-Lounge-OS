@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/experience.schema.json",
+  "title": "LoungeExperience",
+  "description": "Tamamlanan işin çözüm yolu ve mimari karar özeti. Global Memory'ye yazılır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "type",
+    "agent",
+    "project_id",
+    "adr_summary",
+    "outcome",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "const": "experience"
+    },
+    "agent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adr_summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["success", "failure", "partial"]
+    },
+    "related_task_id": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

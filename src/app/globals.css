@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #0c0e13;
+  --color-foreground: #dfe5f8;
+  --color-surface: #0c0e13;
+  --color-surface-dim: #0c0e13;
+  --color-surface-bright: #252c3c;
+  --color-surface-container: #161a23;
+  --color-surface-container-low: #10131a;
+  --color-surface-container-high: #1a202b;
+  --color-surface-container-highest: #1f2633;
+  --color-surface-container-lowest: #000000;
+  --color-on-surface: #dfe5f8;
+  --color-on-surface-variant: #a5abbc;
+  --color-outline: #6f7586;
+  --color-outline-variant: #424857;
+  --color-primary: #b4c5ff;
+  --color-primary-dim: #a0b6ff;
+  --color-primary-container: #003ea8;
+  --color-on-primary: #c2cfff;
+  --color-on-primary-container: #c2cfff;
+  --color-on-primary-fixed: #003798;
+  --color-secondary: #859fca;
+  --color-secondary-dim: #859fca;
+  --color-secondary-container: #203c61;
+  --color-secondary-fixed-dim: #bed6ff;
+  --color-tertiary: #d7e6ff;
+  --color-error: #ee7d77;
+  --color-error-dim: #bb5551;
+  --color-error-container: #7f2927;
+  --color-on-error-container: #ff9993;
+  --font-sans: var(--font-ibm-plex);
+  --font-body: var(--font-ibm-plex);
+  --font-headline: var(--font-geist-sans);
+  --font-label: var(--font-public-sans);
+  --font-mono: var(--font-jetbrains);
+  --radius-DEFAULT: 0.125rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.5rem;
+}
+
+html,
+body {
+  background: #0c0e13;
+  color: #dfe5f8;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0c0e13;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #424857;
+  border-radius: 2px;
+}
+
+::selection {
+  background: #003ea8;
+  color: #b4c5ff;
+}
