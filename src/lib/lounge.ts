@@ -38,6 +38,50 @@ export type NatsEvent = {
   state: "queued" | "ok" | "error" | "retry";
 };
 
+export type LoungeMessage = {
+  id: string;
+  type: string;
+  subject: string;
+  source_agent: string;
+  target_agent?: string | null;
+  created_at: string;
+  payload: unknown;
+  payload_bytes: number;
+};
+
+export const BUS_UI_EVENT = "lounge://bus";
+
+export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
+  const kb = (message.payload_bytes / 1024).toFixed(1);
+  let state: NatsEvent["state"] = "ok";
+  if (message.subject.endsWith(".failed")) {
+    state = "error";
+  } else if (message.subject.endsWith(".requested")) {
+    state = "queued";
+  }
+  const created = new Date(message.created_at);
+  let time = message.created_at;
+  if (!Number.isNaN(created.getTime())) {
+    const clock = new Intl.DateTimeFormat("tr-TR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZone: "Europe/Istanbul",
+    }).format(created);
+    time = `${clock}.${String(created.getMilliseconds()).padStart(3, "0")}`;
+  }
+  return {
+    id: message.id,
+    time,
+    subject: message.subject,
+    from: message.source_agent,
+    to: message.target_agent?.trim() ? message.target_agent : "bus",
+    payload: `${kb}kb`,
+    state,
+  };
+}
+
 export type SemanticNode = {
   name: string;
   edges: number;

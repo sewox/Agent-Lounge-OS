@@ -18,9 +18,12 @@ import {
   MOCK_EVENTS,
   MOCK_EXPERIENCES,
   MOCK_QUOTAS,
+  loungeMessageToEvent,
+  BUS_UI_EVENT,
   type ApprovalRequest,
   type IndexSnapshot,
   type LoungeExperience,
+  type LoungeMessage,
   type NatsEvent,
   type ProjectSummary,
   type RoutingPolicy,
@@ -52,16 +55,11 @@ type LoungeContextValue = {
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
   resolveApproval: (vote: RoutingVote) => Promise<void>;
+  ingestBusMessage: (message: LoungeMessage) => void;
+  probeBus: () => Promise<void>;
 };
 
 const LoungeContext = createContext<LoungeContextValue | null>(null);
-
-function asEventState(value: string): NatsEvent["state"] {
-  if (value === "ok" || value === "error" || value === "retry" || value === "queued") {
-    return value;
-  }
-  return "ok";
-}
 
 export function LoungeProvider({ children }: { children: ReactNode }) {
   const [report, setReport] = useState<ServiceReport | null>(null);
@@ -69,7 +67,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [model, setModel] = useState("llama3.1:8b");
   const [models, setModels] = useState<string[]>([]);
   const [experiences, setExperiences] = useState<LoungeExperience[]>(MOCK_EXPERIENCES);
-  const [events, setEvents] = useState<NatsEvent[]>(MOCK_EVENTS);
+  const [events, setEvents] = useState<NatsEvent[]>(() => (isTauri() ? [] : MOCK_EVENTS));
   const [quotas, setQuotas] = useState<ToolQuota[]>(MOCK_QUOTAS);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [query, setQuery] = useState("");
@@ -165,6 +163,36 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     setPolicy(saved);
   }, []);
 
+  const ingestBusMessage = useCallback((message: LoungeMessage) => {
+    const row = loungeMessageToEvent(message);
+    setEvents((current) => {
+      if (current.some((event) => event.id === row.id)) {
+        return current;
+      }
+      return [row, ...current].slice(0, EVENT_CAP);
+    });
+    if (row.subject.includes("experience")) {
+      void refreshSemantic();
+    }
+  }, [refreshSemantic]);
+
+  const probeBus = useCallback(async () => {
+    if (!isTauri()) {
+      ingestBusMessage({
+        id: crypto.randomUUID(),
+        type: "bus",
+        subject: "lounge.bus.probe",
+        source_agent: "browser",
+        target_agent: "bus",
+        created_at: new Date().toISOString(),
+        payload: { kind: "probe" },
+        payload_bytes: 16,
+      });
+      return;
+    }
+    await invoke<LoungeMessage>("probe_bus");
+  }, [ingestBusMessage]);
+
   const resolveApproval = useCallback(async (vote: RoutingVote) => {
     if (!approval) {
       return;
@@ -209,18 +237,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         unlisteners.push(
-          await listen<NatsEvent>("lounge://nats", (event) => {
-            if (cancelled) {
-              return;
-            }
-            const payload = event.payload;
-            const row: NatsEvent = {
-              ...payload,
-              state: asEventState(payload.state),
-            };
-            setEvents((current) => [row, ...current].slice(0, EVENT_CAP));
-            if (row.subject.includes("experience")) {
-              void refreshSemantic();
+          await listen<LoungeMessage>(BUS_UI_EVENT, (event) => {
+            if (!cancelled) {
+              ingestBusMessage(event.payload);
             }
           }),
         );
@@ -242,7 +261,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         void fn();
       });
     };
-  }, [refreshSemantic]);
+  }, [ingestBusMessage]);
 
   const value = useMemo<LoungeContextValue>(
     () => ({
@@ -266,6 +285,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      ingestBusMessage,
+      probeBus,
     }),
     [
       report,
@@ -286,6 +307,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      ingestBusMessage,
+      probeBus,
     ],
   );
 

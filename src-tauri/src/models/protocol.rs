@@ -336,5 +336,7 @@ mod tests {
         assert_eq!(json["task"]["completed"], TASK_COMPLETED);
         assert_eq!(json["task"]["failed"], TASK_FAILED);
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
+        assert_eq!(json["bus"]["connected"], "lounge.bus.connected");
+        assert_eq!(json["bus"]["heartbeat"], "lounge.bus.heartbeat");
     }
 }

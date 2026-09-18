@@ -19,5 +19,10 @@
   "agent": {
     "heartbeat": "lounge.agent.heartbeat",
     "status": "lounge.agent.status"
+  },
+  "bus": {
+    "connected": "lounge.bus.connected",
+    "heartbeat": "lounge.bus.heartbeat",
+    "probe": "lounge.bus.probe"
   }
 }

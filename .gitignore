@@ -43,6 +43,8 @@ next-env.d.ts
 # Tauri / Rust
 src-tauri/target
 src-tauri/gen
+shared/lounge_protocol/target
+shared/lounge_protocol/Cargo.lock
 
 # Native binaries (resolved at runtime from PATH if missing)
 bridge/codebase-memory-mcp
