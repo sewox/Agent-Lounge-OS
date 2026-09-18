@@ -7,11 +7,12 @@ pub mod services;
 use std::path::PathBuf;
 
 use db::ExperienceStore;
-use infra::{listen_lounge_wildcard, probe_quotas};
+use infra::{probe_quotas, scan_system, BusManager};
 use kernel::{default_model_lock, Dispatcher};
+use lounge_protocol::LoungeMessage;
 use models::{
-    IndexSnapshot, LoungeExperience, ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport,
-    ToolQuota,
+    ConnectedTool, DiscoveredTool, DiscoveryReport, IndexSnapshot, LoungeExperience,
+    ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport, ToolQuota,
 };
 use services::{MemoryBridge, ServiceManager, SharedServices};
 use tauri::Manager;
@@ -46,12 +47,13 @@ pub fn run() {
                 workspace,
             );
             dispatcher.attach_app(app.handle().clone());
+            let bus = BusManager::new("nats://127.0.0.1:4222", app.handle().clone());
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
             app.manage(store);
+            app.manage(bus.clone());
 
-            let hub_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 {
                     let mut manager = services.lock().await;
@@ -63,10 +65,7 @@ pub fn run() {
                         report.memory.running
                     );
                 }
-                tauri::async_runtime::spawn(listen_lounge_wildcard(
-                    hub_app,
-                    "nats://127.0.0.1:4222".into(),
-                ));
+                tauri::async_runtime::spawn(async move { bus.run().await });
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
                 }
@@ -86,7 +85,11 @@ pub fn run() {
             list_quotas,
             get_routing_policy,
             set_routing_policy,
-            resolve_routing
+            resolve_routing,
+            probe_bus,
+            discover_system,
+            save_connected_tools,
+            list_connected_tools
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -206,6 +209,43 @@ async fn resolve_routing(
 ) -> Result<(), String> {
     state
         .resolve_vote(task_id, vote)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn probe_bus(state: tauri::State<'_, BusManager>) -> Result<LoungeMessage, String> {
+    state.probe().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn discover_system(
+    state: tauri::State<'_, SharedServices>,
+) -> Result<DiscoveryReport, String> {
+    let endpoint = {
+        let manager = state.lock().await;
+        manager.ollama_endpoint()
+    };
+    Ok(scan_system(workspace_root(), endpoint).await)
+}
+
+#[tauri::command]
+async fn save_connected_tools(
+    state: tauri::State<'_, ExperienceStore>,
+    tools: Vec<DiscoveredTool>,
+) -> Result<Vec<ConnectedTool>, String> {
+    state
+        .save_connected_tools(tools)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_connected_tools(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<Vec<ConnectedTool>, String> {
+    state
+        .list_connected_tools()
         .await
         .map_err(|err| err.to_string())
 }

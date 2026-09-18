@@ -38,6 +38,176 @@ export type NatsEvent = {
   state: "queued" | "ok" | "error" | "retry";
 };
 
+export type LoungeMessage = {
+  id: string;
+  type: string;
+  subject: string;
+  source_agent: string;
+  target_agent?: string | null;
+  created_at: string;
+  payload: unknown;
+  payload_bytes: number;
+};
+
+export type DiscoverySource = {
+  id: string;
+  available: boolean;
+  origin_path?: string | null;
+  detail?: string | null;
+};
+
+export type DiscoveredTool = {
+  id: string;
+  name: string;
+  kind: "model" | "mcp" | string;
+  source: "claude_desktop" | "cursor" | "ollama" | string;
+  origin_path?: string | null;
+  command?: string | null;
+  args: string[];
+  endpoint?: string | null;
+  detail?: string | null;
+  available: boolean;
+};
+
+export type DiscoveryReport = {
+  scanned_at: string;
+  sources: DiscoverySource[];
+  tools: DiscoveredTool[];
+};
+
+export type ConnectedTool = {
+  id: string;
+  name: string;
+  kind: string;
+  source: string;
+  origin_path?: string | null;
+  command?: string | null;
+  args: string[];
+  endpoint?: string | null;
+  enabled: boolean;
+  connected_at: string;
+  payload: unknown;
+};
+
+export const MOCK_DISCOVERY: DiscoveryReport = {
+  scanned_at: new Date().toISOString(),
+  sources: [
+    {
+      id: "claude_desktop",
+      available: true,
+      origin_path: "~/Library/Application Support/Claude/claude_desktop_config.json",
+      detail: "1 araç",
+    },
+    {
+      id: "cursor",
+      available: true,
+      origin_path: "~/.cursor/mcp.json",
+      detail: "2 araç",
+    },
+    {
+      id: "ollama",
+      available: true,
+      origin_path: "http://127.0.0.1:11434/api/tags",
+      detail: "2 model",
+    },
+  ],
+  tools: [
+    {
+      id: "ollama:llama3.1:8b",
+      name: "llama3.1:8b",
+      kind: "model",
+      source: "ollama",
+      origin_path: "http://127.0.0.1:11434/api/tags",
+      command: null,
+      args: [],
+      endpoint: "http://127.0.0.1:11434",
+      detail: null,
+      available: true,
+    },
+    {
+      id: "ollama:qwen2.5:7b",
+      name: "qwen2.5:7b",
+      kind: "model",
+      source: "ollama",
+      origin_path: "http://127.0.0.1:11434/api/tags",
+      command: null,
+      args: [],
+      endpoint: "http://127.0.0.1:11434",
+      detail: null,
+      available: true,
+    },
+    {
+      id: "claude_desktop:github",
+      name: "github",
+      kind: "mcp",
+      source: "claude_desktop",
+      origin_path: "~/Library/Application Support/Claude/claude_desktop_config.json",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+      endpoint: null,
+      detail: "env keys: GITHUB_TOKEN",
+      available: true,
+    },
+    {
+      id: "cursor:notion",
+      name: "notion",
+      kind: "mcp",
+      source: "cursor",
+      origin_path: "~/.cursor/mcp.json",
+      command: "npx",
+      args: ["-y", "@notionhq/mcp"],
+      endpoint: null,
+      detail: "env keys: NOTION_TOKEN",
+      available: true,
+    },
+    {
+      id: "cursor:codebase-memory",
+      name: "codebase-memory",
+      kind: "mcp",
+      source: "cursor",
+      origin_path: ".cursor/mcp.json",
+      command: "codebase-memory-mcp",
+      args: [],
+      endpoint: null,
+      detail: null,
+      available: true,
+    },
+  ],
+};
+
+export const BUS_UI_EVENT = "lounge://bus";
+
+export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
+  const kb = (message.payload_bytes / 1024).toFixed(1);
+  let state: NatsEvent["state"] = "ok";
+  if (message.subject.endsWith(".failed")) {
+    state = "error";
+  } else if (message.subject.endsWith(".requested")) {
+    state = "queued";
+  }
+  const created = new Date(message.created_at);
+  let time = message.created_at;
+  if (!Number.isNaN(created.getTime())) {
+    const clock = new Intl.DateTimeFormat("tr-TR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZone: "Europe/Istanbul",
+    }).format(created);
+    time = `${clock}.${String(created.getMilliseconds()).padStart(3, "0")}`;
+  }
+  return {
+    id: message.id,
+    time,
+    subject: message.subject,
+    from: message.source_agent,
+    to: message.target_agent?.trim() ? message.target_agent : "bus",
+    payload: `${kb}kb`,
+    state,
+  };
+}
+
 export type SemanticNode = {
   name: string;
   edges: number;

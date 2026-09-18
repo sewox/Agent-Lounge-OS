@@ -1,15 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { eventStateClass, Kpi, outcomeClass, Pip, subjectClass } from "@/components/ui";
 import {
+  BUS_UI_EVENT,
   formatExperienceTime,
+  isTauri,
   MOCK_HEALTH,
   MOCK_NODES,
   quotaBarClass,
   quotaToneClass,
+  type LoungeMessage,
   type QuotaExhaustedAction,
   type QuotaKind,
 } from "@/lib/lounge";
@@ -60,8 +65,35 @@ export function OverviewKpis() {
 }
 
 export function EventStreamPanel() {
-  const { events, query } = useLounge();
+  const { events, query, ingestBusMessage, probeBus } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
+  const [probing, setProbing] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    void listen<LoungeMessage>(BUS_UI_EVENT, (event) => {
+      if (!cancelled) {
+        ingestBusMessage(event.payload);
+      }
+    }).then((fn) => {
+      if (cancelled) {
+        void fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, [ingestBusMessage]);
+
   const filtered = useMemo(() => {
     return events.filter((event) => {
       if (subjectFilter === "task" && !event.subject.includes(".task.")) {
@@ -85,6 +117,9 @@ export function EventStreamPanel() {
           <Pip live tone="primary" />
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">NATS EVENT STREAM</h2>
           <span className="rounded bg-surface-container-high px-1 font-mono text-[10px] text-outline">topic: lounge.&gt;</span>
+          <span className="rounded border border-primary/30 bg-primary-container/20 px-1.5 py-0.5 font-mono text-[10px] text-primary">
+            bus live
+          </span>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 rounded border border-outline-variant/60 bg-surface-container-high px-2 py-0.5">
@@ -147,7 +182,7 @@ export function EventStreamPanel() {
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-2.5 py-6 text-center font-mono text-[11px] text-outline">
-                  0 events
+                  Bus dinleniyor — henüz lounge.&gt; mesajı yok
                 </td>
               </tr>
             ) : null}
@@ -159,6 +194,16 @@ export function EventStreamPanel() {
           Streaming: {filtered.length} events visible / {events.length} buffered
         </span>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setProbing(true);
+              void probeBus().finally(() => setProbing(false));
+            }}
+            className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 font-medium text-on-surface hover:bg-surface-bright"
+          >
+            {probing ? "Probing…" : "Probe bus"}
+          </button>
           <span className="h-1.5 w-1.5 rounded-full bg-secondary" />
           <span className="text-on-surface-variant">NATS listen survives navigation</span>
         </div>
@@ -452,6 +497,22 @@ export function SettingsPanel() {
 
   return (
     <section className="space-y-3">
+      <div className="rounded-lg border border-outline-variant bg-surface-container">
+        <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+          <div>
+            <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Bağlı araçlar</h2>
+            <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+              Claude Desktop, Cursor MCP ve Ollama yeniden taranır; seçim connected_tools tablosuna yazılır.
+            </p>
+          </div>
+          <Link
+            href="/onboarding"
+            className="rounded bg-primary-container px-2.5 py-1 font-mono text-[11px] font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+          >
+            Yeniden tara
+          </Link>
+        </div>
+      </div>
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Routing Policy</h2>

@@ -27,6 +27,7 @@ const TITLES: Record<string, string> = {
   "/telemetry": "Telemetry",
   "/quotas": "Quotas",
   "/settings": "Settings",
+  "/onboarding": "Onboarding",
 };
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -50,6 +51,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const crumb = TITLES[pathname] ?? "Lounge";
   const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 70);
+  const onboarding = pathname === "/onboarding";
 
   return (
     <div className="min-h-screen bg-surface text-on-surface">
@@ -107,31 +109,38 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
 
-        <div className="mx-6 flex max-w-lg flex-1 items-center gap-4">
-          <label className="relative w-full">
-            <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-outline">
-              <Icon name="search" />
-            </span>
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="w-full rounded-lg border border-outline-variant bg-surface-container-low py-1 pr-12 pl-8 font-body text-xs text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
-              placeholder="Filter subjects, repos, experiences"
-            />
-            <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
-              <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
-                ⌘K
-              </kbd>
-            </span>
-          </label>
-          <div className="hidden shrink-0 items-center gap-3 font-mono text-[11px] xl:flex">
-            <span className="border-b border-primary px-1 py-0.5 font-medium text-primary">Cluster us-east</span>
-            <span className="text-on-surface-variant">NATS v2.10</span>
-            <span className="text-on-surface-variant">Latency 4ms</span>
+        {onboarding ? (
+          <div className="mx-6 flex-1 font-mono text-[11px] text-on-surface-variant">
+            Yerel araçları tarayıp Lounge’a bağlayın
           </div>
-        </div>
+        ) : (
+          <div className="mx-6 flex max-w-lg flex-1 items-center gap-4">
+            <label className="relative w-full">
+              <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-outline">
+                <Icon name="search" />
+              </span>
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="w-full rounded-lg border border-outline-variant bg-surface-container-low py-1 pr-12 pl-8 font-body text-xs text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
+                placeholder="Filter subjects, repos, experiences"
+              />
+              <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
+                <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
+                  ⌘K
+                </kbd>
+              </span>
+            </label>
+            <div className="hidden shrink-0 items-center gap-3 font-mono text-[11px] xl:flex">
+              <span className="border-b border-primary px-1 py-0.5 font-medium text-primary">Cluster us-east</span>
+              <span className="text-on-surface-variant">NATS v2.10</span>
+              <span className="text-on-surface-variant">Latency 4ms</span>
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
+          {onboarding ? null : (
           <div className="mr-1 flex items-center gap-1.5 font-mono text-[11px]">
             <label className="flex items-center gap-1.5 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface-variant">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
@@ -166,27 +175,33 @@ export function AppShell({ children }: { children: ReactNode }) {
             </Link>
             <div className="tnum hidden text-on-surface-variant sm:block">{clock} UTC+3</div>
           </div>
-          <button
-            type="button"
-            className="flex items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-high px-2.5 py-1 text-xs font-medium text-on-surface hover:bg-surface-bright"
-          >
-            <Icon name="tune" />
-            <span className="hidden sm:inline">Quick Filter</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => void indexWorkspace()}
-            className="flex items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
-          >
-            <Icon name="terminal" />
-            <span>{indexing ? "Indexing…" : "Index Workspace"}</span>
-          </button>
+          )}
+          {onboarding ? null : (
+            <>
+              <button
+                type="button"
+                className="flex items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-high px-2.5 py-1 text-xs font-medium text-on-surface hover:bg-surface-bright"
+              >
+                <Icon name="tune" />
+                <span className="hidden sm:inline">Quick Filter</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void indexWorkspace()}
+                className="flex items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+              >
+                <Icon name="terminal" />
+                <span>{indexing ? "Indexing…" : "Index Workspace"}</span>
+              </button>
+            </>
+          )}
           <span className="rounded-lg p-1 text-on-surface-variant" title={`kernel · ${kernel}`}>
             <Icon name="bell" className="h-[15px] w-[15px]" />
           </span>
         </div>
       </header>
 
+      {onboarding ? null : (
       <aside className="fixed top-12 bottom-0 left-0 z-30 flex w-[220px] flex-col justify-between border-r border-outline-variant bg-surface-container-low px-2 py-3">
         <div className="space-y-4">
           <div className="flex items-center justify-between border-b border-outline-variant/60 px-2 pb-2">
@@ -258,8 +273,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </aside>
+      )}
 
-      <main className={`mt-12 ml-[220px] min-h-[calc(100vh-48px)] space-y-3 bg-surface p-3.5 ${approval ? "pt-14" : ""}`}>
+      <main className={`mt-12 min-h-[calc(100vh-48px)] space-y-3 bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[220px]"} ${approval ? "pt-14" : ""}`}>
         {children}
       </main>
     </div>
