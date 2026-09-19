@@ -106,6 +106,13 @@ export function Icon({ name, className = "h-3.5 w-3.5" }: { name: string; classN
           <path d="M8 2.8V8l3.8 3.8" />
         </svg>
       );
+    case "warn":
+      return (
+        <svg viewBox="0 0 16 16" className={className} aria-hidden {...stroke}>
+          <path d="M8 2.4 14.2 13H1.8z" />
+          <path d="M8 6.2v3.2M8 11.4h.01" />
+        </svg>
+      );
     default:
       return null;
   }

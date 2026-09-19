@@ -10,13 +10,13 @@ export default function Home() {
   useEffect(() => {
     const id = window.setTimeout(() => {
       if (!isTauri()) {
-        router.replace("/stream");
+        router.replace("/onboarding");
         return;
       }
       void invoke<ConnectedTool[]>("list_connected_tools")
         .then((tools) => {
-          const hasEnabled = tools.some((tool) => tool.enabled);
-          router.replace(hasEnabled ? "/stream" : "/onboarding");
+          const hasEnabled = tools.some((tool) => tool.enabled || tool.is_active);
+          router.replace(hasEnabled ? "/dashboard" : "/onboarding");
         })
         .catch(() => {
           router.replace("/onboarding");

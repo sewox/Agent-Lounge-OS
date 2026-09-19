@@ -3,12 +3,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Icon } from "@/components/icons";
 import {
   MOCK_DISCOVERY,
   isTauri,
   type ConnectedTool,
   type DiscoveredTool,
   type DiscoveryReport,
+  type DiscoverySource,
 } from "@/lib/lounge";
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -16,6 +18,15 @@ const SOURCE_LABEL: Record<string, string> = {
   cursor: "Cursor",
   ollama: "Ollama",
   system: "Sistem",
+};
+
+const INSTALL: Record<string, { label: string; href: string }> = {
+  ollama: { label: "Ollama kur", href: "https://ollama.com/download" },
+  claude_desktop: { label: "Claude Desktop", href: "https://claude.ai/download" },
+  cursor: { label: "Cursor", href: "https://cursor.com/download" },
+  git: { label: "Git kur", href: "https://git-scm.com/downloads" },
+  gh: { label: "GitHub CLI", href: "https://cli.github.com" },
+  docker: { label: "Docker Desktop", href: "https://docs.docker.com/get-docker/" },
 };
 
 function systemToolsAsDiscovered(report: DiscoveryReport): DiscoveredTool[] {
@@ -36,6 +47,10 @@ function systemToolsAsDiscovered(report: DiscoveryReport): DiscoveredTool[] {
   }));
 }
 
+function installFor(id: string): { label: string; href: string } | null {
+  return INSTALL[id] ?? null;
+}
+
 export function OnboardingPanel() {
   const router = useRouter();
   const [report, setReport] = useState<DiscoveryReport | null>(null);
@@ -50,7 +65,9 @@ export function OnboardingPanel() {
     try {
       const next = isTauri()
         ? await invoke<DiscoveryReport>("get_discovery_report")
-        : MOCK_DISCOVERY;
+        : await new Promise<DiscoveryReport>((resolve) => {
+            window.setTimeout(() => resolve(MOCK_DISCOVERY), 1400);
+          });
       let connected: ConnectedTool[] = [];
       if (isTauri()) {
         try {
@@ -59,7 +76,9 @@ export function OnboardingPanel() {
           connected = [];
         }
       }
-      const enabled = new Set(connected.filter((row) => row.enabled).map((row) => row.id));
+      const enabled = new Set(
+        connected.filter((row) => row.enabled || row.is_active).map((row) => row.id),
+      );
       const initial =
         enabled.size > 0
           ? enabled
@@ -87,6 +106,7 @@ export function OnboardingPanel() {
     () => (report ? systemToolsAsDiscovered(report) : []),
     [report],
   );
+  const ollamaSource = report?.sources.find((source) => source.id === "ollama");
 
   const toggle = (id: string) => {
     setSelected((current) => {
@@ -104,6 +124,9 @@ export function OnboardingPanel() {
     setSelected((current) => {
       const next = new Set(current);
       for (const tool of tools) {
+        if (!tool.available) {
+          continue;
+        }
         if (on) {
           next.add(tool.id);
         } else {
@@ -112,13 +135,6 @@ export function OnboardingPanel() {
       }
       return next;
     });
-  };
-
-  const selectAll = () => {
-    if (!report) {
-      return;
-    }
-    setSelected(new Set(report.tools.map((tool) => tool.id)));
   };
 
   const save = async () => {
@@ -136,7 +152,7 @@ export function OnboardingPanel() {
       if (isTauri()) {
         await invoke<ConnectedTool[]>("save_selected_tools", { tools });
       }
-      router.replace("/stream");
+      router.replace("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -144,17 +160,21 @@ export function OnboardingPanel() {
     }
   };
 
+  if (scanning && !report) {
+    return <ScanningSystem />;
+  }
+
   return (
     <section className="mx-auto max-w-3xl space-y-3">
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low p-3">
           <div>
             <h1 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
-              Sistem keşfi
+              İlk açılış · Sistem keşfi
             </h1>
             <p className="mt-1 font-body text-[11px] text-on-surface-variant">
-              Claude Desktop, Cursor MCP, Ollama ve PATH (git, gh, docker) taranır. Seçtiklerin
-              Lounge’a bağlanır; MCP env değerleri kaydedilmez.
+              Yerel modeller, MCP sunucuları ve CLI araçları taranır. Seçtiklerin Lounge’a bağlanır;
+              MCP env değerleri kaydedilmez.
             </p>
           </div>
           <button
@@ -163,35 +183,14 @@ export function OnboardingPanel() {
             disabled={scanning}
             className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-bright disabled:opacity-50"
           >
-            {scanning ? "Taranıyor…" : "Yeniden tara"}
+            {scanning ? "Scanning…" : "Yeniden tara"}
           </button>
         </div>
 
         <div className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-4">
           {(report?.sources ?? []).map((source) => (
-            <div
-              key={source.id}
-              className="rounded border border-outline-variant bg-surface-container-high px-3 py-2"
-            >
-              <div className="flex items-center justify-between font-mono text-[11px]">
-                <span className="font-semibold text-on-surface">
-                  {SOURCE_LABEL[source.id] ?? source.id}
-                </span>
-                <span className={source.available ? "text-secondary" : "text-error"}>
-                  {source.available ? "found" : "yok"}
-                </span>
-              </div>
-              <div className="mt-1 truncate font-mono text-[10px] text-outline" title={source.origin_path ?? ""}>
-                {source.origin_path ?? "—"}
-              </div>
-              <div className="mt-0.5 font-body text-[10px] text-on-surface-variant">
-                {source.detail ?? ""}
-              </div>
-            </div>
+            <SourceCard key={source.id} source={source} />
           ))}
-          {scanning && !report ? (
-            <div className="font-mono text-[11px] text-on-surface-variant">Kaynaklar taranıyor…</div>
-          ) : null}
         </div>
       </div>
 
@@ -203,20 +202,24 @@ export function OnboardingPanel() {
 
       <ToolGroup
         title="Modeller"
+        emptyHint="Ollama yanıt vermedi veya yüklü model yok."
+        missing={ollamaSource && !ollamaSource.available ? installFor("ollama") : null}
         tools={models}
         selected={selected}
         onToggle={toggle}
         onSelectAll={() => selectGroup(models, true)}
       />
       <ToolGroup
-        title="MCP araçları"
+        title="MCP Serverlar"
+        emptyHint="Claude Desktop veya Cursor mcp.json bulunamadı."
         tools={mcps}
         selected={selected}
         onToggle={toggle}
         onSelectAll={() => selectGroup(mcps, true)}
       />
       <ToolGroup
-        title="Sistem araçları"
+        title="CLI Araçları"
+        emptyHint="PATH üzerinde git / gh / docker görünmüyor."
         tools={systemTools}
         selected={selected}
         onToggle={toggle}
@@ -226,13 +229,6 @@ export function OnboardingPanel() {
       <div className="flex items-center justify-between rounded-lg border border-outline-variant bg-surface-container px-3 py-2">
         <div className="font-mono text-[11px] text-on-surface-variant">
           {selected.size} seçildi
-          <button
-            type="button"
-            onClick={selectAll}
-            className="ml-3 text-primary hover:underline"
-          >
-            Hepsini seç
-          </button>
         </div>
         <button
           type="button"
@@ -240,10 +236,70 @@ export function OnboardingPanel() {
           disabled={saving || !report}
           className="rounded bg-primary-container px-3 py-1.5 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
         >
-          {saving ? "Kaydediliyor…" : "Sisteme dahil et"}
+          {saving ? "Kaydediliyor…" : "Sistemi Başlat"}
         </button>
       </div>
     </section>
+  );
+}
+
+function ScanningSystem() {
+  return (
+    <section
+      role="status"
+      aria-live="polite"
+      className="flex min-h-[calc(100vh-96px)] flex-col items-center justify-center gap-4"
+    >
+      <div className="relative h-12 w-12" aria-hidden>
+        <span className="absolute inset-0 rounded-full border border-outline-variant" />
+        <span className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-primary" />
+        <span className="absolute inset-2 animate-pulse rounded-full bg-primary-container/40" />
+      </div>
+      <div className="font-mono text-xs font-bold tracking-[0.28em] text-on-surface uppercase">
+        Scanning System...
+      </div>
+      <div className="font-mono text-[10px] text-outline">
+        Ollama :11434 · Claude Desktop · Cursor MCP · PATH
+      </div>
+    </section>
+  );
+}
+
+function SourceCard({ source }: { source: DiscoverySource }) {
+  const install = !source.available ? installFor(source.id) : null;
+  return (
+    <div className="rounded border border-outline-variant bg-surface-container-high px-3 py-2">
+      <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+        <span className="font-semibold text-on-surface">{SOURCE_LABEL[source.id] ?? source.id}</span>
+        {source.available ? (
+          <span className="text-secondary">found</span>
+        ) : (
+          <span className="flex items-center gap-1 text-error">
+            <Icon name="warn" className="h-3 w-3" />
+            yok
+          </span>
+        )}
+      </div>
+      <div className="mt-1 truncate font-mono text-[10px] text-outline" title={source.origin_path ?? ""}>
+        {source.origin_path ?? "—"}
+      </div>
+      <div className="mt-0.5 font-body text-[10px] text-on-surface-variant">{source.detail ?? ""}</div>
+      {install ? <InstallLink {...install} /> : null}
+    </div>
+  );
+}
+
+function InstallLink({ label, href }: { label: string; href: string }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-primary hover:underline"
+    >
+      <Icon name="warn" className="h-3 w-3 text-error" />
+      {label}
+    </a>
   );
 }
 
@@ -253,12 +309,16 @@ function ToolGroup({
   selected,
   onToggle,
   onSelectAll,
+  emptyHint,
+  missing,
 }: {
   title: string;
   tools: DiscoveredTool[];
   selected: Set<string>;
   onToggle: (id: string) => void;
   onSelectAll: () => void;
+  emptyHint: string;
+  missing?: { label: string; href: string } | null;
 }) {
   return (
     <div className="rounded-lg border border-outline-variant bg-surface-container">
@@ -267,7 +327,7 @@ function ToolGroup({
           {title}
           <span className="ml-2 font-medium text-outline">{tools.length}</span>
         </h2>
-        {tools.length > 0 ? (
+        {tools.some((tool) => tool.available) ? (
           <button
             type="button"
             onClick={onSelectAll}
@@ -278,23 +338,38 @@ function ToolGroup({
         ) : null}
       </div>
       {tools.length === 0 ? (
-        <div className="px-3 py-4 font-mono text-[11px] text-outline">Bu taramada kayıt yok.</div>
+        <div className="flex items-start gap-2 px-3 py-4">
+          <Icon name="warn" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-error" />
+          <div>
+            <div className="font-mono text-[11px] text-outline">{emptyHint}</div>
+            {missing ? <InstallLink {...missing} /> : null}
+          </div>
+        </div>
       ) : (
         <ul className="divide-y divide-outline-variant/40">
           {tools.map((tool) => {
             const checked = selected.has(tool.id);
+            const install = !tool.available ? installFor(tool.name) ?? installFor(tool.source) : null;
             return (
               <li key={tool.id}>
-                <label className="flex cursor-pointer items-start gap-3 px-3 py-2 hover:bg-surface-container-high">
+                <label
+                  className={`flex items-start gap-3 px-3 py-2 ${
+                    tool.available ? "cursor-pointer hover:bg-surface-container-high" : "opacity-80"
+                  }`}
+                >
                   <input
                     type="checkbox"
                     checked={checked}
+                    disabled={!tool.available}
                     onChange={() => onToggle(tool.id)}
                     className="mt-0.5 accent-primary"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
-                      <span className="font-semibold text-on-surface">{tool.name}</span>
+                      <span className="flex items-center gap-1.5 font-semibold text-on-surface">
+                        {!tool.available ? <Icon name="warn" className="h-3 w-3 text-error" /> : null}
+                        {tool.name}
+                      </span>
                       <span className="shrink-0 text-outline">
                         {SOURCE_LABEL[tool.source] ?? tool.source}
                       </span>
@@ -307,6 +382,7 @@ function ToolGroup({
                     {tool.detail ? (
                       <div className="mt-0.5 font-body text-[10px] text-outline">{tool.detail}</div>
                     ) : null}
+                    {install ? <InstallLink {...install} /> : null}
                   </div>
                 </label>
               </li>

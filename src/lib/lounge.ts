@@ -129,7 +129,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       id: "system",
       available: true,
       origin_path: null,
-      detail: "3 / 3 PATH",
+      detail: "2 / 3 PATH",
     },
   ],
   models: [
@@ -199,7 +199,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
   system_tools: [
     { id: "system:git", name: "git", available: true, path: "/usr/bin/git", detail: null },
     { id: "system:gh", name: "gh", available: true, path: "/opt/homebrew/bin/gh", detail: null },
-    { id: "system:docker", name: "docker", available: true, path: "/usr/local/bin/docker", detail: null },
+    { id: "system:docker", name: "docker", available: false, path: null, detail: "PATH'te bulunamadı" },
   ],
   tools: [
     {
@@ -291,12 +291,12 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       name: "docker",
       kind: "system",
       source: "system",
-      origin_path: "/usr/local/bin/docker",
-      command: "/usr/local/bin/docker",
+      origin_path: null,
+      command: "docker",
       args: [],
       endpoint: null,
-      detail: null,
-      available: true,
+      detail: "PATH'te bulunamadı",
+      available: false,
     },
   ],
 };
