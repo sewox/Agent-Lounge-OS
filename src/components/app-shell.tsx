@@ -28,6 +28,7 @@ const TITLES: Record<string, string> = {
   "/quotas": "Quotas",
   "/settings": "Settings",
   "/onboarding": "Onboarding",
+  "/dashboard": "Dashboard",
 };
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -220,7 +221,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           <nav className="space-y-0.5 font-label text-xs">
             {NAV.map((item) => {
-              const active = pathname === item.href || (item.href === "/stream" && pathname === "/");
+              const active =
+                pathname === item.href ||
+                (item.href === "/stream" && (pathname === "/" || pathname === "/dashboard"));
               return (
                 <Link
                   key={item.id}
