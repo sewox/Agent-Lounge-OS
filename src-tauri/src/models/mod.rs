@@ -8,7 +8,8 @@ mod quota;
 mod service;
 
 pub use discovery::{
-    tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource, SystemTool,
+    sqlite_tool_type, tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource,
+    SystemTool,
 };
 pub use memory::{IndexSnapshot, ProjectList, ProjectSummary};
 pub use policy::{

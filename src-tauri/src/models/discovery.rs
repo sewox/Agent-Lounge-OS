@@ -89,6 +89,11 @@ pub struct ConnectedTool {
     pub enabled: bool,
     pub connected_at: String,
     pub payload: serde_json::Value,
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub config_path: Option<String>,
+    pub is_active: bool,
+    pub last_synced: String,
 }
 
 impl ConnectedTool {
@@ -103,11 +108,23 @@ impl ConnectedTool {
             args: tool.args.clone(),
             endpoint: tool.endpoint.clone(),
             enabled: true,
-            connected_at,
+            connected_at: connected_at.clone(),
             payload: serde_json::json!({
                 "detail": tool.detail,
                 "available": tool.available,
             }),
+            tool_type: sqlite_tool_type(&tool.kind).to_string(),
+            config_path: tool.origin_path.clone(),
+            is_active: true,
+            last_synced: connected_at,
         }
+    }
+}
+
+pub fn sqlite_tool_type(kind: &str) -> &'static str {
+    match kind {
+        "mcp" => "mcp",
+        "model" => "model",
+        _ => "cli",
     }
 }

@@ -134,7 +134,7 @@ export function OnboardingPanel() {
     ];
     try {
       if (isTauri()) {
-        await invoke<ConnectedTool[]>("save_connected_tools", { tools });
+        await invoke<ConnectedTool[]>("save_selected_tools", { tools });
       }
       router.replace("/stream");
     } catch (err) {

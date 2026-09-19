@@ -91,6 +91,7 @@ pub fn run() {
             discover_system,
             get_discovery_report,
             save_connected_tools,
+            save_selected_tools,
             list_connected_tools
         ])
         .run(tauri::generate_context!())
@@ -245,8 +246,16 @@ async fn save_connected_tools(
     state: tauri::State<'_, ExperienceStore>,
     tools: Vec<DiscoveredTool>,
 ) -> Result<Vec<ConnectedTool>, String> {
+    save_selected_tools(state, tools).await
+}
+
+#[tauri::command]
+async fn save_selected_tools(
+    state: tauri::State<'_, ExperienceStore>,
+    tools: Vec<DiscoveredTool>,
+) -> Result<Vec<ConnectedTool>, String> {
     state
-        .save_connected_tools(tools)
+        .save_selected_tools(tools)
         .await
         .map_err(|err| err.to_string())
 }
