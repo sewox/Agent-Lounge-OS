@@ -98,6 +98,10 @@ export type ConnectedTool = {
   enabled: boolean;
   connected_at: string;
   payload: unknown;
+  type: "mcp" | "model" | "cli" | string;
+  config_path?: string | null;
+  is_active: boolean;
+  last_synced: string;
 };
 
 export const MOCK_DISCOVERY: DiscoveryReport = {
