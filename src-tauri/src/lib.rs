@@ -16,12 +16,54 @@ use models::{
 };
 use services::autodiscover::discovery_report;
 use services::{MemoryBridge, ServiceManager, SharedServices};
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+const ONBOARDING_ROUTE: &str = "/onboarding";
+const DASHBOARD_ROUTE: &str = "/dashboard";
+
+/// `connected_tools` boşsa onboarding, doluysa dashboard.
+pub fn initial_window_route() -> &'static str {
+    match ExperienceStore::open(db::default_db_path(workspace_root())) {
+        Ok(store) => window_route_for_store(&store),
+        Err(err) => {
+            log::warn!("connected_tools okunamadı, onboarding: {err}");
+            ONBOARDING_ROUTE
+        }
+    }
+}
+
+pub(crate) fn window_route_for_store(store: &ExperienceStore) -> &'static str {
+    match store.connected_tools_empty() {
+        Ok(false) => DASHBOARD_ROUTE,
+        Ok(true) => ONBOARDING_ROUTE,
+        Err(err) => {
+            log::warn!("connected_tools sayısı okunamadı, onboarding: {err}");
+            ONBOARDING_ROUTE
+        }
+    }
+}
+
+fn open_main_window(app: &tauri::App, start_route: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut window_config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .ok_or("main window config missing")?;
+    window_config.url = WebviewUrl::App(PathBuf::from(start_route.trim_start_matches('/')));
+    WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
+    Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_with_start_route(initial_window_route());
+}
+
+pub fn run_with_start_route(start_route: &'static str) {
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -33,6 +75,7 @@ pub fn run() {
             let workspace = workspace_root();
             let store = ExperienceStore::open(db::default_db_path(&workspace))
                 .map_err(|err| err.to_string())?;
+            open_main_window(app, start_route)?;
             let model = default_model_lock();
             let services = ServiceManager::shared();
             let memory = MemoryBridge::discover().unwrap_or_else(|err| {
