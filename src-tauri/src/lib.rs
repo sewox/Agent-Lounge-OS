@@ -7,13 +7,14 @@ pub mod services;
 use std::path::PathBuf;
 
 use db::ExperienceStore;
-use infra::{probe_quotas, scan_system, BusManager};
+use infra::{probe_quotas, BusManager};
 use kernel::{default_model_lock, Dispatcher};
 use lounge_protocol::LoungeMessage;
 use models::{
     ConnectedTool, DiscoveredTool, DiscoveryReport, IndexSnapshot, LoungeExperience,
     ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport, ToolQuota,
 };
+use services::autodiscover::discovery_report;
 use services::{MemoryBridge, ServiceManager, SharedServices};
 use tauri::Manager;
 
@@ -88,6 +89,7 @@ pub fn run() {
             resolve_routing,
             probe_bus,
             discover_system,
+            get_discovery_report,
             save_connected_tools,
             list_connected_tools
         ])
@@ -222,11 +224,20 @@ async fn probe_bus(state: tauri::State<'_, BusManager>) -> Result<LoungeMessage,
 async fn discover_system(
     state: tauri::State<'_, SharedServices>,
 ) -> Result<DiscoveryReport, String> {
+    get_discovery_report(state).await
+}
+
+#[tauri::command]
+async fn get_discovery_report(
+    state: tauri::State<'_, SharedServices>,
+) -> Result<DiscoveryReport, String> {
     let endpoint = {
         let manager = state.lock().await;
         manager.ollama_endpoint()
     };
-    Ok(scan_system(workspace_root(), endpoint).await)
+    discovery_report(workspace_root(), endpoint)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

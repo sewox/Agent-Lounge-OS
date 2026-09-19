@@ -1,5 +1,6 @@
 //! Ollama, NATS ve C-binary (codebase-memory-mcp) yaşam döngüsü.
 
+pub mod autodiscover;
 pub mod memory_bridge;
 pub mod nats_manager;
 pub mod ollama;

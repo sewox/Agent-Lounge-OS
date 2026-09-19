@@ -15,7 +15,26 @@ const SOURCE_LABEL: Record<string, string> = {
   claude_desktop: "Claude Desktop",
   cursor: "Cursor",
   ollama: "Ollama",
+  system: "Sistem",
 };
+
+function systemToolsAsDiscovered(report: DiscoveryReport): DiscoveredTool[] {
+  if (report.tools.some((tool) => tool.kind === "system")) {
+    return report.tools.filter((tool) => tool.kind === "system");
+  }
+  return report.system_tools.map((tool) => ({
+    id: tool.id,
+    name: tool.name,
+    kind: "system",
+    source: "system",
+    origin_path: tool.path ?? null,
+    command: tool.path ?? tool.name,
+    args: [],
+    endpoint: null,
+    detail: tool.detail ?? null,
+    available: tool.available,
+  }));
+}
 
 export function OnboardingPanel() {
   const router = useRouter();
@@ -30,7 +49,7 @@ export function OnboardingPanel() {
     setError(null);
     try {
       const next = isTauri()
-        ? await invoke<DiscoveryReport>("discover_system")
+        ? await invoke<DiscoveryReport>("get_discovery_report")
         : MOCK_DISCOVERY;
       let connected: ConnectedTool[] = [];
       if (isTauri()) {
@@ -62,12 +81,10 @@ export function OnboardingPanel() {
     return () => window.clearTimeout(id);
   }, [scan]);
 
-  const models = useMemo(
-    () => report?.tools.filter((tool) => tool.kind === "model") ?? [],
-    [report],
-  );
-  const mcps = useMemo(
-    () => report?.tools.filter((tool) => tool.kind === "mcp") ?? [],
+  const models = useMemo(() => report?.models ?? [], [report]);
+  const mcps = useMemo(() => report?.mcp_servers ?? [], [report]);
+  const systemTools = useMemo(
+    () => (report ? systemToolsAsDiscovered(report) : []),
     [report],
   );
 
@@ -110,7 +127,11 @@ export function OnboardingPanel() {
     }
     setSaving(true);
     setError(null);
-    const tools = report.tools.filter((tool) => selected.has(tool.id));
+    const tools = [
+      ...models.filter((tool) => selected.has(tool.id)),
+      ...mcps.filter((tool) => selected.has(tool.id)),
+      ...systemTools.filter((tool) => selected.has(tool.id) && tool.available),
+    ];
     try {
       if (isTauri()) {
         await invoke<ConnectedTool[]>("save_connected_tools", { tools });
@@ -132,8 +153,8 @@ export function OnboardingPanel() {
               Sistem keşfi
             </h1>
             <p className="mt-1 font-body text-[11px] text-on-surface-variant">
-              Claude Desktop, Cursor MCP ve Ollama taranır. Seçtiklerin Lounge’a bağlanır; MCP env
-              değerleri kaydedilmez.
+              Claude Desktop, Cursor MCP, Ollama ve PATH (git, gh, docker) taranır. Seçtiklerin
+              Lounge’a bağlanır; MCP env değerleri kaydedilmez.
             </p>
           </div>
           <button
@@ -146,7 +167,7 @@ export function OnboardingPanel() {
           </button>
         </div>
 
-        <div className="grid gap-2 p-3 sm:grid-cols-3">
+        <div className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-4">
           {(report?.sources ?? []).map((source) => (
             <div
               key={source.id}
@@ -193,6 +214,13 @@ export function OnboardingPanel() {
         selected={selected}
         onToggle={toggle}
         onSelectAll={() => selectGroup(mcps, true)}
+      />
+      <ToolGroup
+        title="Sistem araçları"
+        tools={systemTools}
+        selected={selected}
+        onToggle={toggle}
+        onSelectAll={() => selectGroup(systemTools, true)}
       />
 
       <div className="flex items-center justify-between rounded-lg border border-outline-variant bg-surface-container px-3 py-2">

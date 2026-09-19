@@ -5,6 +5,32 @@ pub struct DiscoveryReport {
     pub scanned_at: String,
     pub sources: Vec<DiscoverySource>,
     pub tools: Vec<DiscoveredTool>,
+    #[serde(default)]
+    pub models: Vec<DiscoveredTool>,
+    #[serde(default)]
+    pub mcp_servers: Vec<DiscoveredTool>,
+    #[serde(default)]
+    pub system_tools: Vec<SystemTool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SystemTool {
+    pub id: String,
+    pub name: String,
+    pub available: bool,
+    pub path: Option<String>,
+    pub detail: Option<String>,
+}
+
+impl SystemTool {
+    pub fn to_discovered(&self) -> DiscoveredTool {
+        let mut tool = DiscoveredTool::new("system", &self.name, "system");
+        tool.origin_path = self.path.clone();
+        tool.command = self.path.clone().or_else(|| Some(self.name.clone()));
+        tool.detail = self.detail.clone();
+        tool.available = self.available;
+        tool
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
