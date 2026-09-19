@@ -96,6 +96,13 @@ impl ExperienceStore {
         .await
         .context("connected_tools list join")?
     }
+
+    pub fn connected_tools_empty(&self) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM connected_tools", [], |row| row.get(0))?;
+        Ok(count == 0)
+    }
 }
 
 fn save_selected_tools_blocking(
@@ -314,5 +321,35 @@ mod tests {
 
         let blob = serde_json::to_string(&mcp).expect("json");
         assert!(blob.contains("\"type\":\"mcp\""));
+    }
+
+    #[test]
+    fn empty_table_routes_to_onboarding() {
+        let store = ExperienceStore::memory().expect("memory db");
+        assert!(store.connected_tools_empty().expect("count"));
+        assert_eq!(crate::window_route_for_store(&store), "/onboarding");
+    }
+
+    #[tokio::test]
+    async fn filled_table_routes_to_dashboard() {
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_selected_tools(vec![sample_tool("notion")])
+            .await
+            .expect("save");
+        assert!(!store.connected_tools_empty().expect("count"));
+        assert_eq!(crate::window_route_for_store(&store), "/dashboard");
+
+        store
+            .save_selected_tools(vec![])
+            .await
+            .expect("deactivate all");
+        assert!(
+            !store
+                .connected_tools_empty()
+                .expect("count after deactivate"),
+            "deactivated rows still occupy the table"
+        );
+        assert_eq!(crate::window_route_for_store(&store), "/dashboard");
     }
 }
