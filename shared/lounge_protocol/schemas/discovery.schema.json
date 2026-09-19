@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/discovery.schema.json",
   "title": "DiscoveryReport",
-  "description": "Yerel Claude Desktop / Cursor MCP ve Ollama taramasının raporu. MCP env değerleri asla yer almaz.",
+  "description": "Yerel Claude Desktop / Cursor MCP, Ollama modelleri ve PATH sistem araçları taraması. MCP env değerleri asla yer almaz.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["scanned_at", "sources", "tools"],
+  "required": ["scanned_at", "sources", "tools", "models", "mcp_servers", "system_tools"],
   "properties": {
     "scanned_at": { "type": "string", "format": "date-time" },
     "sources": {
@@ -15,6 +15,18 @@
     "tools": {
       "type": "array",
       "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "models": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "mcp_servers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "system_tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SystemTool" }
     }
   },
   "$defs": {
@@ -25,7 +37,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "enum": ["claude_desktop", "cursor", "ollama"]
+          "enum": ["claude_desktop", "cursor", "ollama", "system"]
         },
         "available": { "type": "boolean" },
         "origin_path": { "type": ["string", "null"] },
@@ -39,10 +51,10 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
-        "kind": { "type": "string", "enum": ["model", "mcp"] },
+        "kind": { "type": "string", "enum": ["model", "mcp", "system"] },
         "source": {
           "type": "string",
-          "enum": ["claude_desktop", "cursor", "ollama"]
+          "enum": ["claude_desktop", "cursor", "ollama", "system"]
         },
         "origin_path": { "type": ["string", "null"] },
         "command": { "type": ["string", "null"] },
@@ -53,6 +65,18 @@
         "endpoint": { "type": ["string", "null"] },
         "detail": { "type": ["string", "null"] },
         "available": { "type": "boolean" }
+      }
+    },
+    "SystemTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "available"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "available": { "type": "boolean" },
+        "path": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] }
       }
     }
   }

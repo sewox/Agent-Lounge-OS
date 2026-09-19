@@ -59,8 +59,8 @@ export type DiscoverySource = {
 export type DiscoveredTool = {
   id: string;
   name: string;
-  kind: "model" | "mcp" | string;
-  source: "claude_desktop" | "cursor" | "ollama" | string;
+  kind: "model" | "mcp" | "system" | string;
+  source: "claude_desktop" | "cursor" | "ollama" | "system" | string;
   origin_path?: string | null;
   command?: string | null;
   args: string[];
@@ -69,10 +69,21 @@ export type DiscoveredTool = {
   available: boolean;
 };
 
+export type SystemTool = {
+  id: string;
+  name: string;
+  available: boolean;
+  path?: string | null;
+  detail?: string | null;
+};
+
 export type DiscoveryReport = {
   scanned_at: string;
   sources: DiscoverySource[];
   tools: DiscoveredTool[];
+  models: DiscoveredTool[];
+  mcp_servers: DiscoveredTool[];
+  system_tools: SystemTool[];
 };
 
 export type ConnectedTool = {
@@ -110,6 +121,81 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       origin_path: "http://127.0.0.1:11434/api/tags",
       detail: "2 model",
     },
+    {
+      id: "system",
+      available: true,
+      origin_path: null,
+      detail: "3 / 3 PATH",
+    },
+  ],
+  models: [
+    {
+      id: "ollama:llama3.1:8b",
+      name: "llama3.1:8b",
+      kind: "model",
+      source: "ollama",
+      origin_path: "http://127.0.0.1:11434/api/tags",
+      command: null,
+      args: [],
+      endpoint: "http://127.0.0.1:11434",
+      detail: null,
+      available: true,
+    },
+    {
+      id: "ollama:qwen2.5:7b",
+      name: "qwen2.5:7b",
+      kind: "model",
+      source: "ollama",
+      origin_path: "http://127.0.0.1:11434/api/tags",
+      command: null,
+      args: [],
+      endpoint: "http://127.0.0.1:11434",
+      detail: null,
+      available: true,
+    },
+  ],
+  mcp_servers: [
+    {
+      id: "claude_desktop:github",
+      name: "github",
+      kind: "mcp",
+      source: "claude_desktop",
+      origin_path: "~/Library/Application Support/Claude/claude_desktop_config.json",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+      endpoint: null,
+      detail: "env keys: GITHUB_TOKEN",
+      available: true,
+    },
+    {
+      id: "cursor:notion",
+      name: "notion",
+      kind: "mcp",
+      source: "cursor",
+      origin_path: "~/.cursor/mcp.json",
+      command: "npx",
+      args: ["-y", "@notionhq/mcp"],
+      endpoint: null,
+      detail: "env keys: NOTION_TOKEN",
+      available: true,
+    },
+    {
+      id: "cursor:codebase-memory",
+      name: "codebase-memory",
+      kind: "mcp",
+      source: "cursor",
+      origin_path: ".cursor/mcp.json",
+      command: "codebase-memory-mcp",
+      args: [],
+      endpoint: null,
+      detail: null,
+      available: true,
+    },
+  ],
+  system_tools: [
+    { id: "system:git", name: "git", available: true, path: "/usr/bin/git", detail: null },
+    { id: "system:gh", name: "gh", available: true, path: "/opt/homebrew/bin/gh", detail: null },
+    { id: "system:docker", name: "docker", available: true, path: "/usr/local/bin/docker", detail: null },
   ],
   tools: [
     {
@@ -167,6 +253,42 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       source: "cursor",
       origin_path: ".cursor/mcp.json",
       command: "codebase-memory-mcp",
+      args: [],
+      endpoint: null,
+      detail: null,
+      available: true,
+    },
+    {
+      id: "system:git",
+      name: "git",
+      kind: "system",
+      source: "system",
+      origin_path: "/usr/bin/git",
+      command: "/usr/bin/git",
+      args: [],
+      endpoint: null,
+      detail: null,
+      available: true,
+    },
+    {
+      id: "system:gh",
+      name: "gh",
+      kind: "system",
+      source: "system",
+      origin_path: "/opt/homebrew/bin/gh",
+      command: "/opt/homebrew/bin/gh",
+      args: [],
+      endpoint: null,
+      detail: null,
+      available: true,
+    },
+    {
+      id: "system:docker",
+      name: "docker",
+      kind: "system",
+      source: "system",
+      origin_path: "/usr/local/bin/docker",
+      command: "/usr/local/bin/docker",
       args: [],
       endpoint: null,
       detail: null,

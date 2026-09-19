@@ -7,7 +7,9 @@ mod protocol;
 mod quota;
 mod service;
 
-pub use discovery::{tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource};
+pub use discovery::{
+    tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource, SystemTool,
+};
 pub use memory::{IndexSnapshot, ProjectList, ProjectSummary};
 pub use policy::{
     decide_route, is_kernel, AgentTrigger, ApprovalKind, ApprovalRequest, QuotaExhaustedAction,
