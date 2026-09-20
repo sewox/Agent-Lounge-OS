@@ -12,7 +12,8 @@ pub use discovery::{
     SystemTool,
 };
 pub use memory::{
-    AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectList, ProjectSummary,
+    merge_project_summaries, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot,
+    ProjectList, ProjectSummary,
 };
 pub use policy::{
     decide_route, is_kernel, AgentTrigger, ApprovalKind, ApprovalRequest, QuotaExhaustedAction,
@@ -24,5 +25,5 @@ pub use protocol::{
     TaskPriority, DEFAULT_OLLAMA_MODEL, EXPERIENCE_REPORTED, TASK_ASSIGNED, TASK_COMPLETED,
     TASK_FAILED, TASK_REQUESTED,
 };
-pub use quota::{NatsUiEvent, ToolQuota};
+pub use quota::{NatsUiEvent, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT};
 pub use service::{ServiceHealth, ServiceId, ServiceReport};

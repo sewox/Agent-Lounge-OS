@@ -7,15 +7,19 @@ pub mod services;
 use std::path::PathBuf;
 
 use db::ExperienceStore;
-use infra::{probe_quotas, BusManager};
+use infra::BusManager;
 use kernel::{default_model_lock, Dispatcher};
 use lounge_protocol::LoungeMessage;
 use models::{
-    ConnectedTool, DeadSymbol, DiscoveredTool, DiscoveryReport, IndexSnapshot, LoungeExperience,
-    ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport, ToolQuota,
+    merge_project_summaries, ConnectedTool, DeadSymbol, DiscoveredTool, DiscoveryReport,
+    IndexSnapshot, LoungeExperience, ProjectSummary, QuotaState, RoutingPolicy, RoutingVote,
+    ServiceReport, ToolQuota,
 };
 use services::autodiscover::discovery_report;
-use services::{spawn_event_pump, MemoryBridge, ServiceManager, SharedServices};
+use services::{
+    collect_quota_state, spawn_event_pump, spawn_quota_pump, MemoryBridge, ServiceManager,
+    SharedServices,
+};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const ONBOARDING_ROUTE: &str = "/onboarding";
@@ -63,6 +67,7 @@ pub fn run() {
 
 pub fn run_with_start_route(start_route: &'static str) {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -93,6 +98,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             dispatcher.attach_app(app.handle().clone());
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let handle = app.handle().clone();
+            let quota_handle = app.handle().clone();
+            let quota_services = services.clone();
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
@@ -110,6 +117,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                         report.memory.running
                     );
                 }
+                spawn_quota_pump(quota_handle, quota_services);
                 let _pump = spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 if let Err(err) = dispatcher.listen().await {
@@ -130,6 +138,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_experiences,
             list_projects,
             list_quotas,
+            get_quota_state,
             get_routing_policy,
             set_routing_policy,
             resolve_routing,
@@ -188,7 +197,11 @@ async fn get_dead_symbols(
         .list_dead_symbols(None)
         .await
         .map_err(|err| err.to_string())?;
-    if !listed.is_empty() {
+    let indexed = store
+        .list_indexed_projects()
+        .await
+        .map_err(|err| err.to_string())?;
+    if !listed.is_empty() || !indexed.is_empty() {
         return Ok(listed);
     }
 
@@ -253,17 +266,30 @@ async fn list_experiences(
 
 #[tauri::command]
 async fn list_projects(
-    state: tauri::State<'_, SharedServices>,
+    services: tauri::State<'_, SharedServices>,
+    store: tauri::State<'_, ExperienceStore>,
 ) -> Result<Vec<ProjectSummary>, String> {
-    let bridge = {
-        let manager = state.lock().await;
-        manager.memory().clone()
+    let indexed = store
+        .list_indexed_projects()
+        .await
+        .map_err(|err| err.to_string())?;
+    let discovered = {
+        let bridge = {
+            let manager = services.lock().await;
+            manager.memory().clone()
+        };
+        bridge.list_projects().await.unwrap_or_default()
     };
-    bridge.list_projects().await.map_err(|err| err.to_string())
+    Ok(merge_project_summaries(indexed, discovered))
 }
 
 #[tauri::command]
 async fn list_quotas(state: tauri::State<'_, SharedServices>) -> Result<Vec<ToolQuota>, String> {
+    Ok(get_quota_state(state).await?.quotas)
+}
+
+#[tauri::command]
+async fn get_quota_state(state: tauri::State<'_, SharedServices>) -> Result<QuotaState, String> {
     let (ollama, nats_monitor, memory) = {
         let manager = state.lock().await;
         (
@@ -272,7 +298,7 @@ async fn list_quotas(state: tauri::State<'_, SharedServices>) -> Result<Vec<Tool
             manager.memory().clone(),
         )
     };
-    Ok(probe_quotas(&ollama, &nats_monitor, &memory).await)
+    Ok(collect_quota_state(&ollama, &nats_monitor, &memory).await)
 }
 
 #[tauri::command]

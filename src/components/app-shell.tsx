@@ -44,6 +44,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     clock,
     indexing,
     quotas,
+    amberAlert,
+    amberTools,
     approval,
     applyModel,
     indexWorkspace,
@@ -51,7 +53,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   } = useLounge();
 
   const crumb = TITLES[pathname] ?? "Lounge";
-  const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 70);
+  const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
   const onboarding = pathname === "/onboarding";
 
   return (
@@ -165,12 +167,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
             <Link
               href="/quotas"
-              className="flex items-center gap-1 rounded border border-error-container bg-error-container/20 px-2 py-0.5 font-mono text-[11px] text-error-dim"
+              className={`flex items-center gap-1 rounded border px-2 py-0.5 font-mono text-[11px] ${
+                amberAlert
+                  ? "border-error-container bg-error-container/20 text-error-dim"
+                  : "border-outline-variant bg-surface-container-high text-on-surface-variant"
+              }`}
             >
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-error" />
+              <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-secondary"}`} />
               <span>
-                {warnQuota
-                  ? `QUOTA ${Math.round(warnQuota.percent ?? 0)}% ${warnQuota.id}`
+                {amberAlert
+                  ? `AMBER ALERT ${Math.round(warnQuota?.percent ?? 80)}% ${amberTools[0] ?? warnQuota?.id ?? ""}`
                   : "QUOTA OK"}
               </span>
             </Link>
@@ -189,7 +195,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               <button
                 type="button"
                 onClick={() => void indexWorkspace()}
-                className="flex items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+                disabled={indexing}
+                className="flex items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
               >
                 <Icon name="terminal" />
                 <span>{indexing ? "Indexing…" : "Index Workspace"}</span>

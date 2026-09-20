@@ -15,11 +15,14 @@ import {
   DEFAULT_POLICY,
   formatClock,
   isTauri,
+  pickWorkspaceFolder,
   MOCK_EVENTS,
   MOCK_EXPERIENCES,
   MOCK_QUOTAS,
   loungeMessageToEvent,
+  AMBER_THRESHOLD,
   BUS_UI_EVENT,
+  QUOTA_UI_EVENT,
   type ApprovalRequest,
   type DeadSymbol,
   type IndexSnapshot,
@@ -27,6 +30,7 @@ import {
   type LoungeMessage,
   type NatsEvent,
   type ProjectSummary,
+  type QuotaState,
   type RoutingPolicy,
   type RoutingVote,
   type ServiceReport,
@@ -44,7 +48,10 @@ type LoungeContextValue = {
   experiences: LoungeExperience[];
   events: NatsEvent[];
   quotas: ToolQuota[];
+  amberAlert: boolean;
+  amberTools: string[];
   projects: ProjectSummary[];
+  lastIndex: IndexSnapshot | null;
   deadSymbols: DeadSymbol[];
   query: string;
   setQuery: (value: string) => void;
@@ -72,7 +79,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [experiences, setExperiences] = useState<LoungeExperience[]>(MOCK_EXPERIENCES);
   const [events, setEvents] = useState<NatsEvent[]>(MOCK_EVENTS);
   const [quotas, setQuotas] = useState<ToolQuota[]>(MOCK_QUOTAS);
+  const [amberAlert, setAmberAlert] = useState(
+    MOCK_QUOTAS.some((row) => (row.percent ?? 0) >= AMBER_THRESHOLD),
+  );
+  const [amberTools, setAmberTools] = useState<string[]>(
+    MOCK_QUOTAS.filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD).map((row) => row.id),
+  );
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [lastIndex, setLastIndex] = useState<IndexSnapshot | null>(null);
   const [deadSymbols, setDeadSymbols] = useState<DeadSymbol[]>([]);
   const [query, setQuery] = useState("");
   const [clock, setClock] = useState("--:--");
@@ -93,9 +107,12 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       /* SQLite henüz boş olabilir */
     }
     try {
-      setProjects(await invoke<ProjectSummary[]>("list_projects"));
+      const rows = await invoke<ProjectSummary[]>("list_projects");
+      if (rows.length > 0) {
+        setProjects(rows);
+      }
     } catch {
-      setProjects([]);
+      /* CBM/SQLite henüz boş olabilir; son snapshot korunur */
     }
     try {
       setDeadSymbols(await invoke<DeadSymbol[]>("get_dead_symbols"));
@@ -121,12 +138,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         setModels([]);
       }
       try {
-        const rows = await invoke<ToolQuota[]>("list_quotas");
-        if (rows.length > 0) {
-          setQuotas(rows);
-        }
+        const state = await invoke<QuotaState>("get_quota_state");
+        setQuotas(state.quotas.length > 0 ? state.quotas : MOCK_QUOTAS);
+        setAmberAlert(state.amber_alert);
+        setAmberTools(state.amber_tools);
       } catch {
-        setQuotas(MOCK_QUOTAS);
+        try {
+          const rows = await invoke<ToolQuota[]>("list_quotas");
+          if (rows.length > 0) {
+            setQuotas(rows);
+            const amber = rows.filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD).map((row) => row.id);
+            setAmberAlert(amber.length > 0);
+            setAmberTools(amber);
+          }
+        } catch {
+          setQuotas(MOCK_QUOTAS);
+        }
       }
       try {
         setPolicy(await invoke<RoutingPolicy>("get_routing_policy"));
@@ -152,15 +179,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     if (!isTauri() || indexing) {
       return;
     }
+    const repoPath = await pickWorkspaceFolder();
+    if (!repoPath) {
+      return;
+    }
     setIndexing(true);
     try {
-      await invoke<IndexSnapshot>("index_workspace");
+      const snapshot = await invoke<IndexSnapshot>("index_workspace", { repoPath });
+      setLastIndex(snapshot);
+      setProjects((current) => upsertIndexedProject(current, snapshot, repoPath));
       await refreshSemantic();
-      await refresh();
+    } catch (error) {
+      console.error(error);
     } finally {
       setIndexing(false);
     }
-  }, [indexing, refresh, refreshSemantic]);
+  }, [indexing, refreshSemantic]);
 
   const savePolicy = useCallback(async (next: RoutingPolicy) => {
     const locked = { ...next, require_user_approval: true };
@@ -223,22 +257,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       void refresh();
     }, 0);
     const id = window.setInterval(() => setClock(formatClock(new Date())), 30_000);
-    const quotaId = window.setInterval(() => {
-      if (!isTauri()) {
-        return;
-      }
-      void invoke<ToolQuota[]>("list_quotas")
-        .then((rows) => {
-          if (rows.length > 0) {
-            setQuotas(rows);
-          }
-        })
-        .catch(() => undefined);
-    }, 15_000);
     return () => {
       window.clearTimeout(boot);
       window.clearInterval(id);
-      window.clearInterval(quotaId);
     };
   }, [refresh]);
 
@@ -255,6 +276,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           await listen<LoungeMessage>(BUS_UI_EVENT, (event) => {
             if (!cancelled) {
               ingestBusMessage(event.payload);
+            }
+          }),
+        );
+        unlisteners.push(
+          await listen<QuotaState>(QUOTA_UI_EVENT, (event) => {
+            if (!cancelled) {
+              setQuotas(event.payload.quotas);
+              setAmberAlert(event.payload.amber_alert);
+              setAmberTools(event.payload.amber_tools);
             }
           }),
         );
@@ -288,7 +318,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       experiences,
       events,
       quotas,
+      amberAlert,
+      amberTools,
       projects,
+      lastIndex,
       deadSymbols,
       query,
       setQuery,
@@ -312,7 +345,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       experiences,
       events,
       quotas,
+      amberAlert,
+      amberTools,
       projects,
+      lastIndex,
       deadSymbols,
       query,
       clock,
@@ -338,4 +374,27 @@ export function useLounge(): LoungeContextValue {
     throw new Error("useLounge must be used within LoungeProvider");
   }
   return value;
+}
+
+function upsertIndexedProject(
+  current: ProjectSummary[],
+  snapshot: IndexSnapshot,
+  repoPath: string,
+): ProjectSummary[] {
+  const next: ProjectSummary = {
+    name: snapshot.project || repoPath.split(/[/\\]/).filter(Boolean).at(-1) || "workspace",
+    root_path: repoPath,
+    nodes: snapshot.nodes,
+    edges: snapshot.edges,
+    files: snapshot.files ?? null,
+  };
+  const index = current.findIndex(
+    (row) => row.name === next.name || row.root_path === repoPath,
+  );
+  if (index === -1) {
+    return [next, ...current];
+  }
+  const copy = current.slice();
+  copy[index] = { ...copy[index], ...next };
+  return copy;
 }

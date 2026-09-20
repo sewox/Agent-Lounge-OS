@@ -24,6 +24,37 @@ impl ToolQuota {
     }
 }
 
+pub const AMBER_THRESHOLD: f32 = 80.0;
+pub const QUOTA_EVENT: &str = "quota-state";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuotaState {
+    pub scanned_at: String,
+    pub amber_alert: bool,
+    pub amber_tools: Vec<String>,
+    pub quotas: Vec<ToolQuota>,
+}
+
+impl QuotaState {
+    pub fn from_quotas(quotas: Vec<ToolQuota>) -> Self {
+        let amber_tools: Vec<String> = quotas
+            .iter()
+            .filter(|row| {
+                row.percent
+                    .map(|value| value >= AMBER_THRESHOLD)
+                    .unwrap_or(false)
+            })
+            .map(|row| row.id.clone())
+            .collect();
+        Self {
+            scanned_at: crate::models::now_rfc3339(),
+            amber_alert: !amber_tools.is_empty(),
+            amber_tools,
+            quotas,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NatsUiEvent {
     pub id: String,

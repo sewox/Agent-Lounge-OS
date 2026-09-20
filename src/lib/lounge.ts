@@ -391,6 +391,8 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
 };
 
 export const BUS_UI_EVENT = "nats-event";
+export const QUOTA_UI_EVENT = "quota-state";
+export const AMBER_THRESHOLD = 80;
 
 export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
   const kb = (message.payload_bytes / 1024).toFixed(1);
@@ -510,7 +512,7 @@ export const MOCK_HEALTH: ProjectHealthRow[] = [
 ];
 
 export type QuotaKind = "ai" | "bot";
-export type QuotaTone = "ok" | "warn" | "live" | "local";
+export type QuotaTone = "ok" | "warn" | "live" | "local" | "amber";
 
 export type ToolQuota = {
   id: string;
@@ -527,11 +529,19 @@ export type ToolQuota = {
   exhausted?: boolean;
 };
 
+export type QuotaState = {
+  scanned_at: string;
+  amber_alert: boolean;
+  amber_tools: string[];
+  quotas: ToolQuota[];
+};
+
 export type ProjectSummary = {
   name: string;
   root_path?: string | null;
   nodes: number;
   edges: number;
+  files?: number | null;
 };
 
 export type IndexSnapshot = {
@@ -596,7 +606,7 @@ export const DEFAULT_POLICY: RoutingPolicy = {
 };
 
 export const MOCK_QUOTAS: ToolQuota[] = [
-  { id: "cursor", tool: "Cursor · Grok 4.6", kind: "ai", unit: "req/day", used: "412 / 500", remaining: "88 remaining", reset: "00:00 UTC", percent: 82, tone: "warn", label: "warn (82%)" },
+  { id: "cursor", tool: "Cursor · Grok 4.6", kind: "ai", unit: "req/day", used: "412 / 500", remaining: "88 remaining", reset: "00:00 UTC", percent: 82, tone: "amber", label: "amber (82%)" },
   { id: "claude", tool: "Claude · Sonnet", kind: "ai", unit: "tokens", used: "1.24M / 5.00M", remaining: "3.76M left", reset: "01 Oct", percent: 25, tone: "ok", label: "ok (25%)" },
   { id: "xai", tool: "xAI · Grok API", kind: "ai", unit: "tokens", used: "18.4k / 50k", remaining: "31.6k left", reset: "rolling", percent: 37, tone: "ok", label: "ok (37%)" },
   { id: "lmr", tool: "LMR · llama3.1:8b", kind: "ai", unit: "local", used: "6.1 / 8.0 GB", remaining: "local unlimited", reset: "LOCAL", percent: 76, tone: "ok", label: "ok (76% vram)" },
@@ -611,14 +621,14 @@ export function quotaBarClass(percent: number): string {
   if (percent >= 90) {
     return "bg-error";
   }
-  if (percent >= 70) {
+  if (percent >= AMBER_THRESHOLD) {
     return "bg-tertiary";
   }
   return "bg-primary";
 }
 
 export function quotaToneClass(tone: QuotaTone): string {
-  if (tone === "warn") {
+  if (tone === "warn" || tone === "amber") {
     return "bg-error-container/40 text-error-dim border-error-container";
   }
   if (tone === "live") {
@@ -629,6 +639,22 @@ export function quotaToneClass(tone: QuotaTone): string {
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function pickWorkspaceFolder(): Promise<string | null> {
+  if (!isTauri()) {
+    return null;
+  }
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: "Index Workspace",
+  });
+  if (typeof selected !== "string" || selected.length === 0) {
+    return null;
+  }
+  return selected;
 }
 
 export function formatClock(date: Date): string {

@@ -23,8 +23,9 @@ type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
 
 export function OverviewKpis() {
-  const { experiences, events, projects, deadSymbols } = useLounge();
-  const files = projects.reduce((sum, row) => sum + row.nodes, 0);
+  const { experiences, events, projects, deadSymbols, lastIndex } = useLounge();
+  const indexedFiles =
+    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) || lastIndex?.files || 0;
   const deadCount = projects.length
     ? deadSymbols.length
     : MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
@@ -41,9 +42,9 @@ export function OverviewKpis() {
         }
       />
       <Kpi
-        label="INDEXED NODES"
-        value={files.toLocaleString("tr-TR")}
-        hint="codebase-memory-mcp"
+        label="INDEXED FILES"
+        value={indexedFiles.toLocaleString("tr-TR")}
+        hint={lastIndex?.project ? `${lastIndex.project} · memory_bridge` : "memory_bridge"}
         badge={<span className="font-mono text-[10px] text-on-surface-variant">{projects.length} repos</span>}
       />
       <Kpi
@@ -216,14 +217,21 @@ export function EventStreamPanel() {
 }
 
 export function VaultPanel() {
-  const { experiences, projects, query } = useLounge();
+  const { experiences, projects, query, lastIndex } = useLounge();
   const nodes = projects.length
     ? projects.map((row) => ({
         name: row.name || "unnamed",
         edges: row.edges,
-        modules: [`${row.nodes} nodes`, row.root_path ?? "sqlite+cbm"],
+        modules: [
+          `${row.files ?? 0} files`,
+          `${row.nodes} nodes`,
+          row.root_path ?? "sqlite+cbm",
+        ],
       }))
     : MOCK_NODES;
+  const fileTotal =
+    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) || lastIndex?.files || 0;
+  const edgeTotal = nodes.reduce((sum, row) => sum + row.edges, 0);
   const log = experiences.filter((item) => {
     if (!query.trim()) {
       return true;
@@ -247,8 +255,10 @@ export function VaultPanel() {
       <div className="flex min-h-[220px] flex-col sm:flex-row">
         <div className="space-y-2.5 border-b border-outline-variant bg-surface-container-low/40 p-2.5 font-mono text-[11px] sm:w-1/2 sm:border-r sm:border-b-0">
           <div className="flex items-center justify-between text-[10px] font-semibold tracking-wider text-outline uppercase">
-            <span>Indexed Nodes</span>
-            <span className="text-on-surface-variant">{nodes.reduce((sum, row) => sum + row.edges, 0)} edges</span>
+            <span>Indexed Files</span>
+            <span className="text-on-surface-variant">
+              {projects.length ? `${fileTotal} files · ${edgeTotal} edges` : `${edgeTotal} edges`}
+            </span>
           </div>
           {nodes.map((node, index) => (
             <div key={node.name}>
@@ -301,8 +311,8 @@ export function HealthPanel() {
   const rows = projects.length
     ? projects.map((row) => ({
         name: row.name || "unnamed",
-        indexed: row.nodes > 0 ? 100 : 0,
-        files: String(row.nodes),
+        indexed: row.nodes > 0 || (row.files ?? 0) > 0 ? 100 : 0,
+        files: String(row.files ?? 0),
         nodes: String(row.nodes),
         stale: 0,
         dead: deadSymbols.filter(
@@ -376,7 +386,7 @@ export function HealthPanel() {
 }
 
 export function QuotaPanel() {
-  const { quotas, query } = useLounge();
+  const { quotas, query, amberAlert, amberTools } = useLounge();
   const [quotaFilter, setQuotaFilter] = useState<QuotaFilter>("all");
   const rows = useMemo(() => {
     return quotas.filter((row) => {
@@ -389,7 +399,7 @@ export function QuotaPanel() {
       return `${row.tool} ${row.unit} ${row.kind}`.toLowerCase().includes(query.trim().toLowerCase());
     });
   }, [quotas, query, quotaFilter]);
-  const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 70).length;
+  const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
 
   return (
     <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
@@ -399,9 +409,15 @@ export function QuotaPanel() {
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             CONNECTED AI + BOT QUOTAS
           </h2>
-          <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
-            infra probes
-          </span>
+          {amberAlert ? (
+            <span className="rounded border border-error-container bg-error-container/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-error-dim uppercase">
+              Amber Alert · {amberTools.join(", ") || "quota"}
+            </span>
+          ) : (
+            <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
+              60s probes
+            </span>
+          )}
         </div>
         <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-[10px]">
           {(["all", "ai", "bots"] as const).map((key) => {
@@ -437,7 +453,7 @@ export function QuotaPanel() {
               <tr
                 key={row.id}
                 className={
-                  row.tone === "warn"
+                  row.tone === "warn" || row.tone === "amber"
                     ? "bg-error-container/10 hover:bg-error-container/20"
                     : "hover:bg-surface-container-high/50"
                 }
@@ -484,10 +500,10 @@ export function QuotaPanel() {
         </table>
       </div>
       <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
-        <span>quota source: infra/ LMR · NATS /varz · memory_bridge</span>
-        <div className="flex items-center gap-1.5 text-error-dim">
-          <span className="h-1.5 w-1.5 rounded-full bg-error" />
-          <span>{nearCap} tools near cap</span>
+        <span>quota source: LMR RAM · OpenAI · Anthropic · Grok · NATS /varz</span>
+        <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
+          <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
+          <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
         </div>
       </div>
     </section>

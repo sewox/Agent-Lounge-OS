@@ -3,7 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::ExperienceStore;
-use crate::models::{now_rfc3339, DeadSymbol, IndexGraph, IndexSnapshot};
+use crate::models::{now_rfc3339, DeadSymbol, IndexGraph, IndexSnapshot, ProjectSummary};
 
 pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -63,6 +63,16 @@ impl ExperienceStore {
         })
         .await
         .context("project_index snapshot join")?
+    }
+
+    pub async fn list_indexed_projects(&self) -> Result<Vec<ProjectSummary>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_indexed_projects_blocking(&conn)
+        })
+        .await
+        .context("project_index list join")?
     }
 }
 
@@ -251,6 +261,11 @@ fn project_index_snapshot_blocking(
         params![project],
         |row| row.get(0),
     )?;
+    let files: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT NULLIF(file_path, '')) FROM project_index WHERE project_id = ?1",
+        params![project],
+        |row| row.get(0),
+    )?;
     let indexed_status: Option<String> = conn
         .query_row(
             "SELECT indexed_at FROM project_index WHERE project_id = ?1 LIMIT 1",
@@ -264,9 +279,40 @@ fn project_index_snapshot_blocking(
         status: indexed_status.map(|_| "indexed".into()),
         nodes: nodes as u64,
         edges: edges as u64,
-        files: None,
+        files: Some(files as u64),
         dead: dead as u64,
     })
+}
+
+fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummary>> {
+    let sql = r#"
+        SELECT
+            project_id,
+            MAX(repo_path),
+            SUM(CASE WHEN kind = 'node' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN kind = 'reference' THEN 1 ELSE 0 END),
+            COUNT(DISTINCT NULLIF(file_path, ''))
+        FROM project_index
+        GROUP BY project_id
+        ORDER BY MAX(indexed_at) DESC, project_id
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ProjectSummary {
+            name: row.get(0)?,
+            root_path: row
+                .get::<_, Option<String>>(1)?
+                .filter(|path| !path.is_empty()),
+            nodes: row.get::<_, i64>(2)? as u64,
+            edges: row.get::<_, i64>(3)? as u64,
+            files: Some(row.get::<_, i64>(4)? as u64),
+        })
+    })?;
+    let mut projects = Vec::new();
+    for row in rows {
+        projects.push(row?);
+    }
+    Ok(projects)
 }
 
 #[cfg(test)]
@@ -357,6 +403,15 @@ mod tests {
         assert_eq!(listed.dead, 2);
         assert_eq!(listed.nodes, 2);
         assert_eq!(listed.edges, 1);
+        assert_eq!(listed.files, Some(3));
+
+        let projects = store.list_indexed_projects().await.expect("list indexed");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "lounge");
+        assert_eq!(projects[0].root_path.as_deref(), Some("/tmp/lounge"));
+        assert_eq!(projects[0].nodes, 2);
+        assert_eq!(projects[0].edges, 1);
+        assert_eq!(projects[0].files, Some(3));
 
         store
             .save_project_index(IndexGraph {
