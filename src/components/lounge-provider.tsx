@@ -213,13 +213,13 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   }, [approval]);
 
   useEffect(() => {
-    setClock(formatClock(new Date()));
-    if (isTauri()) {
-      setEvents([]);
-    } else {
-      setKernel("browser");
-    }
     const boot = window.setTimeout(() => {
+      setClock(formatClock(new Date()));
+      if (isTauri()) {
+        setEvents([]);
+      } else {
+        setKernel("browser");
+      }
       void refresh();
     }, 0);
     const id = window.setInterval(() => setClock(formatClock(new Date())), 30_000);
