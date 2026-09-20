@@ -6,6 +6,7 @@ pub mod memory_bridge;
 pub mod nats_manager;
 pub mod ollama;
 mod probe;
+pub mod quota_manager;
 
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub use ollama::{
 pub use probe::{
     lounge_ollama_endpoint, system_ollama_endpoint, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
+pub use quota_manager::{collect_quota_state, spawn_quota_pump};
 
 /// Paylaşılan, thread-safe servis yöneticisi (EchoMind `Arc<Mutex<T>>` kalıbı).
 pub type SharedServices = Arc<Mutex<ServiceManager>>;
