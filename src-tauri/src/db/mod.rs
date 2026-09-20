@@ -3,6 +3,7 @@
 mod connected_tools;
 mod embedding;
 mod experiences;
+mod project_index;
 
 pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experiences::{default_db_path, ExperienceStore};

@@ -190,6 +190,7 @@ fn create_settings_sql() -> &'static str {
 fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
     crate::db::connected_tools::migrate_connected_tools(conn)?;
+    crate::db::project_index::migrate_project_index(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;

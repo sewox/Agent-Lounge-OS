@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const WILDCARD: &str = "lounge.>";
-pub const UI_EVENT: &str = "lounge://bus";
+pub const UI_EVENT: &str = "nats-event";
 pub const BUS_CONNECTED: &str = "lounge.bus.connected";
 pub const BUS_HEARTBEAT: &str = "lounge.bus.heartbeat";
 pub const BUS_PROBE: &str = "lounge.bus.probe";
@@ -154,6 +154,12 @@ mod tests {
         assert_eq!(msg.msg_type, "task");
         assert_eq!(msg.subject, "lounge.task.requested");
         assert_eq!(msg.state(), "queued");
+    }
+
+    #[test]
+    fn ui_event_is_nats_event() {
+        assert_eq!(UI_EVENT, "nats-event");
+        assert_eq!(WILDCARD, "lounge.>");
     }
 
     #[test]

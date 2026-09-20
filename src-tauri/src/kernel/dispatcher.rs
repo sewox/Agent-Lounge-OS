@@ -275,14 +275,19 @@ impl Dispatcher {
         if decision.needs_code_analysis(&task) {
             tags.push("memory_bridge".into());
             let repo = resolve_repo_path(&task, &decision, &self.workspace_root);
-            match self.memory.index_repository(&repo).await {
-                Ok(snapshot) => {
+            match self.memory.index_workspace(&repo).await {
+                Ok(graph) => {
+                    let snapshot = graph.snapshot();
                     tags.push(format!("nodes:{}", snapshot.nodes));
                     tags.push(format!("edges:{}", snapshot.edges));
+                    tags.push(format!("dead:{}", snapshot.dead));
                     adr = format!(
-                        "{adr}\ncodebase-memory-mcp index: project={} nodes={} edges={}",
-                        snapshot.project, snapshot.nodes, snapshot.edges
+                        "{adr}\ncodebase-memory-mcp index: project={} nodes={} edges={} dead={}",
+                        snapshot.project, snapshot.nodes, snapshot.edges, snapshot.dead
                     );
+                    if let Err(err) = self.store.save_project_index(graph).await {
+                        log::warn!("project_index yazılamadı: {err}");
+                    }
                 }
                 Err(err) => {
                     outcome = ExperienceOutcome::Partial;
@@ -467,7 +472,7 @@ mod tests {
     fn dispatcher(decision: AnalysisDecision) -> Dispatcher {
         Dispatcher::new(
             "nats://127.0.0.1:4222",
-            "http://127.0.0.1:11434",
+            crate::services::lounge_ollama_endpoint(),
             default_model_lock(),
             MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
             ExperienceStore::memory().unwrap(),
@@ -536,7 +541,7 @@ mod tests {
 
         let dispatcher = Dispatcher::new(
             "nats://127.0.0.1:4222",
-            "http://127.0.0.1:11434",
+            crate::services::lounge_ollama_endpoint(),
             default_model_lock(),
             MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
             store,

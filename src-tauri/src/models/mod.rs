@@ -11,7 +11,9 @@ pub use discovery::{
     sqlite_tool_type, tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource,
     SystemTool,
 };
-pub use memory::{IndexSnapshot, ProjectList, ProjectSummary};
+pub use memory::{
+    AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectList, ProjectSummary,
+};
 pub use policy::{
     decide_route, is_kernel, AgentTrigger, ApprovalKind, ApprovalRequest, QuotaExhaustedAction,
     RouteIntent, RoutingPolicy, RoutingVote, KERNEL_AGENT,

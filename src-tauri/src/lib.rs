@@ -11,11 +11,11 @@ use infra::{probe_quotas, BusManager};
 use kernel::{default_model_lock, Dispatcher};
 use lounge_protocol::LoungeMessage;
 use models::{
-    ConnectedTool, DiscoveredTool, DiscoveryReport, IndexSnapshot, LoungeExperience,
+    ConnectedTool, DeadSymbol, DiscoveredTool, DiscoveryReport, IndexSnapshot, LoungeExperience,
     ProjectSummary, RoutingPolicy, RoutingVote, ServiceReport, ToolQuota,
 };
 use services::autodiscover::discovery_report;
-use services::{MemoryBridge, ServiceManager, SharedServices};
+use services::{spawn_event_pump, MemoryBridge, ServiceManager, SharedServices};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const ONBOARDING_ROUTE: &str = "/onboarding";
@@ -84,14 +84,15 @@ pub fn run_with_start_route(start_route: &'static str) {
             });
             let dispatcher = Dispatcher::new(
                 "nats://127.0.0.1:4222",
-                "http://127.0.0.1:11434",
+                services::lounge_ollama_endpoint(),
                 model,
                 memory,
                 store.clone(),
                 workspace,
             );
             dispatcher.attach_app(app.handle().clone());
-            let bus = BusManager::new("nats://127.0.0.1:4222", app.handle().clone());
+            let bus = BusManager::new("nats://127.0.0.1:4222");
+            let handle = app.handle().clone();
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
@@ -103,12 +104,13 @@ pub fn run_with_start_route(start_route: &'static str) {
                     let mut manager = services.lock().await;
                     let report = manager.ensure_all().await;
                     log::info!(
-                        "bootstrap ollama={} nats={} memory={}",
+                        "bootstrap lmr={} nats={} memory={}",
                         report.ollama.running,
                         report.nats.running,
                         report.memory.running
                     );
                 }
+                let _pump = spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
@@ -121,6 +123,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             ensure_services,
             service_status,
             index_workspace,
+            get_dead_symbols,
             get_kernel_model,
             set_kernel_model,
             list_ollama_models,
@@ -155,19 +158,59 @@ async fn service_status(state: tauri::State<'_, SharedServices>) -> Result<Servi
 
 #[tauri::command]
 async fn index_workspace(
-    state: tauri::State<'_, SharedServices>,
+    services: tauri::State<'_, SharedServices>,
+    store: tauri::State<'_, ExperienceStore>,
     repo_path: Option<String>,
 ) -> Result<IndexSnapshot, String> {
     let bridge = {
-        let manager = state.lock().await;
+        let manager = services.lock().await;
         manager.memory().clone()
     };
 
     let path = repo_path.map(PathBuf::from).unwrap_or_else(workspace_root);
-    bridge
-        .index_repository(path)
+    let graph = bridge
+        .index_workspace(&path)
+        .await
+        .map_err(|err| err.to_string())?;
+    store
+        .save_project_index(graph.clone())
         .await
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_dead_symbols(
+    services: tauri::State<'_, SharedServices>,
+    store: tauri::State<'_, ExperienceStore>,
+    repo_path: Option<String>,
+) -> Result<Vec<DeadSymbol>, String> {
+    let listed = store
+        .list_dead_symbols(None)
+        .await
+        .map_err(|err| err.to_string())?;
+    if !listed.is_empty() {
+        return Ok(listed);
+    }
+
+    let bridge = {
+        let manager = services.lock().await;
+        manager.memory().clone()
+    };
+    let path = repo_path.map(PathBuf::from).unwrap_or_else(workspace_root);
+    let mut graph = bridge
+        .index_workspace(&path)
+        .await
+        .map_err(|err| err.to_string())?;
+    if graph.dead.is_empty() {
+        if let Ok(dead) = bridge.get_dead_symbols(&path).await {
+            graph.dead = dead;
+        }
+    }
+    store
+        .save_project_index(graph.clone())
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(graph.dead)
 }
 
 #[tauri::command]
@@ -192,7 +235,8 @@ async fn set_kernel_model(
 async fn list_ollama_models(
     state: tauri::State<'_, SharedServices>,
 ) -> Result<Vec<String>, String> {
-    let manager = state.lock().await;
+    let mut manager = state.lock().await;
+    let _ = manager.ensure_all().await;
     manager.ollama_models().await.map_err(|err| err.to_string())
 }
 
@@ -275,11 +319,21 @@ async fn discover_system(
 async fn get_discovery_report(
     state: tauri::State<'_, SharedServices>,
 ) -> Result<DiscoveryReport, String> {
-    let endpoint = {
-        let manager = state.lock().await;
-        manager.ollama_endpoint()
+    let (lounge_endpoint, system_endpoint) = {
+        let mut manager = state.lock().await;
+        let report = manager.ensure_all().await;
+        if !report.ollama.running {
+            log::warn!(
+                "keşif öncesi LMR ayakta değil: {}",
+                report.ollama.error.as_deref().unwrap_or("yanıt yok")
+            );
+        }
+        (
+            manager.ollama_endpoint(),
+            services::system_ollama_endpoint(),
+        )
     };
-    discovery_report(workspace_root(), endpoint)
+    discovery_report(workspace_root(), lounge_endpoint, system_endpoint)
         .await
         .map_err(|err| err.to_string())
 }

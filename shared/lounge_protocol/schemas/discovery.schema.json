@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/discovery.schema.json",
   "title": "DiscoveryReport",
-  "description": "Yerel Claude Desktop / Cursor MCP, Ollama modelleri ve PATH sistem araçları taraması. MCP env değerleri asla yer almaz.",
+  "description": "Yerel Claude Desktop / Cursor MCP, LMR ve Ollama modelleri ile PATH sistem araçları taraması. MCP env değerleri asla yer almaz.",
   "type": "object",
   "additionalProperties": false,
   "required": ["scanned_at", "sources", "tools", "models", "mcp_servers", "system_tools"],
@@ -37,7 +37,7 @@
       "properties": {
         "id": {
           "type": "string",
-          "enum": ["claude_desktop", "cursor", "ollama", "system"]
+          "enum": ["claude_desktop", "cursor", "lmr", "ollama", "system"]
         },
         "available": { "type": "boolean" },
         "origin_path": { "type": ["string", "null"] },
@@ -54,7 +54,7 @@
         "kind": { "type": "string", "enum": ["model", "mcp", "system"] },
         "source": {
           "type": "string",
-          "enum": ["claude_desktop", "cursor", "ollama", "system"]
+          "enum": ["claude_desktop", "cursor", "lmr", "ollama", "system"]
         },
         "origin_path": { "type": ["string", "null"] },
         "command": { "type": ["string", "null"] },

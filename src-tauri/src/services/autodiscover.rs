@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use super::lmr_runtime::{host_ollama_down_detail, host_ollama_installed};
 use super::probe::find_executable;
 use crate::infra::quotas::http_json;
 use crate::models::{
@@ -12,15 +13,19 @@ use crate::models::{
 
 const SOURCE_CLAUDE: &str = "claude_desktop";
 const SOURCE_CURSOR: &str = "cursor";
+const SOURCE_LMR: &str = "lmr";
 const SOURCE_OLLAMA: &str = "ollama";
 const SOURCE_SYSTEM: &str = "system";
 const SYSTEM_BINARIES: &[&str] = &["gh", "docker", "git"];
 
 pub async fn discovery_report(
     workspace: PathBuf,
-    ollama_endpoint: String,
+    lounge_endpoint: String,
+    system_endpoint: String,
 ) -> Result<DiscoveryReport> {
-    let (claude, cursor, ollama, system) = tokio::join!(
+    let skip_host_ollama =
+        normalize_endpoint(&lounge_endpoint) == normalize_endpoint(&system_endpoint);
+    let (claude, cursor, lmr, host_ollama, system) = tokio::join!(
         async {
             tokio::task::spawn_blocking(scan_claude_desktop)
                 .await
@@ -31,7 +36,22 @@ pub async fn discovery_report(
                 .await
                 .unwrap_or_else(|err| join_error(SOURCE_CURSOR, err))
         },
-        scan_ollama(&ollama_endpoint),
+        scan_ollama(&lounge_endpoint, SOURCE_LMR),
+        async {
+            if skip_host_ollama {
+                (
+                    DiscoverySource {
+                        id: SOURCE_OLLAMA.into(),
+                        available: false,
+                        origin_path: Some(system_endpoint.clone()),
+                        detail: Some("Ollama uç noktası LMR ile aynı".into()),
+                    },
+                    Vec::new(),
+                )
+            } else {
+                scan_host_ollama(&system_endpoint).await
+            }
+        },
         async {
             tokio::task::spawn_blocking(scan_system_tools)
                 .await
@@ -51,10 +71,12 @@ pub async fn discovery_report(
 
     let (claude_source, claude_tools) = claude;
     let (cursor_source, cursor_tools) = cursor;
-    let (ollama_source, models) = ollama;
+    let (lmr_source, lmr_models) = lmr;
+    let (ollama_source, ollama_models) = host_ollama;
     let (system_source, system_tools) = system;
 
     let mcp_servers = dedupe_tools([claude_tools, cursor_tools].concat());
+    let models = [lmr_models, ollama_models].concat();
     let system_discovered: Vec<DiscoveredTool> =
         system_tools.iter().map(SystemTool::to_discovered).collect();
 
@@ -65,7 +87,13 @@ pub async fn discovery_report(
 
     Ok(DiscoveryReport {
         scanned_at: now_rfc3339(),
-        sources: vec![claude_source, cursor_source, ollama_source, system_source],
+        sources: vec![
+            claude_source,
+            cursor_source,
+            lmr_source,
+            ollama_source,
+            system_source,
+        ],
         tools,
         models,
         mcp_servers,
@@ -93,21 +121,16 @@ pub fn scan_cursor(workspace: &Path) -> (DiscoverySource, Vec<DiscoveredTool>) {
     let paths = cursor_config_paths(workspace);
     let mut found = Vec::new();
     let mut tools = Vec::new();
-    let mut details = Vec::new();
 
     for path in &paths {
         match read_mcp_file(path, SOURCE_CURSOR) {
             Ok(Some(rows)) => {
                 found.push(path.display().to_string());
-                if rows.is_empty() {
-                    details.push(format!("{} · mcpServers yok", path.display()));
-                }
                 tools.extend(rows);
             }
             Ok(None) => {}
-            Err(err) => {
+            Err(_) => {
                 found.push(path.display().to_string());
-                details.push(err.to_string());
             }
         }
     }
@@ -115,13 +138,13 @@ pub fn scan_cursor(workspace: &Path) -> (DiscoverySource, Vec<DiscoveredTool>) {
     let available = !found.is_empty();
     let origin_path = found.first().cloned();
     let detail = if available {
-        if details.is_empty() {
-            Some(found.join(", "))
+        if tools.is_empty() {
+            Some(format!("{} konum · mcpServers yok", found.len()))
         } else {
-            Some(format!("{} · {}", found.join(", "), details.join("; ")))
+            Some(format!("{} araç", tools.len()))
         }
     } else {
-        Some("Cursor mcp.json / settings.json bulunamadı".into())
+        Some("config yok".into())
     };
 
     (
@@ -135,36 +158,79 @@ pub fn scan_cursor(workspace: &Path) -> (DiscoverySource, Vec<DiscoveredTool>) {
     )
 }
 
-pub async fn scan_ollama(endpoint: &str) -> (DiscoverySource, Vec<DiscoveredTool>) {
+pub async fn scan_host_ollama(endpoint: &str) -> (DiscoverySource, Vec<DiscoveredTool>) {
+    let (source, tools) = scan_ollama(endpoint, SOURCE_OLLAMA).await;
+    if source.available {
+        return (source, tools);
+    }
+    (
+        DiscoverySource {
+            id: SOURCE_OLLAMA.into(),
+            available: false,
+            origin_path: Some(endpoint.trim_end_matches('/').to_string()),
+            detail: Some(host_ollama_down_detail(host_ollama_installed()).into()),
+        },
+        Vec::new(),
+    )
+}
+
+pub async fn scan_ollama(endpoint: &str, source: &str) -> (DiscoverySource, Vec<DiscoveredTool>) {
     let url = format!("{}/api/tags", endpoint.trim_end_matches('/'));
     match http_json(&url).await {
         Ok(payload) => {
-            let tools = parse_ollama_tags(&payload, endpoint);
+            let tools = parse_ollama_tags(&payload, endpoint, source);
             let detail = if tools.is_empty() {
-                Some("Ollama ayakta, model yok".into())
+                Some(format!("{} ayakta, model yok", ollama_source_label(source)))
             } else {
                 Some(format!("{} model", tools.len()))
             };
             (
                 DiscoverySource {
-                    id: SOURCE_OLLAMA.into(),
+                    id: source.into(),
                     available: true,
-                    origin_path: Some(url),
+                    origin_path: Some(endpoint.trim_end_matches('/').to_string()),
                     detail,
                 },
                 tools,
             )
         }
-        Err(err) => (
-            DiscoverySource {
-                id: SOURCE_OLLAMA.into(),
-                available: false,
-                origin_path: Some(url),
-                detail: Some(err),
-            },
-            Vec::new(),
-        ),
+        Err(err) => {
+            log::debug!("Ollama tarama başarısız ({source}): {err}");
+            (
+                DiscoverySource {
+                    id: source.into(),
+                    available: false,
+                    origin_path: Some(endpoint.trim_end_matches('/').to_string()),
+                    detail: Some(if source == SOURCE_LMR {
+                        "ayağa kalkmadı".into()
+                    } else {
+                        "yanıt yok".into()
+                    }),
+                },
+                Vec::new(),
+            )
+        }
     }
+}
+
+fn ollama_source_label(source: &str) -> &'static str {
+    match source {
+        SOURCE_LMR => "LMR",
+        SOURCE_OLLAMA => "Ollama",
+        _ => "Ollama",
+    }
+}
+
+fn ollama_source_detail(source: &str) -> &'static str {
+    match source {
+        SOURCE_LMR => "Lounge Model Runner",
+        SOURCE_OLLAMA => "Ollama Sunucusu",
+        _ => "Ollama",
+    }
+}
+
+fn normalize_endpoint(endpoint: &str) -> String {
+    endpoint.trim().trim_end_matches('/').to_ascii_lowercase()
 }
 
 pub fn scan_system_tools() -> (DiscoverySource, Vec<SystemTool>) {
@@ -238,7 +304,7 @@ pub fn parse_mcp_servers(value: &Value, source: &str, origin_path: &Path) -> Vec
     tools
 }
 
-pub fn parse_ollama_tags(payload: &Value, endpoint: &str) -> Vec<DiscoveredTool> {
+pub fn parse_ollama_tags(payload: &Value, endpoint: &str, source: &str) -> Vec<DiscoveredTool> {
     payload
         .get("models")
         .and_then(Value::as_array)
@@ -246,9 +312,10 @@ pub fn parse_ollama_tags(payload: &Value, endpoint: &str) -> Vec<DiscoveredTool>
         .flatten()
         .filter_map(|row| row.get("name").and_then(Value::as_str))
         .map(|name| {
-            let mut tool = DiscoveredTool::new(SOURCE_OLLAMA, name, "model");
+            let mut tool = DiscoveredTool::new(source, name, "model");
             tool.endpoint = Some(endpoint.trim_end_matches('/').to_string());
             tool.origin_path = Some(format!("{}/api/tags", endpoint.trim_end_matches('/')));
+            tool.detail = Some(ollama_source_detail(source).into());
             tool.available = true;
             tool
         })
@@ -460,19 +527,47 @@ mod tests {
                 { "name": "qwen2.5:7b" }
             ]
         });
-        let tools = parse_ollama_tags(&payload, "http://127.0.0.1:11434");
+        let tools = parse_ollama_tags(&payload, "http://127.0.0.1:18790", SOURCE_LMR);
         assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].id, "ollama:llama3.1:8b");
+        assert_eq!(tools[0].id, "lmr:llama3.1:8b");
         assert_eq!(tools[0].kind, "model");
-        assert_eq!(tools[0].source, "ollama");
+        assert_eq!(tools[0].source, "lmr");
+        assert_eq!(tools[0].endpoint.as_deref(), Some("http://127.0.0.1:18790"));
+
+        let host = parse_ollama_tags(&payload, "http://127.0.0.1:11434", SOURCE_OLLAMA);
+        assert_eq!(host[0].id, "ollama:llama3.1:8b");
+        assert_eq!(host[0].source, "ollama");
     }
 
     #[tokio::test]
     async fn ollama_down_returns_empty_models() {
-        let (source, tools) = scan_ollama("http://127.0.0.1:9").await;
+        let (source, tools) = scan_ollama("http://127.0.0.1:9", SOURCE_OLLAMA).await;
         assert!(!source.available);
+        assert_eq!(source.id, SOURCE_OLLAMA);
+        assert_eq!(source.detail.as_deref(), Some("yanıt yok"));
         assert!(tools.is_empty());
-        assert!(source.detail.is_some());
+    }
+
+    #[tokio::test]
+    async fn lmr_down_is_not_host_bulunamadi() {
+        let (source, tools) = scan_ollama("http://127.0.0.1:9", SOURCE_LMR).await;
+        assert!(!source.available);
+        assert_eq!(source.id, SOURCE_LMR);
+        assert_eq!(source.detail.as_deref(), Some("ayağa kalkmadı"));
+        assert!(tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn host_ollama_without_install_is_bulunamadi() {
+        let (source, tools) = scan_host_ollama("http://127.0.0.1:9").await;
+        assert!(!source.available);
+        assert_eq!(source.id, SOURCE_OLLAMA);
+        assert!(tools.is_empty());
+        if host_ollama_installed() {
+            assert_eq!(source.detail.as_deref(), Some("yüklü, çalışmıyor"));
+        } else {
+            assert_eq!(source.detail.as_deref(), Some("bulunamadı"));
+        }
     }
 
     #[test]

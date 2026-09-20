@@ -249,7 +249,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-lowest/60 p-2">
             <div className="mb-1 font-mono text-[10px] tracking-wider text-outline uppercase">Active daemons</div>
             {[
-              { name: "Ollama", health: report?.ollama, fallback: "—" },
+              { name: "LMR", health: report?.ollama, fallback: "—" },
               { name: "NATS", health: report?.nats, fallback: "—" },
               { name: "Memory Bridge", health: report?.memory, fallback: "—" },
             ].map((daemon) => (
