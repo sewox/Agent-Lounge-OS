@@ -1,6 +1,7 @@
-//! Ollama, NATS ve C-binary (codebase-memory-mcp) yaşam döngüsü.
+//! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
 pub mod autodiscover;
+pub mod lmr_runtime;
 pub mod memory_bridge;
 pub mod nats_manager;
 pub mod ollama;
@@ -13,10 +14,13 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use memory_bridge::MemoryBridge;
-pub use nats_manager::{NatsConfig, NatsService};
+pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};
 pub use ollama::{
-    chat_json, embed_model, embed_text, parse_llm_json, OllamaConfig, OllamaService,
+    chat_json, embed_model, embed_text, parse_llm_json, private_env, OllamaConfig, OllamaService,
     DEFAULT_EMBED_MODEL,
+};
+pub use probe::{
+    lounge_ollama_endpoint, system_ollama_endpoint, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
 
 /// Paylaşılan, thread-safe servis yöneticisi (EchoMind `Arc<Mutex<T>>` kalıbı).
@@ -73,11 +77,11 @@ impl ServiceManager {
         }
     }
 
-    /// Ollama ve NATS yerelde yoksa başlatır; mevcut süreçlere dokunmaz.
+    /// LMR'yi kapalı devrede ayağa kaldırır; host Ollama :11434 örneğine dokunmaz.
     pub async fn ensure_all(&mut self) -> ServiceReport {
         let (ollama, nats) = tokio::join!(self.ollama.ensure(), self.nats.ensure());
         if let Some(error) = ollama.error.as_deref() {
-            log::error!("Ollama: {error}");
+            log::error!("LMR: {error}");
         }
         if let Some(error) = nats.error.as_deref() {
             log::error!("NATS: {error}");
@@ -115,6 +119,7 @@ mod tests {
                 port: 1,
                 binary: "__missing_ollama__".into(),
                 args: vec!["serve".into()],
+                models_dir: None,
             }),
             nats: NatsService::with_config(NatsConfig {
                 host: "127.0.0.1".into(),

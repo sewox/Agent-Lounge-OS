@@ -73,8 +73,8 @@ async fn probe_ollama(endpoint: &str) -> ToolQuota {
                 .unwrap_or(0);
             let gb = size as f32 / (1024.0 * 1024.0 * 1024.0);
             ToolQuota {
-                id: "ollama".into(),
-                tool: "Ollama · local".into(),
+                id: "lmr".into(),
+                tool: "LMR".into(),
                 kind: "ai".into(),
                 unit: "local".into(),
                 used: format!("{running} loaded · {gb:.1} GB"),
@@ -88,8 +88,8 @@ async fn probe_ollama(endpoint: &str) -> ToolQuota {
             }
         }
         Err(err) => ToolQuota {
-            id: "ollama".into(),
-            tool: "Ollama · local".into(),
+            id: "lmr".into(),
+            tool: "LMR".into(),
             kind: "ai".into(),
             unit: "local".into(),
             used: "down".into(),

@@ -21,6 +21,7 @@ import {
   loungeMessageToEvent,
   BUS_UI_EVENT,
   type ApprovalRequest,
+  type DeadSymbol,
   type IndexSnapshot,
   type LoungeExperience,
   type LoungeMessage,
@@ -44,6 +45,7 @@ type LoungeContextValue = {
   events: NatsEvent[];
   quotas: ToolQuota[];
   projects: ProjectSummary[];
+  deadSymbols: DeadSymbol[];
   query: string;
   setQuery: (value: string) => void;
   clock: string;
@@ -63,15 +65,17 @@ const LoungeContext = createContext<LoungeContextValue | null>(null);
 
 export function LoungeProvider({ children }: { children: ReactNode }) {
   const [report, setReport] = useState<ServiceReport | null>(null);
-  const [kernel, setKernel] = useState(() => (isTauri() ? "idle" : "browser"));
+  // SSR ve ilk hydrate aynı olmalı; isTauri() useState initializer'da hydration bozar.
+  const [kernel, setKernel] = useState("idle");
   const [model, setModel] = useState("llama3.1:8b");
   const [models, setModels] = useState<string[]>([]);
   const [experiences, setExperiences] = useState<LoungeExperience[]>(MOCK_EXPERIENCES);
-  const [events, setEvents] = useState<NatsEvent[]>(() => (isTauri() ? [] : MOCK_EVENTS));
+  const [events, setEvents] = useState<NatsEvent[]>(MOCK_EVENTS);
   const [quotas, setQuotas] = useState<ToolQuota[]>(MOCK_QUOTAS);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [deadSymbols, setDeadSymbols] = useState<DeadSymbol[]>([]);
   const [query, setQuery] = useState("");
-  const [clock, setClock] = useState(() => formatClock(new Date()));
+  const [clock, setClock] = useState("--:--");
   const [indexing, setIndexing] = useState(false);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
@@ -92,6 +96,11 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setProjects(await invoke<ProjectSummary[]>("list_projects"));
     } catch {
       setProjects([]);
+    }
+    try {
+      setDeadSymbols(await invoke<DeadSymbol[]>("get_dead_symbols"));
+    } catch {
+      setDeadSymbols([]);
     }
   }, []);
 
@@ -205,6 +214,12 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const boot = window.setTimeout(() => {
+      setClock(formatClock(new Date()));
+      if (isTauri()) {
+        setEvents([]);
+      } else {
+        setKernel("browser");
+      }
       void refresh();
     }, 0);
     const id = window.setInterval(() => setClock(formatClock(new Date())), 30_000);
@@ -274,6 +289,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       events,
       quotas,
       projects,
+      deadSymbols,
       query,
       setQuery,
       clock,
@@ -297,6 +313,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       events,
       quotas,
       projects,
+      deadSymbols,
       query,
       clock,
       indexing,

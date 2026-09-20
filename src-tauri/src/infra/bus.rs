@@ -4,26 +4,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use lounge_protocol::{LoungeMessage, BUS_CONNECTED, BUS_HEARTBEAT, BUS_PROBE, UI_EVENT, WILDCARD};
-use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
+use lounge_protocol::{LoungeMessage, BUS_CONNECTED, BUS_HEARTBEAT, BUS_PROBE, WILDCARD};
 
 const RECONNECT: Duration = Duration::from_secs(2);
 const HEARTBEAT: Duration = Duration::from_secs(10);
 
-/// NATS `lounge.>` sinir sistemi. Gelen zarfları Tauri event olarak UI'a fırlatır.
+/// NATS yayıncı: probe, heartbeat ve connected. `lounge.>` dinleme `NatsEventPump` tarafında.
 #[derive(Clone)]
 pub struct BusManager {
     nats_url: String,
-    app: AppHandle,
     ticks: std::sync::Arc<AtomicU64>,
 }
 
 impl BusManager {
-    pub fn new(nats_url: impl Into<String>, app: AppHandle) -> Self {
+    pub fn new(nats_url: impl Into<String>) -> Self {
         Self {
             nats_url: nats_url.into(),
-            app,
             ticks: std::sync::Arc::new(AtomicU64::new(0)),
         }
     }
@@ -75,30 +71,7 @@ impl BusManager {
             .context("NATS bus connect join")?
             .context("NATS bus bağlanamadı")?;
 
-        let (tx, mut rx) = mpsc::channel::<nats::Message>(256);
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        let listener = nc.clone();
-        tokio::task::spawn_blocking(move || match listener.subscribe(WILDCARD) {
-            Ok(sub) => {
-                let _ = ready_tx.send(Ok(()));
-                for msg in sub.messages() {
-                    if tx.blocking_send(msg).is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            }
-            Err(err) => {
-                let _ = ready_tx.send(Err(err.to_string()));
-                Err(err)
-            }
-        });
-        ready_rx
-            .await
-            .context("bus subscribe ready")?
-            .map_err(|err| anyhow::anyhow!(err))?;
-
-        log::info!("NATS bus dinliyor: {} ({WILDCARD})", self.nats_url);
+        log::info!("NATS bus yayınlıyor: {}", self.nats_url);
 
         let connected = LoungeMessage::new(
             BUS_CONNECTED,
@@ -107,30 +80,16 @@ impl BusManager {
         );
         publish_on(&nc, &connected).await?;
 
-        let heartbeat_nc = nc.clone();
-        let ticks = self.ticks.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(HEARTBEAT).await;
-                let tick = ticks.fetch_add(1, Ordering::Relaxed) + 1;
-                let msg = LoungeMessage::new(
-                    BUS_HEARTBEAT,
-                    "lounge-bus",
-                    serde_json::json!({ "tick": tick }),
-                );
-                if publish_on(&heartbeat_nc, &msg).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        while let Some(raw) = rx.recv().await {
-            let envelope = LoungeMessage::from_nats(&raw.subject, &raw.data);
-            if let Err(err) = self.app.emit(UI_EVENT, &envelope) {
-                log::debug!("tauri emit {UI_EVENT}: {err}");
-            }
+        loop {
+            tokio::time::sleep(HEARTBEAT).await;
+            let tick = self.ticks.fetch_add(1, Ordering::Relaxed) + 1;
+            let msg = LoungeMessage::new(
+                BUS_HEARTBEAT,
+                "lounge-bus",
+                serde_json::json!({ "tick": tick }),
+            );
+            publish_on(&nc, &msg).await?;
         }
-        Ok(())
     }
 }
 

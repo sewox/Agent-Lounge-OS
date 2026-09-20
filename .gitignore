@@ -50,6 +50,10 @@ shared/lounge_protocol/Cargo.lock
 bridge/codebase-memory-mcp
 bridge/codebase-memory-mcp.exe
 
+# LMR (Lounge Model Runner) — uygulama içi runtime + model deposu
+data/lmr/
+data/ollama/
+
 # Local experience store
 experiences/*.sqlite
 experiences/*.sqlite-journal

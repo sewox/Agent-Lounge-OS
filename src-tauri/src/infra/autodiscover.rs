@@ -2,9 +2,10 @@
 
 pub async fn scan_system(
     workspace: std::path::PathBuf,
-    ollama_endpoint: String,
+    lounge_endpoint: String,
+    system_endpoint: String,
 ) -> crate::models::DiscoveryReport {
-    crate::services::autodiscover::discovery_report(workspace, ollama_endpoint)
+    crate::services::autodiscover::discovery_report(workspace, lounge_endpoint, system_endpoint)
         .await
         .unwrap_or_else(|err| crate::models::DiscoveryReport {
             scanned_at: crate::models::now_rfc3339(),

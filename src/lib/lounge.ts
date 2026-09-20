@@ -60,7 +60,7 @@ export type DiscoveredTool = {
   id: string;
   name: string;
   kind: "model" | "mcp" | "system" | string;
-  source: "claude_desktop" | "cursor" | "ollama" | "system" | string;
+  source: "claude_desktop" | "cursor" | "lmr" | "ollama" | "system" | string;
   origin_path?: string | null;
   command?: string | null;
   args: string[];
@@ -86,6 +86,65 @@ export type DiscoveryReport = {
   system_tools: SystemTool[];
 };
 
+export function formatDiscoveryLocation(raw?: string | null): string {
+  if (!raw?.trim()) {
+    return "—";
+  }
+  const parts = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return "—";
+  }
+  const first = formatOneLocation(parts[0]);
+  return parts.length === 1 ? first : `${first} +${parts.length - 1}`;
+}
+
+function formatOneLocation(raw: string): string {
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      return url.port ? `${url.hostname}:${url.port}` : url.host;
+    } catch {
+      return raw;
+    }
+  }
+  return raw
+    .replace(/^\/Users\/[^/]+/, "~")
+    .replace(/^\/home\/[^/]+/, "~")
+    .replace(/^\\Users\\[^\\]+/i, "~");
+}
+
+export function humanizeDiscoveryDetail(raw?: string | null): string | null {
+  if (!raw?.trim()) {
+    return null;
+  }
+  const text = raw.trim();
+  const lower = text.toLowerCase();
+  if (
+    lower.includes("error sending") ||
+    lower.includes("error trying") ||
+    lower.includes("connection refused") ||
+    lower.includes("timed out") ||
+    lower.includes("connect error") ||
+    lower.includes("tcp connect")
+  ) {
+    return "yanıt yok";
+  }
+  if ((text.includes("/") || text.includes("\\")) && /[,;]/.test(text)) {
+    const locations = text
+      .split(/[,;]/)
+      .map((part) => part.trim())
+      .filter((part) => part.includes("/") || part.includes("\\"));
+    const note = /mcpServers yok/i.test(text) ? "mcpServers yok" : null;
+    if (locations.length > 1) {
+      return note ? `${locations.length} konum · ${note}` : `${locations.length} konum`;
+    }
+  }
+  return text;
+}
+
 export type ConnectedTool = {
   id: string;
   name: string;
@@ -110,14 +169,20 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
     {
       id: "claude_desktop",
       available: true,
-      origin_path: "~/Library/Application Support/Claude/claude_desktop_config.json",
-      detail: "1 araç",
+      origin_path: "/Users/macbookpro/Library/Application Support/Claude/claude_desktop_config.json",
+      detail: "0 araç",
     },
     {
       id: "cursor",
       available: true,
-      origin_path: "~/.cursor/mcp.json",
-      detail: "2 araç",
+      origin_path: "/Users/macbookpro/Library/Application Support/Cursor/User/settings.json",
+      detail: "2 konum · mcpServers yok",
+    },
+    {
+      id: "lmr",
+      available: true,
+      origin_path: "http://127.0.0.1:18790/api/tags",
+      detail: "1 model",
     },
     {
       id: "ollama",
@@ -134,6 +199,18 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
   ],
   models: [
     {
+      id: "lmr:llama3.1:8b",
+      name: "llama3.1:8b",
+      kind: "model",
+      source: "lmr",
+      origin_path: "http://127.0.0.1:18790/api/tags",
+      command: null,
+      args: [],
+      endpoint: "http://127.0.0.1:18790",
+      detail: "Lounge Model Runner",
+      available: true,
+    },
+    {
       id: "ollama:llama3.1:8b",
       name: "llama3.1:8b",
       kind: "model",
@@ -142,7 +219,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       command: null,
       args: [],
       endpoint: "http://127.0.0.1:11434",
-      detail: null,
+      detail: "Ollama Sunucusu",
       available: true,
     },
     {
@@ -154,7 +231,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       command: null,
       args: [],
       endpoint: "http://127.0.0.1:11434",
-      detail: null,
+      detail: "Ollama Sunucusu",
       available: true,
     },
   ],
@@ -203,6 +280,18 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
   ],
   tools: [
     {
+      id: "lmr:llama3.1:8b",
+      name: "llama3.1:8b",
+      kind: "model",
+      source: "lmr",
+      origin_path: "http://127.0.0.1:18790/api/tags",
+      command: null,
+      args: [],
+      endpoint: "http://127.0.0.1:18790",
+      detail: "Lounge Model Runner",
+      available: true,
+    },
+    {
       id: "ollama:llama3.1:8b",
       name: "llama3.1:8b",
       kind: "model",
@@ -211,7 +300,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       command: null,
       args: [],
       endpoint: "http://127.0.0.1:11434",
-      detail: null,
+      detail: "Ollama Sunucusu",
       available: true,
     },
     {
@@ -223,7 +312,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
       command: null,
       args: [],
       endpoint: "http://127.0.0.1:11434",
-      detail: null,
+      detail: "Ollama Sunucusu",
       available: true,
     },
     {
@@ -301,7 +390,7 @@ export const MOCK_DISCOVERY: DiscoveryReport = {
   ],
 };
 
-export const BUS_UI_EVENT = "lounge://bus";
+export const BUS_UI_EVENT = "nats-event";
 
 export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
   const kb = (message.payload_bytes / 1024).toFixed(1);
@@ -451,6 +540,16 @@ export type IndexSnapshot = {
   nodes: number;
   edges: number;
   files?: number | null;
+  dead?: number;
+};
+
+export type DeadSymbol = {
+  name: string;
+  kind: "unused" | "broken" | string;
+  file?: string | null;
+  line?: number | null;
+  detail?: string | null;
+  project_id?: string | null;
 };
 
 export type QuotaExhaustedAction = "stop" | "ask_then_local" | "ask_then_abort";
@@ -486,13 +585,13 @@ export type RoutingVote = "approve" | "approve_local" | "deny";
 export const DEFAULT_POLICY: RoutingPolicy = {
   require_user_approval: true,
   on_quota_exhausted: "ask_then_local",
-  local_fallback_agent: "ollama",
+  local_fallback_agent: "lmr",
   local_fallback_model: "llama3.1:8b",
   triggers: [
     { agent_id: "cursor", label: "Cursor", when: "code_analysis", enabled: true },
     { agent_id: "claude", label: "Claude", when: "review", enabled: true },
     { agent_id: "grok", label: "Grok", when: "general", enabled: true },
-    { agent_id: "ollama", label: "Ollama (local)", when: "fallback", enabled: true },
+    { agent_id: "lmr", label: "LMR", when: "fallback", enabled: true },
   ],
 };
 
@@ -500,7 +599,7 @@ export const MOCK_QUOTAS: ToolQuota[] = [
   { id: "cursor", tool: "Cursor · Grok 4.6", kind: "ai", unit: "req/day", used: "412 / 500", remaining: "88 remaining", reset: "00:00 UTC", percent: 82, tone: "warn", label: "warn (82%)" },
   { id: "claude", tool: "Claude · Sonnet", kind: "ai", unit: "tokens", used: "1.24M / 5.00M", remaining: "3.76M left", reset: "01 Oct", percent: 25, tone: "ok", label: "ok (25%)" },
   { id: "xai", tool: "xAI · Grok API", kind: "ai", unit: "tokens", used: "18.4k / 50k", remaining: "31.6k left", reset: "rolling", percent: 37, tone: "ok", label: "ok (37%)" },
-  { id: "ollama", tool: "Ollama · llama3.1:8b", kind: "ai", unit: "local", used: "6.1 / 8.0 GB", remaining: "local unlimited", reset: "LOCAL", percent: 76, tone: "ok", label: "ok (76% vram)" },
+  { id: "lmr", tool: "LMR · llama3.1:8b", kind: "ai", unit: "local", used: "6.1 / 8.0 GB", remaining: "local unlimited", reset: "LOCAL", percent: 76, tone: "ok", label: "ok (76% vram)" },
   { id: "stitch", tool: "Stitch · Gemini", kind: "bot", unit: "gens", used: "14 / 50", remaining: "36 left", reset: "monthly", percent: 28, tone: "ok", label: "ok (28%)" },
   { id: "cbm", tool: "codebase-memory-mcp", kind: "bot", unit: "local", used: "— / ∞", remaining: "unlimited", reset: "LOCAL", percent: null, tone: "local", label: "ok LOCAL" },
   { id: "notion", tool: "Notion MCP", kind: "bot", unit: "req/min", used: "42 / 180", remaining: "138 left", reset: "60s", percent: 23, tone: "ok", label: "ok (23%)" },

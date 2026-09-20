@@ -23,8 +23,11 @@ type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
 
 export function OverviewKpis() {
-  const { experiences, events, projects } = useLounge();
+  const { experiences, events, projects, deadSymbols } = useLounge();
   const files = projects.reduce((sum, row) => sum + row.nodes, 0);
+  const deadCount = projects.length
+    ? deadSymbols.length
+    : MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
   return (
     <section className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
       <Kpi
@@ -51,7 +54,7 @@ export function OverviewKpis() {
       />
       <Kpi
         label="DEAD SYMBOLS"
-        value="127"
+        value={String(deadCount)}
         hint="unreachable fn/struct refs"
         valueClass="text-error"
         badge={
@@ -294,7 +297,7 @@ export function VaultPanel() {
 }
 
 export function HealthPanel() {
-  const { projects } = useLounge();
+  const { projects, deadSymbols } = useLounge();
   const rows = projects.length
     ? projects.map((row) => ({
         name: row.name || "unnamed",
@@ -302,7 +305,12 @@ export function HealthPanel() {
         files: String(row.nodes),
         nodes: String(row.nodes),
         stale: 0,
-        dead: 0,
+        dead: deadSymbols.filter(
+          (symbol) =>
+            !symbol.project_id ||
+            symbol.project_id === row.name ||
+            symbol.project_id === row.root_path,
+        ).length,
         sync: "live",
       }))
     : MOCK_HEALTH;
@@ -476,7 +484,7 @@ export function QuotaPanel() {
         </table>
       </div>
       <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
-        <span>quota source: infra/ Ollama · NATS /varz · memory_bridge</span>
+        <span>quota source: infra/ LMR · NATS /varz · memory_bridge</span>
         <div className="flex items-center gap-1.5 text-error-dim">
           <span className="h-1.5 w-1.5 rounded-full bg-error" />
           <span>{nearCap} tools near cap</span>
@@ -488,7 +496,7 @@ export function QuotaPanel() {
 
 const QUOTA_ACTIONS: { id: QuotaExhaustedAction; title: string; hint: string }[] = [
   { id: "stop", title: "Kotam biterse durdur", hint: "Görevi iptal et, ajan değiştirme." },
-  { id: "ask_then_local", title: "Onay alarak yerel modele geç", hint: "Kota bitince UI onayı → Ollama." },
+  { id: "ask_then_local", title: "Onay alarak yerel modele geç", hint: "Kota bitince UI onayı → LMR." },
   { id: "ask_then_abort", title: "Onay alarak iptal et", hint: "Kota bitince kullanıcı reddedebilir." },
 ];
 
@@ -502,7 +510,7 @@ export function SettingsPanel() {
           <div>
             <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Bağlı araçlar</h2>
             <p className="mt-1 font-body text-[11px] text-on-surface-variant">
-              Claude Desktop, Cursor MCP ve Ollama yeniden taranır; seçim connected_tools tablosuna yazılır.
+              Claude Desktop, Cursor MCP, LMR ve Ollama yeniden taranır; seçim connected_tools tablosuna yazılır.
             </p>
           </div>
           <Link

@@ -1,7 +1,12 @@
+#![allow(deprecated)]
+
 use std::process::Stdio;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use lounge_protocol::{LoungeMessage, UI_EVENT, WILDCARD};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::{Child, Command};
 
 use super::probe::{
@@ -12,6 +17,54 @@ use crate::models::{ServiceHealth, ServiceId};
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(400);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
+const EVENT_RECONNECT: Duration = Duration::from_secs(2);
+
+pub fn default_nats_url() -> String {
+    format!("nats://{}:{}", DEFAULT_NATS_HOST, DEFAULT_NATS_PORT)
+}
+
+/// `lounge.>` dinler ve her mesajı ana pencereye `nats-event` olarak fırlatır.
+pub fn spawn_event_pump(app: AppHandle) -> JoinHandle<()> {
+    spawn_event_pump_url(app, default_nats_url())
+}
+
+pub fn spawn_event_pump_url(app: AppHandle, nats_url: impl Into<String>) -> JoinHandle<()> {
+    let nats_url = nats_url.into();
+    std::thread::spawn(move || loop {
+        match listen_once(&app, &nats_url) {
+            Ok(()) => log::warn!("NATS event pump bağlantısı kapandı, yeniden bağlanılıyor"),
+            Err(err) => log::warn!("NATS event pump: {err}"),
+        }
+        std::thread::sleep(EVENT_RECONNECT);
+    })
+}
+
+pub(crate) fn listen_once(app: &AppHandle, url: &str) -> Result<()> {
+    let sub = connect_and_subscribe(url)?;
+    log::info!("NATS event pump dinliyor: {url} ({WILDCARD})");
+    for msg in sub.messages() {
+        let envelope = LoungeMessage::from_nats(&msg.subject, &msg.data);
+        emit_nats_event(app, &envelope);
+    }
+    Ok(())
+}
+
+pub(crate) fn connect_and_subscribe(url: &str) -> Result<nats::Subscription> {
+    let nc = nats::connect(url).with_context(|| format!("NATS bağlanamadı: {url}"))?;
+    nc.subscribe(WILDCARD)
+        .with_context(|| format!("subscribe {WILDCARD} başarısız"))
+}
+
+fn emit_nats_event(app: &AppHandle, envelope: &LoungeMessage) {
+    match app.get_webview_window("main") {
+        Some(window) => {
+            if let Err(err) = window.emit(UI_EVENT, envelope) {
+                log::debug!("tauri emit {UI_EVENT}: {err}");
+            }
+        }
+        None => log::debug!("main window yok, {UI_EVENT} düşürüldü"),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NatsConfig {
@@ -208,5 +261,20 @@ mod tests {
         let health = service.ensure().await;
         assert!(!health.running);
         assert!(health.error.unwrap().contains("nats-server bulunamadı"));
+    }
+
+    #[test]
+    fn event_name_is_nats_event() {
+        assert_eq!(UI_EVENT, "nats-event");
+    }
+
+    #[test]
+    fn connect_and_subscribe_does_not_panic_when_nats_down() {
+        let err = connect_and_subscribe("nats://127.0.0.1:1").expect_err("closed port");
+        let text = err.to_string();
+        assert!(
+            text.contains("NATS bağlanamadı") || text.contains("connection") || text.contains("1"),
+            "{text}"
+        );
     }
 }

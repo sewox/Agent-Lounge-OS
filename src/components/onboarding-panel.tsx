@@ -6,18 +6,27 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import {
   MOCK_DISCOVERY,
+  formatDiscoveryLocation,
+  humanizeDiscoveryDetail,
   isTauri,
   type ConnectedTool,
   type DiscoveredTool,
   type DiscoveryReport,
   type DiscoverySource,
 } from "@/lib/lounge";
+import { Pip } from "@/components/ui";
 
 const SOURCE_LABEL: Record<string, string> = {
   claude_desktop: "Claude Desktop",
   cursor: "Cursor",
+  lmr: "LMR",
   ollama: "Ollama",
   system: "Sistem",
+};
+
+const SOURCE_TITLE: Record<string, string> = {
+  lmr: "Lounge Model Runner",
+  ollama: "Ollama Sunucusu",
 };
 
 const INSTALL: Record<string, { label: string; href: string }> = {
@@ -107,6 +116,8 @@ export function OnboardingPanel() {
     [report],
   );
   const ollamaSource = report?.sources.find((source) => source.id === "ollama");
+  const ollamaInstall =
+    ollamaSource && !ollamaSource.available ? installFor("ollama") : null;
 
   const toggle = (id: string) => {
     setSelected((current) => {
@@ -165,10 +176,10 @@ export function OnboardingPanel() {
   }
 
   return (
-    <section className="mx-auto max-w-3xl space-y-3">
-      <div className="rounded-lg border border-outline-variant bg-surface-container">
+    <section className="mx-auto max-w-4xl space-y-3">
+      <div className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low p-3">
-          <div>
+          <div className="min-w-0">
             <h1 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
               İlk açılış · Sistem keşfi
             </h1>
@@ -181,17 +192,12 @@ export function OnboardingPanel() {
             type="button"
             onClick={() => void scan()}
             disabled={scanning}
-            className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-bright disabled:opacity-50"
+            className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-bright disabled:opacity-50"
           >
             {scanning ? "Scanning…" : "Yeniden tara"}
           </button>
         </div>
-
-        <div className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-4">
-          {(report?.sources ?? []).map((source) => (
-            <SourceCard key={source.id} source={source} />
-          ))}
-        </div>
+        <SourceTable sources={report?.sources ?? []} />
       </div>
 
       {error ? (
@@ -202,8 +208,8 @@ export function OnboardingPanel() {
 
       <ToolGroup
         title="Modeller"
-        emptyHint="Ollama yanıt vermedi veya yüklü model yok."
-        missing={ollamaSource && !ollamaSource.available ? installFor("ollama") : null}
+        emptyHint="LMR veya Ollama Sunucusu üzerinde yüklü model yok."
+        missing={ollamaInstall}
         tools={models}
         selected={selected}
         onToggle={toggle}
@@ -259,33 +265,78 @@ function ScanningSystem() {
         Scanning System...
       </div>
       <div className="font-mono text-[10px] text-outline">
-        Ollama :11434 · Claude Desktop · Cursor MCP · PATH
+        LMR :18790 · Ollama :11434 · Claude Desktop · Cursor MCP · PATH
       </div>
     </section>
   );
 }
 
-function SourceCard({ source }: { source: DiscoverySource }) {
-  const install = !source.available ? installFor(source.id) : null;
+function SourceTable({ sources }: { sources: DiscoverySource[] }) {
   return (
-    <div className="rounded border border-outline-variant bg-surface-container-high px-3 py-2">
-      <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
-        <span className="font-semibold text-on-surface">{SOURCE_LABEL[source.id] ?? source.id}</span>
-        {source.available ? (
-          <span className="text-secondary">found</span>
-        ) : (
-          <span className="flex items-center gap-1 text-error">
-            <Icon name="warn" className="h-3 w-3" />
-            yok
-          </span>
-        )}
-      </div>
-      <div className="mt-1 truncate font-mono text-[10px] text-outline" title={source.origin_path ?? ""}>
-        {source.origin_path ?? "—"}
-      </div>
-      <div className="mt-0.5 font-body text-[10px] text-on-surface-variant">{source.detail ?? ""}</div>
-      {install ? <InstallLink {...install} /> : null}
-    </div>
+    <table className="w-full table-fixed text-left font-mono text-[11px]">
+      <colgroup>
+        <col className="w-[24%]" />
+        <col className="w-[44%]" />
+        <col className="w-[32%]" />
+      </colgroup>
+      <thead>
+        <tr className="border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
+          <th className="px-3 py-1.5 font-medium">Kaynak</th>
+          <th className="px-2 py-1.5 font-medium">Konum</th>
+          <th className="px-3 py-1.5 font-medium">Durum</th>
+        </tr>
+      </thead>
+      <tbody>
+        {sources.map((source) => {
+          const label = SOURCE_LABEL[source.id] ?? source.id;
+          const title = SOURCE_TITLE[source.id] ?? label;
+          const location = formatDiscoveryLocation(source.origin_path);
+          const detail = humanizeDiscoveryDetail(source.detail);
+          const install =
+            !source.available && source.id !== "lmr" ? installFor(source.id) : null;
+          return (
+            <tr key={source.id} className="border-b border-outline-variant/40 last:border-b-0">
+              <td className="px-3 py-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Pip tone={source.available ? "ok" : "down"} />
+                  <span className="truncate font-semibold text-on-surface" title={title}>
+                    {label}
+                  </span>
+                </div>
+              </td>
+              <td className="min-w-0 px-2 py-2">
+                <span className="block truncate text-on-surface-variant" title={source.origin_path ?? ""}>
+                  {location}
+                </span>
+              </td>
+              <td className="min-w-0 px-3 py-2">
+                {source.available ? (
+                  <span className="block truncate text-secondary" title={detail ?? "found"}>
+                    {detail ?? "found"}
+                  </span>
+                ) : (
+                  <span className="flex min-w-0 items-center gap-2 text-error">
+                    <span className="truncate" title={detail ?? "yok"}>
+                      {detail ?? "yok"}
+                    </span>
+                    {install ? (
+                      <a
+                        href={install.href}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="shrink-0 text-[10px] text-primary hover:underline"
+                      >
+                        {install.label}
+                      </a>
+                    ) : null}
+                  </span>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 
@@ -382,7 +433,7 @@ function ToolGroup({
                     {tool.detail ? (
                       <div className="mt-0.5 font-body text-[10px] text-outline">{tool.detail}</div>
                     ) : null}
-                    {install ? <InstallLink {...install} /> : null}
+                    {install && tool.source !== "lmr" ? <InstallLink {...install} /> : null}
                   </div>
                 </label>
               </li>
