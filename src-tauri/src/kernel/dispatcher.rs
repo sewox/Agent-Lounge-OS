@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
-use crate::db::{lexical_embedding, ExperienceStore};
+use crate::db::{lexical_embedding, ExperienceStore, FastRetrieveQuery};
 use crate::infra::{probe_quotas, quota_exhausted_for};
 use crate::kernel::decision_engine::{
     lookup_decision, security_approval, DecisionCache, DecisionResult, RoutingType,
@@ -204,6 +204,25 @@ impl Dispatcher {
 
     /// Yeni iş emri için benzer konuları semantik arar (Tokio).
     pub async fn recall_context(&self, task: &LoungeTask) -> Result<ExperienceContext> {
+        if let Some(gate) = self.gate_decision(&task.id) {
+            if gate.knowledge_is_hit() {
+                let embedding =
+                    match embed_text(&self.ollama_endpoint, &embed_model(), &task.summary).await {
+                        Ok(vector) if !vector.is_empty() => Some(vector),
+                        _ => None,
+                    };
+                return self
+                    .store
+                    .fast_retrieve(FastRetrieveQuery::from_task(
+                        task,
+                        gate.knowledge_hit,
+                        embedding,
+                    ))
+                    .await
+                    .context("fast_retrieve KNOWLEDGE_HIT");
+            }
+        }
+
         let query = task.summary.clone();
         let lexical = lexical_embedding(&query);
         let skip_embed = self
@@ -508,8 +527,11 @@ fn analysis_from_gate(task: &LoungeTask, gate: &DecisionResult) -> AnalysisDecis
     let mut decision = fallback_decision(task);
     apply_gate_hints(&mut decision, gate);
     decision.reason = format!(
-        "DecisionGate {}ms routing={:?} security={:?} hit={:.2}",
-        gate.elapsed_ms, gate.routing.value, gate.security.value, gate.knowledge_hit
+        "DecisionGate {:.1}ms routing={:?} security={:?} hit={:.2}",
+        gate.latency_ms(),
+        gate.routing.value,
+        gate.security.value,
+        gate.knowledge_hit
     );
     decision.adr_summary = task.summary.clone();
     decision.outcome = Some(ExperienceOutcome::Success);
@@ -559,7 +581,7 @@ mod tests {
     use super::*;
     use crate::db::ExperienceStore;
     use crate::kernel::decision_engine::{Scored, SecurityLevel};
-    use crate::models::{ApprovalKind, ExperienceRecord, TaskKind, TASK_ASSIGNED};
+    use crate::models::{ApprovalKind, ExperienceRecord, TaskKind, TASK_ASSIGNED, TASK_REQUESTED};
     use crate::services::parse_llm_json;
 
     fn dispatcher(decision: AnalysisDecision) -> Dispatcher {
@@ -670,7 +692,81 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.starts_with("recalled:")));
-        assert!(experience.adr_summary.contains("Önceki tecrübeler"));
+        assert!(experience.adr_summary.contains("Cross-Project Memory"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_hit_recalls_cross_project_via_fast_retrieve() {
+        let store = ExperienceStore::memory().unwrap();
+        let prior = LoungeTask::new(
+            "claude",
+            "sister-os",
+            "NATS dispatcher dinleyici lounge.task.requested",
+        );
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &prior,
+                "sync nats client blocking thread",
+                "spawn_blocking + mpsc",
+                ExperienceOutcome::Success,
+                vec![],
+            ))
+            .await
+            .unwrap();
+
+        let dispatcher = Dispatcher::new(
+            "nats://127.0.0.1:4222",
+            crate::services::lounge_ollama_endpoint(),
+            default_model_lock(),
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+            store,
+            PathBuf::from("/tmp"),
+        )
+        .with_stub_decision(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "laya hit".into(),
+            adr_summary: "fast_retrieve".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+
+        let task = LoungeTask::new(
+            "cursor",
+            "agent-lounge-os",
+            "dispatcher NATS mesajlarını dinle",
+        );
+        dispatcher.inject_decision(DecisionResult {
+            message_id: task.id.clone(),
+            subject: TASK_REQUESTED.into(),
+            routing: crate::kernel::decision_engine::Scored {
+                value: RoutingType::Task,
+                confidence: 0.9,
+                probabilities: HashMap::from([("Task".into(), 0.9)]),
+            },
+            security: crate::kernel::decision_engine::Scored {
+                value: SecurityLevel::Safe,
+                confidence: 0.9,
+                probabilities: HashMap::from([("Safe".into(), 0.9)]),
+            },
+            knowledge_hit: 0.84,
+            elapsed_ms: 5,
+            elapsed_us: 5_000,
+            device: "cpu".into(),
+            recall: crate::kernel::decision_engine::RecallHint {
+                query: task.summary.clone(),
+                project_id: task.project_id.clone(),
+                source_agent: task.source_agent.clone(),
+                target_agent: None,
+                ast_refs: vec![],
+            },
+        });
+
+        let context = dispatcher.recall_context(&task).await.unwrap();
+        assert!(!context.is_empty());
+        assert_eq!(context.experiences[0].project_id, "sister-os");
+        assert_eq!(context.knowledge_hit, Some(0.84));
     }
 
     #[tokio::test]
@@ -722,7 +818,9 @@ mod tests {
             },
             knowledge_hit: 0.1,
             elapsed_ms: 7,
+            elapsed_us: 7_000,
             device: "cpu".into(),
+            recall: Default::default(),
         });
         let found = dispatcher.gate_decision(&task.id).unwrap();
         let request = security_approval(&task.id, &task.summary, "cursor", &found).unwrap();

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use db::ExperienceStore;
 use infra::BusManager;
 use kernel::{
-    default_model_lock, DecisionGate, DecisionGatePhase, DecisionGateStatus, Dispatcher,
-    DECISION_GATE_EVENT,
+    default_model_lock, inject_knowledge_hit, DecisionGate, DecisionGatePhase, DecisionGateStatus,
+    Dispatcher, InferMeter, LoungeTelemetry, DECISION_GATE_EVENT,
 };
 use lounge_protocol::LoungeMessage;
 use models::{
@@ -113,6 +113,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             let load_app = app.handle().clone();
             let watch_gate = gate.clone();
             let watch_app = app.handle().clone();
+            let retrieve_store = store.clone();
+            let retrieve_bus = bus.clone();
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
@@ -121,16 +123,27 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(bus.clone());
 
             tauri::async_runtime::spawn(async move {
+                let mut meter = InferMeter::new();
                 while let Some(result) = decision_rx.recv().await {
+                    let msg_per_min = meter.record();
                     log::info!(
-                        "DecisionGate {} routing={:?} security={:?} hit={:.2} {}ms {}",
+                        "DecisionGate {} routing={:?} security={:?} hit={:.2} {:.1}ms {}",
                         result.message_id,
                         result.routing.value,
                         result.security.value,
                         result.knowledge_hit,
-                        result.elapsed_ms,
+                        result.latency_ms(),
                         result.device
                     );
+                    let telemetry = LoungeTelemetry::from_decision(&result, msg_per_min);
+                    if let Err(err) = retrieve_bus.publish(&telemetry.envelope()).await {
+                        log::warn!("DecisionGate telemetry: {err}");
+                    }
+                    if let Err(err) =
+                        inject_knowledge_hit(&retrieve_store, &retrieve_bus, &result).await
+                    {
+                        log::warn!("Cross-Project Memory: {err}");
+                    }
                 }
             });
             tauri::async_runtime::spawn(async move {

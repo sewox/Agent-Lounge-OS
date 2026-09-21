@@ -8,6 +8,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -25,9 +26,12 @@ import {
   AMBER_THRESHOLD,
   BUS_UI_EVENT,
   DECISION_GATE_EVENT,
+  LATENCY_SPARK_CAP,
   MODEL_PULL_EVENT,
   QUOTA_UI_EVENT,
   SERVICE_UI_EVENT,
+  parseDecisionTelemetry,
+  pruneMsgWindow,
   type ApprovalRequest,
   type DeadSymbol,
   type DecisionGateStatus,
@@ -35,6 +39,7 @@ import {
   type IndexSnapshot,
   type LoungeExperience,
   type LoungeMessage,
+  type LoungeTelemetry,
   type NatsEvent,
   type ProjectSummary,
   type PullProgress,
@@ -71,6 +76,9 @@ type LoungeContextValue = {
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
   decisionGate: DecisionGateStatus | null;
+  decisionTelemetry: LoungeTelemetry | null;
+  decisionLatencyHistory: number[];
+  decisionMsgPerMin: number;
   applyModel: (next?: string) => Promise<void>;
   enableLaya: () => Promise<void>;
   declineLaya: () => Promise<void>;
@@ -110,6 +118,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
+  const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
+  const [decisionLatencyHistory, setDecisionLatencyHistory] = useState<number[]>([]);
+  const [decisionMsgTimes, setDecisionMsgTimes] = useState<number[]>([]);
+  const lastTelemetryId = useRef<string | null>(null);
 
   const refreshSemantic = useCallback(async () => {
     if (!isTauri()) {
@@ -287,6 +299,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       }
       return [row, ...current].slice(0, EVENT_CAP);
     });
+    const telemetry = parseDecisionTelemetry(message);
+    if (telemetry && lastTelemetryId.current !== message.id) {
+      lastTelemetryId.current = message.id;
+      setDecisionTelemetry(telemetry);
+      setDecisionLatencyHistory((history) =>
+        [...history, telemetry.latency_ms].slice(-LATENCY_SPARK_CAP),
+      );
+      setDecisionMsgTimes((times) => pruneMsgWindow([...times, Date.now()]));
+    }
     if (row.subject.includes("experience")) {
       void refreshSemantic();
     }
@@ -395,10 +416,17 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         void syncInstalledModels();
       }
     }, 20_000);
+    const meterId = window.setInterval(() => {
+      setDecisionMsgTimes((times) => {
+        const next = pruneMsgWindow(times);
+        return next.length === times.length ? times : next;
+      });
+    }, 5_000);
     return () => {
       window.clearTimeout(boot);
       window.clearInterval(id);
       window.clearInterval(modelsId);
+      window.clearInterval(meterId);
     };
   }, [refresh, syncInstalledModels]);
 
@@ -476,6 +504,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     };
   }, [ingestBusMessage, syncInstalledModels]);
 
+  const decisionMsgPerMin = decisionMsgTimes.length;
+
   const value = useMemo<LoungeContextValue>(
     () => ({
       report,
@@ -500,6 +530,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       policy,
       approval,
       decisionGate,
+      decisionTelemetry,
+      decisionLatencyHistory,
+      decisionMsgPerMin,
       applyModel,
       enableLaya,
       declineLaya,
@@ -531,6 +564,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       policy,
       approval,
       decisionGate,
+      decisionTelemetry,
+      decisionLatencyHistory,
+      decisionMsgPerMin,
       applyModel,
       enableLaya,
       declineLaya,

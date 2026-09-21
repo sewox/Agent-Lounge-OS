@@ -400,7 +400,97 @@ export const QUOTA_UI_EVENT = "quota-update";
 export const SERVICE_UI_EVENT = "service-status";
 export const MODEL_PULL_EVENT = "model-pull";
 export const DECISION_GATE_EVENT = "decision-gate";
+export const TELEMETRY_DECISION = "lounge.telemetry.decision";
+export const LATENCY_SPARK_CAP = 24;
+export const MSG_MIN_WINDOW_MS = 60_000;
 export const AMBER_THRESHOLD = 80;
+
+export type LoungeTelemetry = {
+  kind: string;
+  message_id: string;
+  subject: string;
+  latency_us: number;
+  latency_ms: number;
+  routing?: string;
+  security?: string;
+  knowledge_hit?: number;
+  device?: string;
+  timestamp?: string;
+  msg_per_min?: number;
+};
+
+export function isDecisionTelemetrySubject(subject: string): boolean {
+  return subject === TELEMETRY_DECISION || subject.startsWith("lounge.telemetry.");
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+export function parseDecisionTelemetry(message: LoungeMessage): LoungeTelemetry | null {
+  if (!isDecisionTelemetrySubject(message.subject)) {
+    return null;
+  }
+  if (!message.payload || typeof message.payload !== "object" || Array.isArray(message.payload)) {
+    return null;
+  }
+  const payload = message.payload as Record<string, unknown>;
+  const latencyUs = asFiniteNumber(payload.latency_us);
+  const latencyMsRaw = asFiniteNumber(payload.latency_ms);
+  const latencyMs = latencyMsRaw ?? (latencyUs != null ? latencyUs / 1000 : null);
+  if (latencyUs == null && latencyMs == null) {
+    return null;
+  }
+  const resolvedUs = latencyUs ?? Math.round((latencyMs ?? 0) * 1000);
+  const resolvedMs = latencyMs ?? resolvedUs / 1000;
+  return {
+    kind: typeof payload.kind === "string" ? payload.kind : "decision",
+    message_id:
+      typeof payload.message_id === "string" && payload.message_id
+        ? payload.message_id
+        : message.id,
+    subject: typeof payload.subject === "string" ? payload.subject : message.subject,
+    latency_us: resolvedUs,
+    latency_ms: resolvedMs,
+    routing: typeof payload.routing === "string" ? payload.routing : undefined,
+    security: typeof payload.security === "string" ? payload.security : undefined,
+    knowledge_hit: asFiniteNumber(payload.knowledge_hit) ?? undefined,
+    device: typeof payload.device === "string" ? payload.device : undefined,
+    timestamp:
+      typeof payload.timestamp === "string" && payload.timestamp
+        ? payload.timestamp
+        : message.created_at,
+    msg_per_min: asFiniteNumber(payload.msg_per_min) ?? undefined,
+  };
+}
+
+export function formatLatencyMs(ms: number): string {
+  if (!Number.isFinite(ms)) {
+    return "—";
+  }
+  return `${ms.toFixed(1)}ms`;
+}
+
+export function formatLayaDecision(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) {
+    return "Laya Decision: —";
+  }
+  return `Laya Decision: ${formatLatencyMs(ms)}`;
+}
+
+export function pruneMsgWindow(timestamps: number[], now = Date.now()): number[] {
+  const cutoff = now - MSG_MIN_WINDOW_MS;
+  return timestamps.filter((at) => at >= cutoff);
+}
 
 export function natsEventTone(subject: string, state?: NatsEvent["state"]): NatsTone {
   const text = `${subject} ${state ?? ""}`.toLowerCase();
@@ -412,7 +502,8 @@ export function natsEventTone(subject: string, state?: NatsEvent["state"]): Nats
     text.includes("success") ||
     text.includes("experience") ||
     text.includes("commit") ||
-    text.includes("heartbeat")
+    text.includes("heartbeat") ||
+    text.includes("telemetry")
   ) {
     return "success";
   }
