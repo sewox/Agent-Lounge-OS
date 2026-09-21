@@ -541,7 +541,7 @@ fn extract_oauth_token(value: &Value) -> Option<String> {
 fn claude_oauth_token_from_os_store() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        return read_secret_command(
+        read_secret_command(
             "security",
             &[
                 "find-generic-password",
@@ -549,12 +549,12 @@ fn claude_oauth_token_from_os_store() -> Option<String> {
                 "Claude Code-credentials",
                 "-w",
             ],
-        );
+        )
     }
     #[cfg(target_os = "windows")]
     {
-        return windows_credential("Claude Code-credentials")
-            .or_else(|| windows_credential("Claude Code-credentials/Claude Code"));
+        windows_credential("Claude Code-credentials")
+            .or_else(|| windows_credential("Claude Code-credentials/Claude Code"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -1430,7 +1430,7 @@ pub fn human_claude_plan(raw: &str) -> String {
         "claude_max" | "max" => "Max".into(),
         "claude_team" | "team" => "Team".into(),
         "claude_enterprise" | "enterprise" => "Enterprise".into(),
-        other if other.is_empty() => "Pro".into(),
+        "" => "Pro".into(),
         other => other.replace('_', " "),
     }
 }
@@ -1462,7 +1462,7 @@ pub fn human_cursor_plan(raw: &str) -> String {
         "business" | "team" => "Business".into(),
         "ultra" => "Ultra".into(),
         "free" | "hobby" => "Free".into(),
-        other if other.is_empty() => "Cursor".into(),
+        "" => "Cursor".into(),
         other => other.replace('_', " "),
     }
 }
@@ -1572,11 +1572,11 @@ fn sqlite_item(path: &Path, key: &str) -> Option<String> {
 fn app_support(app: &str) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        return Some(home_dir()?.join("Library/Application Support").join(app));
+        Some(home_dir()?.join("Library/Application Support").join(app))
     }
     #[cfg(target_os = "windows")]
     {
-        return Some(PathBuf::from(std::env::var_os("APPDATA")?).join(app));
+        Some(PathBuf::from(std::env::var_os("APPDATA")?).join(app))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
