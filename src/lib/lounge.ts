@@ -26,6 +26,19 @@ export type DecisionGateStatus = {
   reason: string | null;
 };
 
+export type LayaEnginePhase = "downloading" | "ready" | "failed";
+
+export type LayaEngineStatus = {
+  phase: LayaEnginePhase;
+  label: string;
+  message: string;
+  file: string | null;
+  completed: number;
+  total: number;
+  path: string;
+  error: string | null;
+};
+
 export type ExperienceOutcome = "success" | "failure" | "partial";
 
 export type LoungeExperience = {
@@ -400,6 +413,7 @@ export const QUOTA_UI_EVENT = "quota-update";
 export const SERVICE_UI_EVENT = "service-status";
 export const MODEL_PULL_EVENT = "model-pull";
 export const DECISION_GATE_EVENT = "decision-gate";
+export const LAYA_ENGINE_EVENT = "laya-engine";
 export const TELEMETRY_DECISION = "lounge.telemetry.decision";
 export const LATENCY_SPARK_CAP = 24;
 export const MSG_MIN_WINDOW_MS = 60_000;

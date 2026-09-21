@@ -122,10 +122,9 @@ pub fn lounge_nats_dir() -> PathBuf {
 }
 
 /// Laya DecisionGate ağırlıkları (`model.safetensors` + tokenizer).
+/// Üretim: `AgentLounge/models/laya` (OS app-support). `LOUNGE_LAYA_DIR` ezer.
 pub fn lounge_laya_dir() -> PathBuf {
-    env_nonempty("LOUNGE_LAYA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root_from_crate().join("data/laya"))
+    super::model_manager::laya_dir()
 }
 
 pub fn nats_monitor_endpoint() -> String {

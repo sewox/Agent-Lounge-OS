@@ -15,7 +15,7 @@ use super::laya::{
     build_sequence, confidence_from_probs, softmax_temp, temperature_for, LayaRuntimeConfig,
     LayaSession, PackedQuestion, QuestionSpec, TokenEncode, QTYPE_CHOICE, QTYPE_NOUL,
 };
-use crate::services::lounge_laya_dir;
+use crate::services::model_manager;
 
 const JOB_CAP: usize = 32;
 const CACHE_TTL: Duration = Duration::from_secs(30);
@@ -23,7 +23,6 @@ const MSG_MIN_WINDOW: Duration = Duration::from_secs(60);
 const CONFIDENCE_SKIP_OLLAMA: f32 = 0.7;
 const KNOWLEDGE_HIT_LOW: f32 = 0.3;
 const MIN_RAM_BYTES: u64 = 1610612736; // 1.5 GiB
-const HF_REPO: &str = "convaiinnovations/laya";
 
 pub const ROUTING_ID: &str = "ROUTING_TYPE";
 pub const SECURITY_ID: &str = "SECURITY_LEVEL";
@@ -190,6 +189,18 @@ impl DecisionGateStatus {
         }
     }
 
+    /// Dosyalar hazırlanana veya RAM yüklemesi başlayana kadar DecisionGate soğuk kalır.
+    pub fn cold() -> Self {
+        Self {
+            phase: DecisionGatePhase::Failed,
+            title: "OpenJev Laya kapalı".into(),
+            message: "Karar motoru henüz RAM'e alınmadı. Kernel LMR ile çalışıyor.".into(),
+            detail: None,
+            device: None,
+            reason: Some("weights".into()),
+        }
+    }
+
     pub fn ram_blocked(&self) -> bool {
         self.reason.as_deref() == Some("ram")
     }
@@ -199,6 +210,9 @@ pub fn classify_load_reason(err: &str) -> &'static str {
     let lower = err.to_lowercase();
     if lower.contains("yetersiz ram") {
         "ram"
+    } else if lower.contains("checksum") || lower.contains("bütünlük") || lower.contains("sha256")
+    {
+        "checksum"
     } else if lower.contains("ağırlık") {
         "weights"
     } else if lower.contains("hf ")
@@ -222,6 +236,11 @@ pub fn status_from_load_error(err: &str) -> DecisionGateStatus {
         "weights" => (
             "OpenJev Laya ağırlıkları yok".into(),
             "Gerekli model dosyaları bulunamadı. DecisionGate kapalı; kernel LMR ile çalışıyor."
+                .into(),
+        ),
+        "checksum" => (
+            "OpenJev Laya bütünlüğü bozuldu".into(),
+            "Model dosyası checksum doğrulaması başarısız. Bozuk ağırlıklar yüklenmedi; kernel LMR ile çalışıyor."
                 .into(),
         ),
         "download" => (
@@ -266,7 +285,7 @@ impl DecisionGate {
         let (jobs, job_rx) = std_mpsc::sync_channel(JOB_CAP);
         let session = Arc::new(StdMutex::new(None));
         let cache: DecisionCache = Arc::new(StdMutex::new(HashMap::new()));
-        let status = Arc::new(StdMutex::new(DecisionGateStatus::loading()));
+        let status = Arc::new(StdMutex::new(DecisionGateStatus::cold()));
         let declined = Arc::new(AtomicBool::new(false));
         let load_in_flight = Arc::new(AtomicBool::new(false));
         let worker_session = session.clone();
@@ -753,63 +772,23 @@ pub fn ram_allows_load() -> bool {
 }
 
 pub fn laya_dir() -> PathBuf {
-    std::env::var("LOUNGE_LAYA_DIR")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(lounge_laya_dir)
+    model_manager::laya_dir()
 }
 
 pub fn skip_download() -> bool {
-    matches!(
-        std::env::var("LOUNGE_LAYA_SKIP_DOWNLOAD").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE")
-    )
+    model_manager::skip_download()
 }
 
 pub fn ensure_artifacts(dir: &Path, download: bool) -> Result<()> {
-    let weights = dir.join("model.safetensors");
-    let tokenizer = dir.join("tokenizer/tokenizer.json");
-    let encoder = dir.join("encoder/config.json");
-    let cfg = dir.join("rl_agent_config.json");
-    if weights.is_file() && tokenizer.is_file() && encoder.is_file() && cfg.is_file() {
-        return Ok(());
-    }
-    if !download || skip_download() {
-        anyhow::bail!("Laya ağırlıkları yok: {}", dir.display());
-    }
-    std::fs::create_dir_all(dir.join("tokenizer"))?;
-    std::fs::create_dir_all(dir.join("encoder"))?;
-    let api = hf_hub::api::sync::ApiBuilder::new()
-        .with_cache_dir(dir.join(".hf"))
-        .build()
-        .context("Hugging Face API")?;
-    let repo = api.model(HF_REPO.into());
-    copy_hub(&repo, "model.safetensors", &weights)?;
-    copy_hub(&repo, "tokenizer/tokenizer.json", &tokenizer)?;
-    copy_hub(&repo, "encoder/config.json", &encoder)?;
-    copy_hub(&repo, "rl_agent_config.json", &cfg)?;
-    Ok(())
-}
-
-fn copy_hub(repo: &hf_hub::api::sync::ApiRepo, name: &str, dest: &Path) -> Result<()> {
-    if dest.is_file() {
-        return Ok(());
-    }
-    let src = repo.get(name).with_context(|| format!("HF get {name}"))?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(&src, dest)
-        .with_context(|| format!("kopyala {} → {}", src.display(), dest.display()))?;
-    Ok(())
+    model_manager::ensure_artifacts(dir, download)
 }
 
 pub fn load_session(dir: &Path) -> Result<LayaSession> {
     if !ram_allows_load() {
         anyhow::bail!("Laya için yetersiz RAM (en az 1.5 GiB boş)");
     }
-    ensure_artifacts(dir, true)?;
+    // Yerel app-support yolu; DecisionGate HF'ye yeniden inmez.
+    ensure_artifacts(dir, false)?;
     LayaSession::load(dir)
 }
 
@@ -954,6 +933,32 @@ mod tests {
         let hf = status_from_load_error("HF get model.safetensors");
         assert_eq!(hf.reason.as_deref(), Some("download"));
         assert!(hf.title.contains("indirilemedi"));
+
+        let checksum =
+            status_from_load_error("Laya checksum uyuşmazlığı (sha256): model.safetensors");
+        assert_eq!(checksum.reason.as_deref(), Some("checksum"));
+        assert!(checksum.message.contains("checksum"));
+    }
+
+    #[test]
+    fn decision_gate_uses_model_manager_path() {
+        assert_eq!(laya_dir(), crate::services::model_manager::laya_dir());
+        let dir = std::env::temp_dir().join(format!("laya-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+        std::fs::create_dir_all(dir.join("encoder")).unwrap();
+        for rel in crate::services::model_manager::ARTIFACTS {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"seed").unwrap();
+        }
+        crate::services::model_manager::verify_dir(&dir, None, true).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"corrupt").unwrap();
+        let err = ensure_artifacts(&dir, false).unwrap_err().to_string();
+        assert_eq!(classify_load_reason(&err), "checksum");
+        assert!(!dir.join("model.safetensors").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

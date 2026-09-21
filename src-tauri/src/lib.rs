@@ -21,7 +21,7 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, collect_quota_state_with_keys, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, MemoryBridge, ServiceManager, SharedServices,
+    spawn_supervisor, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -109,8 +109,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             let quota_handle = app.handle().clone();
             let quota_services = services.clone();
             let quota_store = store.clone();
+            let models = ModelManager::new();
             let load_gate = gate.clone();
             let load_app = app.handle().clone();
+            let load_models = models.clone();
             let watch_gate = gate.clone();
             let watch_app = app.handle().clone();
             let retrieve_store = store.clone();
@@ -119,6 +121,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(services.clone());
             app.manage(dispatcher.clone());
             app.manage(gate);
+            app.manage(models);
             app.manage(store);
             app.manage(bus.clone());
 
@@ -147,7 +150,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 }
             });
             tauri::async_runtime::spawn(async move {
-                run_laya_load(&load_app, &load_gate).await;
+                run_laya_load(&load_app, &load_gate, &load_models).await;
             });
             spawn_laya_watchdog(watch_app, watch_gate);
 
@@ -186,6 +189,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_decision_gate_status,
             enable_decision_gate,
             decline_decision_gate,
+            get_laya_engine_status,
+            ensure_laya_engine,
             get_device_profile,
             list_recommended_models,
             pull_lmr_model,
@@ -299,11 +304,31 @@ fn get_decision_gate_status(
 }
 
 #[tauri::command]
+fn get_laya_engine_status(
+    models: tauri::State<'_, ModelManager>,
+) -> Result<LayaEngineStatus, String> {
+    Ok(models.status())
+}
+
+#[tauri::command]
+async fn ensure_laya_engine(
+    app: tauri::AppHandle,
+    models: tauri::State<'_, ModelManager>,
+) -> Result<LayaEngineStatus, String> {
+    let models = models.inner().clone();
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || models.ensure(Some(&app_clone)))
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn enable_decision_gate(
     app: tauri::AppHandle,
     gate: tauri::State<'_, DecisionGate>,
+    models: tauri::State<'_, ModelManager>,
 ) -> Result<DecisionGateStatus, String> {
-    run_laya_load(&app, &gate).await;
+    run_laya_load(&app, &gate, &models).await;
     Ok(gate.status())
 }
 
@@ -318,13 +343,30 @@ fn decline_decision_gate(
     Ok(status)
 }
 
-async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate) {
+async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &ModelManager) {
+    let models = models.clone();
+    let app_for_files = app.clone();
+    let engine = tokio::task::spawn_blocking(move || models.ensure(Some(&app_for_files)))
+        .await
+        .unwrap_or_else(|err| {
+            LayaEngineStatus::failed(&kernel::decision_engine::laya_dir(), err.to_string())
+        });
+    emit_laya_engine(app, &engine);
+    if !engine.is_ready() {
+        let detail = engine
+            .error
+            .clone()
+            .unwrap_or_else(|| "Laya ağırlıkları yok".into());
+        gate.fail_load(&detail);
+        emit_decision_gate(app, &gate.status());
+        return;
+    }
     if !gate.begin_load() {
         emit_decision_gate(app, &gate.status());
         return;
     }
     emit_decision_gate(app, &gate.status());
-    let dir = kernel::decision_engine::laya_dir();
+    let dir = PathBuf::from(&engine.path);
     match tokio::task::spawn_blocking(move || kernel::decision_engine::load_session(&dir)).await {
         Ok(Ok(session)) => gate.install(session),
         Ok(Err(err)) => gate.fail_load(&err.to_string()),
@@ -380,6 +422,10 @@ fn emit_decision_gate(app: &tauri::AppHandle, status: &DecisionGateStatus) {
     if let Err(err) = app.emit(DECISION_GATE_EVENT, status) {
         log::debug!("{DECISION_GATE_EVENT} app emit: {err}");
     }
+}
+
+fn emit_laya_engine(app: &tauri::AppHandle, status: &LayaEngineStatus) {
+    services::model_manager::emit_engine(Some(app), status);
 }
 
 #[tauri::command]

@@ -36,7 +36,8 @@ candle-nn = { version = "0.9.1", default-features = false }
 candle-transformers = { version = "0.9.1", default-features = false }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 safetensors = "0.4"
-hf-hub = { version = "0.4", default-features = false, features = ["ureq", "native-tls"] }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
+sha2 = "0.10"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 candle-core = { version = "0.9.1", default-features = false, features = ["metal"] }

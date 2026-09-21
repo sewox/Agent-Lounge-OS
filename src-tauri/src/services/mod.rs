@@ -5,6 +5,7 @@ pub mod hardware;
 pub mod hf_catalog;
 pub mod lmr_runtime;
 pub mod memory_bridge;
+pub mod model_manager;
 pub mod nats_manager;
 pub mod ollama;
 pub mod plugin;
@@ -20,6 +21,7 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use memory_bridge::MemoryBridge;
+pub use model_manager::{LayaEnginePhase, LayaEngineStatus, ModelManager, LAYA_ENGINE_EVENT};
 pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};
 pub use ollama::{
     chat_json, embed_model, embed_text, parse_llm_json, private_env, OllamaConfig, OllamaService,
