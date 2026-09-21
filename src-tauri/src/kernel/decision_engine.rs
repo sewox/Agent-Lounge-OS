@@ -257,7 +257,10 @@ impl DecisionGate {
 
     pub fn fail_load(&self, err: &str) {
         let status = status_from_load_error(err);
-        log::warn!("DecisionGate soğuk: {}", status.detail.as_deref().unwrap_or(err));
+        log::warn!(
+            "DecisionGate soğuk: {}",
+            status.detail.as_deref().unwrap_or(err)
+        );
         self.load_in_flight.store(false, Ordering::SeqCst);
         self.set_status(status);
     }
