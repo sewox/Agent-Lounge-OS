@@ -309,7 +309,6 @@ fn attach_nats_log(command: &mut Command) {
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .write(true)
         .open(&path)
     {
         Ok(file) => match file.try_clone() {
@@ -357,7 +356,7 @@ fn kill_nats_on_port(port: u16) -> usize {
 fn listen_pids(port: u16) -> Vec<u32> {
     #[cfg(windows)]
     {
-        return windows_listen_pids(port);
+        windows_listen_pids(port)
     }
     #[cfg(not(windows))]
     {
@@ -416,7 +415,6 @@ mod tests {
             http_port: 0,
             binary: "__missing_nats__".into(),
             args: vec!["-p".into(), port.to_string()],
-            ..NatsConfig::default()
         });
 
         let health = service.ensure().await;
