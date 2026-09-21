@@ -18,7 +18,11 @@
   },
   "agent": {
     "heartbeat": "lounge.agent.heartbeat",
-    "status": "lounge.agent.status"
+    "status": "lounge.agent.status",
+    "prompt": "lounge.agent.prompt"
+  },
+  "telemetry": {
+    "decision": "lounge.telemetry.decision"
   },
   "bus": {
     "connected": "lounge.bus.connected",

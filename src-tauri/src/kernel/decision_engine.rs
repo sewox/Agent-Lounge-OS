@@ -1,6 +1,6 @@
 //! Native Rust DecisionGate: her NATS `LoungeMessage` için Laya Fast Inference.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex as StdMutex};
@@ -19,6 +19,7 @@ use crate::services::lounge_laya_dir;
 
 const JOB_CAP: usize = 32;
 const CACHE_TTL: Duration = Duration::from_secs(30);
+const MSG_MIN_WINDOW: Duration = Duration::from_secs(60);
 const CONFIDENCE_SKIP_OLLAMA: f32 = 0.7;
 const KNOWLEDGE_HIT_LOW: f32 = 0.3;
 const MIN_RAM_BYTES: u64 = 1610612736; // 1.5 GiB
@@ -36,6 +37,16 @@ pub enum RoutingType {
     Review,
 }
 
+impl RoutingType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "Task",
+            Self::Experience => "Experience",
+            Self::Review => "Review",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SecurityLevel {
     Safe,
@@ -43,11 +54,35 @@ pub enum SecurityLevel {
     Critical,
 }
 
+impl SecurityLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Safe => "Safe",
+            Self::Risky => "Risky",
+            Self::Critical => "Critical",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Scored<T> {
     pub value: T,
     pub confidence: f32,
     pub probabilities: HashMap<String, f32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecallHint {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub source_agent: String,
+    #[serde(default)]
+    pub target_agent: Option<String>,
+    #[serde(default)]
+    pub ast_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -58,10 +93,22 @@ pub struct DecisionResult {
     pub security: Scored<SecurityLevel>,
     pub knowledge_hit: f32,
     pub elapsed_ms: u128,
+    #[serde(default)]
+    pub elapsed_us: u128,
     pub device: String,
+    #[serde(default)]
+    pub recall: RecallHint,
 }
 
 impl DecisionResult {
+    pub fn latency_ms(&self) -> f64 {
+        if self.elapsed_us > 0 {
+            micros_to_millis(self.elapsed_us)
+        } else {
+            self.elapsed_ms as f64
+        }
+    }
+
     pub fn confident(&self) -> bool {
         self.routing.confidence >= CONFIDENCE_SKIP_OLLAMA
             && self.security.confidence >= CONFIDENCE_SKIP_OLLAMA
@@ -69,6 +116,10 @@ impl DecisionResult {
 
     pub fn knowledge_is_low(&self) -> bool {
         self.knowledge_hit < KNOWLEDGE_HIT_LOW
+    }
+
+    pub fn knowledge_is_hit(&self) -> bool {
+        self.knowledge_hit >= KNOWLEDGE_HIT_LOW
     }
 }
 
@@ -338,6 +389,97 @@ impl DecisionGate {
 
 pub fn skip_bus_subject(subject: &str) -> bool {
     subject.starts_with("lounge.bus.")
+        || subject.starts_with("lounge.telemetry.")
+        || subject == crate::models::AGENT_PROMPT
+}
+
+pub fn infer_elapsed_us(start_time: Instant, end_time: Instant) -> u128 {
+    end_time.saturating_duration_since(start_time).as_micros()
+}
+
+pub fn micros_to_millis(us: u128) -> f64 {
+    us as f64 / 1000.0
+}
+
+/// DecisionGate infer tamamlanınca NATS `lounge.telemetry.decision` gövdesi.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoungeTelemetry {
+    pub kind: String,
+    pub message_id: String,
+    pub subject: String,
+    pub latency_us: u64,
+    pub latency_ms: f64,
+    pub routing: String,
+    pub security: String,
+    pub knowledge_hit: f32,
+    pub device: String,
+    pub timestamp: String,
+    pub msg_per_min: u32,
+}
+
+impl LoungeTelemetry {
+    pub fn from_decision(result: &DecisionResult, msg_per_min: u32) -> Self {
+        Self {
+            kind: "decision".into(),
+            message_id: result.message_id.clone(),
+            subject: result.subject.clone(),
+            latency_us: u64::try_from(result.elapsed_us).unwrap_or(u64::MAX),
+            latency_ms: result.latency_ms(),
+            routing: result.routing.value.as_str().into(),
+            security: result.security.value.as_str().into(),
+            knowledge_hit: result.knowledge_hit,
+            device: result.device.clone(),
+            timestamp: crate::models::now_rfc3339(),
+            msg_per_min,
+        }
+    }
+
+    pub fn envelope(&self) -> LoungeMessage {
+        let payload = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        let mut msg = LoungeMessage::new(
+            crate::models::TELEMETRY_DECISION,
+            crate::models::KERNEL_AGENT,
+            payload,
+        );
+        msg.target_agent = Some("ui".into());
+        msg
+    }
+}
+
+/// DecisionGate tamamlanma sayısı — kayan 60 saniye penceresi.
+#[derive(Debug, Default)]
+pub struct InferMeter {
+    completions: VecDeque<Instant>,
+}
+
+impl InferMeter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&mut self) -> u32 {
+        self.record_at(Instant::now())
+    }
+
+    pub fn record_at(&mut self, at: Instant) -> u32 {
+        self.completions.push_back(at);
+        self.prune(at);
+        self.completions.len() as u32
+    }
+
+    pub fn count(&self) -> u32 {
+        self.completions.len() as u32
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while let Some(front) = self.completions.front().copied() {
+            if now.saturating_duration_since(front) > MSG_MIN_WINDOW {
+                self.completions.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 pub fn lookup_decision(cache: &DecisionCache, id: &str) -> Option<DecisionResult> {
@@ -422,7 +564,7 @@ pub fn result_from_logits(
     packed: &[PackedQuestion],
     logits: &[Vec<f32>],
     cfg: &LayaRuntimeConfig,
-    elapsed_ms: u128,
+    elapsed_us: u128,
     device: &str,
 ) -> Result<DecisionResult> {
     let mut routing = None;
@@ -452,9 +594,63 @@ pub fn result_from_logits(
         routing: routing.context("ROUTING_TYPE yok")?,
         security: security.context("SECURITY_LEVEL yok")?,
         knowledge_hit,
-        elapsed_ms,
+        elapsed_ms: elapsed_us / 1000,
+        elapsed_us,
         device: device.into(),
+        recall: recall_from_message(msg),
     })
+}
+
+fn recall_from_message(msg: &LoungeMessage) -> RecallHint {
+    let payload = &msg.payload;
+    let nested = payload.get("task").cloned().unwrap_or(payload.clone());
+    RecallHint {
+        query: string_from(
+            &nested,
+            &["summary", "topic", "adr_summary", "query", "text"],
+        )
+        .or_else(|| {
+            payload
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default(),
+        project_id: string_from(&nested, &["project_id"]).unwrap_or_default(),
+        source_agent: if msg.source_agent.is_empty() {
+            string_from(&nested, &["source_agent", "agent"]).unwrap_or_default()
+        } else {
+            msg.source_agent.clone()
+        },
+        target_agent: msg
+            .target_agent
+            .clone()
+            .or_else(|| string_from(&nested, &["target_agent"])),
+        ast_refs: string_list(&nested, "ast_refs"),
+    }
+}
+
+fn string_from(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .filter(|item| !item.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn scored_routing(keys: &[String], probs: &[f32]) -> Scored<RoutingType> {
@@ -505,7 +701,7 @@ fn infer_worker(
     tx: mpsc::Sender<DecisionResult>,
 ) {
     while let Ok(msg) = jobs.recv() {
-        let started = Instant::now();
+        let start_time = Instant::now();
         let inferred = {
             let guard = session.lock().expect("laya session lock");
             let Some(sess) = guard.as_ref() else {
@@ -519,13 +715,16 @@ fn infer_worker(
                 }
             }
         };
+        let end_time = Instant::now();
+        let elapsed_us = infer_elapsed_us(start_time, end_time);
         let mut result = inferred;
-        result.elapsed_ms = started.elapsed().as_millis();
-        if result.elapsed_ms > 10 {
+        result.elapsed_us = elapsed_us;
+        result.elapsed_ms = elapsed_us / 1000;
+        if result.elapsed_us > 10_000 {
             log::debug!(
-                "DecisionGate {} {}ms (hedef 10ms, device={})",
+                "DecisionGate {} {:.1}ms (hedef 10ms, device={})",
                 result.message_id,
-                result.elapsed_ms,
+                result.latency_ms(),
                 result.device
             );
         }
@@ -666,6 +865,9 @@ mod tests {
         assert!(skip_bus_subject("lounge.bus.connected"));
         assert!(!skip_bus_subject("lounge.task.requested"));
         assert!(!skip_bus_subject("lounge.experience.reported"));
+        assert!(skip_bus_subject("lounge.agent.prompt"));
+        assert!(skip_bus_subject("lounge.telemetry.decision"));
+        assert!(skip_bus_subject("lounge.telemetry.other"));
     }
 
     #[test]
@@ -696,15 +898,19 @@ mod tests {
             &packed,
             &logits,
             &LayaRuntimeConfig::default(),
-            8,
+            8_000,
             "cpu",
         )
         .unwrap();
         assert_eq!(result.routing.value, RoutingType::Task);
         assert_eq!(result.security.value, SecurityLevel::Critical);
         assert!(result.knowledge_hit > 0.8);
+        assert_eq!(result.elapsed_us, 8_000);
         assert_eq!(result.elapsed_ms, 8);
+        assert!((result.latency_ms() - 8.0).abs() < f64::EPSILON);
         assert_eq!(result.device, "cpu");
+        assert_eq!(result.recall.query, "index kernel dispatcher");
+        assert_eq!(result.recall.source_agent, "cursor");
         let json = serde_json::to_value(&result).unwrap();
         let back: DecisionResult = serde_json::from_value(json).unwrap();
         assert_eq!(back.security.value, SecurityLevel::Critical);
@@ -724,7 +930,7 @@ mod tests {
             &packed,
             &logits,
             &LayaRuntimeConfig::default(),
-            4,
+            4_000,
             "cpu",
         )
         .unwrap();
@@ -768,6 +974,73 @@ mod tests {
         assert!(!gate.mark_available());
         gate.clear_declined();
         assert!(gate.mark_available());
+    }
+
+    #[test]
+    fn elapsed_is_microsecond_precision() {
+        let start_time = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        let elapsed_us = infer_elapsed_us(start_time, Instant::now());
+        assert!(
+            elapsed_us >= 1_000,
+            "süre mikro-saniye olmalı, alındı {elapsed_us}"
+        );
+        assert_eq!(format!("{:.1}", micros_to_millis(4_200)), "4.2");
+        assert!((micros_to_millis(4_200) - 4.2).abs() < 1e-9);
+        assert_eq!(micros_to_millis(elapsed_us), elapsed_us as f64 / 1000.0);
+    }
+
+    #[test]
+    fn telemetry_payload_shape_from_decision() {
+        let msg = sample_msg();
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            4_200,
+            "cpu",
+        )
+        .unwrap();
+        let telemetry = LoungeTelemetry::from_decision(&result, 12);
+        assert_eq!(telemetry.kind, "decision");
+        assert_eq!(telemetry.message_id, result.message_id);
+        assert_eq!(telemetry.latency_us, 4_200);
+        assert_eq!(format!("{:.1}", telemetry.latency_ms), "4.2");
+        assert_eq!(telemetry.routing, "Task");
+        assert_eq!(telemetry.security, "Critical");
+        assert_eq!(telemetry.device, "cpu");
+        assert_eq!(telemetry.msg_per_min, 12);
+        assert!(!telemetry.timestamp.is_empty());
+        let json = serde_json::to_value(&telemetry).unwrap();
+        assert_eq!(json["latency_us"], 4_200);
+        assert_eq!(json["kind"], "decision");
+        assert!(json["latency_ms"].as_f64().is_some());
+        assert!(json["knowledge_hit"].as_f64().is_some());
+        let envelope = telemetry.envelope();
+        assert_eq!(envelope.subject, crate::models::TELEMETRY_DECISION);
+        assert_eq!(envelope.source_agent, crate::models::KERNEL_AGENT);
+        assert_eq!(envelope.target_agent.as_deref(), Some("ui"));
+        assert_eq!(envelope.msg_type, "telemetry");
+    }
+
+    #[test]
+    fn infer_meter_rolls_sixty_second_window() {
+        let t0 = Instant::now();
+        let mut meter = InferMeter::new();
+        assert_eq!(meter.record_at(t0), 1);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(10)), 2);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(59)), 3);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(61)), 3);
+        assert_eq!(meter.count(), 3);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(72)), 3);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(122)), 2);
     }
 
     #[test]

@@ -60,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     amberTools,
     approval,
     decisionGate,
+    decisionTelemetry,
     applyModel,
     enableLaya,
     declineLaya,
@@ -406,7 +407,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                       : "text-on-surface-variant"
                 }`}
               >
-                {layaDaemonLabel(decisionGate)}
+                {layaDaemonLabel(decisionGate, decisionTelemetry?.latency_ms)}
               </span>
             </div>
           </div>
@@ -495,11 +496,17 @@ function ModelSelect({
   );
 }
 
-function layaDaemonLabel(status: DecisionGateStatus | null): string {
+function layaDaemonLabel(
+  status: DecisionGateStatus | null,
+  latencyMs?: number | null,
+): string {
   if (!status) {
     return "—";
   }
   if (status.phase === "ready") {
+    if (latencyMs != null && Number.isFinite(latencyMs)) {
+      return `${latencyMs.toFixed(1)}ms`;
+    }
     return status.device || "ready";
   }
   if (status.phase === "loading") {

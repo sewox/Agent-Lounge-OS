@@ -28,7 +28,34 @@ export function daemonLabel(health: ServiceHealth | undefined, fallback: string)
   if (!health) {
     return fallback;
   }
-  return health.running ? (health.started_by_us ? "12ms" : "4ms") : "down";
+  return health.running ? "up" : "down";
+}
+
+export function LatencySparkline({ values }: { values: number[] }) {
+  if (values.length < 2) {
+    return null;
+  }
+  const width = 56;
+  const height = 16;
+  const max = Math.max(...values, 0.1);
+  const points = values
+    .map((value, index) => {
+      const x = (index / (values.length - 1)) * width;
+      const y = height - (value / max) * (height - 2) - 1;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      className="text-primary"
+      aria-hidden
+    >
+      <polyline fill="none" stroke="currentColor" strokeWidth="1.5" points={points} />
+    </svg>
+  );
 }
 
 export function outcomeClass(outcome: ExperienceOutcome): string {

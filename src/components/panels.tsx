@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
-import { eventToneClass, Kpi, outcomeClass, Pip, subjectClass } from "@/components/ui";
+import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pip, subjectClass } from "@/components/ui";
 import {
   formatExperienceTime,
+  formatLayaDecision,
+  formatLatencyMs,
   MOCK_HEALTH,
   MOCK_NODES,
   natsEventTone,
@@ -35,7 +37,18 @@ function quotaKindClass(mode: string): string {
 }
 
 export function OverviewKpis() {
-  const { experiences, events, projects, deadSymbols, lastIndex, semanticMap, indexing } = useLounge();
+  const {
+    experiences,
+    projects,
+    deadSymbols,
+    lastIndex,
+    semanticMap,
+    indexing,
+    decisionTelemetry,
+    decisionLatencyHistory,
+    decisionMsgPerMin,
+    decisionGate,
+  } = useLounge();
   const fromMap = semanticMap.projects.reduce((sum, row) => sum + row.files, 0);
   const fromProjects = projects.reduce((sum, row) => sum + (row.files ?? 0), 0);
   const indexedFiles = fromMap || fromProjects || lastIndex?.files || 0;
@@ -44,6 +57,11 @@ export function OverviewKpis() {
   const deadCount = hasIndex
     ? deadSymbols.length || lastIndex?.dead || 0
     : MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
+  const latencyMs = decisionTelemetry?.latency_ms;
+  const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
+  const latencyValue = latencyLive ? formatLatencyMs(latencyMs) : "—";
+  const layaHint = formatLayaDecision(latencyLive ? latencyMs : null);
+  const msgLive = decisionMsgPerMin > 0;
   return (
     <section className="space-y-2.5">
       {indexing ? (
@@ -60,14 +78,38 @@ export function OverviewKpis() {
           <span className="text-outline">Index Workspace</span>
         </div>
       ) : null}
-      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
+      <Kpi
+        label="LATENCY"
+        value={latencyValue}
+        hint={
+          decisionTelemetry?.device
+            ? `${layaHint} · ${decisionTelemetry.device}`
+            : layaHint
+        }
+        badge={
+          latencyLive ? (
+            <LatencySparkline values={decisionLatencyHistory} />
+          ) : (
+            <span className="font-mono text-[10px] text-on-surface-variant">
+              {decisionGate?.phase === "ready" ? "idle" : "cold"}
+            </span>
+          )
+        }
+      />
       <Kpi
         label="MSG / MIN"
-        value={String(Math.max(events.length, 1))}
-        hint="buffered lounge.> events"
+        value={String(decisionMsgPerMin)}
+        hint="DecisionGate infer / 60s"
         badge={
-          <span className="flex items-center gap-0.5 rounded border border-primary/30 bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary">
-            live
+          <span
+            className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+              msgLive
+                ? "border-primary/30 bg-surface-container-high text-primary"
+                : "border-outline-variant bg-surface-container-high text-on-surface-variant"
+            }`}
+          >
+            {msgLive ? "live" : "idle"}
           </span>
         }
       />
@@ -707,24 +749,46 @@ export function FleetPanel() {
 }
 
 export function TelemetryPanel() {
-  const { events, quotas } = useLounge();
+  const {
+    events,
+    quotas,
+    decisionTelemetry,
+    decisionLatencyHistory,
+    decisionMsgPerMin,
+    decisionGate,
+  } = useLounge();
   const subscription = quotas.filter((row) => (row.access_mode || row.kind) === "subscription");
   const plugins = quotas.filter((row) => (row.access_mode || row.kind) === "plugin");
+  const latencyMs = decisionTelemetry?.latency_ms;
+  const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
   return (
     <section className="grid min-h-[calc(100vh-5.5rem)] min-w-0 auto-rows-fr gap-3 md:grid-cols-2">
       <div className="flex min-h-0 flex-col rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-        <div className="text-[10px] tracking-wider text-outline uppercase">NATS buffer</div>
-        <div className="mt-2 text-2xl font-bold text-on-surface">{events.length}</div>
-        <div className="text-outline">events retained across routes</div>
-        <div className="mt-auto pt-4 text-[10px] text-outline">lounge.&gt; · dispatcher listen</div>
+        <div className="text-[10px] tracking-wider text-outline uppercase">Laya Decision</div>
+        <div className="mt-2 text-2xl font-bold text-on-surface">
+          {latencyLive ? formatLatencyMs(latencyMs) : "—"}
+        </div>
+        <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
+        <div className="mt-3">
+          {latencyLive ? (
+            <LatencySparkline values={decisionLatencyHistory} />
+          ) : (
+            <span className="text-[10px] text-on-surface-variant">
+              {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
+            </span>
+          )}
+        </div>
+        <div className="mt-auto pt-4 text-[10px] text-outline">
+          lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
+        </div>
       </div>
       <div className="flex min-h-0 flex-col rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-        <div className="text-[10px] tracking-wider text-outline uppercase">Quota probes</div>
-        <div className="mt-2 text-2xl font-bold text-on-surface">{quotas.length}</div>
-        <div className="text-outline">
-          {subscription.length} abonelik · {plugins.length} plugin
+        <div className="text-[10px] tracking-wider text-outline uppercase">MSG / MIN</div>
+        <div className="mt-2 text-2xl font-bold text-on-surface">{decisionMsgPerMin}</div>
+        <div className="text-outline">DecisionGate infer / 60s</div>
+        <div className="mt-auto pt-4 text-[10px] text-outline">
+          NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
         </div>
-        <div className="mt-auto pt-4 text-[10px] text-outline">infra / last snapshot</div>
       </div>
     </section>
   );

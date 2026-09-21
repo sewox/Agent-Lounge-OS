@@ -52,12 +52,15 @@ impl ExperienceStore {
 
     pub async fn insert_record(&self, record: ExperienceRecord) -> Result<()> {
         let conn = self.conn.clone();
+        let for_vector = record.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
             insert_record_blocking(&conn, &record)
         })
         .await
-        .context("experience insert join")?
+        .context("experience insert join")??;
+        super::vector_memory::spawn_upsert(for_vector);
+        Ok(())
     }
 
     pub async fn get(&self, id: String) -> Result<Option<LoungeExperience>> {
@@ -110,6 +113,23 @@ impl ExperienceStore {
         })
         .await
         .context("experience similar join")?
+    }
+
+    /// Tüm projeler üzerinde kosinüs araması (Cross-Project Memory).
+    pub async fn similar_cross(
+        &self,
+        project_id: String,
+        query: Vec<f32>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ExperienceHit>> {
+        let conn = self.conn.clone();
+        let limit = limit.unwrap_or(DEFAULT_SIMILAR_LIMIT);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            similar_cross_blocking(&conn, &project_id, &query, limit)
+        })
+        .await
+        .context("experience similar_cross join")?
     }
 
     pub async fn get_setting(&self, key: String) -> Result<Option<String>> {
@@ -356,6 +376,29 @@ fn similar_blocking(
     Ok(hits)
 }
 
+const SAME_PROJECT_BOOST: f32 = 0.04;
+
+fn similar_cross_blocking(
+    conn: &Connection,
+    project_id: &str,
+    query: &[f32],
+    limit: usize,
+) -> Result<Vec<ExperienceHit>> {
+    let mut hits = score_rows(conn, None, query)?;
+    for hit in &mut hits {
+        if hit.project_id == project_id {
+            hit.score = (hit.score + SAME_PROJECT_BOOST).min(1.0);
+        }
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
 fn score_rows(
     conn: &Connection,
     project_id: Option<&str>,
@@ -411,6 +454,7 @@ fn map_hit_row(
         solution_summary: solution.clone(),
         adr_record: row.get(5)?,
         score: 0.0,
+        source: "sqlite".into(),
     };
     Ok((hit, row.get(6)?, topic, solution))
 }
