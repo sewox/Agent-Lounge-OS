@@ -14,8 +14,10 @@ import {
 import {
   DEFAULT_POLICY,
   formatClock,
+  indexBusMessage,
   isTauri,
   pickWorkspaceFolder,
+  mockIndexSnapshot,
   MOCK_EVENTS,
   MOCK_EXPERIENCES,
   MOCK_QUOTAS,
@@ -23,8 +25,10 @@ import {
   AMBER_THRESHOLD,
   BUS_UI_EVENT,
   QUOTA_UI_EVENT,
+  SERVICE_UI_EVENT,
   type ApprovalRequest,
   type DeadSymbol,
+  type IndexNotice,
   type IndexSnapshot,
   type LoungeExperience,
   type LoungeMessage,
@@ -33,6 +37,7 @@ import {
   type QuotaState,
   type RoutingPolicy,
   type RoutingVote,
+  type SemanticMap,
   type ServiceReport,
   type ToolQuota,
 } from "@/lib/lounge";
@@ -52,11 +57,13 @@ type LoungeContextValue = {
   amberTools: string[];
   projects: ProjectSummary[];
   lastIndex: IndexSnapshot | null;
+  semanticMap: SemanticMap;
   deadSymbols: DeadSymbol[];
   query: string;
   setQuery: (value: string) => void;
   clock: string;
   indexing: boolean;
+  indexNotice: IndexNotice | null;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
   applyModel: () => Promise<void>;
@@ -87,10 +94,12 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   );
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [lastIndex, setLastIndex] = useState<IndexSnapshot | null>(null);
+  const [semanticMap, setSemanticMap] = useState<SemanticMap>({ projects: [] });
   const [deadSymbols, setDeadSymbols] = useState<DeadSymbol[]>([]);
   const [query, setQuery] = useState("");
   const [clock, setClock] = useState("--:--");
   const [indexing, setIndexing] = useState(false);
+  const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
 
@@ -100,19 +109,38 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }
     try {
       const rows = await invoke<LoungeExperience[]>("list_experiences", { limit: 12 });
-      if (rows.length > 0) {
-        setExperiences(rows);
-      }
+      setExperiences(rows);
     } catch {
       /* SQLite henüz boş olabilir */
     }
     try {
-      const rows = await invoke<ProjectSummary[]>("list_projects");
-      if (rows.length > 0) {
-        setProjects(rows);
+      const map = await invoke<SemanticMap>("get_semantic_map");
+      if (map.projects.length > 0) {
+        setSemanticMap(map);
+        setProjects(
+          map.projects.map((row) => ({
+            name: row.name,
+            root_path: row.repo_path || null,
+            nodes: row.node_count,
+            edges: row.edge_count,
+            files: row.files,
+          })),
+        );
+      } else {
+        const rows = await invoke<ProjectSummary[]>("list_projects");
+        if (rows.length > 0) {
+          setProjects(rows);
+        }
       }
     } catch {
-      /* CBM/SQLite henüz boş olabilir; son snapshot korunur */
+      try {
+        const rows = await invoke<ProjectSummary[]>("list_projects");
+        if (rows.length > 0) {
+          setProjects(rows);
+        }
+      } catch {
+        /* CBM/SQLite henüz boş olabilir */
+      }
     }
     try {
       setDeadSymbols(await invoke<DeadSymbol[]>("get_dead_symbols"));
@@ -139,7 +167,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       }
       try {
         const state = await invoke<QuotaState>("get_quota_state");
-        setQuotas(state.quotas.length > 0 ? state.quotas : MOCK_QUOTAS);
+        setQuotas(state.quotas);
         setAmberAlert(state.amber_alert);
         setAmberTools(state.amber_tools);
       } catch {
@@ -175,27 +203,6 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     setModel(saved);
   }, [model]);
 
-  const indexWorkspace = useCallback(async () => {
-    if (!isTauri() || indexing) {
-      return;
-    }
-    const repoPath = await pickWorkspaceFolder();
-    if (!repoPath) {
-      return;
-    }
-    setIndexing(true);
-    try {
-      const snapshot = await invoke<IndexSnapshot>("index_workspace", { repoPath });
-      setLastIndex(snapshot);
-      setProjects((current) => upsertIndexedProject(current, snapshot, repoPath));
-      await refreshSemantic();
-    } catch (error) {
-      console.error(error);
-    } finally {
-      setIndexing(false);
-    }
-  }, [indexing, refreshSemantic]);
-
   const savePolicy = useCallback(async (next: RoutingPolicy) => {
     const locked = { ...next, require_user_approval: true };
     if (!isTauri()) {
@@ -218,6 +225,58 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       void refreshSemantic();
     }
   }, [refreshSemantic]);
+
+  const indexWorkspace = useCallback(async () => {
+    if (indexing) {
+      return;
+    }
+    const repoPath = isTauri()
+      ? await pickWorkspaceFolder()
+      : "/Users/demo/Agent-Lounge-OS";
+    if (!repoPath) {
+      return;
+    }
+    setIndexing(true);
+    setIndexNotice(null);
+    try {
+      const snapshot = isTauri()
+        ? await invoke<IndexSnapshot>("index_workspace", { path: repoPath })
+        : await new Promise<IndexSnapshot>((resolve) => {
+            window.setTimeout(() => resolve(mockIndexSnapshot(repoPath)), 1400);
+          });
+      setLastIndex(snapshot);
+      setProjects((current) => upsertIndexedProject(current, snapshot, repoPath));
+      if (isTauri()) {
+        await refreshSemantic();
+      } else {
+        setDeadSymbols(mockDeadSymbols(snapshot));
+      }
+      const files = snapshot.files ?? 0;
+      ingestBusMessage(
+        indexBusMessage("lounge.index.completed", {
+          path: repoPath,
+          project: snapshot.project,
+          files,
+          dead: snapshot.dead ?? 0,
+        }),
+      );
+      setIndexNotice({
+        tone: "success",
+        text: `Success · ${files} files · ${snapshot.project || repoPath}`,
+      });
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      ingestBusMessage(
+        indexBusMessage("lounge.index.failed", {
+          path: repoPath,
+          error: text,
+        }),
+      );
+      setIndexNotice({ tone: "error", text });
+    } finally {
+      setIndexing(false);
+    }
+  }, [indexing, ingestBusMessage, refreshSemantic]);
 
   const probeBus = useCallback(async () => {
     if (!isTauri()) {
@@ -245,6 +304,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }
     setApproval(null);
   }, [approval]);
+
+  useEffect(() => {
+    if (!indexNotice) {
+      return;
+    }
+    const id = window.setTimeout(() => setIndexNotice(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [indexNotice]);
 
   useEffect(() => {
     const boot = window.setTimeout(() => {
@@ -289,6 +356,16 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           }),
         );
         unlisteners.push(
+          await listen<ServiceReport>(SERVICE_UI_EVENT, (event) => {
+            if (!cancelled) {
+              setReport(event.payload);
+              setKernel(
+                event.payload.ollama.running && event.payload.nats.running ? "ready" : "degraded",
+              );
+            }
+          }),
+        );
+        unlisteners.push(
           await listen<ApprovalRequest>("lounge://routing-approval", (event) => {
             if (!cancelled) {
               setApproval(event.payload);
@@ -322,11 +399,13 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       amberTools,
       projects,
       lastIndex,
+      semanticMap,
       deadSymbols,
       query,
       setQuery,
       clock,
       indexing,
+      indexNotice,
       policy,
       approval,
       applyModel,
@@ -349,10 +428,12 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       amberTools,
       projects,
       lastIndex,
+      semanticMap,
       deadSymbols,
       query,
       clock,
       indexing,
+      indexNotice,
       policy,
       approval,
       applyModel,
@@ -397,4 +478,16 @@ function upsertIndexedProject(
   const copy = current.slice();
   copy[index] = { ...copy[index], ...next };
   return copy;
+}
+
+function mockDeadSymbols(snapshot: IndexSnapshot): DeadSymbol[] {
+  const count = snapshot.dead ?? 0;
+  return Array.from({ length: count }, (_, index) => ({
+    name: `unused_symbol_${index + 1}`,
+    kind: "unused",
+    file: "src/lib.rs",
+    line: index + 1,
+    detail: null,
+    project_id: snapshot.project,
+  }));
 }

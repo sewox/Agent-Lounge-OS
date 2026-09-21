@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ExperienceOutcome, NatsEvent, ServiceHealth } from "@/lib/lounge";
+import { natsEventTone, type ExperienceOutcome, type NatsEvent, type NatsTone, type ServiceHealth } from "@/lib/lounge";
 
 export function Pip({ live = false, tone = "ok" }: { live?: boolean; tone?: "ok" | "warn" | "down" | "primary" }) {
   const color =
@@ -41,30 +41,32 @@ export function outcomeClass(outcome: ExperienceOutcome): string {
   return "bg-error-container text-on-error-container border-error";
 }
 
-export function eventStateClass(state: NatsEvent["state"]): string {
-  if (state === "ok") {
+export function eventStateClass(state: NatsEvent["state"], subject = ""): string {
+  return eventToneClass(natsEventTone(subject, state));
+}
+
+export function eventToneClass(tone: NatsTone): string {
+  if (tone === "success") {
     return "bg-secondary-container/40 text-secondary-dim border-secondary-container";
   }
-  if (state === "error") {
+  if (tone === "error") {
     return "bg-error-container text-on-error-container border-error";
   }
-  if (state === "retry") {
-    return "bg-surface-container-highest text-tertiary border-outline-variant";
-  }
-  return "bg-surface-container-highest text-secondary border-outline-variant";
+  return "bg-primary-container/50 text-primary border-primary/40";
 }
 
 export function subjectClass(subject: string, selected: boolean): string {
   if (selected) {
     return "text-primary font-medium";
   }
-  if (subject.includes("failed")) {
+  const tone = natsEventTone(subject);
+  if (tone === "error") {
     return "text-error font-medium";
   }
-  if (subject.includes("experience")) {
+  if (tone === "success") {
     return "text-secondary";
   }
-  return "text-on-surface";
+  return "text-primary";
 }
 
 export function Kpi({

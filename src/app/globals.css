@@ -46,6 +46,11 @@ body {
   color: #dfe5f8;
 }
 
+:root {
+  --sidebar-w: 13.75rem;
+  --header-h: 3rem;
+}
+
 .tnum {
   font-variant-numeric: tabular-nums;
 }

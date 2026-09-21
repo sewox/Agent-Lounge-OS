@@ -28,6 +28,15 @@ export function Icon({ name, className = "h-3.5 w-3.5" }: { name: string; classN
           <path d="M6.5 13.2a1.6 1.6 0 0 0 3 0" />
         </svg>
       );
+    case "dashboard":
+      return (
+        <svg viewBox="0 0 16 16" className={className} aria-hidden {...stroke}>
+          <rect x="2" y="2.5" width="5" height="5" rx="0.8" />
+          <rect x="9" y="2.5" width="5" height="3.5" rx="0.8" />
+          <rect x="2" y="9" width="5" height="4.5" rx="0.8" />
+          <rect x="9" y="7.5" width="5" height="6" rx="0.8" />
+        </svg>
+      );
     case "stream":
       return (
         <svg viewBox="0 0 16 16" className={className} aria-hidden {...stroke}>
