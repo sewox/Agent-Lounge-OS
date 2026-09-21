@@ -121,6 +121,13 @@ pub fn lounge_nats_dir() -> PathBuf {
         .unwrap_or_else(|| repo_root_from_crate().join("data/nats"))
 }
 
+/// Laya DecisionGate ağırlıkları (`model.safetensors` + tokenizer).
+pub fn lounge_laya_dir() -> PathBuf {
+    env_nonempty("LOUNGE_LAYA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root_from_crate().join("data/laya"))
+}
+
 pub fn nats_monitor_endpoint() -> String {
     http_endpoint(DEFAULT_NATS_HOST, DEFAULT_NATS_HTTP_PORT)
 }
@@ -223,6 +230,7 @@ mod tests {
         assert!(lounge_ollama_models_dir().ends_with("models"));
         assert!(!lmr.ends_with(".ollama"));
         assert!(lounge_nats_dir().ends_with("nats"));
+        assert!(lounge_laya_dir().ends_with("laya"));
         assert_eq!(nats_monitor_endpoint(), "http://127.0.0.1:8222");
     }
 }

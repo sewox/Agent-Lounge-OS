@@ -24,16 +24,20 @@ import {
   loungeMessageToEvent,
   AMBER_THRESHOLD,
   BUS_UI_EVENT,
+  DECISION_GATE_EVENT,
+  MODEL_PULL_EVENT,
   QUOTA_UI_EVENT,
   SERVICE_UI_EVENT,
   type ApprovalRequest,
   type DeadSymbol,
+  type DecisionGateStatus,
   type IndexNotice,
   type IndexSnapshot,
   type LoungeExperience,
   type LoungeMessage,
   type NatsEvent,
   type ProjectSummary,
+  type PullProgress,
   type QuotaState,
   type RoutingPolicy,
   type RoutingVote,
@@ -66,7 +70,10 @@ type LoungeContextValue = {
   indexNotice: IndexNotice | null;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
-  applyModel: () => Promise<void>;
+  decisionGate: DecisionGateStatus | null;
+  applyModel: (next?: string) => Promise<void>;
+  enableLaya: () => Promise<void>;
+  declineLaya: () => Promise<void>;
   indexWorkspace: () => Promise<void>;
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
@@ -81,7 +88,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [report, setReport] = useState<ServiceReport | null>(null);
   // SSR ve ilk hydrate aynı olmalı; isTauri() useState initializer'da hydration bozar.
   const [kernel, setKernel] = useState("idle");
-  const [model, setModel] = useState("llama3.1:8b");
+  const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [experiences, setExperiences] = useState<LoungeExperience[]>(MOCK_EXPERIENCES);
   const [events, setEvents] = useState<NatsEvent[]>(MOCK_EVENTS);
@@ -102,6 +109,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
 
   const refreshSemantic = useCallback(async () => {
     if (!isTauri()) {
@@ -149,6 +157,34 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const syncInstalledModels = useCallback(async () => {
+    if (!isTauri()) {
+      setModels([]);
+      return;
+    }
+    try {
+      const listed = await invoke<string[]>("list_ollama_models");
+      const unique = Array.from(new Set(listed.filter((name) => name.trim().length > 0))).sort(
+        (left, right) => left.localeCompare(right),
+      );
+      setModels(unique);
+      const current = (await invoke<string>("get_kernel_model")).trim();
+      if (unique.includes(current)) {
+        setModel(current);
+        return;
+      }
+      const fallback = unique[0];
+      if (!fallback) {
+        setModel("");
+        return;
+      }
+      const saved = await invoke<string>("set_kernel_model", { model: fallback });
+      setModel(saved);
+    } catch {
+      /* LMR geçici olarak yanıt vermezse önceki listeyi koru */
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!isTauri()) {
       return;
@@ -158,12 +194,11 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       const next = await invoke<ServiceReport>("ensure_services");
       setReport(next);
       setKernel(next.ollama.running && next.nats.running ? "ready" : "degraded");
-      const current = await invoke<string>("get_kernel_model");
-      setModel(current);
+      await syncInstalledModels();
       try {
-        setModels(await invoke<string[]>("list_ollama_models"));
+        setDecisionGate(await invoke<DecisionGateStatus>("get_decision_gate_status"));
       } catch {
-        setModels([]);
+        /* DecisionGate henüz yönetilmiyor olabilir */
       }
       try {
         const state = await invoke<QuotaState>("get_quota_state");
@@ -193,15 +228,46 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setKernel("error");
       console.error(error);
     }
-  }, [refreshSemantic]);
+  }, [refreshSemantic, syncInstalledModels]);
 
-  const applyModel = useCallback(async () => {
+  const applyModel = useCallback(async (next?: string) => {
+    const chosen = (next ?? model).trim();
+    if (!chosen) {
+      return;
+    }
+    if (!isTauri()) {
+      setModel(chosen);
+      return;
+    }
+    try {
+      const saved = await invoke<string>("set_kernel_model", { model: chosen });
+      setModel(saved);
+    } catch (error) {
+      console.error(error);
+    }
+  }, [model]);
+
+  const enableLaya = useCallback(async () => {
     if (!isTauri()) {
       return;
     }
-    const saved = await invoke<string>("set_kernel_model", { model });
-    setModel(saved);
-  }, [model]);
+    try {
+      setDecisionGate(await invoke<DecisionGateStatus>("enable_decision_gate"));
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
+  const declineLaya = useCallback(async () => {
+    if (!isTauri()) {
+      return;
+    }
+    try {
+      setDecisionGate(await invoke<DecisionGateStatus>("decline_decision_gate"));
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
 
   const savePolicy = useCallback(async (next: RoutingPolicy) => {
     const locked = { ...next, require_user_approval: true };
@@ -324,11 +390,17 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       void refresh();
     }, 0);
     const id = window.setInterval(() => setClock(formatClock(new Date())), 30_000);
+    const modelsId = window.setInterval(() => {
+      if (isTauri()) {
+        void syncInstalledModels();
+      }
+    }, 20_000);
     return () => {
       window.clearTimeout(boot);
       window.clearInterval(id);
+      window.clearInterval(modelsId);
     };
-  }, [refresh]);
+  }, [refresh, syncInstalledModels]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -362,6 +434,25 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
               setKernel(
                 event.payload.ollama.running && event.payload.nats.running ? "ready" : "degraded",
               );
+              if (event.payload.ollama.running) {
+                void syncInstalledModels();
+              } else {
+                setModels([]);
+              }
+            }
+          }),
+        );
+        unlisteners.push(
+          await listen<PullProgress>(MODEL_PULL_EVENT, (event) => {
+            if (!cancelled && event.payload.done && !event.payload.error) {
+              void syncInstalledModels();
+            }
+          }),
+        );
+        unlisteners.push(
+          await listen<DecisionGateStatus>(DECISION_GATE_EVENT, (event) => {
+            if (!cancelled) {
+              setDecisionGate(event.payload);
             }
           }),
         );
@@ -383,7 +474,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         void fn();
       });
     };
-  }, [ingestBusMessage]);
+  }, [ingestBusMessage, syncInstalledModels]);
 
   const value = useMemo<LoungeContextValue>(
     () => ({
@@ -408,7 +499,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexNotice,
       policy,
       approval,
+      decisionGate,
       applyModel,
+      enableLaya,
+      declineLaya,
       indexWorkspace,
       refresh,
       savePolicy,
@@ -436,7 +530,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexNotice,
       policy,
       approval,
+      decisionGate,
       applyModel,
+      enableLaya,
+      declineLaya,
       indexWorkspace,
       refresh,
       savePolicy,

@@ -12,6 +12,7 @@ use super::probe::{
     endpoint, find_executable, lounge_nats_dir, tcp_ready, wait_until, DEFAULT_NATS_HOST,
     DEFAULT_NATS_HTTP_PORT, DEFAULT_NATS_PORT,
 };
+use crate::kernel::DecisionGate;
 use crate::models::{ServiceHealth, ServiceId};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(400);
@@ -51,6 +52,9 @@ pub(crate) fn listen_once(app: &AppHandle, url: &str) -> Result<()> {
     log::info!("NATS event pump dinliyor: {url} ({WILDCARD})");
     for msg in sub.messages() {
         let envelope = LoungeMessage::from_nats(&msg.subject, &msg.data);
+        if let Some(gate) = app.try_state::<DecisionGate>() {
+            gate.infer_async(&envelope);
+        }
         emit_nats_event(app, &envelope);
     }
     Ok(())

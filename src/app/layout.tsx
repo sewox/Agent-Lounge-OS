@@ -30,6 +30,10 @@ const publicSans = Public_Sans({
 export const metadata: Metadata = {
   title: "Agent Lounge OS",
   description: "Yerel ajan orkestrasyon katmanı",
+  icons: {
+    icon: [{ url: "/logo.png", type: "image/png" }],
+    apple: "/logo.png",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

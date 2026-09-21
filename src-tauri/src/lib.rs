@@ -8,7 +8,10 @@ use std::path::PathBuf;
 
 use db::ExperienceStore;
 use infra::BusManager;
-use kernel::{default_model_lock, Dispatcher};
+use kernel::{
+    default_model_lock, DecisionGate, DecisionGatePhase, DecisionGateStatus, Dispatcher,
+    DECISION_GATE_EVENT,
+};
 use lounge_protocol::LoungeMessage;
 use models::{
     merge_project_summaries, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
@@ -20,7 +23,7 @@ use services::{
     api_keys_from_store, collect_quota_state_with_keys, spawn_event_pump, spawn_quota_pump,
     spawn_supervisor, MemoryBridge, ServiceManager, SharedServices,
 };
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
@@ -87,6 +90,8 @@ pub fn run_with_start_route(start_route: &'static str) {
                 log::warn!("{err}");
                 MemoryBridge::from_binary("codebase-memory-mcp")
             });
+            let (decision_tx, mut decision_rx) = tokio::sync::mpsc::channel(64);
+            let gate = DecisionGate::new(decision_tx);
             let dispatcher = Dispatcher::new(
                 "nats://127.0.0.1:4222",
                 services::lounge_ollama_endpoint(),
@@ -94,7 +99,8 @@ pub fn run_with_start_route(start_route: &'static str) {
                 memory,
                 store.clone(),
                 workspace,
-            );
+            )
+            .with_decision_cache(gate.cache());
             dispatcher.attach_app(app.handle().clone());
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let handle = app.handle().clone();
@@ -103,11 +109,34 @@ pub fn run_with_start_route(start_route: &'static str) {
             let quota_handle = app.handle().clone();
             let quota_services = services.clone();
             let quota_store = store.clone();
+            let load_gate = gate.clone();
+            let load_app = app.handle().clone();
+            let watch_gate = gate.clone();
+            let watch_app = app.handle().clone();
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
+            app.manage(gate);
             app.manage(store);
             app.manage(bus.clone());
+
+            tauri::async_runtime::spawn(async move {
+                while let Some(result) = decision_rx.recv().await {
+                    log::info!(
+                        "DecisionGate {} routing={:?} security={:?} hit={:.2} {}ms {}",
+                        result.message_id,
+                        result.routing.value,
+                        result.security.value,
+                        result.knowledge_hit,
+                        result.elapsed_ms,
+                        result.device
+                    );
+                }
+            });
+            tauri::async_runtime::spawn(async move {
+                run_laya_load(&load_app, &load_gate).await;
+            });
+            spawn_laya_watchdog(watch_app, watch_gate);
 
             tauri::async_runtime::spawn(async move {
                 {
@@ -141,6 +170,9 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_kernel_model,
             set_kernel_model,
             list_ollama_models,
+            get_decision_gate_status,
+            enable_decision_gate,
+            decline_decision_gate,
             get_device_profile,
             list_recommended_models,
             pull_lmr_model,
@@ -244,6 +276,97 @@ async fn list_ollama_models(
     let mut manager = state.lock().await;
     let _ = manager.ensure_all().await;
     manager.ollama_models().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_decision_gate_status(
+    gate: tauri::State<'_, DecisionGate>,
+) -> Result<DecisionGateStatus, String> {
+    Ok(gate.status())
+}
+
+#[tauri::command]
+async fn enable_decision_gate(
+    app: tauri::AppHandle,
+    gate: tauri::State<'_, DecisionGate>,
+) -> Result<DecisionGateStatus, String> {
+    run_laya_load(&app, &gate).await;
+    Ok(gate.status())
+}
+
+#[tauri::command]
+fn decline_decision_gate(
+    app: tauri::AppHandle,
+    gate: tauri::State<'_, DecisionGate>,
+) -> Result<DecisionGateStatus, String> {
+    gate.decline_offer();
+    let status = gate.status();
+    emit_decision_gate(&app, &status);
+    Ok(status)
+}
+
+async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate) {
+    if !gate.begin_load() {
+        emit_decision_gate(app, &gate.status());
+        return;
+    }
+    emit_decision_gate(app, &gate.status());
+    let dir = kernel::decision_engine::laya_dir();
+    match tokio::task::spawn_blocking(move || kernel::decision_engine::load_session(&dir)).await {
+        Ok(Ok(session)) => gate.install(session),
+        Ok(Err(err)) => gate.fail_load(&err.to_string()),
+        Err(err) => gate.fail_load(&err.to_string()),
+    }
+    emit_decision_gate(app, &gate.status());
+}
+
+fn spawn_laya_watchdog(app: tauri::AppHandle, gate: DecisionGate) {
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let status = gate.status();
+            if matches!(
+                status.phase,
+                DecisionGatePhase::Ready | DecisionGatePhase::Loading
+            ) {
+                continue;
+            }
+            if !status.ram_blocked() {
+                continue;
+            }
+            let ram_ok = tokio::task::spawn_blocking(kernel::decision_engine::ram_allows_load)
+                .await
+                .unwrap_or(false);
+            if gate.declined() {
+                if !ram_ok {
+                    gate.clear_declined();
+                }
+                continue;
+            }
+            if ram_ok {
+                if gate.mark_available() {
+                    emit_decision_gate(&app, &gate.status());
+                }
+            } else if status.phase == DecisionGatePhase::Available {
+                gate.fail_load("Laya için yetersiz RAM (en az 1.5 GiB boş)");
+                emit_decision_gate(&app, &gate.status());
+            }
+        }
+    });
+}
+
+fn emit_decision_gate(app: &tauri::AppHandle, status: &DecisionGateStatus) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(err) = window.emit(DECISION_GATE_EVENT, status) {
+            log::debug!("{DECISION_GATE_EVENT} window emit: {err}");
+        }
+        return;
+    }
+    if let Err(err) = app.emit(DECISION_GATE_EVENT, status) {
+        log::debug!("{DECISION_GATE_EVENT} app emit: {err}");
+    }
 }
 
 #[tauri::command]

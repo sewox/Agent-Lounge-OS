@@ -54,6 +54,7 @@ bridge/codebase-memory-mcp.exe
 data/lmr/
 data/ollama/
 data/nats/
+data/laya/
 
 # Local experience store
 experiences/*.sqlite
