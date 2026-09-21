@@ -7,9 +7,18 @@ import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 
-export type NavId = "stream" | "vault" | "health" | "fleet" | "telemetry" | "quotas" | "settings";
+export type NavId =
+  | "dashboard"
+  | "stream"
+  | "vault"
+  | "health"
+  | "fleet"
+  | "telemetry"
+  | "quotas"
+  | "settings";
 
 const NAV: { id: NavId; href: string; label: string; icon: string }[] = [
+  { id: "dashboard", href: "/dashboard", label: "Dashboard", icon: "dashboard" },
   { id: "stream", href: "/stream", label: "Event Stream", icon: "stream" },
   { id: "vault", href: "/vault", label: "Knowledge Vault", icon: "db" },
   { id: "health", href: "/health", label: "Project Health", icon: "health" },
@@ -43,6 +52,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     setQuery,
     clock,
     indexing,
+    indexNotice,
     quotas,
     amberAlert,
     amberTools,
@@ -55,11 +65,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const crumb = TITLES[pathname] ?? "Lounge";
   const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
   const onboarding = pathname === "/onboarding";
+  const statusBanner = approval || indexing || indexNotice;
+  const bannerOffset = Boolean(statusBanner);
 
   return (
     <div className="min-h-screen bg-surface text-on-surface">
       {approval ? (
-        <div className="fixed inset-x-0 top-12 z-50 border-b border-error-container bg-error-container/20 px-[220px] py-2">
+        <div className="fixed inset-x-0 top-12 z-50 border-b border-error-container bg-error-container/20 py-2 pl-[calc(var(--sidebar-w)+0.75rem)] pr-3">
           <div className="flex flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="text-on-surface">
               <span className="font-bold uppercase text-error-dim">Routing onayı · </span>
@@ -93,20 +105,53 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </div>
         </div>
+      ) : indexing ? (
+        <div className="fixed inset-x-0 top-12 z-50 border-b border-outline-variant bg-surface-container-low py-2 pl-[calc(var(--sidebar-w)+0.75rem)] pr-3">
+          <div className="flex items-center gap-2 px-4 font-mono text-[11px] text-on-surface">
+            <span
+              className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-transparent border-t-primary"
+              aria-hidden
+            />
+            <span className="font-bold tracking-wider uppercase">Scanning...</span>
+            <span className="text-outline">memory_bridge · index_workspace</span>
+          </div>
+        </div>
+      ) : indexNotice ? (
+        <div
+          className={`fixed inset-x-0 top-12 z-50 border-b py-2 pl-[calc(var(--sidebar-w)+0.75rem)] pr-3 ${
+            indexNotice.tone === "error"
+              ? "border-error-container bg-error-container/20"
+              : "border-secondary-container bg-secondary-container/30"
+          }`}
+        >
+          <div
+            className={`px-4 font-mono text-[11px] font-semibold ${
+              indexNotice.tone === "error" ? "text-error-dim" : "text-secondary-dim"
+            }`}
+          >
+            {indexNotice.text}
+          </div>
+        </div>
       ) : null}
 
-      <header className="fixed top-0 left-0 z-40 flex h-12 w-full items-center justify-between border-b border-outline-variant bg-surface px-3">
-        <div className="flex items-center gap-3">
+      <header className="fixed top-0 left-0 z-40 flex h-12 w-full min-w-0 items-center justify-between gap-2 overflow-hidden border-b border-outline-variant bg-surface px-3">
+        <div className="flex min-w-0 shrink-0 items-center gap-3">
           <div className="flex items-center gap-2 border-r border-outline-variant pr-3">
-            <span className="font-headline font-mono text-xs font-bold tracking-tight uppercase">
+            <span className="whitespace-nowrap font-headline font-mono text-xs font-bold tracking-tight uppercase">
               Agent Lounge OS
             </span>
             <span className="rounded border border-outline-variant bg-surface-container-high px-1 py-0.5 font-mono text-[9px] text-primary uppercase">
               KERNEL
             </span>
           </div>
-          <div className="flex items-center gap-1.5 font-mono text-xs text-on-surface-variant">
-            <span>Overview</span>
+          <div className="hidden min-w-0 items-center gap-1.5 font-mono text-xs text-on-surface-variant lg:flex">
+            {onboarding ? (
+              <span>Overview</span>
+            ) : (
+              <Link href="/dashboard" className="hover:text-on-surface">
+                Overview
+              </Link>
+            )}
             <span className="text-outline">/</span>
             <span className="font-medium text-on-surface">{crumb}</span>
           </div>
@@ -117,7 +162,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             Yerel araçları tarayıp Lounge’a bağlayın
           </div>
         ) : (
-          <div className="mx-6 flex max-w-lg flex-1 items-center gap-4">
+          <div className="mx-2 hidden min-w-0 max-w-md flex-1 items-center gap-4 md:flex">
             <label className="relative w-full">
               <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-outline">
                 <Icon name="search" />
@@ -142,10 +187,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 shrink-0 items-center gap-2">
           {onboarding ? null : (
           <div className="mr-1 flex items-center gap-1.5 font-mono text-[11px]">
-            <label className="flex items-center gap-1.5 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface-variant">
+            <label className="hidden items-center gap-1.5 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface-variant lg:flex">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
               <input
                 list="ollama-models"
@@ -161,7 +206,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 ))}
               </datalist>
             </label>
-            <div className="flex items-center gap-1 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-primary">
+            <div className="hidden items-center gap-1 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-primary md:flex">
               <span className="h-1.5 w-1.5 rounded-full bg-secondary" />
               <span>LOCAL</span>
             </div>
@@ -180,7 +225,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   : "QUOTA OK"}
               </span>
             </Link>
-            <div className="tnum hidden text-on-surface-variant sm:block">{clock} UTC+3</div>
+            <div className="tnum hidden text-on-surface-variant xl:block">{clock} UTC+3</div>
           </div>
           )}
           {onboarding ? null : (
@@ -199,7 +244,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 className="flex items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
               >
                 <Icon name="terminal" />
-                <span>{indexing ? "Indexing…" : "Index Workspace"}</span>
+                <span>{indexing ? "Scanning..." : "Index Workspace"}</span>
               </button>
             </>
           )}
@@ -210,7 +255,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       {onboarding ? null : (
-      <aside className="fixed top-12 bottom-0 left-0 z-30 flex w-[220px] flex-col justify-between border-r border-outline-variant bg-surface-container-low px-2 py-3">
+      <aside className="fixed top-12 bottom-0 left-0 z-30 flex w-[var(--sidebar-w)] flex-col justify-between overflow-y-auto border-r border-outline-variant bg-surface-container-low px-2 py-3">
         <div className="space-y-4">
           <div className="flex items-center justify-between border-b border-outline-variant/60 px-2 pb-2">
             <div>
@@ -229,8 +274,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <nav className="space-y-0.5 font-label text-xs">
             {NAV.map((item) => {
               const active =
-                pathname === item.href ||
-                (item.href === "/stream" && (pathname === "/" || pathname === "/dashboard"));
+                pathname === item.href || (item.id === "dashboard" && pathname === "/");
               return (
                 <Link
                   key={item.id}
@@ -285,7 +329,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </aside>
       )}
 
-      <main className={`mt-12 min-h-[calc(100vh-48px)] space-y-3 bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[220px]"} ${approval ? "pt-14" : ""}`}>
+      <main className={`mt-12 min-h-[calc(100vh-48px)] min-w-0 space-y-3 overflow-x-hidden bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[var(--sidebar-w)]"} ${bannerOffset ? "pt-14" : ""}`}>
         {children}
       </main>
     </div>

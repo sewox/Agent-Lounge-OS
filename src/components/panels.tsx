@@ -1,36 +1,66 @@
 "use client";
 
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
-import { eventStateClass, Kpi, outcomeClass, Pip, subjectClass } from "@/components/ui";
+import { eventToneClass, Kpi, outcomeClass, Pip, subjectClass } from "@/components/ui";
 import {
-  BUS_UI_EVENT,
   formatExperienceTime,
-  isTauri,
   MOCK_HEALTH,
   MOCK_NODES,
+  natsEventTone,
+  natsToneLabel,
   quotaBarClass,
   quotaToneClass,
-  type LoungeMessage,
   type QuotaExhaustedAction,
   type QuotaKind,
+  type SemanticProject,
 } from "@/lib/lounge";
 
 type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
 
+function quotaKindClass(mode: string): string {
+  if (mode === "subscription") {
+    return "text-primary";
+  }
+  if (mode === "api") {
+    return "text-tertiary";
+  }
+  if (mode === "plugin") {
+    return "text-secondary";
+  }
+  return "text-on-surface-variant";
+}
+
 export function OverviewKpis() {
-  const { experiences, events, projects, deadSymbols, lastIndex } = useLounge();
-  const indexedFiles =
-    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) || lastIndex?.files || 0;
-  const deadCount = projects.length
-    ? deadSymbols.length
+  const { experiences, events, projects, deadSymbols, lastIndex, semanticMap, indexing } = useLounge();
+  const fromMap = semanticMap.projects.reduce((sum, row) => sum + row.files, 0);
+  const fromProjects = projects.reduce((sum, row) => sum + (row.files ?? 0), 0);
+  const indexedFiles = fromMap || fromProjects || lastIndex?.files || 0;
+  const hasIndex =
+    Boolean(lastIndex) || projects.length > 0 || semanticMap.projects.length > 0;
+  const deadCount = hasIndex
+    ? deadSymbols.length || lastIndex?.dead || 0
     : MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
   return (
-    <section className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+    <section className="space-y-2.5">
+      {indexing ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-2 rounded-lg border border-outline-variant bg-surface-container px-3 py-2 font-mono text-[11px] text-on-surface"
+        >
+          <span
+            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-transparent border-t-primary"
+            aria-hidden
+          />
+          <span className="font-bold tracking-wider uppercase">Scanning...</span>
+          <span className="text-outline">Index Workspace</span>
+        </div>
+      ) : null}
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
       <Kpi
         label="MSG / MIN"
         value={String(Math.max(events.length, 1))}
@@ -63,40 +93,16 @@ export function OverviewKpis() {
             ▼ amber alert
           </span>
         }
-      />
+        />
+      </div>
     </section>
   );
 }
 
 export function EventStreamPanel() {
-  const { events, query, ingestBusMessage, probeBus } = useLounge();
+  const { events, query, probeBus } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
   const [probing, setProbing] = useState(false);
-
-  useEffect(() => {
-    if (!isTauri()) {
-      return;
-    }
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    void listen<LoungeMessage>(BUS_UI_EVENT, (event) => {
-      if (!cancelled) {
-        ingestBusMessage(event.payload);
-      }
-    }).then((fn) => {
-      if (cancelled) {
-        void fn();
-        return;
-      }
-      unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      if (unlisten) {
-        void unlisten();
-      }
-    };
-  }, [ingestBusMessage]);
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
@@ -158,15 +164,16 @@ export function EventStreamPanel() {
           <tbody className="divide-y divide-outline-variant/30">
             {filtered.map((event, index) => {
               const selected = index === 0 && subjectFilter === "all" && !query;
+              const tone = natsEventTone(event.subject, event.state);
               return (
                 <tr
                   key={event.id}
                   className={
-                    event.state === "error"
+                    tone === "error"
                       ? "bg-error-container/10 hover:bg-error-container/20"
-                      : selected
-                        ? "border-l-2 border-primary bg-primary-container/20 text-on-surface hover:bg-primary-container/30"
-                        : "hover:bg-surface-container-high/50"
+                      : tone === "task"
+                        ? "border-l-2 border-primary bg-primary-container/15 hover:bg-primary-container/25"
+                        : "bg-secondary-container/10 hover:bg-secondary-container/20"
                   }
                 >
                   <td className="tnum px-2.5 py-1.5 text-on-surface-variant">{event.time}</td>
@@ -174,10 +181,10 @@ export function EventStreamPanel() {
                   <td className="px-2 py-1.5 text-on-surface-variant">
                     {event.from} <span className="text-outline">→</span> {event.to}
                   </td>
-                  <td className="tnum px-2 py-1.5 text-right text-on-surface-variant">{event.payload}</td>
+                  <td className="tnum px-2.5 py-1.5 text-right text-on-surface-variant">{event.payload}</td>
                   <td className="px-2.5 py-1.5 text-right">
-                    <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] ${eventStateClass(event.state)}`}>
-                      {event.state}
+                    <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase ${eventToneClass(tone)}`}>
+                      {natsToneLabel(tone)}
                     </span>
                   </td>
                 </tr>
@@ -217,20 +224,29 @@ export function EventStreamPanel() {
 }
 
 export function VaultPanel() {
-  const { experiences, projects, query, lastIndex } = useLounge();
-  const nodes = projects.length
-    ? projects.map((row) => ({
+  const { experiences, projects, query, lastIndex, semanticMap } = useLounge();
+  const nodes = semanticMap.projects.length
+    ? semanticMap.projects.map((row) => ({
         name: row.name || "unnamed",
-        edges: row.edges,
-        modules: [
-          `${row.files ?? 0} files`,
-          `${row.nodes} nodes`,
-          row.root_path ?? "sqlite+cbm",
-        ],
+        edges: row.edge_count,
+        modules: semanticModules(row),
       }))
-    : MOCK_NODES;
+    : projects.length
+      ? projects.map((row) => ({
+          name: row.name || "unnamed",
+          edges: row.edges,
+          modules: [
+            `${row.files ?? 0} files`,
+            `${row.nodes} nodes`,
+            row.root_path ?? "sqlite+cbm",
+          ],
+        }))
+      : MOCK_NODES;
   const fileTotal =
-    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) || lastIndex?.files || 0;
+    semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
+    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) ||
+    lastIndex?.files ||
+    0;
   const edgeTotal = nodes.reduce((sum, row) => sum + row.edges, 0);
   const log = experiences.filter((item) => {
     if (!query.trim()) {
@@ -307,8 +323,18 @@ export function VaultPanel() {
 }
 
 export function HealthPanel() {
-  const { projects, deadSymbols } = useLounge();
-  const rows = projects.length
+  const { projects, deadSymbols, semanticMap } = useLounge();
+  const rows = semanticMap.projects.length
+    ? semanticMap.projects.map((row) => ({
+        name: row.name || "unnamed",
+        indexed: row.node_count > 0 || row.files > 0 ? 100 : 0,
+        files: String(row.files),
+        nodes: String(row.node_count),
+        stale: 0,
+        dead: row.dead.length,
+        sync: "live",
+      }))
+    : projects.length
     ? projects.map((row) => ({
         name: row.name || "unnamed",
         indexed: row.nodes > 0 || (row.files ?? 0) > 0 ? 100 : 0,
@@ -390,23 +416,26 @@ export function QuotaPanel() {
   const [quotaFilter, setQuotaFilter] = useState<QuotaFilter>("all");
   const rows = useMemo(() => {
     return quotas.filter((row) => {
-      if (quotaFilter !== "all" && row.kind !== quotaFilter) {
+      const mode = row.access_mode || row.kind;
+      if (quotaFilter !== "all" && mode !== quotaFilter) {
         return false;
       }
       if (!query.trim()) {
         return true;
       }
-      return `${row.tool} ${row.unit} ${row.kind}`.toLowerCase().includes(query.trim().toLowerCase());
+      return `${row.tool} ${row.unit} ${mode} ${row.host_id ?? ""}`
+        .toLowerCase()
+        .includes(query.trim().toLowerCase());
     });
   }, [quotas, query, quotaFilter]);
   const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
 
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <Pip live tone="ok" />
-          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+          <h2 className="truncate font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             CONNECTED AI + BOT QUOTAS
           </h2>
           {amberAlert ? (
@@ -415,19 +444,18 @@ export function QuotaPanel() {
             </span>
           ) : (
             <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
-              60s probes
+              30s probes
             </span>
           )}
         </div>
         <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-[10px]">
-          {(["all", "ai", "bots"] as const).map((key) => {
-            const value: QuotaFilter = key === "bots" ? "bot" : key;
+          {(["all", "subscription", "api", "plugin", "local"] as const).map((key) => {
             return (
               <button
                 key={key}
                 type="button"
-                onClick={() => setQuotaFilter(value)}
-                className={`rounded px-2 py-0.5 ${quotaFilter === value ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
+                onClick={() => setQuotaFilter(key)}
+                className={`rounded px-2 py-0.5 ${quotaFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
                 {key}
               </button>
@@ -435,17 +463,17 @@ export function QuotaPanel() {
           })}
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-left font-mono text-[11px]">
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="w-full min-w-[720px] border-collapse text-left font-mono text-[11px]">
           <thead>
             <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
               <th className="px-2.5 py-1.5 font-medium">Tool</th>
               <th className="w-14 px-2 py-1.5 font-medium">Kind</th>
               <th className="w-16 px-2 py-1.5 font-medium">Unit</th>
-              <th className="px-2 py-1.5 font-medium">Used / Limit</th>
-              <th className="px-2 py-1.5 text-right font-medium">Remaining</th>
-              <th className="w-20 px-2 py-1.5 text-right font-medium">Reset</th>
-              <th className="w-24 px-2.5 py-1.5 text-right font-medium">State</th>
+              <th className="min-w-[160px] px-2 py-1.5 font-medium">Used / Limit</th>
+              <th className="min-w-[160px] px-2 py-1.5 text-right font-medium">Remaining / Hosts</th>
+              <th className="min-w-[140px] px-2 py-1.5 text-right font-medium">Reset</th>
+              <th className="w-16 px-2.5 py-1.5 text-right font-medium">State</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
@@ -459,8 +487,8 @@ export function QuotaPanel() {
                 }
               >
                 <td className="px-2.5 py-1.5 font-medium text-on-surface">{row.tool}</td>
-                <td className={`px-2 py-1.5 font-medium ${row.kind === "ai" ? "text-primary" : "text-secondary"}`}>
-                  {row.kind.toUpperCase()}
+                <td className={`px-2 py-1.5 font-medium ${quotaKindClass(row.access_mode || row.kind)}`}>
+                  {(row.access_mode || row.kind).toUpperCase()}
                 </td>
                 <td className={`px-2 py-1.5 ${row.unit === "local" ? "text-secondary" : "text-on-surface-variant"}`}>
                   {row.unit}
@@ -470,14 +498,29 @@ export function QuotaPanel() {
                     <span className={row.tone === "live" ? "font-medium text-primary" : "tnum text-outline"}>{row.used}</span>
                   ) : (
                     <div className="flex items-center gap-2">
-                      <span className="tnum min-w-[70px] text-on-surface">{row.used}</span>
-                      <div className="h-1 w-24 shrink-0 overflow-hidden rounded-full bg-surface-container-highest">
+                      <span className="tnum text-on-surface">{row.used}</span>
+                      <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-surface-container-highest">
                         <div className={`h-1 rounded-full ${quotaBarClass(row.percent)}`} style={{ width: `${row.percent}%` }} />
                       </div>
                     </div>
                   )}
                 </td>
-                <td className="tnum px-2 py-1.5 text-right text-on-surface-variant">{row.remaining}</td>
+                <td className="px-2 py-1.5 text-right">
+                  {row.access_mode === "plugin" || row.kind === "plugin" ? (
+                    <div className="flex flex-wrap justify-end gap-1">
+                      {row.remaining.split(" · ").filter(Boolean).map((host) => (
+                        <span
+                          key={host}
+                          className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[9px] text-on-surface-variant"
+                        >
+                          {host}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="tnum text-on-surface-variant">{row.remaining}</span>
+                  )}
+                </td>
                 <td className={`px-2 py-1.5 text-right ${row.reset === "LOCAL" ? "font-semibold text-secondary" : "tnum text-outline"}`}>
                   {row.reset}
                 </td>
@@ -500,7 +543,7 @@ export function QuotaPanel() {
         </table>
       </div>
       <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
-        <span>quota source: LMR RAM · OpenAI · Anthropic · Grok · NATS /varz</span>
+        <span>abonelik: yerel plan · API keys · plugins · LMR sysinfo</span>
         <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
           <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
           <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
@@ -526,7 +569,8 @@ export function SettingsPanel() {
           <div>
             <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Bağlı araçlar</h2>
             <p className="mt-1 font-body text-[11px] text-on-surface-variant">
-              Claude Desktop, Cursor MCP, LMR ve Ollama yeniden taranır; seçim connected_tools tablosuna yazılır.
+              Claude Desktop, Cursor uygulaması + plugin’leri, Antigravity, LMR ve Ollama yeniden taranır;
+              seçim connected_tools tablosuna yazılır.
             </p>
           </div>
           <Link
@@ -652,18 +696,39 @@ export function FleetPanel() {
 
 export function TelemetryPanel() {
   const { events, quotas } = useLounge();
+  const subscription = quotas.filter((row) => (row.access_mode || row.kind) === "subscription");
+  const plugins = quotas.filter((row) => (row.access_mode || row.kind) === "plugin");
   return (
-    <section className="grid gap-2.5 lg:grid-cols-2">
-      <div className="rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+    <section className="grid min-h-[calc(100vh-5.5rem)] min-w-0 auto-rows-fr gap-3 md:grid-cols-2">
+      <div className="flex min-h-0 flex-col rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
         <div className="text-[10px] tracking-wider text-outline uppercase">NATS buffer</div>
         <div className="mt-2 text-2xl font-bold text-on-surface">{events.length}</div>
         <div className="text-outline">events retained across routes</div>
+        <div className="mt-auto pt-4 text-[10px] text-outline">lounge.&gt; · dispatcher listen</div>
       </div>
-      <div className="rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+      <div className="flex min-h-0 flex-col rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
         <div className="text-[10px] tracking-wider text-outline uppercase">Quota probes</div>
         <div className="mt-2 text-2xl font-bold text-on-surface">{quotas.length}</div>
-        <div className="text-outline">infra/ last snapshot</div>
+        <div className="text-outline">
+          {subscription.length} abonelik · {plugins.length} plugin
+        </div>
+        <div className="mt-auto pt-4 text-[10px] text-outline">infra / last snapshot</div>
       </div>
     </section>
   );
+}
+
+function semanticModules(project: SemanticProject): string[] {
+  const files = [
+    ...new Set(
+      project.nodes
+        .map((node) => node.file)
+        .filter((file): file is string => Boolean(file && file.trim())),
+    ),
+  ];
+  const names = [...new Set(files.map((file) => file.split(/[/\\]/).filter(Boolean).at(-1) ?? file))];
+  if (names.length === 0) {
+    return [`${project.files} files`, `${project.node_count} nodes`, project.repo_path || "sqlite"];
+  }
+  return names.slice(0, 8);
 }
