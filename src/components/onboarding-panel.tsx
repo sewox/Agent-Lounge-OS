@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
 import {
   MOCK_DISCOVERY,
@@ -436,11 +437,7 @@ function ScanningSystem() {
       aria-live="polite"
       className="flex min-h-[calc(100vh-96px)] flex-col items-center justify-center gap-4"
     >
-      <div className="relative h-12 w-12" aria-hidden>
-        <span className="absolute inset-0 rounded-full border border-outline-variant" />
-        <span className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-primary" />
-        <span className="absolute inset-2 animate-pulse rounded-full bg-primary-container/40" />
-      </div>
+      <BrandMark size={56} className="rounded-md" />
       <div className="font-mono text-xs font-bold tracking-[0.28em] text-on-surface uppercase">
         Scanning System...
       </div>

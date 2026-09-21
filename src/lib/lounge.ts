@@ -15,6 +15,17 @@ export type ServiceReport = {
   plugin: ServiceHealth;
 };
 
+export type DecisionGatePhase = "loading" | "ready" | "failed" | "available";
+
+export type DecisionGateStatus = {
+  phase: DecisionGatePhase;
+  title: string;
+  message: string;
+  detail: string | null;
+  device: string | null;
+  reason: string | null;
+};
+
 export type ExperienceOutcome = "success" | "failure" | "partial";
 
 export type LoungeExperience = {
@@ -388,6 +399,7 @@ export const BUS_UI_EVENT = "nats-event";
 export const QUOTA_UI_EVENT = "quota-update";
 export const SERVICE_UI_EVENT = "service-status";
 export const MODEL_PULL_EVENT = "model-pull";
+export const DECISION_GATE_EVENT = "decision-gate";
 export const AMBER_THRESHOLD = 80;
 
 export function natsEventTone(subject: string, state?: NatsEvent["state"]): NatsTone {
@@ -669,7 +681,11 @@ export type RoutingPolicy = {
   triggers: AgentTrigger[];
 };
 
-export type ApprovalKind = "agent_switch" | "quota_local_fallback" | "quota_abort";
+export type ApprovalKind =
+  | "agent_switch"
+  | "quota_local_fallback"
+  | "quota_abort"
+  | "security_critical";
 
 export type ApprovalRequest = {
   task_id: string;

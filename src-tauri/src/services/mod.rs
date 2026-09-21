@@ -27,8 +27,8 @@ pub use ollama::{
 };
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
-    lounge_ollama_endpoint, nats_monitor_endpoint, system_ollama_endpoint, LOUNGE_OLLAMA_PORT,
-    SYSTEM_OLLAMA_PORT,
+    lounge_laya_dir, lounge_ollama_endpoint, nats_monitor_endpoint, system_ollama_endpoint,
+    LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, spawn_quota_pump,

@@ -670,11 +670,23 @@ export function SettingsPanel() {
 }
 
 export function FleetPanel() {
-  const { report, model } = useLounge();
+  const { report, model, decisionGate } = useLounge();
   const workers = [
     { id: "lounge-kernel", status: report?.ollama.running ? "ready" : "down", model },
     { id: "nats-hub", status: report?.nats.running ? "listening" : "down", model: "lounge.>" },
     { id: "memory-bridge", status: report?.memory.running ? "ready" : "missing", model: "cbm cli" },
+    {
+      id: "openjev-laya",
+      status:
+        decisionGate?.phase === "ready"
+          ? "ready"
+          : decisionGate?.phase === "loading"
+            ? "loading"
+            : decisionGate?.phase === "available"
+              ? "available"
+              : "down",
+      model: decisionGate?.device || decisionGate?.title || "DecisionGate",
+    },
   ];
   return (
     <section className="rounded-lg border border-outline-variant bg-surface-container">
@@ -686,7 +698,7 @@ export function FleetPanel() {
           <div key={row.id} className="flex items-center justify-between px-3 py-2">
             <span className="text-on-surface">{row.id}</span>
             <span className="text-on-surface-variant">{row.model}</span>
-            <span className={row.status === "down" || row.status === "missing" ? "text-error" : "text-secondary"}>{row.status}</span>
+            <span className={row.status === "down" || row.status === "missing" ? "text-error" : row.status === "loading" || row.status === "available" ? "text-on-surface-variant" : "text-secondary"}>{row.status}</span>
           </div>
         ))}
       </div>

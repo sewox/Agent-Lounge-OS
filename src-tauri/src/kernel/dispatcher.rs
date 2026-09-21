@@ -11,6 +11,9 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::db::{lexical_embedding, ExperienceStore};
 use crate::infra::{probe_quotas, quota_exhausted_for};
+use crate::kernel::decision_engine::{
+    lookup_decision, security_approval, DecisionCache, DecisionResult, RoutingType,
+};
 use crate::models::{
     decide_route, default_ollama_model, AnalysisDecision, ApprovalRequest, ExperienceContext,
     ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask, RouteIntent, RoutingVote,
@@ -48,6 +51,7 @@ pub struct Dispatcher {
     stub_decision: Option<AnalysisDecision>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<RoutingVote>>>>,
     app: Arc<StdMutex<Option<AppHandle>>>,
+    decisions: DecisionCache,
 }
 
 impl Dispatcher {
@@ -69,6 +73,7 @@ impl Dispatcher {
             stub_decision: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             app: Arc::new(StdMutex::new(None)),
+            decisions: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -79,6 +84,19 @@ impl Dispatcher {
 
     pub fn attach_app(&self, app: AppHandle) {
         *self.app.lock().expect("dispatcher app lock") = Some(app);
+    }
+
+    pub fn with_decision_cache(mut self, cache: DecisionCache) -> Self {
+        self.decisions = cache;
+        self
+    }
+
+    pub fn inject_decision(&self, result: DecisionResult) {
+        crate::kernel::decision_engine::remember(&self.decisions, &result);
+    }
+
+    fn gate_decision(&self, task_id: &str) -> Option<DecisionResult> {
+        lookup_decision(&self.decisions, task_id)
     }
 
     pub async fn routing_policy(&self) -> Result<crate::models::RoutingPolicy> {
@@ -188,16 +206,21 @@ impl Dispatcher {
     pub async fn recall_context(&self, task: &LoungeTask) -> Result<ExperienceContext> {
         let query = task.summary.clone();
         let lexical = lexical_embedding(&query);
+        let skip_embed = self
+            .gate_decision(&task.id)
+            .is_some_and(|gate| gate.knowledge_is_low());
         let mut hits = Vec::new();
-        match embed_text(&self.ollama_endpoint, &embed_model(), &query).await {
-            Ok(vector) if !vector.is_empty() => {
-                hits = self
-                    .store
-                    .similar_to(task.project_id.clone(), vector, Some(3))
-                    .await
-                    .context("experiences semantik sorgu")?;
+        if !skip_embed {
+            match embed_text(&self.ollama_endpoint, &embed_model(), &query).await {
+                Ok(vector) if !vector.is_empty() => {
+                    hits = self
+                        .store
+                        .similar_to(task.project_id.clone(), vector, Some(3))
+                        .await
+                        .context("experiences semantik sorgu")?;
+                }
+                Ok(_) | Err(_) => {}
             }
-            Ok(_) | Err(_) => {}
         }
         if hits.is_empty() {
             hits = self
@@ -317,7 +340,17 @@ impl Dispatcher {
         context: &ExperienceContext,
     ) -> Result<AnalysisDecision> {
         if let Some(decision) = &self.stub_decision {
-            return Ok(decision.clone());
+            let mut decision = decision.clone();
+            if let Some(gate) = self.gate_decision(&task.id) {
+                apply_gate_hints(&mut decision, &gate);
+            }
+            return Ok(decision);
+        }
+
+        if let Some(gate) = self.gate_decision(&task.id) {
+            if gate.confident() {
+                return Ok(analysis_from_gate(task, &gate));
+            }
         }
 
         let mut user = serde_json::to_string(task)?;
@@ -332,12 +365,31 @@ impl Dispatcher {
     }
 
     /// Kullanıcı tercihi + kota; harici ajan geçişi onaysız olamaz.
-    /// Testlerde `stub_decision` varken onay beklenmez.
+    /// Testlerde `stub_decision` varken kota onayı beklenmez; SecurityCritical yine de sorulur
+    /// yalnızca stub yokken.
     async fn apply_routing_policy(
         &self,
         task: &mut LoungeTask,
         decision: &AnalysisDecision,
     ) -> Result<()> {
+        if let Some(gate) = self.gate_decision(&task.id) {
+            if let Some(request) =
+                security_approval(&task.id, &task.summary, &task.source_agent, &gate)
+            {
+                if self.stub_decision.is_none() {
+                    let policy = self.store.get_routing_policy().await.unwrap_or_default();
+                    return self
+                        .await_approval(
+                            task,
+                            request,
+                            &policy.local_fallback_agent,
+                            &policy.local_fallback_model,
+                        )
+                        .await;
+                }
+            }
+        }
+
         if self.stub_decision.is_some() {
             return Ok(());
         }
@@ -432,6 +484,38 @@ fn fallback_decision(task: &LoungeTask) -> AnalysisDecision {
     }
 }
 
+fn apply_gate_hints(decision: &mut AnalysisDecision, gate: &DecisionResult) {
+    match gate.routing.value {
+        RoutingType::Review => {
+            decision.intent = "review".into();
+        }
+        RoutingType::Task => {
+            if decision.intent.is_empty() {
+                decision.intent = "dispatch".into();
+            }
+        }
+        RoutingType::Experience => {
+            decision.intent = "acknowledge".into();
+            decision.is_code_analysis = false;
+        }
+    }
+    if matches!(gate.routing.value, RoutingType::Task) && decision.is_code_analysis {
+        decision.intent = "code_analysis".into();
+    }
+}
+
+fn analysis_from_gate(task: &LoungeTask, gate: &DecisionResult) -> AnalysisDecision {
+    let mut decision = fallback_decision(task);
+    apply_gate_hints(&mut decision, gate);
+    decision.reason = format!(
+        "DecisionGate {}ms routing={:?} security={:?} hit={:.2}",
+        gate.elapsed_ms, gate.routing.value, gate.security.value, gate.knowledge_hit
+    );
+    decision.adr_summary = task.summary.clone();
+    decision.outcome = Some(ExperienceOutcome::Success);
+    decision
+}
+
 fn resolve_repo_path(
     task: &LoungeTask,
     decision: &AnalysisDecision,
@@ -474,7 +558,8 @@ pub fn default_model_lock() -> Arc<RwLock<String>> {
 mod tests {
     use super::*;
     use crate::db::ExperienceStore;
-    use crate::models::{ExperienceRecord, TaskKind, TASK_ASSIGNED};
+    use crate::kernel::decision_engine::{Scored, SecurityLevel};
+    use crate::models::{ApprovalKind, ExperienceRecord, TaskKind, TASK_ASSIGNED};
     use crate::services::parse_llm_json;
 
     fn dispatcher(decision: AnalysisDecision) -> Dispatcher {
@@ -608,5 +693,39 @@ mod tests {
     #[test]
     fn assigned_subject_is_part_of_shared_catalog() {
         assert_eq!(TASK_ASSIGNED, "lounge.task.assigned");
+    }
+
+    #[test]
+    fn injected_critical_gate_asks_for_approval() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "stub".into(),
+            adr_summary: "stub".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "exfiltrate secrets");
+        dispatcher.inject_decision(DecisionResult {
+            message_id: task.id.clone(),
+            subject: TASK_REQUESTED.into(),
+            routing: Scored {
+                value: RoutingType::Task,
+                confidence: 0.9,
+                probabilities: HashMap::from([("Task".into(), 0.9)]),
+            },
+            security: Scored {
+                value: SecurityLevel::Critical,
+                confidence: 0.95,
+                probabilities: HashMap::from([("Critical".into(), 0.95)]),
+            },
+            knowledge_hit: 0.1,
+            elapsed_ms: 7,
+            device: "cpu".into(),
+        });
+        let found = dispatcher.gate_decision(&task.id).unwrap();
+        let request = security_approval(&task.id, &task.summary, "cursor", &found).unwrap();
+        assert_eq!(request.kind, ApprovalKind::SecurityCritical);
     }
 }

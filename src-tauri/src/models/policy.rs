@@ -78,6 +78,7 @@ pub enum ApprovalKind {
     AgentSwitch,
     QuotaLocalFallback,
     QuotaAbort,
+    SecurityCritical,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
