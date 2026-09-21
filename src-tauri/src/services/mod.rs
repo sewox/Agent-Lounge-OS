@@ -11,6 +11,7 @@ pub mod plugin;
 mod probe;
 pub mod quota_manager;
 pub mod subscription_usage;
+pub mod supervisor;
 
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ pub use probe::{
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, spawn_quota_pump,
 };
+pub use supervisor::spawn_supervisor;
 
 /// Paylaşılan, thread-safe servis yöneticisi (EchoMind `Arc<Mutex<T>>` kalıbı).
 pub type SharedServices = Arc<Mutex<ServiceManager>>;

@@ -18,7 +18,7 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, collect_quota_state_with_keys, spawn_event_pump, spawn_quota_pump,
-    MemoryBridge, ServiceManager, SharedServices,
+    spawn_supervisor, MemoryBridge, ServiceManager, SharedServices,
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -98,6 +98,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             dispatcher.attach_app(app.handle().clone());
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let handle = app.handle().clone();
+            let supervisor_handle = app.handle().clone();
+            let supervisor_services = services.clone();
             let quota_handle = app.handle().clone();
             let quota_services = services.clone();
             let quota_store = store.clone();
@@ -120,6 +122,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                     );
                 }
                 spawn_quota_pump(quota_handle, quota_services, quota_store);
+                spawn_supervisor(supervisor_handle, supervisor_services);
                 spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 if let Err(err) = dispatcher.listen().await {
