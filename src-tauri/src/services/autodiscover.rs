@@ -232,7 +232,7 @@ pub fn find_grok_bot() -> Option<DiscoveredTool> {
         .or_else(|| running.then(|| PathBuf::from("Grok Bot")))
         .map(|path| {
             let mut tool = DiscoveredTool::host_app(SOURCE_GROK, "Grok Bot");
-            if path != PathBuf::from("Grok Bot") {
+            if path.as_os_str() != "Grok Bot" {
                 tool.origin_path = Some(path.display().to_string());
             }
             tool.detail = Some(host_detail(true, running));
@@ -261,7 +261,7 @@ pub fn find_antigravity() -> Option<DiscoveredTool> {
         .or_else(|| running.then(|| PathBuf::from("Antigravity")))
         .map(|path| {
             let mut tool = DiscoveredTool::host_app(SOURCE_ANTIGRAVITY, "Antigravity");
-            if path != PathBuf::from("Antigravity") {
+            if path.as_os_str() != "Antigravity" {
                 tool.origin_path = Some(path.display().to_string());
             }
             tool.detail = Some(host_detail(true, running));
