@@ -26,6 +26,7 @@ import {
   AMBER_THRESHOLD,
   BUS_UI_EVENT,
   DECISION_GATE_EVENT,
+  LAYA_ENGINE_EVENT,
   LATENCY_SPARK_CAP,
   MODEL_PULL_EVENT,
   QUOTA_UI_EVENT,
@@ -36,6 +37,7 @@ import {
   type DeadSymbol,
   type DecisionGateStatus,
   type IndexNotice,
+  type LayaEngineStatus,
   type IndexSnapshot,
   type LoungeExperience,
   type LoungeMessage,
@@ -76,6 +78,7 @@ type LoungeContextValue = {
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
   decisionGate: DecisionGateStatus | null;
+  layaEngine: LayaEngineStatus | null;
   decisionTelemetry: LoungeTelemetry | null;
   decisionLatencyHistory: number[];
   decisionMsgPerMin: number;
@@ -118,6 +121,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
+  const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
   const [decisionLatencyHistory, setDecisionLatencyHistory] = useState<number[]>([]);
   const [decisionMsgTimes, setDecisionMsgTimes] = useState<number[]>([]);
@@ -211,6 +215,11 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         setDecisionGate(await invoke<DecisionGateStatus>("get_decision_gate_status"));
       } catch {
         /* DecisionGate henüz yönetilmiyor olabilir */
+      }
+      try {
+        setLayaEngine(await invoke<LayaEngineStatus>("get_laya_engine_status"));
+      } catch {
+        /* Laya Engine henüz yönetilmiyor olabilir */
       }
       try {
         const state = await invoke<QuotaState>("get_quota_state");
@@ -485,6 +494,13 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           }),
         );
         unlisteners.push(
+          await listen<LayaEngineStatus>(LAYA_ENGINE_EVENT, (event) => {
+            if (!cancelled) {
+              setLayaEngine(event.payload);
+            }
+          }),
+        );
+        unlisteners.push(
           await listen<ApprovalRequest>("lounge://routing-approval", (event) => {
             if (!cancelled) {
               setApproval(event.payload);
@@ -530,6 +546,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       policy,
       approval,
       decisionGate,
+      layaEngine,
       decisionTelemetry,
       decisionLatencyHistory,
       decisionMsgPerMin,
@@ -564,6 +581,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       policy,
       approval,
       decisionGate,
+      layaEngine,
       decisionTelemetry,
       decisionLatencyHistory,
       decisionMsgPerMin,

@@ -60,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     amberTools,
     approval,
     decisionGate,
+    layaEngine,
     decisionTelemetry,
     applyModel,
     enableLaya,
@@ -81,7 +82,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [decisionGate?.phase]);
   const layaBanner =
     decisionGate?.phase === "available" ||
-    (Boolean(decisionGate) && decisionGate?.phase !== "ready" && !layaDismissed);
+    (Boolean(decisionGate) &&
+      decisionGate?.phase !== "ready" &&
+      !layaDismissed &&
+      layaEngine?.phase !== "downloading");
   const statusBanner = approval || indexing || indexNotice || layaBanner;
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding

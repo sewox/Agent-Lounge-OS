@@ -10,6 +10,7 @@ import {
   MOCK_DISCOVERY,
   MOCK_RECOMMENDED_MODELS,
   MODEL_PULL_EVENT,
+  LAYA_ENGINE_EVENT,
   formatDiscoveryLocation,
   hfOfferToTool,
   hostLabelsFor,
@@ -23,6 +24,7 @@ import {
   type HfModelOffer,
   type PullProgress,
   type RecommendedModels,
+  type LayaEngineStatus,
 } from "@/lib/lounge";
 import { Pip } from "@/components/ui";
 
@@ -90,6 +92,7 @@ export function OnboardingPanel() {
   const [saving, setSaving] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [progress, setProgress] = useState<PullProgress | null>(null);
+  const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const scan = useCallback(async () => {
@@ -162,6 +165,52 @@ export function OnboardingPanel() {
       void listen<PullProgress>(MODEL_PULL_EVENT, (event) => {
         if (!cancelled) {
           setProgress(event.payload);
+        }
+      }).then((fn) => {
+        if (cancelled) {
+          void fn();
+          return;
+        }
+        unlisten = fn;
+      });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(boot);
+      if (unlisten) {
+        void unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    const boot = window.setTimeout(() => {
+      void invoke<LayaEngineStatus>("get_laya_engine_status")
+        .then((status) => {
+          if (!cancelled) {
+            setLayaEngine(status);
+          }
+        })
+        .catch(() => {
+          /* komut henüz yoksa sessiz */
+        });
+      void invoke<LayaEngineStatus>("ensure_laya_engine").then((status) => {
+        if (!cancelled) {
+          setLayaEngine(status);
+        }
+      }).catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+      void listen<LayaEngineStatus>(LAYA_ENGINE_EVENT, (event) => {
+        if (!cancelled) {
+          setLayaEngine(event.payload);
         }
       }).then((fn) => {
         if (cancelled) {
@@ -369,6 +418,8 @@ export function OnboardingPanel() {
         </div>
       ) : null}
 
+      <LayaEngineBlock status={layaEngine} />
+
       <HfCatalogBlock
         device={device}
         offers={offers}
@@ -528,6 +579,56 @@ function InstallLink({ label, href }: { label: string; href: string }) {
       <Icon name="warn" className="h-3 w-3 text-error" />
       {label}
     </a>
+  );
+}
+
+function LayaEngineBlock({ status }: { status: LayaEngineStatus | null }) {
+  const percent =
+    status && status.total > 0
+      ? Math.min(100, Math.round((status.completed / status.total) * 100))
+      : null;
+  const downloading = status?.phase === "downloading";
+  return (
+    <div className="rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-3 py-2">
+        <div className="min-w-0">
+          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+            OpenJev Laya
+          </h2>
+          <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+            convaiinnovations/laya ağırlıkları uygulama dizinine indirilir; DecisionGate yalnızca
+            doğrulanmış yerel dosyaları yükler.
+          </p>
+        </div>
+        <span
+          className={`shrink-0 font-mono text-[11px] ${
+            status?.phase === "failed"
+              ? "text-error"
+              : status?.phase === "ready"
+                ? "text-secondary"
+                : "text-on-surface-variant"
+          }`}
+        >
+          {status?.label ?? "Laya Engine: Downloading"}
+        </span>
+      </div>
+      {downloading || status?.phase === "failed" ? (
+        <div className="px-3 py-2">
+          <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-on-surface-variant">
+            <span className="truncate">{status?.error ?? status?.message ?? "hazırlanıyor"}</span>
+            <span>{percent != null ? `${percent}%` : downloading ? "…" : ""}</span>
+          </div>
+          {downloading ? (
+            <div className="mt-1 h-1.5 overflow-hidden rounded bg-surface-container-high">
+              <div
+                className={`h-full bg-primary ${percent == null ? "w-1/3 animate-pulse" : ""}`}
+                style={{ width: percent != null ? `${percent}%` : undefined }}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
