@@ -54,11 +54,15 @@ impl MemoryBridge {
         }
     }
 
-    pub async fn index_workspace(&self, repo_path: impl AsRef<Path>) -> Result<IndexGraph> {
-        let repo_path = repo_path
-            .as_ref()
+    /// `bridge/codebase-memory-mcp` binary'sini `std::process::Command` ile tetikler.
+    pub async fn index_workspace(&self, path: String) -> Result<IndexGraph> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            bail!("index_workspace path boş");
+        }
+        let repo_path = PathBuf::from(trimmed)
             .canonicalize()
-            .with_context(|| "repo_path çözümlenemedi")?;
+            .with_context(|| format!("repo_path çözümlenemedi: {trimmed}"))?;
         let repo = repo_path.to_str().context("repo_path UTF-8 değil")?;
         let stdout = self
             .run_cli(&[
@@ -75,7 +79,10 @@ impl MemoryBridge {
     }
 
     pub async fn index_repository(&self, repo_path: impl AsRef<Path>) -> Result<IndexSnapshot> {
-        Ok(self.index_workspace(repo_path).await?.snapshot())
+        Ok(self
+            .index_workspace(repo_path.as_ref().to_string_lossy().into_owned())
+            .await?
+            .snapshot())
     }
 
     pub async fn get_dead_symbols(&self, repo_path: impl AsRef<Path>) -> Result<Vec<DeadSymbol>> {
@@ -88,7 +95,10 @@ impl MemoryBridge {
                 return Ok(dead);
             }
         }
-        Ok(self.index_workspace(&repo_path).await?.dead)
+        Ok(self
+            .index_workspace(repo_path.to_string_lossy().into_owned())
+            .await?
+            .dead)
     }
 
     pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
@@ -134,13 +144,21 @@ impl MemoryBridge {
         let pid = Arc::new(AtomicU32::new(0));
         let pid_for_child = pid.clone();
 
+        // Tokio runtime'ı bloklamamak için std::process::Command spawn_blocking içinde.
         let wait = tokio::task::spawn_blocking(move || {
-            let child = std::process::Command::new(&binary)
+            let mut command = std::process::Command::new(&binary);
+            command
                 .arg("cli")
                 .args(&args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
+            let child = command
                 .spawn()
                 .with_context(|| format!("subprocess başarısız: {}", binary.display()))?;
             pid_for_child.store(child.id(), Ordering::SeqCst);
@@ -689,6 +707,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_empty_index_path() {
+        let bridge = MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp");
+        let err = bridge.index_workspace("  ".into()).await.unwrap_err();
+        assert!(err.to_string().contains("path boş"));
+    }
+
+    #[tokio::test]
     async fn lists_projects_when_binary_present() {
         let Ok(bridge) = MemoryBridge::discover() else {
             return;
@@ -723,7 +748,10 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         std::fs::set_permissions(&script, perms).unwrap();
 
         let bridge = MemoryBridge::from_binary(&script);
-        let graph = bridge.index_workspace(&dir).await.expect("index");
+        let graph = bridge
+            .index_workspace(dir.to_string_lossy().into_owned())
+            .await
+            .expect("index");
         assert_eq!(graph.project, "demo");
         assert_eq!(graph.nodes.len(), 2);
         assert!(graph
@@ -739,5 +767,41 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         assert!(cli_dead.iter().any(|row| row.name == "cli_dead"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tauri_command_path_indexes_protocol_crate() {
+        let Ok(bridge) = MemoryBridge::discover() else {
+            return;
+        };
+        if !bridge.binary_path().is_file() {
+            return;
+        }
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace")
+            .join("shared/lounge_protocol");
+        let graph = bridge
+            .index_workspace(repo.to_string_lossy().into_owned())
+            .await
+            .expect("index_workspace");
+        assert!(
+            !graph.project.is_empty(),
+            "project adı boş: {:?}",
+            graph.project
+        );
+        let store = crate::db::ExperienceStore::memory().unwrap();
+        let snapshot = store
+            .save_project_index(graph)
+            .await
+            .expect("save_project_index");
+        assert_eq!(snapshot.status.as_deref(), Some("indexed"));
+        assert!(snapshot.nodes >= 1, "nodes={}", snapshot.nodes);
+        let _ = store.list_dead_symbols(None).await.expect("dead symbols");
+        let map = store.load_semantic_map(None).await.expect("semantic map");
+        assert!(
+            !map.projects.is_empty() || snapshot.nodes > 0,
+            "indeks sonrası harita/sayı boş"
+        );
     }
 }

@@ -1,9 +1,14 @@
+use std::collections::{BTreeMap, HashSet};
+
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::ExperienceStore;
-use crate::models::{now_rfc3339, DeadSymbol, IndexGraph, IndexSnapshot, ProjectSummary};
+use crate::models::{
+    now_rfc3339, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectSummary,
+    SemanticMap, SemanticProject,
+};
 
 pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -73,6 +78,16 @@ impl ExperienceStore {
         })
         .await
         .context("project_index list join")?
+    }
+
+    pub async fn load_semantic_map(&self, project_id: Option<String>) -> Result<SemanticMap> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            load_semantic_map_blocking(&conn, project_id.as_deref())
+        })
+        .await
+        .context("project_index semantic map join")?
     }
 }
 
@@ -315,6 +330,118 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     Ok(projects)
 }
 
+fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Result<SemanticMap> {
+    let sql = r#"
+        SELECT project_id, repo_path, kind, name, file_path, line, target, ref_count, detail
+        FROM project_index
+        WHERE ?1 IS NULL OR project_id = ?1
+        ORDER BY project_id, kind, name
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok(MapRow {
+            project_id: row.get(0)?,
+            repo_path: row.get(1)?,
+            kind: row.get(2)?,
+            name: row.get(3)?,
+            file_path: row.get(4)?,
+            line: row.get(5)?,
+            target: row.get(6)?,
+            ref_count: row.get(7)?,
+            detail: row.get(8)?,
+        })
+    })?;
+
+    let mut by_project: BTreeMap<String, SemanticProject> = BTreeMap::new();
+    for row in rows {
+        let row = row?;
+        let project = by_project
+            .entry(row.project_id.clone())
+            .or_insert_with(|| SemanticProject {
+                name: row.project_id.clone(),
+                repo_path: row.repo_path.clone(),
+                ..SemanticProject::default()
+            });
+        if project.repo_path.is_empty() && !row.repo_path.is_empty() {
+            project.repo_path = row.repo_path.clone();
+        }
+        match row.kind.as_str() {
+            "node" => {
+                let id = row
+                    .target
+                    .clone()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| row.name.clone());
+                project.nodes.push(AstNode {
+                    id,
+                    name: row.name,
+                    kind: row.detail.unwrap_or_default(),
+                    file: row.file_path,
+                    line: row.line,
+                    ref_count: row.ref_count.max(0) as u64,
+                });
+            }
+            "reference" => {
+                project.references.push(CodeReference {
+                    from_id: row.name,
+                    to_id: row.target.unwrap_or_default(),
+                    file: row.file_path,
+                    line: row.line,
+                });
+            }
+            "dead" | "broken" => {
+                project.dead.push(DeadSymbol {
+                    name: row.name,
+                    kind: if row.kind == "broken" {
+                        "broken".into()
+                    } else {
+                        "unused".into()
+                    },
+                    file: row.file_path,
+                    line: row.line,
+                    detail: row.detail,
+                    project_id: Some(row.project_id),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let projects = by_project
+        .into_values()
+        .map(|mut project| {
+            project.node_count = project.nodes.len() as u64;
+            project.edge_count = project.references.len() as u64;
+            let mut files = HashSet::new();
+            for node in &project.nodes {
+                if let Some(file) = node.file.as_deref().filter(|path| !path.is_empty()) {
+                    files.insert(file.to_string());
+                }
+            }
+            for edge in &project.references {
+                if let Some(file) = edge.file.as_deref().filter(|path| !path.is_empty()) {
+                    files.insert(file.to_string());
+                }
+            }
+            project.files = files.len() as u64;
+            project
+        })
+        .collect();
+    Ok(SemanticMap::from_projects(projects))
+}
+
+struct MapRow {
+    project_id: String,
+    repo_path: String,
+    kind: String,
+    name: String,
+    file_path: Option<String>,
+    line: Option<i64>,
+    target: Option<String>,
+    ref_count: i64,
+    detail: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +539,20 @@ mod tests {
         assert_eq!(projects[0].nodes, 2);
         assert_eq!(projects[0].edges, 1);
         assert_eq!(projects[0].files, Some(3));
+
+        let map = store
+            .load_semantic_map(Some("lounge".into()))
+            .await
+            .expect("map");
+        assert_eq!(map.projects.len(), 1);
+        assert_eq!(map.projects[0].nodes.len(), 2);
+        assert_eq!(map.projects[0].references.len(), 1);
+        assert_eq!(map.projects[0].dead.len(), 2);
+        assert_eq!(map.projects[0].files, 3);
+        assert!(map.projects[0]
+            .nodes
+            .iter()
+            .any(|node| node.name == "foo" && node.ref_count == 1));
 
         store
             .save_project_index(IndexGraph {

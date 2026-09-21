@@ -53,13 +53,21 @@ fn host_ollama_app_present() -> bool {
 }
 
 fn host_ollama_app_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("/Applications/Ollama.app")];
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join("Applications/Ollama.app"));
+    let mut dirs = Vec::new();
+    if cfg!(target_os = "macos") {
+        dirs.push(PathBuf::from("/Applications/Ollama.app"));
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join("Applications/Ollama.app"));
+        }
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         dirs.push(PathBuf::from(local).join("Programs/Ollama"));
     }
+    if let Some(pf) = std::env::var_os("PROGRAMFILES") {
+        dirs.push(PathBuf::from(pf).join("Ollama"));
+    }
+    dirs.push(PathBuf::from("/opt/Ollama"));
+    dirs.push(PathBuf::from("/usr/share/ollama"));
     dirs
 }
 

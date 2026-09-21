@@ -16,16 +16,48 @@ pub struct ToolQuota {
     pub source: String,
     #[serde(default)]
     pub exhausted: bool,
+    #[serde(default)]
+    pub access_mode: String,
+    #[serde(default)]
+    pub host_id: Option<String>,
+}
+
+impl Default for ToolQuota {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            tool: String::new(),
+            kind: "local".into(),
+            unit: String::new(),
+            used: String::new(),
+            remaining: String::new(),
+            reset: String::new(),
+            percent: None,
+            tone: "ok".into(),
+            label: String::new(),
+            source: String::new(),
+            exhausted: false,
+            access_mode: "local".into(),
+            host_id: None,
+        }
+    }
 }
 
 impl ToolQuota {
     pub fn is_exhausted(&self) -> bool {
         self.exhausted || self.percent.map(|value| value >= 100.0).unwrap_or(false)
     }
+
+    pub fn with_mode(mut self, mode: &str, host: Option<&str>) -> Self {
+        self.access_mode = mode.to_string();
+        self.kind = mode.to_string();
+        self.host_id = host.map(str::to_string);
+        self
+    }
 }
 
 pub const AMBER_THRESHOLD: f32 = 80.0;
-pub const QUOTA_EVENT: &str = "quota-state";
+pub const QUOTA_EVENT: &str = "quota-update";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QuotaState {

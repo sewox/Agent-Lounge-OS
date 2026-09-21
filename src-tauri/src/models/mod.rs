@@ -1,6 +1,7 @@
 //! Domain modelleri ve mesaj şemaları.
 
 mod discovery;
+mod hf;
 mod memory;
 mod policy;
 mod protocol;
@@ -8,12 +9,13 @@ mod quota;
 mod service;
 
 pub use discovery::{
-    sqlite_tool_type, tool_id, ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource,
-    SystemTool,
+    access_mode_for, format_host_labels, host_display_name, sqlite_tool_type, tool_id,
+    ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource, SystemTool,
 };
+pub use hf::{DeviceProfile, HfModelOffer, PullProgress, RecommendedModels, MODEL_PULL_EVENT};
 pub use memory::{
     merge_project_summaries, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot,
-    ProjectList, ProjectSummary,
+    ProjectList, ProjectSummary, SemanticMap, SemanticProject,
 };
 pub use policy::{
     decide_route, is_kernel, AgentTrigger, ApprovalKind, ApprovalRequest, QuotaExhaustedAction,
@@ -26,4 +28,4 @@ pub use protocol::{
     TASK_FAILED, TASK_REQUESTED,
 };
 pub use quota::{NatsUiEvent, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT};
-pub use service::{ServiceHealth, ServiceId, ServiceReport};
+pub use service::{ServiceHealth, ServiceId, ServiceReport, SERVICE_EVENT};
