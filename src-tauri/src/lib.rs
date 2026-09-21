@@ -11,14 +11,14 @@ use infra::BusManager;
 use kernel::{default_model_lock, Dispatcher};
 use lounge_protocol::LoungeMessage;
 use models::{
-    merge_project_summaries, ConnectedTool, DeadSymbol, DiscoveredTool, DiscoveryReport,
-    IndexSnapshot, LoungeExperience, ProjectSummary, QuotaState, RoutingPolicy, RoutingVote,
-    ServiceReport, ToolQuota,
+    merge_project_summaries, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
+    DiscoveryReport, IndexSnapshot, LoungeExperience, ProjectSummary, QuotaState,
+    RecommendedModels, RoutingPolicy, RoutingVote, SemanticMap, ServiceReport, ToolQuota,
 };
 use services::autodiscover::discovery_report;
 use services::{
-    collect_quota_state, spawn_event_pump, spawn_quota_pump, MemoryBridge, ServiceManager,
-    SharedServices,
+    api_keys_from_store, collect_quota_state_with_keys, spawn_event_pump, spawn_quota_pump,
+    MemoryBridge, ServiceManager, SharedServices,
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -100,6 +100,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             let handle = app.handle().clone();
             let quota_handle = app.handle().clone();
             let quota_services = services.clone();
+            let quota_store = store.clone();
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
@@ -111,14 +112,15 @@ pub fn run_with_start_route(start_route: &'static str) {
                     let mut manager = services.lock().await;
                     let report = manager.ensure_all().await;
                     log::info!(
-                        "bootstrap lmr={} nats={} memory={}",
+                        "bootstrap lmr={} nats={} memory={} plugin={}",
                         report.ollama.running,
                         report.nats.running,
-                        report.memory.running
+                        report.memory.running,
+                        report.plugin.running
                     );
                 }
-                spawn_quota_pump(quota_handle, quota_services);
-                let _pump = spawn_event_pump(handle);
+                spawn_quota_pump(quota_handle, quota_services, quota_store);
+                spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
@@ -132,9 +134,13 @@ pub fn run_with_start_route(start_route: &'static str) {
             service_status,
             index_workspace,
             get_dead_symbols,
+            get_semantic_map,
             get_kernel_model,
             set_kernel_model,
             list_ollama_models,
+            get_device_profile,
+            list_recommended_models,
+            pull_lmr_model,
             list_experiences,
             list_projects,
             list_quotas,
@@ -169,16 +175,17 @@ async fn service_status(state: tauri::State<'_, SharedServices>) -> Result<Servi
 async fn index_workspace(
     services: tauri::State<'_, SharedServices>,
     store: tauri::State<'_, ExperienceStore>,
-    repo_path: Option<String>,
+    path: String,
 ) -> Result<IndexSnapshot, String> {
+    if path.trim().is_empty() {
+        return Err("path boş".into());
+    }
     let bridge = {
         let manager = services.lock().await;
         manager.memory().clone()
     };
-
-    let path = repo_path.map(PathBuf::from).unwrap_or_else(workspace_root);
     let graph = bridge
-        .index_workspace(&path)
+        .index_workspace(path)
         .await
         .map_err(|err| err.to_string())?;
     store
@@ -189,41 +196,24 @@ async fn index_workspace(
 
 #[tauri::command]
 async fn get_dead_symbols(
-    services: tauri::State<'_, SharedServices>,
     store: tauri::State<'_, ExperienceStore>,
-    repo_path: Option<String>,
+    project_id: Option<String>,
 ) -> Result<Vec<DeadSymbol>, String> {
-    let listed = store
-        .list_dead_symbols(None)
-        .await
-        .map_err(|err| err.to_string())?;
-    let indexed = store
-        .list_indexed_projects()
-        .await
-        .map_err(|err| err.to_string())?;
-    if !listed.is_empty() || !indexed.is_empty() {
-        return Ok(listed);
-    }
-
-    let bridge = {
-        let manager = services.lock().await;
-        manager.memory().clone()
-    };
-    let path = repo_path.map(PathBuf::from).unwrap_or_else(workspace_root);
-    let mut graph = bridge
-        .index_workspace(&path)
-        .await
-        .map_err(|err| err.to_string())?;
-    if graph.dead.is_empty() {
-        if let Ok(dead) = bridge.get_dead_symbols(&path).await {
-            graph.dead = dead;
-        }
-    }
     store
-        .save_project_index(graph.clone())
+        .list_dead_symbols(project_id)
         .await
-        .map_err(|err| err.to_string())?;
-    Ok(graph.dead)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_semantic_map(
+    store: tauri::State<'_, ExperienceStore>,
+    project_id: Option<String>,
+) -> Result<SemanticMap, String> {
+    store
+        .load_semantic_map(project_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -251,6 +241,44 @@ async fn list_ollama_models(
     let mut manager = state.lock().await;
     let _ = manager.ensure_all().await;
     manager.ollama_models().await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_device_profile() -> DeviceProfile {
+    services::hardware::device_profile()
+}
+
+#[tauri::command]
+async fn list_recommended_models(
+    state: tauri::State<'_, SharedServices>,
+) -> Result<RecommendedModels, String> {
+    let device = services::hardware::device_profile();
+    let installed = {
+        let mut manager = state.lock().await;
+        let _ = manager.ensure_all().await;
+        manager.ollama_models().await.unwrap_or_default()
+    };
+    services::hf_catalog::list_recommended(device, &installed)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn pull_lmr_model(
+    app: tauri::AppHandle,
+    services: tauri::State<'_, SharedServices>,
+    dispatcher: tauri::State<'_, Dispatcher>,
+    hf_id: String,
+) -> Result<String, String> {
+    let name = {
+        let mut manager = services.lock().await;
+        manager
+            .pull_hf_model(&app, &hf_id)
+            .await
+            .map_err(|err| err.to_string())?
+    };
+    dispatcher.set_model(name.clone()).await;
+    Ok(name)
 }
 
 #[tauri::command]
@@ -284,21 +312,28 @@ async fn list_projects(
 }
 
 #[tauri::command]
-async fn list_quotas(state: tauri::State<'_, SharedServices>) -> Result<Vec<ToolQuota>, String> {
-    Ok(get_quota_state(state).await?.quotas)
+async fn list_quotas(
+    services: tauri::State<'_, SharedServices>,
+    store: tauri::State<'_, ExperienceStore>,
+) -> Result<Vec<ToolQuota>, String> {
+    Ok(get_quota_state(services, store).await?.quotas)
 }
 
 #[tauri::command]
-async fn get_quota_state(state: tauri::State<'_, SharedServices>) -> Result<QuotaState, String> {
+async fn get_quota_state(
+    services: tauri::State<'_, SharedServices>,
+    store: tauri::State<'_, ExperienceStore>,
+) -> Result<QuotaState, String> {
     let (ollama, nats_monitor, memory) = {
-        let manager = state.lock().await;
+        let manager = services.lock().await;
         (
             manager.ollama_endpoint(),
-            "http://127.0.0.1:8222".to_string(),
+            manager.nats_monitor_url(),
             manager.memory().clone(),
         )
     };
-    Ok(collect_quota_state(&ollama, &nats_monitor, &memory).await)
+    let keys = api_keys_from_store(&store).await;
+    Ok(collect_quota_state_with_keys(&ollama, &nats_monitor, &memory, &keys).await)
 }
 
 #[tauri::command]

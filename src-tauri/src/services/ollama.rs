@@ -1,17 +1,23 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
+use super::hf_catalog::{
+    gguf_filename_for, hf_gguf_resolve_url, is_hf_redirect_block, is_installed,
+    normalize_pull_name, strip_hf_prefix, with_quant_tag,
+};
 use super::lmr_runtime::ensure_lmr_runtime;
 use super::probe::{
     http_endpoint, lounge_lmr_dir, lounge_ollama_host, lounge_ollama_models_dir,
     lounge_ollama_port, wait_until,
 };
-use crate::models::{ServiceHealth, ServiceId};
+use crate::models::{PullProgress, ServiceHealth, ServiceId, MODEL_PULL_EVENT};
 
 const SERVICE_NAME: &str = "LMR";
 
@@ -172,6 +178,27 @@ impl OllamaService {
         probe_ollama_models(&self.endpoint()).await
     }
 
+    pub async fn pull_hf_model(&self, app: &AppHandle, hf_id: &str) -> Result<String> {
+        self.pull_hf_model_with(hf_id, |progress| emit_pull(app, &progress))
+            .await
+    }
+
+    pub async fn pull_hf_model_with<F>(&self, hf_id: &str, mut on_progress: F) -> Result<String>
+    where
+        F: FnMut(PullProgress),
+    {
+        match pull_hf_model_from(&self.endpoint(), hf_id, &mut on_progress).await {
+            Ok(name) => Ok(name),
+            Err(err) if is_hf_redirect_block(&err.to_string()) => {
+                log::warn!(
+                    "LMR Hugging Face CDN yönlendirmesini reddetti, GGUF doğrudan indirilecek: {err}"
+                );
+                import_hf_gguf(&self.config, hf_id, &mut on_progress).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     async fn fetch_models(&self) -> Result<Vec<String>> {
         probe_ollama_models(&self.endpoint()).await
     }
@@ -179,7 +206,7 @@ impl OllamaService {
     fn reap_exited_child(&mut self) {
         if let Some(child) = self.child.as_mut() {
             if let Ok(Some(status)) = child.try_wait() {
-                log::warn!("LMR süreci sonlandı: {status}");
+                log::error!("kritik servis down: LMR süreci sonlandı ({status})");
                 self.child = None;
                 self.started_by_us = false;
             }
@@ -234,6 +261,312 @@ async fn probe_ollama_models(endpoint: &str) -> Result<Vec<String>> {
         .into_iter()
         .filter_map(|model| model.name)
         .collect())
+}
+
+pub async fn pull_hf_model_from<F>(
+    endpoint: &str,
+    hf_id: &str,
+    on_progress: &mut F,
+) -> Result<String>
+where
+    F: FnMut(PullProgress),
+{
+    let pull_name = normalize_pull_name(hf_id)?;
+    let hf_id = pull_name
+        .strip_prefix("hf.co/")
+        .unwrap_or(pull_name.as_str())
+        .to_string();
+    let mut progress = PullProgress {
+        hf_id: hf_id.clone(),
+        pull_name: pull_name.clone(),
+        status: "çekiliyor".into(),
+        ..PullProgress::default()
+    };
+    on_progress(progress.clone());
+
+    let url = format!("{}/api/pull", endpoint.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("LMR pull istemcisi kurulamadı")?;
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": pull_name,
+            "name": pull_name,
+            "stream": true
+        }))
+        .send()
+        .await
+        .with_context(|| format!("LMR pull başarısız: {url}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        progress.done = true;
+        progress.error = Some(format!("LMR pull HTTP {status}: {body}"));
+        on_progress(progress.clone());
+        bail!(
+            "LMR pull HTTP {status}: {}",
+            progress.error.clone().unwrap_or_default()
+        );
+    }
+
+    let mut buffer = String::new();
+    let mut stream = response;
+    let mut succeeded = false;
+    loop {
+        match stream.chunk().await {
+            Ok(Some(chunk)) => {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(idx) = buffer.find('\n') {
+                    let line = buffer[..idx].trim().to_string();
+                    buffer.drain(..=idx);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match apply_pull_line(&mut progress, &line) {
+                        ApplyPull::Continue => on_progress(progress.clone()),
+                        ApplyPull::Success => {
+                            succeeded = true;
+                            progress.done = true;
+                            progress.status = "success".into();
+                            on_progress(progress.clone());
+                        }
+                        ApplyPull::Failed(err) => {
+                            progress.done = true;
+                            progress.error = Some(err.clone());
+                            on_progress(progress.clone());
+                            bail!("{err}");
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                progress.done = true;
+                progress.error = Some(err.to_string());
+                on_progress(progress.clone());
+                return Err(err.into());
+            }
+        }
+        if succeeded {
+            break;
+        }
+    }
+
+    if !succeeded {
+        if !buffer.trim().is_empty() {
+            match apply_pull_line(&mut progress, buffer.trim()) {
+                ApplyPull::Success => succeeded = true,
+                ApplyPull::Failed(err) => {
+                    progress.done = true;
+                    progress.error = Some(err.clone());
+                    on_progress(progress.clone());
+                    bail!("{err}");
+                }
+                ApplyPull::Continue => {}
+            }
+        }
+        if !succeeded {
+            progress.done = true;
+            progress.error = Some("LMR pull tamamlanmadı".into());
+            on_progress(progress.clone());
+            bail!("LMR pull tamamlanmadı");
+        }
+    }
+
+    let tags = probe_ollama_models(endpoint).await.unwrap_or_default();
+    Ok(resolve_installed_name(&hf_id, &pull_name, &tags))
+}
+
+#[derive(Debug)]
+enum ApplyPull {
+    Continue,
+    Success,
+    Failed(String),
+}
+
+fn apply_pull_line(progress: &mut PullProgress, line: &str) -> ApplyPull {
+    let value: serde_json::Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(_) => return ApplyPull::Continue,
+    };
+    if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
+        if !err.is_empty() {
+            return ApplyPull::Failed(err.to_string());
+        }
+    }
+    if let Some(status) = value.get("status").and_then(|v| v.as_str()) {
+        progress.status = status.to_string();
+        if status.eq_ignore_ascii_case("success") {
+            return ApplyPull::Success;
+        }
+    }
+    if let Some(digest) = value.get("digest").and_then(|v| v.as_str()) {
+        progress.digest = Some(digest.to_string());
+    }
+    if let Some(total) = value.get("total").and_then(|v| v.as_u64()) {
+        progress.total = total;
+    }
+    if let Some(completed) = value.get("completed").and_then(|v| v.as_u64()) {
+        progress.completed = completed;
+    }
+    ApplyPull::Continue
+}
+
+fn resolve_installed_name(hf_id: &str, pull_name: &str, tags: &[String]) -> String {
+    if is_installed(hf_id, pull_name, tags) {
+        tags.iter()
+            .find(|tag| is_installed(hf_id, pull_name, std::slice::from_ref(*tag)))
+            .cloned()
+            .unwrap_or_else(|| pull_name.to_string())
+    } else {
+        pull_name.to_string()
+    }
+}
+
+async fn import_hf_gguf<F>(
+    config: &OllamaConfig,
+    hf_id: &str,
+    on_progress: &mut F,
+) -> Result<String>
+where
+    F: FnMut(PullProgress),
+{
+    let repo = strip_hf_prefix(hf_id).to_string();
+    let pull_name = with_quant_tag(&normalize_pull_name(&repo)?, "Q4_K_M");
+    let filename = gguf_filename_for(&repo);
+    let mut progress = PullProgress {
+        hf_id: repo.clone(),
+        pull_name: pull_name.clone(),
+        status: format!("Hugging Face GGUF indiriliyor ({filename})"),
+        ..PullProgress::default()
+    };
+    on_progress(progress.clone());
+
+    let imports = lounge_lmr_dir().join("imports");
+    tokio::fs::create_dir_all(&imports)
+        .await
+        .with_context(|| format!("import dizini oluşturulamadı: {}", imports.display()))?;
+    let dest = imports.join(&filename);
+    download_hf_gguf(&repo, &filename, &dest, &mut progress, on_progress).await?;
+
+    progress.status = "LMR'ye aktarılıyor (ollama create)".into();
+    on_progress(progress.clone());
+    ollama_create_from_gguf(config, &pull_name, &dest).await?;
+    let _ = tokio::fs::remove_file(&dest).await;
+
+    let tags = probe_ollama_models(&http_endpoint(&config.host, config.port))
+        .await
+        .unwrap_or_default();
+    progress.done = true;
+    progress.status = "success".into();
+    on_progress(progress.clone());
+    Ok(resolve_installed_name(&repo, &pull_name, &tags))
+}
+
+async fn download_hf_gguf<F>(
+    hf_id: &str,
+    filename: &str,
+    dest: &Path,
+    progress: &mut PullProgress,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(PullProgress),
+{
+    let url = hf_gguf_resolve_url(hf_id, filename);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::limited(20))
+        .user_agent("Agent-Lounge-OS/0.1 (LMR)")
+        .build()
+        .context("HF indirme istemcisi kurulamadı")?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("Hugging Face GGUF alınamadı: {url}"))?;
+    if !response.status().is_success() {
+        bail!("Hugging Face GGUF HTTP {} ({url})", response.status());
+    }
+    progress.total = response.content_length().unwrap_or(0);
+    progress.completed = 0;
+    on_progress(progress.clone());
+
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .with_context(|| format!("GGUF yazılamadı: {}", dest.display()))?;
+    let mut stream = response;
+    while let Some(chunk) = stream.chunk().await.context("GGUF indirme kesildi")? {
+        file.write_all(&chunk).await?;
+        progress.completed = progress.completed.saturating_add(chunk.len() as u64);
+        on_progress(progress.clone());
+    }
+    file.flush().await?;
+    if progress.total == 0 {
+        progress.total = progress.completed;
+    }
+    Ok(())
+}
+
+async fn ollama_create_from_gguf(config: &OllamaConfig, model: &str, gguf: &Path) -> Result<()> {
+    let binary = ensure_lmr_runtime(&config.binary).await?;
+    let gguf = gguf
+        .canonicalize()
+        .with_context(|| format!("GGUF yolu çözülemedi: {}", gguf.display()))?;
+    let modelfile_path = gguf.with_extension("Modelfile");
+    tokio::fs::write(&modelfile_path, format!("FROM {}\n", gguf.display()))
+        .await
+        .context("Modelfile yazılamadı")?;
+
+    let mut command = Command::new(&binary);
+    command
+        .arg("create")
+        .arg(model)
+        .arg("-f")
+        .arg(&modelfile_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in private_env(config) {
+        command.env(key, value);
+    }
+    apply_no_window(&mut command);
+    let output = command
+        .output()
+        .await
+        .with_context(|| format!("ollama create başlatılamadı: {}", binary.display()))?;
+    let _ = tokio::fs::remove_file(&modelfile_path).await;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "LMR create başarısız ({}): {}",
+            output.status,
+            [stderr.trim(), stdout.trim()]
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or("çıktı yok")
+        );
+    }
+    Ok(())
+}
+
+fn emit_pull(app: &AppHandle, progress: &PullProgress) {
+    match app.get_webview_window("main") {
+        Some(window) => {
+            if let Err(err) = window.emit(MODEL_PULL_EVENT, progress) {
+                log::debug!("{MODEL_PULL_EVENT} emit: {err}");
+            }
+        }
+        None => {
+            if let Err(err) = app.emit(MODEL_PULL_EVENT, progress) {
+                log::debug!("{MODEL_PULL_EVENT} emit: {err}");
+            }
+        }
+    }
 }
 
 fn models_detail(models: &[String]) -> Option<String> {
@@ -466,6 +799,69 @@ mod tests {
         assert!(host.ends_with(&format!(":{}", config.port)));
         assert!(!host.ends_with(":11434"));
         assert!(env.iter().any(|(key, _)| key == "OLLAMA_MODELS"));
+    }
+
+    #[tokio::test]
+    async fn pull_rejects_empty_id_before_http() {
+        let err = pull_hf_model_from("http://127.0.0.1:1", "", &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("boş"));
+    }
+
+    #[tokio::test]
+    async fn pull_name_must_start_with_hf_co() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let body = std::str::from_utf8(&buf).unwrap_or("");
+                assert!(body.contains("hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"));
+                let ndjson = "{\"status\":\"pulling manifest\"}\n{\"status\":\"success\"}\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ndjson}",
+                    ndjson.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let name = pull_hf_model_from(
+            &format!("http://127.0.0.1:{port}"),
+            "bartowski/Llama-3.2-1B-Instruct-GGUF",
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(name.starts_with("hf.co/"));
+    }
+
+    #[test]
+    fn pull_progress_parses_ndjson_status() {
+        let mut progress = PullProgress::default();
+        apply_pull_line(
+            &mut progress,
+            r#"{"status":"downloading","digest":"sha256:abc","total":100,"completed":40}"#,
+        );
+        assert_eq!(progress.status, "downloading");
+        assert_eq!(progress.completed, 40);
+        assert_eq!(progress.total, 100);
+        let result = apply_pull_line(&mut progress, r#"{"status":"success"}"#);
+        assert!(matches!(result, ApplyPull::Success));
+    }
+
+    #[test]
+    fn pull_error_detects_blocked_cdn_redirect() {
+        let mut progress = PullProgress::default();
+        let result = apply_pull_line(
+            &mut progress,
+            r#"{"error":"Head \"https://us.aws.cdn.hf.co/xet-bridge-us/abc\": blocked redirect to a different host"}"#,
+        );
+        match result {
+            ApplyPull::Failed(err) => assert!(is_hf_redirect_block(&err)),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

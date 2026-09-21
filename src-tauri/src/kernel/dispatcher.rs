@@ -17,9 +17,8 @@ use crate::models::{
     TaskAssignment, EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED,
     TASK_REQUESTED,
 };
-use crate::services::{chat_json, embed_model, embed_text, MemoryBridge};
+use crate::services::{chat_json, embed_model, embed_text, nats_monitor_endpoint, MemoryBridge};
 
-const NATS_MONITOR: &str = "http://127.0.0.1:8222";
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 const ANALYZE_SYSTEM: &str = r#"Sen Agent Lounge OS görev dağıtıcısısın.
@@ -275,7 +274,11 @@ impl Dispatcher {
         if decision.needs_code_analysis(&task) {
             tags.push("memory_bridge".into());
             let repo = resolve_repo_path(&task, &decision, &self.workspace_root);
-            match self.memory.index_workspace(&repo).await {
+            match self
+                .memory
+                .index_workspace(repo.to_string_lossy().into_owned())
+                .await
+            {
                 Ok(graph) => {
                     let snapshot = graph.snapshot();
                     tags.push(format!("nodes:{}", snapshot.nodes));
@@ -340,7 +343,12 @@ impl Dispatcher {
         }
 
         let policy = self.store.get_routing_policy().await.unwrap_or_default();
-        let quotas = probe_quotas(&self.ollama_endpoint, NATS_MONITOR, &self.memory).await;
+        let quotas = probe_quotas(
+            &self.ollama_endpoint,
+            &nats_monitor_endpoint(),
+            &self.memory,
+        )
+        .await;
         let to = decision
             .target_agent
             .as_deref()

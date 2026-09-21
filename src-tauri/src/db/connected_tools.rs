@@ -33,7 +33,13 @@ pub(crate) fn migrate_connected_tools(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
             UPDATE connected_tools SET
-              "type" = CASE kind WHEN 'model' THEN 'model' WHEN 'mcp' THEN 'mcp' ELSE 'cli' END,
+              "type" = CASE kind
+                WHEN 'model' THEN 'model'
+                WHEN 'mcp' THEN 'mcp'
+                WHEN 'plugin' THEN 'mcp'
+                WHEN 'app' THEN 'app'
+                ELSE 'cli'
+              END,
               config_path = COALESCE(NULLIF(config_path, ''), origin_path),
               is_active = enabled,
               last_synced = CASE
@@ -233,11 +239,14 @@ mod tests {
     use crate::models::DiscoveredTool;
 
     fn sample_tool(id_name: &str) -> DiscoveredTool {
-        let mut tool = DiscoveredTool::new("cursor", id_name, "mcp");
+        let mut tool = DiscoveredTool::new("cursor", id_name, "plugin");
         tool.command = Some("npx".into());
         tool.args = vec!["-y".into(), "demo".into()];
         tool.detail = Some("env keys: TOKEN".into());
         tool.origin_path = Some("~/.cursor/mcp.json".into());
+        tool.kind = "plugin".into();
+        tool.access_mode = "plugin".into();
+        tool.host_id = Some("cursor".into());
         tool
     }
 
@@ -305,6 +314,9 @@ mod tests {
 
         let mcp = listed.iter().find(|row| row.id == "cursor:notion").unwrap();
         assert_eq!(mcp.tool_type, "mcp");
+        assert_eq!(mcp.kind, "plugin");
+        assert_eq!(mcp.payload["access_mode"], "plugin");
+        assert_eq!(mcp.payload["host_id"], "cursor");
         assert_eq!(mcp.config_path.as_deref(), Some("~/.cursor/mcp.json"));
         assert!(mcp.is_active);
         assert!(!mcp.last_synced.is_empty());

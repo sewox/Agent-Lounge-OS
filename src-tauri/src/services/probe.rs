@@ -11,12 +11,20 @@ pub const SYSTEM_OLLAMA_PORT: u16 = 11434;
 pub const LOUNGE_OLLAMA_PORT: u16 = 18790;
 pub const DEFAULT_NATS_HOST: &str = "127.0.0.1";
 pub const DEFAULT_NATS_PORT: u16 = 4222;
+pub const DEFAULT_NATS_HTTP_PORT: u16 = 8222;
 
 const EXTRA_BIN_DIRS: &[&str] = &[
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
     "/opt/homebrew/opt/nats-server/bin",
+    "/opt/Claude",
+    "/opt/claude-desktop",
+    "/opt/Cursor",
+    "/opt/cursor",
+    "/opt/Antigravity",
+    "/opt/Ollama",
+    "/snap/bin",
 ];
 
 pub async fn tcp_ready(host: &str, port: u16, wait: Duration) -> bool {
@@ -107,6 +115,16 @@ pub fn lounge_lmr_dir() -> PathBuf {
         .unwrap_or_else(|| repo_root_from_crate().join("data/lmr"))
 }
 
+pub fn lounge_nats_dir() -> PathBuf {
+    env_nonempty("LOUNGE_NATS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root_from_crate().join("data/nats"))
+}
+
+pub fn nats_monitor_endpoint() -> String {
+    http_endpoint(DEFAULT_NATS_HOST, DEFAULT_NATS_HTTP_PORT)
+}
+
 pub fn lounge_lmr_binary_path() -> PathBuf {
     env_nonempty("LOUNGE_LMR_BINARY")
         .map(PathBuf::from)
@@ -131,8 +149,19 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
 
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".local/bin"));
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        dirs.push(PathBuf::from(&home).join(".local/bin"));
+        dirs.push(PathBuf::from(home).join("bin"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        dirs.push(local.join("Programs"));
+        dirs.push(local.join("Programs/cursor"));
+        dirs.push(local.join("Programs/Claude"));
+        dirs.push(local.join("Programs/Ollama"));
+    }
+    if let Some(pf) = std::env::var_os("PROGRAMFILES") {
+        dirs.push(PathBuf::from(pf));
     }
     dirs.extend(EXTRA_BIN_DIRS.iter().map(PathBuf::from));
 
@@ -193,5 +222,7 @@ mod tests {
         assert!(lmr.ends_with("lmr"));
         assert!(lounge_ollama_models_dir().ends_with("models"));
         assert!(!lmr.ends_with(".ollama"));
+        assert!(lounge_nats_dir().ends_with("nats"));
+        assert_eq!(nats_monitor_endpoint(), "http://127.0.0.1:8222");
     }
 }

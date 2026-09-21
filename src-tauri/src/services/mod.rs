@@ -1,12 +1,16 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
 pub mod autodiscover;
+pub mod hardware;
+pub mod hf_catalog;
 pub mod lmr_runtime;
 pub mod memory_bridge;
 pub mod nats_manager;
 pub mod ollama;
+pub mod plugin;
 mod probe;
 pub mod quota_manager;
+pub mod subscription_usage;
 
 use std::sync::Arc;
 
@@ -20,10 +24,14 @@ pub use ollama::{
     chat_json, embed_model, embed_text, parse_llm_json, private_env, OllamaConfig, OllamaService,
     DEFAULT_EMBED_MODEL,
 };
+pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
-    lounge_ollama_endpoint, system_ollama_endpoint, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
+    lounge_ollama_endpoint, nats_monitor_endpoint, system_ollama_endpoint, LOUNGE_OLLAMA_PORT,
+    SYSTEM_OLLAMA_PORT,
 };
-pub use quota_manager::{collect_quota_state, spawn_quota_pump};
+pub use quota_manager::{
+    api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, spawn_quota_pump,
+};
 
 /// Paylaşılan, thread-safe servis yöneticisi (EchoMind `Arc<Mutex<T>>` kalıbı).
 pub type SharedServices = Arc<Mutex<ServiceManager>>;
@@ -61,12 +69,31 @@ impl ServiceManager {
         self.nats.endpoint()
     }
 
+    pub fn nats_monitor_url(&self) -> String {
+        self.nats.monitor_url()
+    }
+
     pub fn ollama_endpoint(&self) -> String {
         self.ollama.endpoint()
     }
 
     pub async fn ollama_models(&self) -> anyhow::Result<Vec<String>> {
         self.ollama.list_models().await
+    }
+
+    pub async fn pull_hf_model(
+        &mut self,
+        app: &tauri::AppHandle,
+        hf_id: &str,
+    ) -> anyhow::Result<String> {
+        let health = self.ollama.ensure().await;
+        if !health.running {
+            anyhow::bail!(
+                "{}",
+                health.error.unwrap_or_else(|| "LMR ayakta değil".into())
+            );
+        }
+        self.ollama.pull_hf_model(app, hf_id).await
     }
 
     pub async fn snapshot(&self) -> ServiceReport {
@@ -76,6 +103,7 @@ impl ServiceManager {
             ollama: self.ollama.snapshot(ollama_running, None, None),
             nats: self.nats.snapshot(nats_running, None, None),
             memory: self.memory.diagnose(),
+            plugin: plugin_snapshot(),
         }
     }
 
@@ -93,8 +121,13 @@ impl ServiceManager {
             ollama,
             nats,
             memory: self.memory.diagnose(),
+            plugin: plugin_snapshot(),
         }
     }
+}
+
+fn plugin_snapshot() -> crate::models::ServiceHealth {
+    plugin_health(&scan_plugin_catalog(&lounge_workspace()))
 }
 
 impl Default for ServiceManager {
@@ -128,6 +161,7 @@ mod tests {
                 port,
                 binary: "__missing_nats__".into(),
                 args: vec!["-p".into(), port.to_string()],
+                ..NatsConfig::default()
             }),
             memory: MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
         };
@@ -136,6 +170,7 @@ mod tests {
         assert!(!report.ollama.running);
         assert!(report.nats.running);
         assert!(!report.memory.running);
+        assert!(report.plugin.running);
         assert!(!report.all_core_running());
     }
 }

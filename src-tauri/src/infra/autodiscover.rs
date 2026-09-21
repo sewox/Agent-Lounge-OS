@@ -16,6 +16,7 @@ pub async fn scan_system(
                 detail: Some(err.to_string()),
             }],
             tools: Vec::new(),
+            apps: Vec::new(),
             models: Vec::new(),
             mcp_servers: Vec::new(),
             system_tools: Vec::new(),

@@ -1,34 +1,112 @@
-//! Periyodik kota: LMR RAM + (anahtar varsa) OpenAI / Anthropic / Grok usage.
-//! %80 üzeri → Amber Alert. Host Ollama sürecine dokunulmaz.
+//! Periyodik kota: LMR RAM/VRAM (sysinfo) + abonelik yerel plan dosyaları +
+//! (anahtar varsa) OpenAI / Anthropic / xAI usage. 30 sn'de bir `quota-update`.
+//! Host Ollama (:11434) sürecine dokunulmaz; hesap sayfasına cookie ile gidilmez.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::Value;
+use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::sleep;
 
+use super::autodiscover::scan_subscription_hosts;
+use super::hardware::{device_profile, is_apple_silicon};
+use super::plugin::{lounge_workspace, scan_plugin_catalog};
+use super::probe::{tcp_ready, DEFAULT_NATS_HOST, DEFAULT_NATS_PORT};
+use super::subscription_usage::{live_subscription_usage, local_subscription_usage};
 use super::MemoryBridge;
 use super::SharedServices;
-use crate::models::{now_rfc3339, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT};
+use crate::db::ExperienceStore;
+use crate::models::{
+    now_rfc3339, DiscoveredTool, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT,
+};
 
-const POLL: Duration = Duration::from_secs(60);
+const POLL: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
-const NATS_MONITOR: &str = "http://127.0.0.1:8222";
-const DEFAULT_RAM_BUDGET_GB: f32 = 8.0;
+const LMR_PORT_MARK: &str = "18790";
 
-pub fn spawn_quota_pump(app: AppHandle, services: SharedServices) {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApiKeys {
+    pub openai: Option<String>,
+    pub anthropic: Option<String>,
+    pub grok: Option<String>,
+}
+
+impl ApiKeys {
+    pub fn from_env() -> Self {
+        Self {
+            openai: env_key(&["OPENAI_API_KEY"]),
+            anthropic: env_key(&["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]),
+            grok: env_key(&["XAI_API_KEY", "GROK_API_KEY"]),
+        }
+    }
+
+    pub fn merge_json(&mut self, raw: &str) {
+        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+            return;
+        };
+        let Value::Object(map) = value else {
+            return;
+        };
+        if self.openai.is_none() {
+            self.openai = json_secret(&map, &["openai", "OPENAI_API_KEY", "openai_api_key"]);
+        }
+        if self.anthropic.is_none() {
+            self.anthropic = json_secret(
+                &map,
+                &["anthropic", "claude", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"],
+            );
+        }
+        if self.grok.is_none() {
+            self.grok = json_secret(&map, &["grok", "xai", "XAI_API_KEY", "GROK_API_KEY"]);
+        }
+    }
+
+    pub fn fill_if_empty(
+        &mut self,
+        openai: Option<String>,
+        anthropic: Option<String>,
+        grok: Option<String>,
+    ) {
+        if self.openai.is_none() {
+            self.openai = openai;
+        }
+        if self.anthropic.is_none() {
+            self.anthropic = anthropic;
+        }
+        if self.grok.is_none() {
+            self.grok = grok;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LmrProcessUsage {
+    pub ram_bytes: u64,
+    pub vram_bytes: u64,
+    pub processes: usize,
+}
+
+pub fn spawn_quota_pump(app: AppHandle, services: SharedServices, store: ExperienceStore) {
     tauri::async_runtime::spawn(async move {
-        run_quota_pump(app, services).await;
+        run_quota_pump(app, services, store).await;
     });
 }
 
-pub async fn run_quota_pump(app: AppHandle, services: SharedServices) {
+pub async fn run_quota_pump(app: AppHandle, services: SharedServices, store: ExperienceStore) {
     loop {
-        let (endpoint, memory) = {
+        let (endpoint, nats_monitor, memory) = {
             let manager = services.lock().await;
-            (manager.ollama_endpoint(), manager.memory().clone())
+            (
+                manager.ollama_endpoint(),
+                manager.nats_monitor_url(),
+                manager.memory().clone(),
+            )
         };
-        let state = collect_quota_state(&endpoint, NATS_MONITOR, &memory).await;
+        let keys = api_keys_from_store(&store).await;
+        let state = collect_quota_state_with_keys(&endpoint, &nats_monitor, &memory, &keys).await;
         emit_quota_state(&app, &state);
         sleep(POLL).await;
     }
@@ -39,15 +117,97 @@ pub async fn collect_quota_state(
     nats_monitor: &str,
     memory: &MemoryBridge,
 ) -> QuotaState {
-    let (lmr, nats, mem, openai, anthropic, grok) = tokio::join!(
-        probe_ollama_ram(ollama_endpoint),
+    collect_quota_state_with_keys(ollama_endpoint, nats_monitor, memory, &ApiKeys::from_env()).await
+}
+
+pub async fn collect_quota_state_with_keys(
+    ollama_endpoint: &str,
+    nats_monitor: &str,
+    memory: &MemoryBridge,
+    keys: &ApiKeys,
+) -> QuotaState {
+    let workspace = lounge_workspace();
+    let (
+        hosts,
+        plugins,
+        lmr,
+        nats,
+        mem,
+        openai,
+        anthropic,
+        grok,
+        cursor_live,
+        grok_bot_live,
+        anti_live,
+        claude_live,
+    ) = tokio::join!(
+        async {
+            tokio::task::spawn_blocking(scan_subscription_hosts)
+                .await
+                .unwrap_or_default()
+        },
+        async {
+            tokio::task::spawn_blocking(move || scan_plugin_catalog(&workspace).plugins)
+                .await
+                .unwrap_or_default()
+        },
+        probe_ollama(ollama_endpoint),
         probe_nats(nats_monitor),
         async { probe_memory(memory) },
-        probe_openai(),
-        probe_anthropic(),
-        probe_grok(),
+        probe_openai(keys.openai.as_deref()),
+        probe_anthropic(keys.anthropic.as_deref()),
+        probe_grok(keys.grok.as_deref()),
+        live_subscription_usage("cursor"),
+        live_subscription_usage("grok_bot"),
+        live_subscription_usage("antigravity"),
+        live_subscription_usage("claude_desktop"),
     );
-    QuotaState::from_quotas(vec![lmr, nats, mem, openai, anthropic, grok])
+    let mut quotas = vec![lmr, nats, mem];
+    quotas.extend(
+        hosts
+            .into_iter()
+            .filter(|host| host.available)
+            .flat_map(|host| {
+                let live = match host.source.as_str() {
+                    "cursor" => cursor_live.clone(),
+                    "grok_bot" => grok_bot_live.clone(),
+                    "antigravity" => anti_live.clone(),
+                    "claude_desktop" | "claude_cli" => claude_live.clone(),
+                    _ => None,
+                };
+                subscription_rows_with_live(&host, live)
+            }),
+    );
+    quotas.extend(plugins.into_iter().map(|plugin| plugin_quota(&plugin)));
+    quotas.extend(openai);
+    quotas.extend(anthropic);
+    quotas.extend(grok);
+    QuotaState::from_quotas(quotas)
+}
+
+pub async fn api_keys_from_store(store: &ExperienceStore) -> ApiKeys {
+    let mut keys = ApiKeys::from_env();
+    if let Ok(Some(raw)) = store.get_setting("api_keys".into()).await {
+        keys.merge_json(&raw);
+    }
+    let openai = match store.get_setting("openai_api_key".into()).await {
+        Ok(value) => value.and_then(|raw| parse_stored_secret(&raw)),
+        Err(_) => None,
+    };
+    let anthropic = match store.get_setting("anthropic_api_key".into()).await {
+        Ok(value) => value.and_then(|raw| parse_stored_secret(&raw)),
+        Err(_) => None,
+    }
+    .or(match store.get_setting("claude_api_key".into()).await {
+        Ok(value) => value.and_then(|raw| parse_stored_secret(&raw)),
+        Err(_) => None,
+    });
+    let grok = match store.get_setting("xai_api_key".into()).await {
+        Ok(value) => value.and_then(|raw| parse_stored_secret(&raw)),
+        Err(_) => None,
+    };
+    keys.fill_if_empty(openai, anthropic, grok);
+    keys
 }
 
 fn emit_quota_state(app: &AppHandle, state: &QuotaState) {
@@ -58,13 +218,13 @@ fn emit_quota_state(app: &AppHandle, state: &QuotaState) {
             state.amber_tools.join(", ")
         );
     }
-    match app.get_webview_window("main") {
-        Some(window) => {
-            if let Err(err) = window.emit(QUOTA_EVENT, state) {
-                log::debug!("{QUOTA_EVENT} emit: {err}");
-            }
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(err) = window.emit(QUOTA_EVENT, state) {
+            log::debug!("{QUOTA_EVENT} window emit: {err}");
         }
-        None => log::debug!("main window yok, {QUOTA_EVENT} düştü"),
+    }
+    if let Err(err) = app.emit(QUOTA_EVENT, state) {
+        log::debug!("{QUOTA_EVENT} app emit: {err}");
     }
 }
 
@@ -101,112 +261,434 @@ pub fn tone_for_percent(percent: Option<f32>, fallback: &str) -> String {
     }
 }
 
-fn unconfigured(id: &str, tool: &str, kind: &str, label: &str) -> ToolQuota {
-    ToolQuota {
-        id: id.into(),
-        tool: tool.into(),
-        kind: kind.into(),
-        unit: "api".into(),
-        used: "unconfigured".into(),
-        remaining: "—".into(),
-        reset: "—".into(),
-        percent: None,
-        tone: "warn".into(),
-        label: label.into(),
-        source: "env".into(),
-        exhausted: false,
+pub fn parse_stored_secret(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "null" {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        match value {
+            Value::String(text) => {
+                let text = text.trim().to_string();
+                return (!text.is_empty()).then_some(text);
+            }
+            Value::Object(map) => {
+                return json_secret(
+                    &map,
+                    &["key", "token", "value", "openai", "anthropic", "claude"],
+                );
+            }
+            _ => return None,
+        }
+    }
+    Some(trimmed.to_string())
+}
+
+fn json_secret(map: &serde_json::Map<String, Value>, names: &[&str]) -> Option<String> {
+    for name in names {
+        if let Some(Value::String(text)) = map.get(*name) {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+pub fn is_lmr_ollama_exe(exe: &str) -> bool {
+    let path = exe.replace('\\', "/").to_lowercase();
+    (path.contains("/data/lmr/") && path.contains("ollama")) || path.contains("/lmr/ollama")
+}
+
+pub fn looks_like_ollama(name: &str, exe: &str) -> bool {
+    let name = name.to_lowercase();
+    let exe = exe.replace('\\', "/").to_lowercase();
+    name.contains("ollama")
+        || exe
+            .rsplit('/')
+            .next()
+            .is_some_and(|file| file.contains("ollama"))
+}
+
+fn environ_has_lmr_host(proc: &Process) -> bool {
+    proc.environ().iter().any(|entry| {
+        let value = entry.to_string_lossy();
+        value.starts_with("OLLAMA_HOST=") && value.contains(LMR_PORT_MARK)
+    })
+}
+
+fn is_lmr_root(proc: &Process) -> bool {
+    let name = proc.name().to_string_lossy();
+    let exe = proc
+        .exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    if !looks_like_ollama(&name, &exe) {
+        return false;
+    }
+    is_lmr_ollama_exe(&exe) || environ_has_lmr_host(proc)
+}
+
+pub fn lmr_sysinfo_usage() -> LmrProcessUsage {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+    lmr_usage_from_system(&sys, is_apple_silicon())
+}
+
+pub fn lmr_usage_from_system(sys: &System, apple_silicon: bool) -> LmrProcessUsage {
+    let mut roots: Vec<Pid> = Vec::new();
+    for (pid, proc) in sys.processes() {
+        if is_lmr_root(proc) {
+            roots.push(*pid);
+        }
+    }
+    if roots.is_empty() {
+        return LmrProcessUsage::default();
+    }
+
+    let mut include: HashSet<Pid> = roots.iter().copied().collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (pid, proc) in sys.processes() {
+            if include.contains(pid) {
+                continue;
+            }
+            if let Some(parent) = proc.parent() {
+                if include.contains(&parent) {
+                    include.insert(*pid);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    let ram_bytes = include
+        .iter()
+        .filter_map(|pid| sys.process(*pid).map(Process::memory))
+        .sum();
+    let vram_bytes = if apple_silicon {
+        ram_bytes
+    } else {
+        include
+            .iter()
+            .filter_map(|pid| {
+                let proc = sys.process(*pid)?;
+                let name = proc.name().to_string_lossy().to_lowercase();
+                name.contains("runner").then_some(proc.memory())
+            })
+            .sum()
+    };
+    LmrProcessUsage {
+        ram_bytes,
+        vram_bytes,
+        processes: include.len(),
     }
 }
 
-async fn probe_ollama_ram(endpoint: &str) -> ToolQuota {
+fn subscription_rows_with_live(
+    tool: &DiscoveredTool,
+    live: Option<crate::services::subscription_usage::LocalPlanUsage>,
+) -> Vec<ToolQuota> {
+    let running = tool
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("çalışıyor"));
+    if let Some(usage) = live {
+        let rows = usage.into_quotas(tool, running);
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    subscription_rows(tool)
+}
+
+fn subscription_rows(tool: &DiscoveredTool) -> Vec<ToolQuota> {
+    let running = tool
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("çalışıyor"));
+    if let Some(usage) = local_subscription_usage(&tool.source) {
+        let rows = usage.into_quotas(tool, running);
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    let usage = (tool.source == "claude_cli")
+        .then(claude_cli_local_usage)
+        .flatten();
+    if let Some((used, limit)) = usage {
+        let percent = if limit > 0 {
+            Some(((used as f32 / limit as f32) * 100.0).clamp(0.0, 999.0))
+        } else {
+            None
+        };
+        return vec![ToolQuota {
+            id: tool.id.clone(),
+            tool: tool.name.clone(),
+            unit: "subscription".into(),
+            used: format!("{used} / {limit}"),
+            remaining: format!("{}", limit.saturating_sub(used)),
+            reset: "—".into(),
+            percent,
+            tone: tone_for_percent(percent, if running { "live" } else { "ok" }),
+            label: percent
+                .map(|value| format!("{value:.0}%"))
+                .unwrap_or_else(|| "abonelik".into()),
+            source: tool.origin_path.clone().unwrap_or_default(),
+            exhausted: percent.map(|value| value >= 100.0).unwrap_or(false),
+            ..ToolQuota::default()
+        }
+        .with_mode("subscription", tool.host_id.as_deref())];
+    }
+    vec![ToolQuota {
+        id: tool.id.clone(),
+        tool: tool.name.clone(),
+        unit: "subscription".into(),
+        used: if running { "çalışıyor" } else { "kurulu" }.into(),
+        remaining: "abonelik".into(),
+        reset: "—".into(),
+        percent: None,
+        tone: if running { "live" } else { "ok" }.into(),
+        label: if running { "live" } else { "abonelik" }.into(),
+        source: tool.origin_path.clone().unwrap_or_default(),
+        exhausted: false,
+        ..ToolQuota::default()
+    }
+    .with_mode("subscription", tool.host_id.as_deref())]
+}
+
+fn plugin_quota(tool: &DiscoveredTool) -> ToolQuota {
+    let hosts = tool.hosts();
+    let labels = crate::models::format_host_labels(&hosts);
+    let host = hosts
+        .first()
+        .cloned()
+        .unwrap_or_else(|| tool.source.clone());
+    ToolQuota {
+        id: tool.id.clone(),
+        tool: tool.name.clone(),
+        unit: "plugin".into(),
+        used: if hosts.len() == 1 {
+            "host üzerinden".into()
+        } else {
+            format!("{} host", hosts.len())
+        },
+        remaining: labels,
+        reset: "HOST".into(),
+        percent: None,
+        tone: "ok".into(),
+        label: "plugin".into(),
+        source: tool.origin_path.clone().unwrap_or_default(),
+        exhausted: false,
+        ..ToolQuota::default()
+    }
+    .with_mode("plugin", Some(&host))
+}
+
+pub fn claude_cli_local_usage() -> Option<(u64, u64)> {
+    for dir in claude_cli_dirs() {
+        for name in ["stats-cache.json", "stats.json", "usage.json"] {
+            let path = dir.join(name);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if let Some(pair) = parse_local_usage_pair(&value) {
+                return Some(pair);
+            }
+        }
+    }
+    None
+}
+
+fn claude_cli_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from) {
+        dirs.push(dir);
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
+        dirs.push(home.join(".claude"));
+        dirs.push(home.join(".config/claude"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        dirs.push(xdg.join("claude"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        dirs.push(appdata.join("Claude"));
+        dirs.push(appdata.join("claude"));
+    }
+    dirs
+}
+
+pub fn parse_local_usage_pair(value: &Value) -> Option<(u64, u64)> {
+    let used = value
+        .get("used")
+        .or_else(|| value.get("tokensUsed"))
+        .or_else(|| value.get("tokens_used"))
+        .or_else(|| value.pointer("/usage/used"))
+        .and_then(Value::as_u64)?;
+    let limit = value
+        .get("limit")
+        .or_else(|| value.get("tokensLimit"))
+        .or_else(|| value.get("tokens_limit"))
+        .or_else(|| value.pointer("/usage/limit"))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)?;
+    Some((used, limit))
+}
+
+pub fn has_api_key(key: Option<&str>) -> bool {
+    key.map(str::trim).is_some_and(|value| !value.is_empty())
+}
+
+async fn probe_ollama(endpoint: &str) -> ToolQuota {
+    let profile = device_profile();
+    let budget = env_f32("LOUNGE_LMR_RAM_BUDGET_GB", profile.usable_budget_gb);
+    let usage = tokio::task::spawn_blocking(lmr_sysinfo_usage)
+        .await
+        .unwrap_or_else(|_| LmrProcessUsage::default());
+
     let url = format!("{}/api/ps", endpoint.trim_end_matches('/'));
-    let budget = env_f32("LOUNGE_LMR_RAM_BUDGET_GB", DEFAULT_RAM_BUDGET_GB);
-    match http_json(&url, &[]).await {
+    let (model_label, api_up) = match http_json(&url, &[]).await {
         Ok(payload) => {
             let models = payload
                 .get("models")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let size: u64 = models
+            let name = models
                 .iter()
-                .filter_map(|row| row.get("size").and_then(Value::as_u64))
-                .sum();
-            let percent = ram_percent(size, budget);
-            let gb = size as f32 / (1024.0 * 1024.0 * 1024.0);
-            ToolQuota {
-                id: "lmr".into(),
-                tool: "LMR".into(),
-                kind: "ai".into(),
-                unit: "ram".into(),
-                used: format!("{gb:.1} / {budget:.1} GB"),
-                remaining: format!("{:.1} GB", (budget - gb).max(0.0)),
-                reset: "LOCAL".into(),
-                percent,
-                tone: tone_for_percent(percent, "local"),
-                label: percent
-                    .map(|value| format!("{:.0}% ram", value))
-                    .unwrap_or_else(|| "ok LOCAL".into()),
-                source: url,
-                exhausted: false,
-            }
+                .filter_map(|row| row.get("name").and_then(Value::as_str))
+                .next()
+                .unwrap_or("LMR");
+            (name.to_string(), true)
         }
-        Err(err) => ToolQuota {
+        Err(_) => ("LMR".into(), false),
+    };
+
+    if usage.processes == 0 && !api_up {
+        return ToolQuota {
             id: "lmr".into(),
             tool: "LMR".into(),
-            kind: "ai".into(),
-            unit: "ram".into(),
+            unit: "ram/vram".into(),
             used: "down".into(),
             remaining: "—".into(),
             reset: "LOCAL".into(),
             percent: None,
             tone: "warn".into(),
-            label: err,
-            source: url,
+            label: "sysinfo: ollama yok".into(),
+            source: "sysinfo".into(),
             exhausted: false,
-        },
+            ..ToolQuota::default()
+        }
+        .with_mode("local", None);
     }
+
+    let percent = ram_percent(usage.ram_bytes, budget);
+    let ram_gb = usage.ram_bytes as f32 / (1024.0 * 1024.0 * 1024.0);
+    let vram_gb = usage.vram_bytes as f32 / (1024.0 * 1024.0 * 1024.0);
+    let used = if is_apple_silicon() {
+        format!("{ram_gb:.1} / {budget:.1} GB RAM/VRAM")
+    } else {
+        format!("{ram_gb:.1} GB RAM · {vram_gb:.1} GB VRAM / {budget:.1} GB")
+    };
+    ToolQuota {
+        id: "lmr".into(),
+        tool: format!("LMR · {model_label}"),
+        unit: "ram/vram".into(),
+        used,
+        remaining: format!("{:.1} GB", (budget - ram_gb).max(0.0)),
+        reset: "LOCAL".into(),
+        percent,
+        tone: tone_for_percent(percent, "local"),
+        label: percent
+            .map(|value| format!("{:.0}% ram", value))
+            .unwrap_or_else(|| "ok LOCAL".into()),
+        source: "sysinfo".into(),
+        exhausted: false,
+        ..ToolQuota::default()
+    }
+    .with_mode("local", None)
 }
 
 async fn probe_nats(monitor: &str) -> ToolQuota {
     let url = format!("{}/varz", monitor.trim_end_matches('/'));
-    match http_json(&url, &[]).await {
-        Ok(payload) => {
-            let connections = payload
-                .get("connections")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let in_msgs = payload.get("in_msgs").and_then(Value::as_u64).unwrap_or(0);
-            ToolQuota {
-                id: "nats".into(),
-                tool: "NATS broker".into(),
-                kind: "bot".into(),
-                unit: "conn".into(),
-                used: format!("{connections} conn · {in_msgs} in_msgs"),
-                remaining: "local".into(),
-                reset: "LOCAL".into(),
-                percent: None,
-                tone: "ok".into(),
-                label: "ok LOCAL".into(),
-                source: url,
-                exhausted: false,
-            }
-        }
-        Err(_) => ToolQuota {
+    let varz = http_json(&url, &[]).await.ok();
+    let tcp = tcp_ready(
+        DEFAULT_NATS_HOST,
+        DEFAULT_NATS_PORT,
+        Duration::from_millis(400),
+    )
+    .await;
+    nats_quota(varz.as_ref(), tcp, &url)
+}
+
+pub fn nats_quota(varz: Option<&Value>, tcp_up: bool, source: &str) -> ToolQuota {
+    if let Some(payload) = varz {
+        let connections = payload
+            .get("connections")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let in_msgs = payload.get("in_msgs").and_then(Value::as_u64).unwrap_or(0);
+        return ToolQuota {
             id: "nats".into(),
             tool: "NATS broker".into(),
-            kind: "bot".into(),
             unit: "conn".into(),
-            used: "monitor kapalı".into(),
-            remaining: "—".into(),
+            used: format!("{connections} conn · {in_msgs} in_msgs"),
+            remaining: "local".into(),
             reset: "LOCAL".into(),
             percent: None,
-            tone: "warn".into(),
-            label: "no /varz".into(),
-            source: url,
+            tone: "ok".into(),
+            label: "ok LOCAL".into(),
+            source: source.into(),
             exhausted: false,
-        },
+            ..ToolQuota::default()
+        }
+        .with_mode("local", None);
     }
+    if tcp_up {
+        return ToolQuota {
+            id: "nats".into(),
+            tool: "NATS broker".into(),
+            unit: "conn".into(),
+            used: "tcp live".into(),
+            remaining: "local".into(),
+            reset: "LOCAL".into(),
+            percent: None,
+            tone: "ok".into(),
+            label: "ok LOCAL".into(),
+            source: source.into(),
+            exhausted: false,
+            ..ToolQuota::default()
+        }
+        .with_mode("local", None);
+    }
+    ToolQuota {
+        id: "nats".into(),
+        tool: "NATS broker".into(),
+        unit: "conn".into(),
+        used: "down".into(),
+        remaining: "—".into(),
+        reset: "LOCAL".into(),
+        percent: None,
+        tone: "warn".into(),
+        label: "down".into(),
+        source: source.into(),
+        exhausted: false,
+        ..ToolQuota::default()
+    }
+    .with_mode("local", None)
 }
 
 fn probe_memory(memory: &MemoryBridge) -> ToolQuota {
@@ -214,7 +696,6 @@ fn probe_memory(memory: &MemoryBridge) -> ToolQuota {
     ToolQuota {
         id: "cbm".into(),
         tool: "codebase-memory-mcp".into(),
-        kind: "bot".into(),
         unit: "local".into(),
         used: if health.running { "ready" } else { "missing" }.into(),
         remaining: "unlimited".into(),
@@ -228,104 +709,110 @@ fn probe_memory(memory: &MemoryBridge) -> ToolQuota {
         },
         source: health.endpoint,
         exhausted: false,
+        ..ToolQuota::default()
     }
+    .with_mode("local", None)
 }
 
-async fn probe_openai() -> ToolQuota {
-    let Some(key) = env_key(&["OPENAI_API_KEY"]) else {
-        return unconfigured("openai", "OpenAI", "ai", "API key yok");
-    };
+async fn probe_openai(key: Option<&str>) -> Option<ToolQuota> {
+    if !has_api_key(key) {
+        return None;
+    }
+    let key = key.unwrap_or_default();
     let start = midnight_unix();
     let url = format!(
         "https://api.openai.com/v1/organization/usage/completions?start_time={start}&bucket_width=1d"
     );
     let budget = env_f32("OPENAI_TOKEN_BUDGET", 0.0);
-    match http_json(
-        &url,
-        &[
-            ("Authorization", format!("Bearer {key}")),
-            ("OpenAI-Beta", "usage=v1".into()),
-        ],
-    )
-    .await
-    {
+    let auth = [
+        ("Authorization", format!("Bearer {key}")),
+        ("OpenAI-Beta", "usage=v1".into()),
+    ];
+    Some(match http_json(&url, &auth).await {
         Ok(payload) => usage_row(
             "openai",
-            "OpenAI",
+            "OpenAI API",
             parse_openai_tokens(&payload),
             budget,
             url,
         ),
-        Err(err) => key_present_no_usage("openai", "OpenAI", err),
-    }
+        Err(usage_err) => match http_json("https://api.openai.com/v1/models", &auth).await {
+            Ok(_) => key_present_no_usage("openai", "OpenAI API", usage_err),
+            Err(err) => key_present_no_usage("openai", "OpenAI API", err),
+        },
+    })
 }
 
-async fn probe_anthropic() -> ToolQuota {
-    let Some(key) = env_key(&["ANTHROPIC_API_KEY"]) else {
-        return unconfigured("anthropic", "Anthropic · Claude", "ai", "API key yok");
-    };
+async fn probe_anthropic(key: Option<&str>) -> Option<ToolQuota> {
+    if !has_api_key(key) {
+        return None;
+    }
+    let key = key.unwrap_or_default();
     let start = now_rfc3339();
     let day_start = format!("{}T00:00:00Z", &start[..10.min(start.len())]);
     let url = format!(
         "https://api.anthropic.com/v1/organizations/usage_report/messages?starting_at={day_start}&bucket_width=1d"
     );
     let budget = env_f32("ANTHROPIC_TOKEN_BUDGET", 0.0);
-    match http_json(
-        &url,
-        &[
-            ("x-api-key", key),
-            ("anthropic-version", "2023-06-01".into()),
-        ],
-    )
-    .await
-    {
+    let headers = [
+        ("x-api-key", key.to_string()),
+        ("anthropic-version", "2023-06-01".into()),
+    ];
+    Some(match http_json(&url, &headers).await {
         Ok(payload) => usage_row(
             "anthropic",
-            "Anthropic · Claude",
+            "Anthropic API",
             parse_anthropic_tokens(&payload),
             budget,
             url,
         ),
-        Err(err) => key_present_no_usage("anthropic", "Anthropic · Claude", err),
-    }
+        Err(usage_err) => match http_json("https://api.anthropic.com/v1/models", &headers).await {
+            Ok(_) => key_present_no_usage("anthropic", "Anthropic API", usage_err),
+            Err(err) => key_present_no_usage("anthropic", "Anthropic API", err),
+        },
+    })
 }
 
-async fn probe_grok() -> ToolQuota {
-    let Some(key) = env_key(&["XAI_API_KEY", "GROK_API_KEY"]) else {
-        return unconfigured("xai", "xAI · Grok", "ai", "API key yok");
-    };
+async fn probe_grok(key: Option<&str>) -> Option<ToolQuota> {
+    if !has_api_key(key) {
+        return None;
+    }
+    let key = key.unwrap_or_default();
     let url = "https://api.x.ai/v1/api-key";
     let budget = env_f32("XAI_CREDIT_BUDGET", 0.0);
-    match http_json(url, &[("Authorization", format!("Bearer {key}"))]).await {
-        Ok(payload) => match parse_xai_usage(&payload) {
-            Some((used, limit)) => {
-                let cap = if budget > 0.0 { budget } else { limit };
-                let percent = if cap > 0.0 {
-                    Some(((used / cap) * 100.0).clamp(0.0, 999.0))
-                } else {
-                    None
-                };
-                ToolQuota {
-                    id: "xai".into(),
-                    tool: "xAI · Grok".into(),
-                    kind: "ai".into(),
-                    unit: "credits".into(),
-                    used: format!("{used:.0} / {cap:.0}"),
-                    remaining: format!("{:.0}", (cap - used).max(0.0)),
-                    reset: "rolling".into(),
-                    percent,
-                    tone: tone_for_percent(percent, "ok"),
-                    label: percent
-                        .map(|value| format!("{value:.0}%"))
-                        .unwrap_or_else(|| "key aktif".into()),
-                    source: url.into(),
-                    exhausted: percent.map(|value| value >= 100.0).unwrap_or(false),
+    Some(
+        match http_json(url, &[("Authorization", format!("Bearer {key}"))]).await {
+            Ok(payload) => match parse_xai_usage(&payload) {
+                Some((used, limit)) => {
+                    let cap = if budget > 0.0 { budget } else { limit };
+                    let percent = if cap > 0.0 {
+                        Some(((used / cap) * 100.0).clamp(0.0, 999.0))
+                    } else {
+                        None
+                    };
+                    ToolQuota {
+                        id: "xai".into(),
+                        tool: "Grok API".into(),
+                        unit: "credits".into(),
+                        used: format!("{used:.0} / {cap:.0}"),
+                        remaining: format!("{:.0}", (cap - used).max(0.0)),
+                        reset: "rolling".into(),
+                        percent,
+                        tone: tone_for_percent(percent, "ok"),
+                        label: percent
+                            .map(|value| format!("{value:.0}%"))
+                            .unwrap_or_else(|| "key aktif".into()),
+                        source: url.into(),
+                        exhausted: percent.map(|value| value >= 100.0).unwrap_or(false),
+                        ..ToolQuota::default()
+                    }
+                    .with_mode("api", None)
                 }
-            }
-            None => key_present_no_usage("xai", "xAI · Grok", "usage alanı yok".into()),
+                None => key_present_no_usage("xai", "Grok API", "usage alanı yok".into()),
+            },
+            Err(err) => key_present_no_usage("xai", "Grok API", err),
         },
-        Err(err) => key_present_no_usage("xai", "xAI · Grok", err),
-    }
+    )
 }
 
 fn usage_row(id: &str, tool: &str, used: u64, budget: f32, source: String) -> ToolQuota {
@@ -337,7 +824,6 @@ fn usage_row(id: &str, tool: &str, used: u64, budget: f32, source: String) -> To
     ToolQuota {
         id: id.into(),
         tool: tool.into(),
-        kind: "ai".into(),
         unit: "tokens".into(),
         used: if budget > 0.0 {
             format!("{used} / {budget:.0}")
@@ -357,14 +843,15 @@ fn usage_row(id: &str, tool: &str, used: u64, budget: f32, source: String) -> To
             .unwrap_or_else(|| "key aktif".into()),
         source,
         exhausted: percent.map(|value| value >= 100.0).unwrap_or(false),
+        ..ToolQuota::default()
     }
+    .with_mode("api", None)
 }
 
 fn key_present_no_usage(id: &str, tool: &str, detail: String) -> ToolQuota {
     ToolQuota {
         id: id.into(),
         tool: tool.into(),
-        kind: "ai".into(),
         unit: "api".into(),
         used: "key var".into(),
         remaining: "usage yok".into(),
@@ -374,7 +861,9 @@ fn key_present_no_usage(id: &str, tool: &str, detail: String) -> ToolQuota {
         label: short_err(&detail),
         source: "provider".into(),
         exhausted: false,
+        ..ToolQuota::default()
     }
+    .with_mode("api", None)
 }
 
 fn short_err(raw: &str) -> String {
@@ -492,7 +981,6 @@ mod tests {
         let state = QuotaState::from_quotas(vec![ToolQuota {
             id: "lmr".into(),
             tool: "LMR".into(),
-            kind: "ai".into(),
             unit: "ram".into(),
             used: "6.4 / 8.0 GB".into(),
             remaining: "1.6 GB".into(),
@@ -502,7 +990,9 @@ mod tests {
             label: "80% ram".into(),
             source: "test".into(),
             exhausted: false,
-        }]);
+            ..ToolQuota::default()
+        }
+        .with_mode("local", None)]);
         assert!(state.amber_alert);
         assert_eq!(state.amber_tools, vec!["lmr"]);
     }
@@ -511,8 +1001,7 @@ mod tests {
     fn seventy_nine_is_not_amber() {
         let state = QuotaState::from_quotas(vec![ToolQuota {
             id: "openai".into(),
-            tool: "OpenAI".into(),
-            kind: "ai".into(),
+            tool: "OpenAI API".into(),
             unit: "tokens".into(),
             used: "79".into(),
             remaining: "21".into(),
@@ -522,7 +1011,9 @@ mod tests {
             label: "79%".into(),
             source: "test".into(),
             exhausted: false,
-        }]);
+            ..ToolQuota::default()
+        }
+        .with_mode("api", None)]);
         assert!(!state.amber_alert);
         assert!(state.amber_tools.is_empty());
     }
@@ -556,5 +1047,75 @@ mod tests {
             "limit": 100.0
         });
         assert_eq!(parse_xai_usage(&payload), Some((80.0, 100.0)));
+    }
+
+    #[test]
+    fn lmr_exe_matches_isolated_binary_not_host() {
+        assert!(is_lmr_ollama_exe(
+            "/Users/me/Agent-Lounge-OS/data/lmr/ollama"
+        ));
+        assert!(is_lmr_ollama_exe(r"C:\Agent-Lounge-OS\data\lmr\ollama.exe"));
+        assert!(!is_lmr_ollama_exe("/opt/homebrew/bin/ollama"));
+        assert!(looks_like_ollama("ollama", "/opt/homebrew/bin/ollama"));
+        assert!(!looks_like_ollama(
+            "nats-server",
+            "/opt/homebrew/bin/nats-server"
+        ));
+    }
+
+    #[test]
+    fn stored_secrets_accept_json_or_plain() {
+        assert_eq!(parse_stored_secret(" sk-test "), Some("sk-test".into()));
+        assert_eq!(parse_stored_secret("\"sk-json\""), Some("sk-json".into()));
+        assert_eq!(parse_stored_secret("null"), None);
+        assert_eq!(parse_stored_secret(""), None);
+        let mut keys = ApiKeys::default();
+        keys.merge_json(r#"{"openai":"sk-oai","claude":"sk-ant"}"#);
+        assert_eq!(keys.openai.as_deref(), Some("sk-oai"));
+        assert_eq!(keys.anthropic.as_deref(), Some("sk-ant"));
+    }
+
+    #[test]
+    fn quota_event_is_update() {
+        assert_eq!(QUOTA_EVENT, "quota-update");
+    }
+
+    #[test]
+    fn nats_quota_tcp_without_varz_is_not_down() {
+        let row = nats_quota(None, true, "http://127.0.0.1:8222/varz");
+        assert_eq!(row.label, "ok LOCAL");
+        assert_eq!(row.used, "tcp live");
+        assert_eq!(row.tone, "ok");
+    }
+
+    #[test]
+    fn nats_quota_down_when_tcp_and_varz_fail() {
+        let row = nats_quota(None, false, "http://127.0.0.1:8222/varz");
+        assert_eq!(row.label, "down");
+        assert_eq!(row.used, "down");
+        assert_eq!(row.tone, "warn");
+    }
+
+    #[test]
+    fn nats_quota_prefers_varz_metrics() {
+        let payload = json!({ "connections": 3, "in_msgs": 40 });
+        let row = nats_quota(Some(&payload), false, "http://127.0.0.1:8222/varz");
+        assert_eq!(row.used, "3 conn · 40 in_msgs");
+        assert_eq!(row.label, "ok LOCAL");
+    }
+
+    #[test]
+    fn missing_api_key_skips_row() {
+        assert!(!has_api_key(None));
+        assert!(!has_api_key(Some("")));
+        assert!(!has_api_key(Some("  ")));
+        assert!(has_api_key(Some("sk-test")));
+    }
+
+    #[test]
+    fn parses_claude_cli_local_usage_without_inventing() {
+        let payload = json!({ "used": 12, "limit": 100 });
+        assert_eq!(parse_local_usage_pair(&payload), Some((12, 100)));
+        assert_eq!(parse_local_usage_pair(&json!({ "used": 12 })), None);
     }
 }
