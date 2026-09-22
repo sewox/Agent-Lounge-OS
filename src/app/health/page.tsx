@@ -3,5 +3,9 @@
 import { HealthPanel } from "@/components/panels";
 
 export default function HealthPage() {
-  return <HealthPanel />;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <HealthPanel />
+    </div>
+  );
 }

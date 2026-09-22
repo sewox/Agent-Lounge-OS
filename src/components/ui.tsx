@@ -102,12 +102,14 @@ export function Kpi({
   hint,
   badge,
   valueClass = "text-on-surface",
+  live = false,
 }: {
   label: string;
   value: string;
   hint: string;
   badge: ReactNode;
   valueClass?: string;
+  live?: boolean;
 }) {
   return (
     <div className="flex flex-col justify-between rounded-lg border border-outline-variant bg-surface-container p-2.5">
@@ -115,10 +117,55 @@ export function Kpi({
         <span className="font-mono text-[11px] tracking-wider uppercase">{label}</span>
       </div>
       <div className="mt-1 flex items-baseline justify-between">
-        <div className={`tnum font-mono text-xl font-bold tracking-tight ${valueClass}`}>{value}</div>
+        <div
+          key={value}
+          data-live={live || undefined}
+          className={`kpi-tick tnum font-mono text-xl font-bold tracking-tight ${valueClass}`}
+        >
+          {value}
+        </div>
         {badge}
       </div>
       <div className="mt-1 font-mono text-[10px] text-outline">{hint}</div>
+    </div>
+  );
+}
+
+export function Pager({
+  page,
+  pages,
+  total,
+  onPage,
+}: {
+  page: number;
+  pages: number;
+  total: number;
+  onPage: (next: number) => void;
+}) {
+  const totalPages = Math.max(1, pages);
+  const safe = Math.min(Math.max(0, page), totalPages - 1);
+  return (
+    <div className="flex items-center gap-2 font-mono text-[10px]" suppressHydrationWarning>
+      <button
+        type="button"
+        disabled={safe <= 0}
+        onClick={() => onPage(Math.max(0, safe - 1))}
+        className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Prev
+      </button>
+      <span className="tnum text-on-surface-variant">
+        {safe + 1}/{totalPages}
+        <span className="ml-1 text-outline">· {total}</span>
+      </span>
+      <button
+        type="button"
+        disabled={safe >= totalPages - 1}
+        onClick={() => onPage(Math.min(totalPages - 1, safe + 1))}
+        className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Next
+      </button>
     </div>
   );
 }

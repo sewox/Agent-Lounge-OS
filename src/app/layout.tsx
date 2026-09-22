@@ -42,7 +42,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="tr"
       className={`${geistSans.variable} ${ibmPlex.variable} ${jetbrains.variable} ${publicSans.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-surface text-on-surface font-body">
+      <body className="h-full overflow-hidden bg-surface text-on-surface font-body">
         <LoungeProvider>
           <AppShell>{children}</AppShell>
         </LoungeProvider>

@@ -11,6 +11,7 @@ pub const TASK_FAILED: &str = "lounge.task.failed";
 pub const EXPERIENCE_REPORTED: &str = "lounge.experience.reported";
 pub const AGENT_PROMPT: &str = "lounge.agent.prompt";
 pub const TELEMETRY_DECISION: &str = "lounge.telemetry.decision";
+pub const INFRA_STATUS: &str = "lounge.infra.status";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -441,6 +442,7 @@ mod tests {
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
         assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
         assert_eq!(json["telemetry"]["decision"], TELEMETRY_DECISION);
+        assert_eq!(json["infra"]["status"], INFRA_STATUS);
         assert_eq!(json["bus"]["connected"], "lounge.bus.connected");
         assert_eq!(json["bus"]["heartbeat"], "lounge.bus.heartbeat");
     }

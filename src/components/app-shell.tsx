@@ -93,7 +93,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     : "fixed top-12 right-0 left-[var(--sidebar-w)] z-50";
 
   return (
-    <div className="min-h-screen bg-surface text-on-surface">
+    <div className="flex h-screen overflow-hidden bg-surface text-on-surface">
       {approval ? (
         <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
@@ -446,8 +446,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       </aside>
       )}
 
-      <main className={`mt-12 min-h-[calc(100vh-48px)] min-w-0 space-y-3 overflow-x-hidden bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[var(--sidebar-w)]"} ${bannerOffset ? "pt-14" : ""}`}>
-        {children}
+      <main className={`mt-12 flex h-[calc(100vh-3rem)] min-h-0 min-w-0 flex-col gap-3 overflow-hidden bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[var(--sidebar-w)]"} ${bannerOffset ? "pt-14" : ""}`}>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
       </main>
     </div>
   );
