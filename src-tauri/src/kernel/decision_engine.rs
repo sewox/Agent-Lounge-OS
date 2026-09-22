@@ -25,9 +25,12 @@ const KNOWLEDGE_HIT_LOW: f32 = 0.3;
 const MIN_RAM_BYTES: u64 = 1610612736; // 1.5 GiB
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-pub const ROUTING_ID: &str = "ROUTING_TYPE";
-pub const SECURITY_ID: &str = "SECURITY_LEVEL";
-pub const KNOWLEDGE_ID: &str = "KNOWLEDGE_HIT";
+pub const ROUTING: &str = "ROUTING";
+pub const SECURITY: &str = "SECURITY";
+pub const CONTEXT_MATCH: &str = "CONTEXT_MATCH";
+pub const ROUTING_ID: &str = ROUTING;
+pub const SECURITY_ID: &str = SECURITY;
+pub const KNOWLEDGE_ID: &str = CONTEXT_MATCH;
 pub const DECISION_GATE_EVENT: &str = "decision-gate";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,6 +123,10 @@ impl DecisionResult {
 
     pub fn knowledge_is_hit(&self) -> bool {
         self.knowledge_hit >= KNOWLEDGE_HIT_LOW
+    }
+
+    pub fn context_match(&self) -> f32 {
+        self.knowledge_hit
     }
 }
 
@@ -341,13 +348,7 @@ impl DecisionGate {
         let status = Arc::new(StdMutex::new(DecisionGateStatus::cold()));
         let declined = Arc::new(AtomicBool::new(false));
         let load_in_flight = Arc::new(AtomicBool::new(false));
-        let worker_session = session.clone();
-        let worker_cache = cache.clone();
-        let worker_tx = results.clone();
-        let _ = std::thread::Builder::new()
-            .name("laya-infer".into())
-            .spawn(move || infer_worker(job_rx, worker_session, worker_cache, worker_tx));
-        Self {
+        let gate = Self {
             jobs,
             session,
             cache,
@@ -355,7 +356,12 @@ impl DecisionGate {
             status,
             declined,
             load_in_flight,
-        }
+        };
+        let worker = gate.clone();
+        let _ = std::thread::Builder::new()
+            .name("laya-infer".into())
+            .spawn(move || infer_worker(job_rx, worker));
+        gate
     }
 
     pub fn cache(&self) -> DecisionCache {
@@ -469,6 +475,50 @@ impl DecisionGate {
         true
     }
 
+    /// Tokenize + Laya sequence classification; latency mikro-saniye. Sonucu NATS kanalına basar.
+    pub fn process_message(&self, message: LoungeMessage) -> Result<DecisionResult> {
+        if skip_bus_subject(&message.subject) {
+            anyhow::bail!("DecisionGate skip subject: {}", message.subject);
+        }
+        let start_time = Instant::now();
+        let inferred = {
+            let guard = self.session.lock().expect("laya session lock");
+            let sess = guard.as_ref().context("DecisionGate soğuk: session yok")?;
+            infer_message(sess, &message)?
+        };
+        let elapsed_us = infer_elapsed_us(start_time, Instant::now());
+        Ok(self.commit_decision(&message, inferred, elapsed_us))
+    }
+
+    fn commit_decision(
+        &self,
+        msg: &LoungeMessage,
+        inferred: DecisionResult,
+        elapsed_us: u128,
+    ) -> DecisionResult {
+        let mut result = inferred;
+        result.elapsed_us = elapsed_us;
+        result.elapsed_ms = elapsed_us / 1000;
+        if result.elapsed_us > 10_000 {
+            log::debug!(
+                "DecisionGate {} {:.1}ms (hedef 10ms, device={})",
+                result.message_id,
+                result.latency_ms(),
+                result.device
+            );
+        }
+        remember(&self.cache, &result);
+        if let Some(payload_id) = msg.payload.get("id").and_then(|v| v.as_str()) {
+            if payload_id != result.message_id {
+                let mut extra = result.clone();
+                extra.message_id = payload_id.into();
+                remember(&self.cache, &extra);
+            }
+        }
+        let _ = self.results.try_send(result.clone());
+        result
+    }
+
     pub fn inject(&self, result: DecisionResult) {
         remember(&self.cache, &result);
         let _ = self.results.try_send(result);
@@ -478,6 +528,7 @@ impl DecisionGate {
 pub fn skip_bus_subject(subject: &str) -> bool {
     subject.starts_with("lounge.bus.")
         || subject.starts_with("lounge.telemetry.")
+        || subject.starts_with("lounge.infra.")
         || subject == crate::models::AGENT_PROMPT
 }
 
@@ -500,6 +551,8 @@ pub struct LoungeTelemetry {
     pub routing: String,
     pub security: String,
     pub knowledge_hit: f32,
+    pub context_match: f32,
+    pub decision: DecisionResult,
     pub device: String,
     pub timestamp: String,
     pub msg_per_min: u32,
@@ -516,6 +569,8 @@ impl LoungeTelemetry {
             routing: result.routing.value.as_str().into(),
             security: result.security.value.as_str().into(),
             knowledge_hit: result.knowledge_hit,
+            context_match: result.context_match(),
+            decision: result.clone(),
             device: result.device.clone(),
             timestamp: crate::models::now_rfc3339(),
             msg_per_min,
@@ -601,7 +656,7 @@ pub fn state_from_message(msg: &LoungeMessage) -> String {
 pub fn lounge_questions() -> [QuestionSpec; 3] {
     [
         QuestionSpec {
-            id: ROUTING_ID,
+            id: ROUTING,
             qtype: QTYPE_CHOICE,
             instructions: "Classify this Agent Lounge OS bus message.",
             options: vec![
@@ -611,7 +666,7 @@ pub fn lounge_questions() -> [QuestionSpec; 3] {
             ],
         },
         QuestionSpec {
-            id: SECURITY_ID,
+            id: SECURITY,
             qtype: QTYPE_CHOICE,
             instructions: "How risky is acting on this message without a human in the loop?",
             options: vec![
@@ -627,7 +682,7 @@ pub fn lounge_questions() -> [QuestionSpec; 3] {
             ],
         },
         QuestionSpec {
-            id: KNOWLEDGE_ID,
+            id: CONTEXT_MATCH,
             qtype: QTYPE_NOUL,
             instructions: "Is a similar record already in Lounge memory for this topic?",
             options: vec![("Miss", None), ("Hit", None)],
@@ -664,13 +719,13 @@ pub fn result_from_logits(
         let temp = temperature_for(cfg, item.qtype, k);
         let probs = softmax_temp(slice, temp);
         match item.id.as_str() {
-            ROUTING_ID => {
+            ROUTING | "ROUTING_TYPE" => {
                 routing = Some(scored_routing(&item.option_keys, &probs));
             }
-            SECURITY_ID => {
+            SECURITY | "SECURITY_LEVEL" => {
                 security = Some(scored_security(&item.option_keys, &probs));
             }
-            KNOWLEDGE_ID => {
+            CONTEXT_MATCH | "KNOWLEDGE_HIT" => {
                 knowledge_hit = probs.get(1).copied().unwrap_or(0.0);
             }
             _ => {}
@@ -679,8 +734,8 @@ pub fn result_from_logits(
     Ok(DecisionResult {
         message_id: msg.id.clone(),
         subject: msg.subject.clone(),
-        routing: routing.context("ROUTING_TYPE yok")?,
-        security: security.context("SECURITY_LEVEL yok")?,
+        routing: routing.context("ROUTING yok")?,
+        security: security.context("SECURITY yok")?,
         knowledge_hit,
         elapsed_ms: elapsed_us / 1000,
         elapsed_us,
@@ -782,49 +837,11 @@ fn argmax(map: &HashMap<String, f32>) -> (String, f32) {
         .unwrap_or_else(|| ("Task".into(), 0.0))
 }
 
-fn infer_worker(
-    jobs: std_mpsc::Receiver<LoungeMessage>,
-    session: Arc<StdMutex<Option<LayaSession>>>,
-    cache: DecisionCache,
-    tx: mpsc::Sender<DecisionResult>,
-) {
+fn infer_worker(jobs: std_mpsc::Receiver<LoungeMessage>, gate: DecisionGate) {
     while let Ok(msg) = jobs.recv() {
-        let start_time = Instant::now();
-        let inferred = {
-            let guard = session.lock().expect("laya session lock");
-            let Some(sess) = guard.as_ref() else {
-                continue;
-            };
-            match infer_message(sess, &msg) {
-                Ok(result) => result,
-                Err(err) => {
-                    log::warn!("DecisionGate çıkarsama: {err}");
-                    continue;
-                }
-            }
-        };
-        let end_time = Instant::now();
-        let elapsed_us = infer_elapsed_us(start_time, end_time);
-        let mut result = inferred;
-        result.elapsed_us = elapsed_us;
-        result.elapsed_ms = elapsed_us / 1000;
-        if result.elapsed_us > 10_000 {
-            log::debug!(
-                "DecisionGate {} {:.1}ms (hedef 10ms, device={})",
-                result.message_id,
-                result.latency_ms(),
-                result.device
-            );
+        if let Err(err) = gate.process_message(msg) {
+            log::warn!("DecisionGate çıkarsama: {err}");
         }
-        remember(&cache, &result);
-        if let Some(payload_id) = msg.payload.get("id").and_then(|v| v.as_str()) {
-            if payload_id != result.message_id {
-                let mut extra = result.clone();
-                extra.message_id = payload_id.into();
-                remember(&cache, &extra);
-            }
-        }
-        let _ = tx.blocking_send(result);
     }
 }
 
@@ -915,6 +932,8 @@ mod tests {
         assert!(skip_bus_subject("lounge.agent.prompt"));
         assert!(skip_bus_subject("lounge.telemetry.decision"));
         assert!(skip_bus_subject("lounge.telemetry.other"));
+        assert!(skip_bus_subject("lounge.infra.status"));
+        assert!(skip_bus_subject("lounge.infra.other"));
     }
 
     #[test]
@@ -932,6 +951,7 @@ mod tests {
             b"{}"
         )));
         assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.agent.prompt", b"{}")));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.infra.status", b"{}")));
     }
 
     #[test]
@@ -945,7 +965,31 @@ mod tests {
         assert_eq!(packed[0].markers.len(), 3);
         assert_eq!(packed[1].markers.len(), 3);
         assert_eq!(packed[2].markers.len(), 2);
-        assert_eq!(packed[0].id, ROUTING_ID);
+        assert_eq!(packed[0].id, ROUTING);
+        assert_eq!(packed[1].id, SECURITY);
+        assert_eq!(packed[2].id, CONTEXT_MATCH);
+        assert_eq!(ROUTING_ID, ROUTING);
+        assert_eq!(SECURITY_ID, SECURITY);
+        assert_eq!(KNOWLEDGE_ID, CONTEXT_MATCH);
+    }
+
+    #[test]
+    fn process_message_requires_session_and_skips_bus() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let skip = gate
+            .process_message(LoungeMessage::from_nats("lounge.bus.heartbeat", b"{}"))
+            .unwrap_err()
+            .to_string();
+        assert!(skip.contains("skip subject"));
+        let infra = gate
+            .process_message(LoungeMessage::from_nats("lounge.infra.status", b"{}"))
+            .unwrap_err()
+            .to_string();
+        assert!(infra.contains("skip subject"));
+        let cold = gate.process_message(sample_msg()).unwrap_err().to_string();
+        assert!(cold.contains("soğuk"));
+        assert!(!gate.is_ready());
     }
 
     #[test]
@@ -969,6 +1013,7 @@ mod tests {
         assert_eq!(result.routing.value, RoutingType::Task);
         assert_eq!(result.security.value, SecurityLevel::Critical);
         assert!(result.knowledge_hit > 0.8);
+        assert_eq!(result.context_match(), result.knowledge_hit);
         assert_eq!(result.elapsed_us, 8_000);
         assert_eq!(result.elapsed_ms, 8);
         assert!((result.latency_ms() - 8.0).abs() < f64::EPSILON);
@@ -1178,6 +1223,9 @@ mod tests {
         assert_eq!(format!("{:.1}", telemetry.latency_ms), "4.2");
         assert_eq!(telemetry.routing, "Task");
         assert_eq!(telemetry.security, "Critical");
+        assert_eq!(telemetry.context_match, result.knowledge_hit);
+        assert_eq!(telemetry.decision.elapsed_us, 4_200);
+        assert_eq!(telemetry.decision.routing.value, RoutingType::Task);
         assert_eq!(telemetry.device, "cpu");
         assert_eq!(telemetry.msg_per_min, 12);
         assert!(!telemetry.timestamp.is_empty());
@@ -1186,6 +1234,9 @@ mod tests {
         assert_eq!(json["kind"], "decision");
         assert!(json["latency_ms"].as_f64().is_some());
         assert!(json["knowledge_hit"].as_f64().is_some());
+        assert_eq!(json["context_match"], json["knowledge_hit"]);
+        assert_eq!(json["decision"]["elapsed_us"], 4_200);
+        assert_eq!(json["decision"]["subject"], msg.subject);
         let envelope = telemetry.envelope();
         assert_eq!(envelope.subject, crate::models::TELEMETRY_DECISION);
         assert_eq!(envelope.source_agent, crate::models::KERNEL_AGENT);

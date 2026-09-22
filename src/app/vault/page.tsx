@@ -3,5 +3,9 @@
 import { VaultPanel } from "@/components/panels";
 
 export default function VaultPage() {
-  return <VaultPanel />;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <VaultPanel />
+    </div>
+  );
 }

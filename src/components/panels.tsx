@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
-import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pip, subjectClass } from "@/components/ui";
+import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
   formatExperienceTime,
   formatLayaDecision,
@@ -13,6 +13,9 @@ import {
   MOCK_NODES,
   natsEventTone,
   natsToneLabel,
+  PAGE_SIZE,
+  pageCount,
+  pageSlice,
   quotaBarClass,
   quotaToneClass,
   type QuotaExhaustedAction,
@@ -63,7 +66,7 @@ export function OverviewKpis() {
   const layaHint = formatLayaDecision(latencyLive ? latencyMs : null);
   const msgLive = decisionMsgPerMin > 0;
   return (
-    <section className="space-y-2.5">
+    <section className="shrink-0 space-y-2.5">
       {indexing ? (
         <div
           role="status"
@@ -82,6 +85,7 @@ export function OverviewKpis() {
       <Kpi
         label="LATENCY"
         value={latencyValue}
+        live={latencyLive}
         hint={
           decisionTelemetry?.device
             ? `${layaHint} · ${decisionTelemetry.device}`
@@ -100,7 +104,8 @@ export function OverviewKpis() {
       <Kpi
         label="MSG / MIN"
         value={String(decisionMsgPerMin)}
-        hint="DecisionGate infer / 60s"
+        live={msgLive}
+        hint="NATS / 60s"
         badge={
           <span
             className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium ${
@@ -145,6 +150,7 @@ export function EventStreamPanel() {
   const { events, query, probeBus } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
   const [probing, setProbing] = useState(false);
+  const [page, setPage] = useState(0);
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
@@ -162,9 +168,13 @@ export function EventStreamPanel() {
     });
   }, [events, query, subjectFilter]);
 
+  const pages = pageCount(filtered.length);
+  const safePage = Math.min(page, pages - 1);
+  const visible = pageSlice(filtered, safePage);
+
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2.5">
           <Pip live tone="primary" />
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">NATS EVENT STREAM</h2>
@@ -183,7 +193,10 @@ export function EventStreamPanel() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setSubjectFilter(key)}
+                onClick={() => {
+                  setSubjectFilter(key);
+                  setPage(0);
+                }}
                 className={`rounded px-2 py-0.5 ${subjectFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
                 {key === "all" ? "all" : key === "task" ? "task.*" : "exp.*"}
@@ -192,10 +205,10 @@ export function EventStreamPanel() {
           </div>
         </div>
       </div>
-      <div className="overflow-x-auto">
+      <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-left font-mono text-[11px]">
-          <thead>
-            <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
+          <thead className="sticky top-0 z-10">
+            <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 text-[10px] text-outline uppercase">
               <th className="w-[90px] px-2.5 py-1.5 font-medium">Time</th>
               <th className="px-2 py-1.5 font-medium">Subject</th>
               <th className="px-2 py-1.5 font-medium">Route</th>
@@ -204,8 +217,8 @@ export function EventStreamPanel() {
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
-            {filtered.map((event, index) => {
-              const selected = index === 0 && subjectFilter === "all" && !query;
+            {visible.map((event, index) => {
+              const selected = safePage === 0 && index === 0 && subjectFilter === "all" && !query;
               const tone = natsEventTone(event.subject, event.state);
               return (
                 <tr
@@ -242,11 +255,12 @@ export function EventStreamPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
         <span>
-          Streaming: {filtered.length} events visible / {events.length} buffered
+          {visible.length}/{filtered.length} · {PAGE_SIZE}/sayfa · {events.length} buffered
         </span>
         <div className="flex items-center gap-2">
+          <Pager page={safePage} pages={pages} total={filtered.length} onPage={setPage} />
           <button
             type="button"
             onClick={() => {
@@ -297,9 +311,14 @@ export function VaultPanel() {
     return `${item.project_id} ${item.adr_summary} ${item.agent}`.toLowerCase().includes(query.trim().toLowerCase());
   });
 
+  const [logPage, setLogPage] = useState(0);
+  const logPages = pageCount(log.length);
+  const safeLogPage = Math.min(logPage, logPages - 1);
+  const logVisible = pageSlice(log, safeLogPage);
+
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
-      <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="tree" />
@@ -310,8 +329,8 @@ export function VaultPanel() {
         </div>
         <span className="font-mono text-[10px] text-outline">memory_bridge + sqlite</span>
       </div>
-      <div className="flex min-h-[220px] flex-col sm:flex-row">
-        <div className="space-y-2.5 border-b border-outline-variant bg-surface-container-low/40 p-2.5 font-mono text-[11px] sm:w-1/2 sm:border-r sm:border-b-0">
+      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+        <div className="min-h-0 flex-1 space-y-2.5 overflow-auto border-b border-outline-variant bg-surface-container-low/40 p-2.5 font-mono text-[11px] sm:border-r sm:border-b-0">
           <div className="flex items-center justify-between text-[10px] font-semibold tracking-wider text-outline uppercase">
             <span>Indexed Files</span>
             <span className="text-on-surface-variant">
@@ -335,13 +354,13 @@ export function VaultPanel() {
             </div>
           ))}
         </div>
-        <div className="flex flex-col p-2.5 font-body sm:w-1/2">
-          <div className="mb-2 flex items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
+          <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
             <span>Experience Log</span>
             <span className="text-secondary">Synced</span>
           </div>
-          <div className="space-y-2 font-mono text-[10.5px]">
-            {log.slice(0, 8).map((item) => (
+          <div className="min-h-0 flex-1 space-y-2 overflow-auto font-mono text-[10.5px]">
+            {logVisible.map((item) => (
               <div key={item.id} className="space-y-1 rounded border border-outline-variant/40 bg-surface-container-high/60 p-1.5">
                 <div className="flex items-center justify-between">
                   <span className="tnum text-on-surface-variant">{formatExperienceTime(item.created_at)}</span>
@@ -356,9 +375,9 @@ export function VaultPanel() {
           </div>
         </div>
       </div>
-      <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[10px] text-outline">
         <span>codebase-memory-mcp · {projects.length || nodes.length} repos</span>
-        <span className="text-on-surface-variant">vector_dims: 256 lexical / 768 ollama</span>
+        <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
     </section>
   );
@@ -393,9 +412,14 @@ export function HealthPanel() {
       }))
     : MOCK_HEALTH;
 
+  const [page, setPage] = useState(0);
+  const pages = pageCount(rows.length);
+  const safePage = Math.min(page, pages - 1);
+  const visible = pageSlice(rows, safePage);
+
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
-      <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="rule" />
@@ -406,8 +430,8 @@ export function HealthPanel() {
         </div>
         <span className="font-mono text-[10px] text-outline">memory_bridge</span>
       </div>
-      <div className="space-y-2.5 p-2.5 font-mono text-[11px]">
-        {rows.map((repo) => (
+      <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-[11px]">
+        {visible.map((repo) => (
           <div key={repo.name} className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-high/40 p-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -449,6 +473,9 @@ export function HealthPanel() {
           </div>
         ))}
       </div>
+      <div className="flex shrink-0 items-center justify-end border-t border-outline-variant bg-surface-container-low px-3 py-1.5">
+        <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
+      </div>
     </section>
   );
 }
@@ -470,6 +497,10 @@ export function QuotaPanel() {
         .includes(query.trim().toLowerCase());
     });
   }, [quotas, query, quotaFilter]);
+  const [page, setPage] = useState(0);
+  const pages = pageCount(rows.length);
+  const safePage = Math.min(page, pages - 1);
+  const visible = pageSlice(rows, safePage);
   const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
 
   return (
@@ -496,7 +527,10 @@ export function QuotaPanel() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setQuotaFilter(key)}
+                onClick={() => {
+                  setQuotaFilter(key);
+                  setPage(0);
+                }}
                 className={`rounded px-2 py-0.5 ${quotaFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
                 {key}
@@ -519,7 +553,7 @@ export function QuotaPanel() {
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
-            {rows.map((row) => (
+            {visible.map((row) => (
               <tr
                 key={row.id}
                 className={
@@ -584,11 +618,14 @@ export function QuotaPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
         <span>abonelik: yerel plan · API keys · plugins · LMR sysinfo</span>
-        <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
-          <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
+        <div className="flex items-center gap-3">
+          <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
+          <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
+            <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
+          </div>
         </div>
       </div>
     </section>
@@ -605,7 +642,8 @@ export function SettingsPanel() {
   const { policy, savePolicy, model } = useLounge();
 
   return (
-    <section className="space-y-3">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
+      <div className="space-y-3">
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
           <div>
@@ -707,6 +745,7 @@ export function SettingsPanel() {
           </div>
         </div>
       </div>
+      </div>
     </section>
   );
 }
@@ -743,11 +782,11 @@ export function FleetPanel() {
         ? "text-on-surface-variant"
         : "text-secondary";
   return (
-    <section className="rounded-lg border border-outline-variant bg-surface-container">
-      <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
         <h2 className="font-mono text-xs font-bold tracking-wider uppercase">Worker Fleet</h2>
       </div>
-      <div className="divide-y divide-outline-variant/40 font-mono text-[11px]">
+      <div className="min-h-0 flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-[11px]">
         {workers.map((row) => (
           <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2">
             <span className="text-on-surface">{row.id}</span>
@@ -783,15 +822,19 @@ export function TelemetryPanel() {
   const plugins = quotas.filter((row) => (row.access_mode || row.kind) === "plugin");
   const latencyMs = decisionTelemetry?.latency_ms;
   const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
+  const msgLive = decisionMsgPerMin > 0;
   return (
-    <section className="grid min-h-[calc(100vh-5.5rem)] min-w-0 auto-rows-fr gap-3 md:grid-cols-2">
-      <div className="flex min-h-0 flex-col rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+    <section className="grid h-full min-h-0 min-w-0 auto-rows-fr gap-3 md:grid-cols-2">
+      <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
         <div className="text-[10px] tracking-wider text-outline uppercase">Laya Decision</div>
-        <div className="mt-2 text-2xl font-bold text-on-surface">
+        <div
+          key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
+          className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
+        >
           {latencyLive ? formatLatencyMs(latencyMs) : "—"}
         </div>
         <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
-        <div className="mt-3">
+        <div className="mt-3 min-h-0 flex-1 overflow-auto">
           {latencyLive ? (
             <LatencySparkline values={decisionLatencyHistory} />
           ) : (
@@ -804,10 +847,15 @@ export function TelemetryPanel() {
           lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
         </div>
       </div>
-      <div className="flex min-h-0 flex-col rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+      <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
         <div className="text-[10px] tracking-wider text-outline uppercase">MSG / MIN</div>
-        <div className="mt-2 text-2xl font-bold text-on-surface">{decisionMsgPerMin}</div>
-        <div className="text-outline">DecisionGate infer / 60s</div>
+        <div
+          key={decisionMsgPerMin}
+          className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
+        >
+          {decisionMsgPerMin}
+        </div>
+        <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
         <div className="mt-auto pt-4 text-[10px] text-outline">
           NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
         </div>

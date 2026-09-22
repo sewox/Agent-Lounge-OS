@@ -25,7 +25,7 @@ pub use protocol::{
     default_ollama_model, now_rfc3339, AnalysisDecision, CodeSnippet, ExperienceContext,
     ExperienceHit, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
     SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority, AGENT_PROMPT, DEFAULT_OLLAMA_MODEL,
-    EXPERIENCE_REPORTED, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
+    EXPERIENCE_REPORTED, INFRA_STATUS, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
     TELEMETRY_DECISION,
 };
 pub use quota::{NatsUiEvent, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT};

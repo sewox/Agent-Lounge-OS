@@ -42,6 +42,8 @@
 
 html,
 body {
+  height: 100%;
+  overflow: hidden;
   background: #0c0e13;
   color: #dfe5f8;
 }
@@ -53,6 +55,19 @@ body {
 
 .tnum {
   font-variant-numeric: tabular-nums;
+}
+
+@keyframes kpi-tick {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.kpi-tick {
+  animation: kpi-tick 0.45s ease-out;
 }
 
 ::-webkit-scrollbar {

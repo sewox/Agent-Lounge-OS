@@ -24,6 +24,9 @@
   "telemetry": {
     "decision": "lounge.telemetry.decision"
   },
+  "infra": {
+    "status": "lounge.infra.status"
+  },
   "bus": {
     "connected": "lounge.bus.connected",
     "heartbeat": "lounge.bus.heartbeat",

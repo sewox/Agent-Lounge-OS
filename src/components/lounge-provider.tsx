@@ -32,7 +32,9 @@ import {
   QUOTA_UI_EVENT,
   SERVICE_UI_EVENT,
   parseDecisionTelemetry,
+  parseLayaEngineStatus,
   pruneMsgWindow,
+  recordMsgTick,
   type ApprovalRequest,
   type DeadSymbol,
   type DecisionGateStatus,
@@ -42,6 +44,7 @@ import {
   type LoungeExperience,
   type LoungeMessage,
   type LoungeTelemetry,
+  type MsgTick,
   type NatsEvent,
   type ProjectSummary,
   type PullProgress,
@@ -124,7 +127,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
   const [decisionLatencyHistory, setDecisionLatencyHistory] = useState<number[]>([]);
-  const [decisionMsgTimes, setDecisionMsgTimes] = useState<number[]>([]);
+  const [decisionMsgTimes, setDecisionMsgTimes] = useState<MsgTick[]>([]);
   const lastTelemetryId = useRef<string | null>(null);
 
   const refreshSemantic = useCallback(async () => {
@@ -321,6 +324,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       }
       return [row, ...current].slice(0, EVENT_CAP);
     });
+    setDecisionMsgTimes((times) => recordMsgTick(times, message.id));
     const telemetry = parseDecisionTelemetry(message);
     if (telemetry && lastTelemetryId.current !== message.id) {
       lastTelemetryId.current = message.id;
@@ -328,7 +332,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setDecisionLatencyHistory((history) =>
         [...history, telemetry.latency_ms].slice(-LATENCY_SPARK_CAP),
       );
-      setDecisionMsgTimes((times) => pruneMsgWindow([...times, Date.now()]));
+    }
+    const engine = parseLayaEngineStatus(message);
+    if (engine) {
+      setLayaEngine(engine);
     }
     if (row.subject.includes("experience")) {
       void refreshSemantic();

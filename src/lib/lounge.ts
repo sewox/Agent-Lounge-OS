@@ -414,9 +414,11 @@ export const SERVICE_UI_EVENT = "service-status";
 export const MODEL_PULL_EVENT = "model-pull";
 export const DECISION_GATE_EVENT = "decision-gate";
 export const LAYA_ENGINE_EVENT = "laya-engine";
+export const INFRA_STATUS = "lounge.infra.status";
 export const TELEMETRY_DECISION = "lounge.telemetry.decision";
 export const LATENCY_SPARK_CAP = 24;
 export const MSG_MIN_WINDOW_MS = 60_000;
+export const PAGE_SIZE = 25;
 export const AMBER_THRESHOLD = 80;
 
 export type LoungeTelemetry = {
@@ -428,13 +430,19 @@ export type LoungeTelemetry = {
   routing?: string;
   security?: string;
   knowledge_hit?: number;
+  context_match?: number;
   device?: string;
   timestamp?: string;
   msg_per_min?: number;
 };
 
+export type MsgTick = {
+  id: string;
+  at: number;
+};
+
 export function isDecisionTelemetrySubject(subject: string): boolean {
-  return subject === TELEMETRY_DECISION || subject.startsWith("lounge.telemetry.");
+  return subject === TELEMETRY_DECISION;
 }
 
 function asFiniteNumber(value: unknown): number | null {
@@ -450,22 +458,70 @@ function asFiniteNumber(value: unknown): number | null {
   return null;
 }
 
-export function parseDecisionTelemetry(message: LoungeMessage): LoungeTelemetry | null {
-  if (!isDecisionTelemetrySubject(message.subject)) {
+export function parseLayaEngineStatus(message: LoungeMessage): LayaEngineStatus | null {
+  if (message.subject !== INFRA_STATUS) {
     return null;
   }
   if (!message.payload || typeof message.payload !== "object" || Array.isArray(message.payload)) {
     return null;
   }
   const payload = message.payload as Record<string, unknown>;
-  const latencyUs = asFiniteNumber(payload.latency_us);
-  const latencyMsRaw = asFiniteNumber(payload.latency_ms);
+  const phase = payload.phase;
+  if (phase !== "downloading" && phase !== "ready" && phase !== "failed") {
+    return null;
+  }
+  if (
+    typeof payload.label !== "string" ||
+    typeof payload.message !== "string" ||
+    typeof payload.path !== "string"
+  ) {
+    return null;
+  }
+  return {
+    phase,
+    label: payload.label,
+    message: payload.message,
+    file: typeof payload.file === "string" ? payload.file : null,
+    completed: asFiniteNumber(payload.completed) ?? 0,
+    total: asFiniteNumber(payload.total) ?? 0,
+    path: payload.path,
+    error: typeof payload.error === "string" ? payload.error : null,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+export function parseDecisionTelemetry(message: LoungeMessage): LoungeTelemetry | null {
+  if (!isDecisionTelemetrySubject(message.subject)) {
+    return null;
+  }
+  const payload = asRecord(message.payload);
+  if (!payload) {
+    return null;
+  }
+  const nested = asRecord(payload.decision);
+  const latencyUs =
+    asFiniteNumber(payload.latency_us) ?? (nested ? asFiniteNumber(nested.elapsed_us) : null);
+  const latencyMsRaw =
+    asFiniteNumber(payload.latency_ms) ?? (nested ? asFiniteNumber(nested.elapsed_ms) : null);
   const latencyMs = latencyMsRaw ?? (latencyUs != null ? latencyUs / 1000 : null);
   if (latencyUs == null && latencyMs == null) {
     return null;
   }
   const resolvedUs = latencyUs ?? Math.round((latencyMs ?? 0) * 1000);
   const resolvedMs = latencyMs ?? resolvedUs / 1000;
+  const nestedHit = nested ? asFiniteNumber(nested.knowledge_hit) : null;
+  const nestedMatch = nested ? asFiniteNumber(nested.context_match) : null;
+  const hit =
+    asFiniteNumber(payload.knowledge_hit) ??
+    asFiniteNumber(payload.context_match) ??
+    nestedHit ??
+    nestedMatch;
   return {
     kind: typeof payload.kind === "string" ? payload.kind : "decision",
     message_id:
@@ -477,7 +533,9 @@ export function parseDecisionTelemetry(message: LoungeMessage): LoungeTelemetry 
     latency_ms: resolvedMs,
     routing: typeof payload.routing === "string" ? payload.routing : undefined,
     security: typeof payload.security === "string" ? payload.security : undefined,
-    knowledge_hit: asFiniteNumber(payload.knowledge_hit) ?? undefined,
+    knowledge_hit: hit ?? undefined,
+    context_match:
+      asFiniteNumber(payload.context_match) ?? nestedMatch ?? hit ?? undefined,
     device: typeof payload.device === "string" ? payload.device : undefined,
     timestamp:
       typeof payload.timestamp === "string" && payload.timestamp
@@ -501,9 +559,37 @@ export function formatLayaDecision(ms: number | null | undefined): string {
   return `Laya Decision: ${formatLatencyMs(ms)}`;
 }
 
-export function pruneMsgWindow(timestamps: number[], now = Date.now()): number[] {
+export function pruneMsgWindow(ticks: MsgTick[], now = Date.now()): MsgTick[] {
   const cutoff = now - MSG_MIN_WINDOW_MS;
-  return timestamps.filter((at) => at >= cutoff);
+  const seen = new Set<string>();
+  const next: MsgTick[] = [];
+  for (const tick of ticks) {
+    if (tick.at < cutoff || seen.has(tick.id)) {
+      continue;
+    }
+    seen.add(tick.id);
+    next.push(tick);
+  }
+  return next;
+}
+
+export function recordMsgTick(ticks: MsgTick[], id: string, now = Date.now()): MsgTick[] {
+  const pruned = pruneMsgWindow(ticks, now);
+  if (!id || pruned.some((tick) => tick.id === id)) {
+    return pruned;
+  }
+  return [...pruned, { id, at: now }];
+}
+
+export function pageCount(total: number, pageSize = PAGE_SIZE): number {
+  return Math.max(1, Math.ceil(Math.max(0, total) / pageSize));
+}
+
+export function pageSlice<T>(items: T[], page: number, pageSize = PAGE_SIZE): T[] {
+  const pages = pageCount(items.length, pageSize);
+  const safe = Math.min(Math.max(0, page), pages - 1);
+  const start = safe * pageSize;
+  return items.slice(start, start + pageSize);
 }
 
 export function natsEventTone(subject: string, state?: NatsEvent["state"]): NatsTone {
@@ -545,14 +631,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
   const created = new Date(message.created_at);
   let time = message.created_at;
   if (!Number.isNaN(created.getTime())) {
-    const clock = new Intl.DateTimeFormat("tr-TR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-      timeZone: "Europe/Istanbul",
-    }).format(created);
-    time = `${clock}.${String(created.getMilliseconds()).padStart(3, "0")}`;
+    time = `${istanbulClockParts(created, true)}.${String(created.getMilliseconds()).padStart(3, "0")}`;
   }
   return {
     id: message.id,
@@ -999,13 +1078,22 @@ export async function pickWorkspaceFolder(): Promise<string | null> {
   return selected;
 }
 
-export function formatClock(date: Date): string {
-  return new Intl.DateTimeFormat("tr-TR", {
+function istanbulClockParts(date: Date, withSeconds = false): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
+    second: withSeconds ? "2-digit" : undefined,
     hour12: false,
     timeZone: "Europe/Istanbul",
-  }).format(date);
+  }).formatToParts(date);
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "00";
+  const clock = `${pick("hour")}:${pick("minute")}`;
+  return withSeconds ? `${clock}:${pick("second")}` : clock;
+}
+
+export function formatClock(date: Date): string {
+  return istanbulClockParts(date);
 }
 
 export function formatExperienceTime(iso: string): string {
@@ -1013,10 +1101,5 @@ export function formatExperienceTime(iso: string): string {
   if (Number.isNaN(date.getTime())) {
     return iso.slice(11, 16) || iso;
   }
-  return new Intl.DateTimeFormat("tr-TR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Europe/Istanbul",
-  }).format(date);
+  return istanbulClockParts(date);
 }

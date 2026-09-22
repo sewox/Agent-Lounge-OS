@@ -8,6 +8,8 @@
 //! `LOUNGE_LAYA_DIR` tam Laya dizinini ezer. Repo `data/laya` yalnızca mevcut
 //! yerel kopya varsa dev fallback’tir; varsayılan indirme hedefi app-support’tur.
 
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -22,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
+use super::nats_manager::default_nats_url;
 use super::probe::repo_root_from_crate;
+use crate::models::{INFRA_STATUS, KERNEL_AGENT};
 
 /// Hugging Face model kimliği — ModernBERT-large + option-marker head.
 pub const HF_REPO: &str = "convaiinnovations/laya";
@@ -161,10 +165,15 @@ impl PathEnv {
 pub struct ModelManager {
     status: Arc<StdMutex<LayaEngineStatus>>,
     gate: Arc<StdMutex<()>>,
+    nats_url: Arc<String>,
 }
 
 impl ModelManager {
     pub fn new() -> Self {
+        Self::with_nats_url(default_nats_url())
+    }
+
+    pub fn with_nats_url(nats_url: impl Into<String>) -> Self {
         let dir = laya_dir();
         let initial = match verify_existing(&dir) {
             Ok(()) => LayaEngineStatus::ready(&dir),
@@ -173,6 +182,7 @@ impl ModelManager {
         Self {
             status: Arc::new(StdMutex::new(initial)),
             gate: Arc::new(StdMutex::new(())),
+            nats_url: Arc::new(nats_url.into()),
         }
     }
 
@@ -190,28 +200,29 @@ impl ModelManager {
         if self.status().is_ready() && verify_existing(&laya_dir()).is_ok() {
             let ready = LayaEngineStatus::ready(&laya_dir());
             self.set_status(ready.clone());
-            emit_engine(app, &ready);
+            emit_engine(app, Some(self.nats_url.as_str()), &ready);
             return ready;
         }
         let dir = laya_dir();
         let downloading = LayaEngineStatus::downloading(&dir, None, 0, 0);
         self.set_status(downloading.clone());
-        emit_engine(app, &downloading);
+        emit_engine(app, Some(self.nats_url.as_str()), &downloading);
         let sink = EngineSink {
             app: app.cloned(),
+            nats_url: self.nats_url.clone(),
             status: self.status.clone(),
         };
         match ensure_artifacts_with_sink(&dir, !skip_download(), &sink) {
             Ok(()) => {
                 let ready = LayaEngineStatus::ready(&dir);
                 self.set_status(ready.clone());
-                emit_engine(app, &ready);
+                emit_engine(app, Some(self.nats_url.as_str()), &ready);
                 ready
             }
             Err(err) => {
                 let failed = LayaEngineStatus::failed(&dir, err.to_string());
                 self.set_status(failed.clone());
-                emit_engine(app, &failed);
+                emit_engine(app, Some(self.nats_url.as_str()), &failed);
                 failed
             }
         }
@@ -226,13 +237,14 @@ impl Default for ModelManager {
 
 struct EngineSink {
     app: Option<AppHandle>,
+    nats_url: Arc<String>,
     status: Arc<StdMutex<LayaEngineStatus>>,
 }
 
 impl EngineSink {
     fn push(&self, next: LayaEngineStatus) {
         *self.status.lock().expect("laya engine status") = next.clone();
-        emit_engine(self.app.as_ref(), &next);
+        emit_engine(self.app.as_ref(), Some(self.nats_url.as_str()), &next);
     }
 }
 
@@ -351,7 +363,37 @@ pub fn artifacts_present(dir: &Path) -> bool {
     ARTIFACTS.iter().all(|rel| dir.join(rel).is_file())
 }
 
-pub fn emit_engine(app: Option<&AppHandle>, status: &LayaEngineStatus) {
+pub fn infra_status_envelope(status: &LayaEngineStatus) -> lounge_protocol::LoungeMessage {
+    let payload = serde_json::to_value(status).unwrap_or(serde_json::json!({}));
+    lounge_protocol::LoungeMessage::new(INFRA_STATUS, KERNEL_AGENT, payload)
+}
+
+fn publish_infra_status(nats_url: &str, status: &LayaEngineStatus) {
+    if nats_url.trim().is_empty() {
+        return;
+    }
+    let envelope = infra_status_envelope(status);
+    let subject = envelope.subject.clone();
+    let Ok(bytes) = serde_json::to_vec(&envelope) else {
+        return;
+    };
+    let url = nats_url.to_string();
+    let _ = std::thread::Builder::new()
+        .name("lounge-infra-status".into())
+        .spawn(move || match nats::connect(&url) {
+            Ok(nc) => {
+                if let Err(err) = nc.publish(&subject, bytes) {
+                    log::debug!("{INFRA_STATUS} publish: {err}");
+                }
+            }
+            Err(err) => log::debug!("{INFRA_STATUS} nats: {err}"),
+        });
+}
+
+pub fn emit_engine(app: Option<&AppHandle>, nats_url: Option<&str>, status: &LayaEngineStatus) {
+    if let Some(url) = nats_url {
+        publish_infra_status(url, status);
+    }
     let Some(app) = app else {
         return;
     };
@@ -372,6 +414,7 @@ pub fn ensure_artifacts(dir: &Path, download: bool) -> Result<()> {
         download,
         &EngineSink {
             app: None,
+            nats_url: Arc::new(String::new()),
             status: Arc::new(StdMutex::new(LayaEngineStatus::downloading(
                 dir, None, 0, 0,
             ))),
@@ -634,6 +677,7 @@ fn download_artifacts(
         let progress = HubProgress {
             sink: EngineSink {
                 app: sink.app.clone(),
+                nats_url: sink.nats_url.clone(),
                 status: sink.status.clone(),
             },
             dir: dir.to_path_buf(),
@@ -811,6 +855,19 @@ mod tests {
             LayaEngineStatus::failed(dir, "x").label,
             "Laya Engine: Failed"
         );
+    }
+
+    #[test]
+    fn infra_envelope_ready_label_without_nats() {
+        let status = LayaEngineStatus::ready(Path::new("/tmp/laya"));
+        assert_eq!(status.label, "Laya Engine: Ready");
+        let envelope = infra_status_envelope(&status);
+        assert_eq!(envelope.subject, INFRA_STATUS);
+        assert_eq!(envelope.source_agent, KERNEL_AGENT);
+        assert_eq!(envelope.payload["label"], "Laya Engine: Ready");
+        assert_eq!(envelope.payload["phase"], "ready");
+        emit_engine(None, None, &status);
+        emit_engine(None, Some(""), &status);
     }
 
     #[test]

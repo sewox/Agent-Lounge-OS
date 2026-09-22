@@ -103,13 +103,13 @@ pub fn run_with_start_route(start_route: &'static str) {
             .with_decision_cache(gate.cache());
             dispatcher.attach_app(app.handle().clone());
             let bus = BusManager::new("nats://127.0.0.1:4222");
+            let models = ModelManager::with_nats_url(bus.nats_url());
             let handle = app.handle().clone();
             let supervisor_handle = app.handle().clone();
             let supervisor_services = services.clone();
             let quota_handle = app.handle().clone();
             let quota_services = services.clone();
             let quota_store = store.clone();
-            let models = ModelManager::new();
             let load_gate = gate.clone();
             let load_app = app.handle().clone();
             let load_models = models.clone();
@@ -437,7 +437,10 @@ fn emit_decision_gate(app: &tauri::AppHandle, status: &DecisionGateStatus) {
 }
 
 fn emit_laya_engine(app: &tauri::AppHandle, status: &LayaEngineStatus) {
-    services::model_manager::emit_engine(Some(app), status);
+    let nats_url = app
+        .try_state::<BusManager>()
+        .map(|bus| bus.nats_url().to_string());
+    services::model_manager::emit_engine(Some(app), nats_url.as_deref(), status);
 }
 
 #[tauri::command]
