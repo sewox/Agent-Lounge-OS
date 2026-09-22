@@ -6,6 +6,7 @@ import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
+  eventDecisionLabel,
   formatDecisionStreamLabel,
   formatExperienceTime,
   formatLayaDecision,
@@ -190,10 +191,10 @@ export function EventStreamPanel() {
       if (!query.trim()) {
         return true;
       }
-      const haystack = `${event.subject} ${event.from} ${event.to} ${event.decisionLabel ?? ""}`.toLowerCase();
+      const haystack = `${event.subject} ${event.from} ${event.to} ${eventDecisionLabel(event, decisionLive ? latencyMs : null)}`.toLowerCase();
       return haystack.includes(query.trim().toLowerCase());
     });
-  }, [events, query, subjectFilter]);
+  }, [decisionLive, events, latencyMs, query, subjectFilter]);
 
   const pages = pageCount(filtered.length);
   const safePage = Math.min(page, pages - 1);
@@ -263,7 +264,10 @@ export function EventStreamPanel() {
                   <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <span className="min-w-0 truncate">{event.subject}</span>
-                      {event.decisionLabel ? <DecisionStreamChip label={event.decisionLabel} live={selected} /> : null}
+                      <DecisionStreamChip
+                        label={eventDecisionLabel(event, decisionLive ? latencyMs : null)}
+                        live={selected || Boolean(event.decisionLabel)}
+                      />
                     </div>
                   </td>
                   <td className="px-2 py-1.5 text-on-surface-variant">

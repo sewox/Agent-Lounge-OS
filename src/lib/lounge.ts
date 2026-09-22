@@ -540,6 +540,20 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+export function extractDecisionLatencyMs(payload: unknown): number | null {
+  const record = asRecord(payload);
+  if (!record) {
+    return null;
+  }
+  const nested = asRecord(record.decision);
+  const latencyUs =
+    asFiniteNumber(record.latency_us) ?? (nested ? asFiniteNumber(nested.elapsed_us) : null);
+  const latencyMsRaw =
+    asFiniteNumber(record.latency_ms) ?? (nested ? asFiniteNumber(nested.elapsed_ms) : null);
+  const latencyMs = latencyMsRaw ?? (latencyUs != null ? latencyUs / 1000 : null);
+  return latencyMs != null && Number.isFinite(latencyMs) ? latencyMs : null;
+}
+
 export function parseDecisionTelemetry(message: LoungeMessage): LoungeTelemetry | null {
   if (!isDecisionTelemetrySubject(message.subject)) {
     return null;
@@ -551,9 +565,7 @@ export function parseDecisionTelemetry(message: LoungeMessage): LoungeTelemetry 
   const nested = asRecord(payload.decision);
   const latencyUs =
     asFiniteNumber(payload.latency_us) ?? (nested ? asFiniteNumber(nested.elapsed_us) : null);
-  const latencyMsRaw =
-    asFiniteNumber(payload.latency_ms) ?? (nested ? asFiniteNumber(nested.elapsed_ms) : null);
-  const latencyMs = latencyMsRaw ?? (latencyUs != null ? latencyUs / 1000 : null);
+  const latencyMs = extractDecisionLatencyMs(payload);
   if (latencyUs == null && latencyMs == null) {
     return null;
   }
@@ -608,6 +620,16 @@ export function formatDecisionStreamLabel(ms: number | null | undefined): string
     return "Decision: —";
   }
   return `Decision: ${Math.round(ms)}ms`;
+}
+
+export function eventDecisionLabel(
+  event: Pick<NatsEvent, "decisionLabel">,
+  latestMs?: number | null,
+): string {
+  if (event.decisionLabel) {
+    return event.decisionLabel;
+  }
+  return formatDecisionStreamLabel(latestMs);
 }
 
 export function pruneMsgWindow(ticks: MsgTick[], now = Date.now()): MsgTick[] {
@@ -685,6 +707,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     time = `${istanbulClockParts(created, true)}.${String(created.getMilliseconds()).padStart(3, "0")}`;
   }
   const telemetry = parseDecisionTelemetry(message);
+  const ownMs = telemetry?.latency_ms ?? extractDecisionLatencyMs(message.payload);
   return {
     id: message.id,
     time,
@@ -693,7 +716,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     to: message.target_agent?.trim() ? message.target_agent : "bus",
     payload: `${kb}kb`,
     state,
-    decisionLabel: telemetry ? formatDecisionStreamLabel(telemetry.latency_ms) : undefined,
+    decisionLabel: ownMs != null ? formatDecisionStreamLabel(ownMs) : undefined,
   };
 }
 

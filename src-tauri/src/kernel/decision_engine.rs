@@ -38,6 +38,9 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 pub const ROUTING: &str = "ROUTING";
 pub const SECURITY: &str = "SECURITY";
 pub const CONTEXT_MATCH: &str = "CONTEXT_MATCH";
+pub const ROUTING_TYPE: &str = "ROUTING_TYPE";
+pub const SECURITY_LEVEL: &str = "SECURITY_LEVEL";
+pub const KNOWLEDGE_HIT: &str = "KNOWLEDGE_HIT";
 pub const ROUTING_ID: &str = ROUTING;
 pub const SECURITY_ID: &str = SECURITY;
 pub const KNOWLEDGE_ID: &str = CONTEXT_MATCH;
@@ -743,13 +746,13 @@ pub fn result_from_logits(
         let temp = temperature_for(cfg, item.qtype, k);
         let probs = softmax_temp(slice, temp);
         match item.id.as_str() {
-            ROUTING | "ROUTING_TYPE" => {
+            ROUTING | ROUTING_TYPE => {
                 routing = Some(scored_routing(&item.option_keys, &probs));
             }
-            SECURITY | "SECURITY_LEVEL" => {
+            SECURITY | SECURITY_LEVEL => {
                 security = Some(scored_security(&item.option_keys, &probs));
             }
-            CONTEXT_MATCH | "KNOWLEDGE_HIT" => {
+            CONTEXT_MATCH | KNOWLEDGE_HIT => {
                 knowledge_hit = probs.get(1).copied().unwrap_or(0.0);
             }
             _ => {}
@@ -1003,6 +1006,9 @@ mod tests {
         assert_eq!(ROUTING_ID, ROUTING);
         assert_eq!(SECURITY_ID, SECURITY);
         assert_eq!(KNOWLEDGE_ID, CONTEXT_MATCH);
+        assert_eq!(ROUTING_TYPE, "ROUTING_TYPE");
+        assert_eq!(SECURITY_LEVEL, "SECURITY_LEVEL");
+        assert_eq!(KNOWLEDGE_HIT, "KNOWLEDGE_HIT");
     }
 
     #[test]
@@ -1028,21 +1034,28 @@ mod tests {
     async fn process_message_async_skips_bus_and_cold_session() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let gate = DecisionGate::new(tx);
-        let skip = gate
-            .process_message_async(LoungeMessage::from_nats("lounge.bus.heartbeat", b"{}"))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(skip.contains("skip subject"));
-        let telemetry = gate
-            .process_message_async(LoungeMessage::from_nats(
-                crate::models::TELEMETRY_DECISION,
-                b"{}",
-            ))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(telemetry.contains("skip subject"));
+        let skip_subjects = [
+            "lounge.bus.heartbeat",
+            "lounge.telemetry.decision",
+            "lounge.telemetry.other",
+            "lounge.infra.status",
+            "lounge.infra.other",
+            "lounge.agent.prompt",
+            crate::models::TELEMETRY_DECISION,
+            crate::models::INFRA_STATUS,
+            crate::models::AGENT_PROMPT,
+        ];
+        for subject in skip_subjects {
+            let skip = gate
+                .process_message_async(LoungeMessage::from_nats(subject, b"{}"))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                skip.contains("skip subject"),
+                "{subject} skip edilmeli: {skip}"
+            );
+        }
         let cold = gate
             .process_message_async(sample_msg())
             .await
@@ -1050,6 +1063,58 @@ mod tests {
             .to_string();
         assert!(cold.contains("soğuk"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn process_message_async_concurrent_skips_do_not_deadlock() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let mut joins = Vec::new();
+        for subject in [
+            "lounge.bus.heartbeat",
+            "lounge.telemetry.decision",
+            "lounge.infra.status",
+            "lounge.agent.prompt",
+        ] {
+            let gate = gate.clone();
+            joins.push(tokio::spawn(async move {
+                gate.process_message_async(LoungeMessage::from_nats(subject, b"{}"))
+                    .await
+            }));
+        }
+        for join in joins {
+            let err = join
+                .await
+                .expect("spawn_blocking join")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("skip subject"), "{err}");
+        }
+    }
+
+    #[test]
+    fn commit_decision_overwrites_elapsed_us_and_nests_on_nats_subject() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let inferred = classified_sample(0);
+        assert_eq!(inferred.elapsed_us, 0);
+        let committed = gate.commit_decision(&sample_msg(), inferred, 4_200);
+        assert_eq!(committed.elapsed_us, 4_200);
+        assert_eq!(committed.elapsed_ms, 4);
+        let got = rx
+            .try_recv()
+            .expect("process_message results kanalına DecisionResult basmalı");
+        assert_eq!(got.elapsed_us, 4_200);
+        let telemetry = LoungeTelemetry::from_decision(&got, 3);
+        assert_eq!(telemetry.decision.elapsed_us, 4_200);
+        assert_eq!(telemetry.latency_us, 4_200);
+        assert_eq!(
+            telemetry.envelope().subject,
+            crate::models::TELEMETRY_DECISION
+        );
+        assert_eq!(telemetry.decision.routing.value, RoutingType::Task);
+        assert_eq!(telemetry.decision.security.value, SecurityLevel::Critical);
+        assert!(telemetry.decision.knowledge_hit > 0.8);
     }
 
     fn classified_sample(elapsed_us: u128) -> DecisionResult {
@@ -1079,9 +1144,9 @@ mod tests {
             &msg,
             &LayaRuntimeConfig::default(),
         );
-        packed[0].id = "ROUTING_TYPE".into();
-        packed[1].id = "SECURITY_LEVEL".into();
-        packed[2].id = "KNOWLEDGE_HIT".into();
+        packed[0].id = ROUTING_TYPE.into();
+        packed[1].id = SECURITY_LEVEL.into();
+        packed[2].id = KNOWLEDGE_HIT.into();
         let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
         let result = result_from_logits(
             &msg,
