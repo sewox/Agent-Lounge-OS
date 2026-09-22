@@ -199,6 +199,23 @@ export function AppShell({ children }: { children: ReactNode }) {
                   Şimdilik LMR
                 </button>
               </div>
+            ) : decisionGate.phase === "failed" ? (
+              <div className="flex shrink-0 items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void enableLaya()}
+                  className="rounded bg-primary-container px-2 py-1 font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+                >
+                  Yeniden dene
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLayaDismissed(true)}
+                  className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
+                >
+                  Gizle
+                </button>
+              </div>
             ) : (
               <button
                 type="button"

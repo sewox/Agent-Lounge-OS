@@ -23,6 +23,7 @@ const MSG_MIN_WINDOW: Duration = Duration::from_secs(60);
 const CONFIDENCE_SKIP_OLLAMA: f32 = 0.7;
 const KNOWLEDGE_HIT_LOW: f32 = 0.3;
 const MIN_RAM_BYTES: u64 = 1610612736; // 1.5 GiB
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub const ROUTING_ID: &str = "ROUTING_TYPE";
 pub const SECURITY_ID: &str = "SECURITY_LEVEL";
@@ -225,8 +226,60 @@ pub fn classify_load_reason(err: &str) -> &'static str {
     }
 }
 
+pub fn bytes_to_gib(bytes: u64) -> f64 {
+    bytes as f64 / GIB
+}
+
+pub fn available_memory_bytes() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+pub fn ram_is_sufficient(available_bytes: u64) -> bool {
+    available_bytes >= MIN_RAM_BYTES
+}
+
+pub fn format_ram_blocked(available_bytes: u64) -> String {
+    format!(
+        "Laya için yetersiz RAM (en az {:.1} GiB boş, sysinfo available {:.2} GiB)",
+        bytes_to_gib(MIN_RAM_BYTES),
+        bytes_to_gib(available_bytes)
+    )
+}
+
+pub fn ram_blocked_status(available_bytes: u64) -> DecisionGateStatus {
+    let required = bytes_to_gib(MIN_RAM_BYTES);
+    let available = bytes_to_gib(available_bytes);
+    DecisionGateStatus {
+        phase: DecisionGatePhase::Failed,
+        title: "OpenJev Laya yüklenemedi".into(),
+        message: format!(
+            "Karar motoru için en az {required:.1} GiB boş bellek yok (sysinfo: {available:.2} GiB). Yönlendirme LMR ve sezgisel kurallarla sürüyor."
+        ),
+        detail: Some(format_ram_blocked(available_bytes)),
+        device: None,
+        reason: Some("ram".into()),
+    }
+}
+
+fn parse_available_from_ram_err(err: &str) -> Option<u64> {
+    let rest = err.split_once("sysinfo available ")?.1;
+    let token = rest.split_whitespace().next()?;
+    let gib: f64 = token.trim_end_matches("GiB").trim().parse().ok()?;
+    if !gib.is_finite() || gib < 0.0 {
+        return None;
+    }
+    Some((gib * GIB).round() as u64)
+}
+
 pub fn status_from_load_error(err: &str) -> DecisionGateStatus {
     let reason = classify_load_reason(err);
+    if reason == "ram" {
+        if let Some(available) = parse_available_from_ram_err(err) {
+            return ram_blocked_status(available);
+        }
+    }
     let (title, message) = match reason {
         "ram" => (
             "OpenJev Laya yüklenemedi".into(),
@@ -351,6 +404,19 @@ impl DecisionGate {
         true
     }
 
+    /// Kullanıcı açıkça yükleme istedi (`Yeniden dene` / `Laya'ya geç`).
+    /// `declined` temizlenir; Failed / Available / cold durumundan yükleme başlar.
+    pub fn request_enable(&self) -> bool {
+        self.declined.store(false, Ordering::SeqCst);
+        if self.is_ready() {
+            return false;
+        }
+        if self.status().phase != DecisionGatePhase::Loading {
+            self.load_in_flight.store(false, Ordering::SeqCst);
+        }
+        self.begin_load()
+    }
+
     pub fn mark_available(&self) -> bool {
         if self.declined.load(Ordering::SeqCst) || self.is_ready() {
             return false;
@@ -391,13 +457,16 @@ impl DecisionGate {
         self.session.lock().expect("laya session lock").is_some()
     }
 
-    pub fn infer_async(&self, msg: &LoungeMessage) {
+    /// Kuyruğa aldıysa `true`. `skip_bus_subject` eşleşirse (bus/telemetry/prompt) `false`.
+    pub fn infer_async(&self, msg: &LoungeMessage) -> bool {
         if skip_bus_subject(&msg.subject) {
-            return;
+            return false;
         }
         if let Err(err) = self.jobs.try_send(msg.clone()) {
             log::debug!("DecisionGate kuyruk dolu: {err}");
+            return false;
         }
+        true
     }
 
     pub fn inject(&self, result: DecisionResult) {
@@ -766,9 +835,7 @@ fn infer_message(session: &LayaSession, msg: &LoungeMessage) -> Result<DecisionR
 }
 
 pub fn ram_allows_load() -> bool {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    sys.available_memory() >= MIN_RAM_BYTES
+    ram_is_sufficient(available_memory_bytes())
 }
 
 pub fn laya_dir() -> PathBuf {
@@ -784,8 +851,9 @@ pub fn ensure_artifacts(dir: &Path, download: bool) -> Result<()> {
 }
 
 pub fn load_session(dir: &Path) -> Result<LayaSession> {
-    if !ram_allows_load() {
-        anyhow::bail!("Laya için yetersiz RAM (en az 1.5 GiB boş)");
+    let available = available_memory_bytes();
+    if !ram_is_sufficient(available) {
+        anyhow::bail!("{}", format_ram_blocked(available));
     }
     // Yerel app-support yolu; DecisionGate HF'ye yeniden inmez.
     ensure_artifacts(dir, false)?;
@@ -847,6 +915,23 @@ mod tests {
         assert!(skip_bus_subject("lounge.agent.prompt"));
         assert!(skip_bus_subject("lounge.telemetry.decision"));
         assert!(skip_bus_subject("lounge.telemetry.other"));
+    }
+
+    #[test]
+    fn infer_async_triggers_on_non_bus_message() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let task = LoungeMessage::from_nats(
+            "lounge.task.requested",
+            br#"{"id":"task-infer","type":"task","source_agent":"test"}"#,
+        );
+        assert!(gate.infer_async(&task));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.bus.heartbeat", b"{}")));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats(
+            "lounge.telemetry.decision",
+            b"{}"
+        )));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.agent.prompt", b"{}")));
     }
 
     #[test]
@@ -925,6 +1010,9 @@ mod tests {
         assert!(ram.title.contains("OpenJev Laya"));
         assert!(ram.message.contains("1.5 GiB"));
         assert!(ram.detail.as_deref().unwrap().contains("yetersiz RAM"));
+        let numbered = status_from_load_error(&format_ram_blocked(512 * 1024 * 1024));
+        assert!(numbered.message.contains("sysinfo: 0.50 GiB"));
+        assert!(numbered.ram_blocked());
 
         let weights = status_from_load_error("Laya ağırlıkları yok: /tmp/laya");
         assert_eq!(weights.reason.as_deref(), Some("weights"));
@@ -979,6 +1067,76 @@ mod tests {
         assert!(!gate.mark_available());
         gate.clear_declined();
         assert!(gate.mark_available());
+    }
+
+    #[test]
+    fn ram_probe_agrees_with_allows_load() {
+        assert_eq!(
+            ram_allows_load(),
+            ram_is_sufficient(available_memory_bytes())
+        );
+        assert!(!ram_is_sufficient(0));
+        assert!(ram_is_sufficient(MIN_RAM_BYTES));
+    }
+
+    #[test]
+    fn enable_from_failed_retries_load() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load("Laya checksum uyuşmazlığı (sha256): model.safetensors");
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(gate.request_enable());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Loading);
+        assert!(!gate.declined());
+        assert!(!gate.is_ready());
+    }
+
+    #[test]
+    fn enable_when_ram_blocked_surfaces_failed_status() {
+        let available = 512 * 1024 * 1024;
+        let status = ram_blocked_status(available);
+        assert_eq!(status.phase, DecisionGatePhase::Failed);
+        assert_eq!(status.reason.as_deref(), Some("ram"));
+        assert!(status.ram_blocked());
+        assert!(status.message.contains("1.5 GiB"));
+        assert!(status.message.contains("0.50 GiB"));
+        assert!(status
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("sysinfo available 0.50 GiB"));
+
+        let from_err = status_from_load_error(&format_ram_blocked(available));
+        assert_eq!(from_err, status);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load(&format_ram_blocked(available));
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(gate.status().ram_blocked());
+        assert!(gate.request_enable());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Loading);
+        gate.fail_load(&format_ram_blocked(available));
+        let again = gate.status();
+        assert_eq!(again.phase, DecisionGatePhase::Failed);
+        assert!(again.ram_blocked());
+        assert!(again.message.contains("sysinfo: 0.50 GiB"));
+        assert_ne!(again, DecisionGateStatus::loading());
+    }
+
+    #[test]
+    fn explicit_retry_clears_declined() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load(&format_ram_blocked(512 * 1024 * 1024));
+        assert!(gate.mark_available());
+        gate.decline_offer();
+        assert!(gate.declined());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(!gate.mark_available());
+        assert!(gate.request_enable());
+        assert!(!gate.declined());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Loading);
     }
 
     #[test]

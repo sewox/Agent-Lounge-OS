@@ -344,6 +344,21 @@ fn decline_decision_gate(
 }
 
 async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &ModelManager) {
+    if !gate.request_enable() {
+        emit_decision_gate(app, &gate.status());
+        return;
+    }
+    emit_decision_gate(app, &gate.status());
+
+    let available = tokio::task::spawn_blocking(kernel::decision_engine::available_memory_bytes)
+        .await
+        .unwrap_or(0);
+    if !kernel::decision_engine::ram_is_sufficient(available) {
+        gate.fail_load(&kernel::decision_engine::format_ram_blocked(available));
+        emit_decision_gate(app, &gate.status());
+        return;
+    }
+
     let models = models.clone();
     let app_for_files = app.clone();
     let engine = tokio::task::spawn_blocking(move || models.ensure(Some(&app_for_files)))
@@ -361,11 +376,6 @@ async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &Mod
         emit_decision_gate(app, &gate.status());
         return;
     }
-    if !gate.begin_load() {
-        emit_decision_gate(app, &gate.status());
-        return;
-    }
-    emit_decision_gate(app, &gate.status());
     let dir = PathBuf::from(&engine.path);
     match tokio::task::spawn_blocking(move || kernel::decision_engine::load_session(&dir)).await {
         Ok(Ok(session)) => gate.install(session),
@@ -391,9 +401,11 @@ fn spawn_laya_watchdog(app: tauri::AppHandle, gate: DecisionGate) {
             if !status.ram_blocked() {
                 continue;
             }
-            let ram_ok = tokio::task::spawn_blocking(kernel::decision_engine::ram_allows_load)
-                .await
-                .unwrap_or(false);
+            let available =
+                tokio::task::spawn_blocking(kernel::decision_engine::available_memory_bytes)
+                    .await
+                    .unwrap_or(0);
+            let ram_ok = kernel::decision_engine::ram_is_sufficient(available);
             if gate.declined() {
                 if !ram_ok {
                     gate.clear_declined();
@@ -405,7 +417,7 @@ fn spawn_laya_watchdog(app: tauri::AppHandle, gate: DecisionGate) {
                     emit_decision_gate(&app, &gate.status());
                 }
             } else if status.phase == DecisionGatePhase::Available {
-                gate.fail_load("Laya için yetersiz RAM (en az 1.5 GiB boş)");
+                gate.fail_load(&kernel::decision_engine::format_ram_blocked(available));
                 emit_decision_gate(&app, &gate.status());
             }
         }

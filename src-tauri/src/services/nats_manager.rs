@@ -20,6 +20,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 const EVENT_RECONNECT: Duration = Duration::from_secs(2);
 
+/// Event pump NATS konusu — `lounge.>` (tek seviye altındaki tüm `lounge.*` değil, `>` ile tüm derinlik).
+pub(crate) const EVENT_PUMP_SUBJECT: &str = WILDCARD;
+
 pub fn default_nats_url() -> String {
     format!("nats://{}:{}", DEFAULT_NATS_HOST, DEFAULT_NATS_PORT)
 }
@@ -48,8 +51,10 @@ pub fn spawn_event_pump_url(app: AppHandle, nats_url: impl Into<String>) {
 }
 
 pub(crate) fn listen_once(app: &AppHandle, url: &str) -> Result<()> {
-    let sub = connect_and_subscribe(url)?;
-    log::info!("NATS event pump dinliyor: {url} ({WILDCARD})");
+    // `nats::Connection` Inner Drop client.shutdown() çağırır. Subscription Client
+    // tutsa bile bağlantı kapanır ve `messages()` hemen biter — `_nc` pump boyunca yaşar.
+    let (_nc, sub) = connect_and_subscribe(url)?;
+    log::info!("NATS event pump dinliyor: {url} ({EVENT_PUMP_SUBJECT})");
     for msg in sub.messages() {
         let envelope = LoungeMessage::from_nats(&msg.subject, &msg.data);
         if let Some(gate) = app.try_state::<DecisionGate>() {
@@ -60,10 +65,12 @@ pub(crate) fn listen_once(app: &AppHandle, url: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn connect_and_subscribe(url: &str) -> Result<nats::Subscription> {
+pub(crate) fn connect_and_subscribe(url: &str) -> Result<(nats::Connection, nats::Subscription)> {
     let nc = nats::connect(url).with_context(|| format!("NATS bağlanamadı: {url}"))?;
-    nc.subscribe(WILDCARD)
-        .with_context(|| format!("subscribe {WILDCARD} başarısız"))
+    let sub = nc
+        .subscribe(EVENT_PUMP_SUBJECT)
+        .with_context(|| format!("subscribe {EVENT_PUMP_SUBJECT} başarısız"))?;
+    Ok((nc, sub))
 }
 
 fn emit_nats_event(app: &AppHandle, envelope: &LoungeMessage) {
@@ -449,6 +456,16 @@ mod tests {
     }
 
     #[test]
+    fn event_pump_subscribe_subject_is_wildcard() {
+        assert_eq!(EVENT_PUMP_SUBJECT, "lounge.>");
+        assert_eq!(EVENT_PUMP_SUBJECT, WILDCARD);
+        assert!(
+            EVENT_PUMP_SUBJECT.ends_with('>'),
+            "pump must use NATS wildcard, got {EVENT_PUMP_SUBJECT}"
+        );
+    }
+
+    #[test]
     fn connect_and_subscribe_does_not_panic_when_nats_down() {
         let err = connect_and_subscribe("nats://127.0.0.1:1").expect_err("closed port");
         let text = err.to_string();
@@ -456,6 +473,59 @@ mod tests {
             text.contains("NATS bağlanamadı") || text.contains("connection") || text.contains("1"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn event_pump_receives_non_bus_message_on_wildcard() {
+        let Some((url, mut child)) = spawn_ephemeral_nats() else {
+            eprintln!("skip: nats-server bulunamadı");
+            return;
+        };
+        let result = (|| -> Result<()> {
+            let (nc, sub) = connect_and_subscribe(&url)?;
+            let payload = br#"{"id":"pump-infer","type":"task","source_agent":"test"}"#;
+            nc.publish("lounge.task.requested", &payload[..])
+                .context("publish task")?;
+            nc.flush().context("flush")?;
+            let msg = sub
+                .next_timeout(Duration::from_secs(2))
+                .context("wildcard lounge.> görev mesajı gelmedi")?;
+            assert_eq!(msg.subject, "lounge.task.requested");
+            let envelope = LoungeMessage::from_nats(&msg.subject, &msg.data);
+            assert!(
+                !crate::kernel::decision_engine::skip_bus_subject(&envelope.subject),
+                "non-bus subject should trigger infer"
+            );
+            Ok(())
+        })();
+        let _ = child.kill();
+        let _ = child.wait();
+        result.expect("event pump wildcard subscribe");
+    }
+
+    fn spawn_ephemeral_nats() -> Option<(String, std::process::Child)> {
+        let binary = find_executable("nats-server")?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+        let port = listener.local_addr().ok()?.port();
+        drop(listener);
+        let child = std::process::Command::new(binary)
+            .args(["-a", "127.0.0.1", "-p", &port.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let url = format!("nats://127.0.0.1:{port}");
+        for _ in 0..80 {
+            if nats::connect(&url).is_ok() {
+                return Some((url, child));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        None
     }
 
     #[test]
