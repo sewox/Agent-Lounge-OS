@@ -272,10 +272,23 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     if (!isTauri()) {
       return;
     }
+    setDecisionGate({
+      phase: "loading",
+      title: "OpenJev Laya yükleniyor",
+      message: "Karar motoru ağırlıkları okunuyor. Bu sırada kernel LMR ile çalışır.",
+      detail: null,
+      device: null,
+      reason: null,
+    });
     try {
       setDecisionGate(await invoke<DecisionGateStatus>("enable_decision_gate"));
     } catch (error) {
       console.error(error);
+      try {
+        setDecisionGate(await invoke<DecisionGateStatus>("get_decision_gate_status"));
+      } catch (statusError) {
+        console.error(statusError);
+      }
     }
   }, []);
 
