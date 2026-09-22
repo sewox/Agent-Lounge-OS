@@ -344,6 +344,16 @@ fn decline_decision_gate(
 }
 
 async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &ModelManager) {
+    // Ağırlık indirmesi RAM yüklemesinden bağımsızdır; Worker Fleet Downloading/Ready görür.
+    let models_for_files = models.clone();
+    let app_for_files = app.clone();
+    let engine = tokio::task::spawn_blocking(move || models_for_files.ensure(Some(&app_for_files)))
+        .await
+        .unwrap_or_else(|err| {
+            LayaEngineStatus::failed(&kernel::decision_engine::laya_dir(), err.to_string())
+        });
+    emit_laya_engine(app, &engine);
+
     if !gate.request_enable() {
         emit_decision_gate(app, &gate.status());
         return;
@@ -359,14 +369,6 @@ async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &Mod
         return;
     }
 
-    let models = models.clone();
-    let app_for_files = app.clone();
-    let engine = tokio::task::spawn_blocking(move || models.ensure(Some(&app_for_files)))
-        .await
-        .unwrap_or_else(|err| {
-            LayaEngineStatus::failed(&kernel::decision_engine::laya_dir(), err.to_string())
-        });
-    emit_laya_engine(app, &engine);
     if !engine.is_ready() {
         let detail = engine
             .error

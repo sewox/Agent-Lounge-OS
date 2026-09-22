@@ -1,4 +1,14 @@
 //! Native Rust DecisionGate: her NATS `LoungeMessage` için Laya Fast Inference.
+//!
+//! `model_manager` ağırlıkları indirdikten sonra `DecisionGate::install` candle
+//! `LayaSession`'ı RAM'e alır. `process_message` tokenize + option-marker sequence
+//! classification yapar (`ROUTING` / `SECURITY` / `CONTEXT_MATCH`), `elapsed_us`
+//! ölçer ve `DecisionResult`'ı results kanalı → NATS `lounge.telemetry.decision`
+//! olarak fırlatır.
+//!
+//! `process_message` senkron kalır: candle session `std::sync::Mutex` ve infer
+//! `laya-infer` thread'indedir (`infer_worker`). Tokio worker'da candle çağrılmaz.
+//! Async giriş: `infer_async` (kuyruk) veya `process_message_async` (`spawn_blocking`).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -476,6 +486,11 @@ impl DecisionGate {
     }
 
     /// Tokenize + Laya sequence classification; latency mikro-saniye. Sonucu NATS kanalına basar.
+    ///
+    /// Public infer API senkron: candle `LayaSession` `std::sync::Mutex` altındadır.
+    /// Çıkarsama Tokio worker'da değil, `laya-infer` thread'inde (`infer_worker`)
+    /// çalışır; runtime deadlock olmaz. Async için `process_message_async` veya
+    /// bus üzerindeki `infer_async` kuyruğunu kullan.
     pub fn process_message(&self, message: LoungeMessage) -> Result<DecisionResult> {
         if skip_bus_subject(&message.subject) {
             anyhow::bail!("DecisionGate skip subject: {}", message.subject);
@@ -488,6 +503,15 @@ impl DecisionGate {
         };
         let elapsed_us = infer_elapsed_us(start_time, Instant::now());
         Ok(self.commit_decision(&message, inferred, elapsed_us))
+    }
+
+    /// Async sarmalayıcı: senkron `process_message` yolunu Tokio worker'da değil
+    /// `spawn_blocking` havuzunda koşturur. Bus üretimi `infer_async` → `laya-infer`.
+    pub async fn process_message_async(&self, message: LoungeMessage) -> Result<DecisionResult> {
+        let gate = self.clone();
+        tokio::task::spawn_blocking(move || gate.process_message(message))
+            .await
+            .context("DecisionGate infer join")?
     }
 
     fn commit_decision(
@@ -934,6 +958,14 @@ mod tests {
         assert!(skip_bus_subject("lounge.telemetry.other"));
         assert!(skip_bus_subject("lounge.infra.status"));
         assert!(skip_bus_subject("lounge.infra.other"));
+        assert!(skip_bus_subject(crate::models::TELEMETRY_DECISION));
+        assert!(skip_bus_subject(crate::models::INFRA_STATUS));
+        assert!(skip_bus_subject(crate::models::AGENT_PROMPT));
+        assert_eq!(crate::models::KERNEL_AGENT, "lounge-kernel");
+        assert_eq!(
+            crate::models::TELEMETRY_DECISION,
+            "lounge.telemetry.decision"
+        );
     }
 
     #[test]
@@ -990,6 +1022,105 @@ mod tests {
         let cold = gate.process_message(sample_msg()).unwrap_err().to_string();
         assert!(cold.contains("soğuk"));
         assert!(!gate.is_ready());
+    }
+
+    #[tokio::test]
+    async fn process_message_async_skips_bus_and_cold_session() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let skip = gate
+            .process_message_async(LoungeMessage::from_nats("lounge.bus.heartbeat", b"{}"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(skip.contains("skip subject"));
+        let telemetry = gate
+            .process_message_async(LoungeMessage::from_nats(
+                crate::models::TELEMETRY_DECISION,
+                b"{}",
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(telemetry.contains("skip subject"));
+        let cold = gate
+            .process_message_async(sample_msg())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(cold.contains("soğuk"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    fn classified_sample(elapsed_us: u128) -> DecisionResult {
+        let msg = sample_msg();
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            elapsed_us,
+            "cpu",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn result_from_logits_accepts_legacy_category_ids() {
+        let msg = sample_msg();
+        let mut packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        packed[0].id = "ROUTING_TYPE".into();
+        packed[1].id = "SECURITY_LEVEL".into();
+        packed[2].id = "KNOWLEDGE_HIT".into();
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            4_200,
+            "cpu",
+        )
+        .unwrap();
+        assert_eq!(result.routing.value, RoutingType::Task);
+        assert_eq!(result.security.value, SecurityLevel::Critical);
+        assert!(result.knowledge_hit > 0.8);
+        assert_eq!(result.context_match(), result.knowledge_hit);
+        assert_eq!(result.elapsed_us, 4_200);
+    }
+
+    #[test]
+    fn inject_emits_decision_result_with_elapsed_us() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let result = classified_sample(4_200);
+        gate.inject(result.clone());
+        let got = rx
+            .try_recv()
+            .expect("DecisionResult results kanalına gitmeli");
+        assert_eq!(got.elapsed_us, 4_200);
+        assert_eq!(got.message_id, result.message_id);
+        let telemetry = LoungeTelemetry::from_decision(&got, 1);
+        assert_eq!(telemetry.decision.elapsed_us, 4_200);
+        assert_eq!(telemetry.latency_us, 4_200);
+        assert_eq!(
+            telemetry.envelope().subject,
+            crate::models::TELEMETRY_DECISION
+        );
+        assert_eq!(
+            telemetry.envelope().source_agent,
+            crate::models::KERNEL_AGENT
+        );
     }
 
     #[test]
@@ -1122,6 +1253,7 @@ mod tests {
         );
         assert!(!ram_is_sufficient(0));
         assert!(ram_is_sufficient(MIN_RAM_BYTES));
+        assert_eq!(MIN_RAM_BYTES, 1_610_612_736);
     }
 
     #[test]

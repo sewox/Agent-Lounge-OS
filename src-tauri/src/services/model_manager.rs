@@ -57,8 +57,22 @@ pub struct LayaEngineStatus {
     pub file: Option<String>,
     pub completed: u64,
     pub total: u64,
+    /// 0–100; NATS `lounge.infra.status` ve Worker Fleet için.
+    #[serde(default)]
+    pub percentage: u8,
     pub path: String,
     pub error: Option<String>,
+}
+
+pub fn download_percentage(completed: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    completed
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(100) as u8
 }
 
 impl LayaEngineStatus {
@@ -71,6 +85,7 @@ impl LayaEngineStatus {
             file: file.map(str::to_string),
             completed,
             total,
+            percentage: download_percentage(completed, total),
             path: dir.display().to_string(),
             error: None,
         }
@@ -84,6 +99,7 @@ impl LayaEngineStatus {
             file: None,
             completed: 1,
             total: 1,
+            percentage: 100,
             path: dir.display().to_string(),
             error: None,
         }
@@ -98,6 +114,7 @@ impl LayaEngineStatus {
             file: None,
             completed: 0,
             total: 0,
+            percentage: 0,
             path: dir.display().to_string(),
             error: Some(error),
         }
@@ -692,8 +709,25 @@ fn download_artifacts(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&src, &dest)
+        copy_atomically(&src, &dest)
             .with_context(|| format!("kopyala {} → {}", src.display(), dest.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_atomically(src: &Path, dest: &Path) -> Result<()> {
+    let file_name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let tmp = dest.with_file_name(format!("{file_name}.part"));
+    if tmp.exists() {
+        std::fs::remove_file(&tmp).ok();
+    }
+    std::fs::copy(src, &tmp)?;
+    if std::fs::rename(&tmp, dest).is_err() {
+        std::fs::copy(&tmp, dest)?;
+        std::fs::remove_file(&tmp).ok();
     }
     Ok(())
 }
@@ -866,8 +900,30 @@ mod tests {
         assert_eq!(envelope.source_agent, KERNEL_AGENT);
         assert_eq!(envelope.payload["label"], "Laya Engine: Ready");
         assert_eq!(envelope.payload["phase"], "ready");
+        assert_eq!(envelope.payload["percentage"], serde_json::json!(100));
         emit_engine(None, None, &status);
         emit_engine(None, Some(""), &status);
+    }
+
+    #[test]
+    fn infra_envelope_publishes_download_percentage() {
+        let status = LayaEngineStatus::downloading(
+            Path::new("/tmp/laya"),
+            Some("model.safetensors"),
+            25,
+            100,
+        );
+        assert_eq!(status.percentage, 25);
+        let envelope = infra_status_envelope(&status);
+        assert_eq!(envelope.subject, INFRA_STATUS);
+        assert_eq!(envelope.payload["phase"], "downloading");
+        assert_eq!(envelope.payload["percentage"], serde_json::json!(25));
+        assert_eq!(envelope.payload["completed"], serde_json::json!(25));
+        assert_eq!(envelope.payload["total"], serde_json::json!(100));
+        assert_eq!(envelope.payload["file"], "model.safetensors");
+        assert_eq!(download_percentage(0, 0), 0);
+        assert_eq!(download_percentage(1, 3), 33);
+        assert_eq!(download_percentage(3, 3), 100);
     }
 
     #[test]

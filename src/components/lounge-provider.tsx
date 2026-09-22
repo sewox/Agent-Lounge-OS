@@ -220,7 +220,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         /* DecisionGate henüz yönetilmiyor olabilir */
       }
       try {
-        setLayaEngine(await invoke<LayaEngineStatus>("get_laya_engine_status"));
+        const engine = await invoke<LayaEngineStatus>("get_laya_engine_status");
+        setLayaEngine(engine);
+        if (engine.phase !== "ready") {
+          void invoke<LayaEngineStatus>("ensure_laya_engine")
+            .then((next) => setLayaEngine(next))
+            .catch(() => {
+              /* indirme zaten kernel tarafında yürüyor olabilir */
+            });
+        }
       } catch {
         /* Laya Engine henüz yönetilmiyor olabilir */
       }

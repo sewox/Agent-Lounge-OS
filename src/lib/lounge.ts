@@ -35,6 +35,7 @@ export type LayaEngineStatus = {
   file: string | null;
   completed: number;
   total: number;
+  percentage: number;
   path: string;
   error: string | null;
 };
@@ -61,6 +62,7 @@ export type NatsEvent = {
   to: string;
   payload: string;
   state: "queued" | "ok" | "error" | "retry";
+  decisionLabel?: string;
 };
 
 export type NatsTone = "task" | "success" | "error";
@@ -477,16 +479,58 @@ export function parseLayaEngineStatus(message: LoungeMessage): LayaEngineStatus 
   ) {
     return null;
   }
+  const completed = asFiniteNumber(payload.completed) ?? 0;
+  const total = asFiniteNumber(payload.total) ?? 0;
+  const percentage =
+    asFiniteNumber(payload.percentage) ??
+    (phase === "ready" ? 100 : total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0);
   return {
     phase,
     label: payload.label,
     message: payload.message,
     file: typeof payload.file === "string" ? payload.file : null,
-    completed: asFiniteNumber(payload.completed) ?? 0,
-    total: asFiniteNumber(payload.total) ?? 0,
+    completed,
+    total,
+    percentage: Math.min(100, Math.max(0, Math.round(percentage))),
     path: payload.path,
     error: typeof payload.error === "string" ? payload.error : null,
   };
+}
+
+export function layaEnginePercentage(status: LayaEngineStatus | null | undefined): number | null {
+  if (!status) {
+    return null;
+  }
+  if (status.phase === "ready") {
+    return 100;
+  }
+  if (typeof status.percentage === "number" && Number.isFinite(status.percentage) && status.total > 0) {
+    return Math.min(100, Math.max(0, Math.round(status.percentage)));
+  }
+  if (status.total > 0) {
+    return Math.min(100, Math.round((status.completed / status.total) * 100));
+  }
+  return null;
+}
+
+export function formatLayaEngineFleetStatus(status: LayaEngineStatus | null | undefined): string {
+  if (!status) {
+    return "Laya Engine: …";
+  }
+  if (status.phase === "downloading") {
+    const pct = layaEnginePercentage(status);
+    return pct != null ? `Laya Engine: Downloading ${pct}%` : "Laya Engine: Downloading";
+  }
+  if (status.label) {
+    return status.label;
+  }
+  if (status.phase === "failed") {
+    return "Laya Engine: Failed";
+  }
+  if (status.phase === "ready") {
+    return "Laya Engine: Ready";
+  }
+  return "Laya Engine: …";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -557,6 +601,13 @@ export function formatLayaDecision(ms: number | null | undefined): string {
     return "Laya Decision: —";
   }
   return `Laya Decision: ${formatLatencyMs(ms)}`;
+}
+
+export function formatDecisionStreamLabel(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) {
+    return "Decision: —";
+  }
+  return `Decision: ${Math.round(ms)}ms`;
 }
 
 export function pruneMsgWindow(ticks: MsgTick[], now = Date.now()): MsgTick[] {
@@ -633,6 +684,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
   if (!Number.isNaN(created.getTime())) {
     time = `${istanbulClockParts(created, true)}.${String(created.getMilliseconds()).padStart(3, "0")}`;
   }
+  const telemetry = parseDecisionTelemetry(message);
   return {
     id: message.id,
     time,
@@ -641,6 +693,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     to: message.target_agent?.trim() ? message.target_agent : "bus",
     payload: `${kb}kb`,
     state,
+    decisionLabel: telemetry ? formatDecisionStreamLabel(telemetry.latency_ms) : undefined,
   };
 }
 
@@ -661,6 +714,7 @@ export type ProjectHealthRow = {
 };
 
 export const MOCK_EVENTS: NatsEvent[] = [
+  { id: "d1", time: "14:09:29.004", subject: "lounge.telemetry.decision", from: "decision_engine", to: "bus", payload: "0.2kb", state: "ok", decisionLabel: "Decision: 4ms" },
   { id: "1", time: "14:09:18.441", subject: "lounge.task.requested", from: "kernel", to: "dispatcher", payload: "1.2kb", state: "queued" },
   { id: "2", time: "14:09:18.512", subject: "lounge.task.assigned", from: "dispatcher", to: "ollama", payload: "0.4kb", state: "ok" },
   { id: "3", time: "14:09:19.108", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "3.8kb", state: "ok" },
