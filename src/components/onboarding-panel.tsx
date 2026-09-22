@@ -12,6 +12,7 @@ import {
   MODEL_PULL_EVENT,
   LAYA_ENGINE_EVENT,
   formatDiscoveryLocation,
+  layaEnginePercentage,
   hfOfferToTool,
   hostLabelsFor,
   humanizeDiscoveryDetail,
@@ -583,10 +584,7 @@ function InstallLink({ label, href }: { label: string; href: string }) {
 }
 
 function LayaEngineBlock({ status }: { status: LayaEngineStatus | null }) {
-  const percent =
-    status && status.total > 0
-      ? Math.min(100, Math.round((status.completed / status.total) * 100))
-      : null;
+  const percent = layaEnginePercentage(status);
   const downloading = status?.phase === "downloading";
   return (
     <div className="rounded-lg border border-outline-variant bg-surface-container">

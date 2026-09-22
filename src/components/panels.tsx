@@ -6,9 +6,12 @@ import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
+  formatDecisionStreamLabel,
   formatExperienceTime,
   formatLayaDecision,
+  formatLayaEngineFleetStatus,
   formatLatencyMs,
+  layaEnginePercentage,
   MOCK_HEALTH,
   MOCK_NODES,
   natsEventTone,
@@ -146,11 +149,35 @@ export function OverviewKpis() {
   );
 }
 
+function DecisionStreamChip({
+  label,
+  live = false,
+}: {
+  label: string;
+  live?: boolean;
+}) {
+  return (
+    <span
+      key={label}
+      className={`kpi-tick shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium tnum ${
+        live
+          ? "border-primary/30 bg-primary-container/20 text-primary"
+          : "border-primary/25 bg-surface-container-high text-primary"
+      }`}
+    >
+      {label}
+    </span>
+  );
+}
+
 export function EventStreamPanel() {
-  const { events, query, probeBus } = useLounge();
+  const { events, query, probeBus, decisionTelemetry } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
   const [probing, setProbing] = useState(false);
   const [page, setPage] = useState(0);
+  const latencyMs = decisionTelemetry?.latency_ms;
+  const decisionLive = latencyMs != null && Number.isFinite(latencyMs);
+  const liveDecisionLabel = formatDecisionStreamLabel(decisionLive ? latencyMs : null);
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
@@ -163,7 +190,7 @@ export function EventStreamPanel() {
       if (!query.trim()) {
         return true;
       }
-      const haystack = `${event.subject} ${event.from} ${event.to}`.toLowerCase();
+      const haystack = `${event.subject} ${event.from} ${event.to} ${event.decisionLabel ?? ""}`.toLowerCase();
       return haystack.includes(query.trim().toLowerCase());
     });
   }, [events, query, subjectFilter]);
@@ -182,6 +209,7 @@ export function EventStreamPanel() {
           <span className="rounded border border-primary/30 bg-primary-container/20 px-1.5 py-0.5 font-mono text-[10px] text-primary">
             bus live
           </span>
+          {decisionLive ? <DecisionStreamChip label={liveDecisionLabel} live /> : null}
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 rounded border border-outline-variant/60 bg-surface-container-high px-2 py-0.5">
@@ -232,7 +260,12 @@ export function EventStreamPanel() {
                   }
                 >
                   <td className="tnum px-2.5 py-1.5 text-on-surface-variant">{event.time}</td>
-                  <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>{event.subject}</td>
+                  <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="min-w-0 truncate">{event.subject}</span>
+                      {event.decisionLabel ? <DecisionStreamChip label={event.decisionLabel} live={selected} /> : null}
+                    </div>
+                  </td>
                   <td className="px-2 py-1.5 text-on-surface-variant">
                     {event.from} <span className="text-outline">→</span> {event.to}
                   </td>
@@ -752,19 +785,14 @@ export function SettingsPanel() {
 
 export function FleetPanel() {
   const { report, model, decisionGate, layaEngine } = useLounge();
-  const engineLabel =
-    layaEngine?.label ??
-    (layaEngine?.phase === "downloading"
-      ? "Laya Engine: Downloading"
-      : layaEngine?.phase === "failed"
-        ? "Laya Engine: Failed"
-        : layaEngine?.phase === "ready"
-          ? "Laya Engine: Ready"
-          : "Laya Engine: …");
+  const engineLabel = formatLayaEngineFleetStatus(layaEngine);
+  const downloadPct = layaEnginePercentage(layaEngine);
   const gateHint =
-    decisionGate?.phase === "ready"
-      ? decisionGate.device || "DecisionGate"
-      : "DecisionGate kapalı";
+    layaEngine?.phase === "downloading" && downloadPct != null
+      ? `${downloadPct}%`
+      : decisionGate?.phase === "ready"
+        ? decisionGate.device || "DecisionGate"
+        : "DecisionGate kapalı";
   const workers = [
     { id: "lounge-kernel", status: report?.ollama.running ? "ready" : "down", model },
     { id: "nats-hub", status: report?.nats.running ? "listening" : "down", model: "lounge.>" },
