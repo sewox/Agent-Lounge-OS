@@ -8,7 +8,18 @@ pub const TASK_REQUESTED: &str = "lounge.task.requested";
 pub const TASK_ASSIGNED: &str = "lounge.task.assigned";
 pub const TASK_COMPLETED: &str = "lounge.task.completed";
 pub const TASK_FAILED: &str = "lounge.task.failed";
+pub const TASK_RESUME: &str = "lounge.task.resume";
+pub const ALERT_SECURITY: &str = "lounge.alert.security";
+pub const ALERT_QUOTA: &str = "lounge.alert.quota";
 pub const EXPERIENCE_REPORTED: &str = "lounge.experience.reported";
+pub const AGENT_PROMPT: &str = "lounge.agent.prompt";
+/// Cross-Project Memory fısıltısı — kanonik NATS konusu (`subjects.json` `context.whisper`).
+/// Ajan enjeksiyonu ayrıca `AGENT_PROMPT` üzerinden de yayınlanır.
+pub const CONTEXT_WHISPER: &str = "lounge.context.whisper";
+pub const TEST_REQUESTED: &str = "lounge.test.requested";
+pub const TEST_COMPLETED: &str = "lounge.test.completed";
+pub const TELEMETRY_DECISION: &str = "lounge.telemetry.decision";
+pub const INFRA_STATUS: &str = "lounge.infra.status";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +70,12 @@ pub struct LoungeTask {
     pub repo_path: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Zincirleme workflow: bu görevi tetikleyen tamamlanmış ebeveyn id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    /// Event Stream etiketi — örn. `Task A -> Triggered Task B`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_chain: Option<String>,
 }
 
 impl LoungeTask {
@@ -80,6 +97,8 @@ impl LoungeTask {
             kind: TaskKind::General,
             repo_path: None,
             model: None,
+            parent_task_id: None,
+            workflow_chain: None,
         }
     }
 
@@ -233,35 +252,136 @@ pub struct ExperienceHit {
     pub solution_summary: String,
     pub adr_record: String,
     pub score: f32,
+    #[serde(default)]
+    pub source: String,
+}
+
+impl ExperienceHit {
+    pub fn source_or_sqlite(&self) -> &str {
+        if self.source.is_empty() {
+            "sqlite"
+        } else {
+            self.source.as_str()
+        }
+    }
+}
+
+/// AST özetinden kırpılmış kod parçası — tam dosya değil.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CodeSnippet {
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub line: Option<i64>,
+    #[serde(default)]
+    pub symbol: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExperienceContext {
     #[serde(default)]
     pub experiences: Vec<ExperienceHit>,
+    #[serde(default)]
+    pub snippets: Vec<CodeSnippet>,
+    #[serde(default)]
+    pub knowledge_hit: Option<f32>,
 }
 
 impl ExperienceContext {
     pub fn from_hits(hits: Vec<ExperienceHit>) -> Self {
-        Self { experiences: hits }
+        Self {
+            experiences: hits,
+            snippets: Vec::new(),
+            knowledge_hit: None,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.experiences.is_empty()
+        self.experiences.is_empty() && self.snippets.is_empty()
     }
 
     pub fn prompt_block(&self) -> String {
-        if self.experiences.is_empty() {
+        if self.is_empty() {
             return String::new();
         }
-        let mut block = String::from("\n\n## Önceki tecrübeler (semantik arama)\n");
-        for hit in &self.experiences {
-            block.push_str(&format!(
-                "- [{}] {} (score={:.2})\n  solution: {}\n  adr: {}\n",
-                hit.agent_id, hit.topic, hit.score, hit.solution_summary, hit.adr_record
-            ));
+        let mut block = String::from("\n\n## Cross-Project Memory\n");
+        if let Some(hit) = self.knowledge_hit {
+            block.push_str(&format!("KNOWLEDGE_HIT={hit:.2}\n"));
+        }
+        if !self.experiences.is_empty() {
+            block.push_str("### Tecrübeler\n");
+            for hit in &self.experiences {
+                block.push_str(&format!(
+                    "- [{}|{}|{}] {} (score={:.2})\n  solution: {}\n  adr: {}\n",
+                    hit.agent_id,
+                    hit.project_id,
+                    hit.source_or_sqlite(),
+                    hit.topic,
+                    hit.score,
+                    hit.solution_summary,
+                    hit.adr_record
+                ));
+            }
+        }
+        if !self.snippets.is_empty() {
+            block.push_str("### İlgili kod (AST özeti)\n");
+            for snippet in &self.snippets {
+                let loc = snippet
+                    .line
+                    .map(|line| format!("{}:{}", snippet.file, line))
+                    .unwrap_or_else(|| snippet.file.clone());
+                block.push_str(&format!(
+                    "- {} `{}` {}\n",
+                    snippet.kind, snippet.symbol, loc
+                ));
+                if !snippet.body.is_empty() {
+                    block.push_str("```\n");
+                    block.push_str(&snippet.body);
+                    if !snippet.body.ends_with('\n') {
+                        block.push('\n');
+                    }
+                    block.push_str("```\n");
+                }
+            }
         }
         block
+    }
+}
+
+/// Çalışan ajana (Cursor/Claude) NATS üzerinden giden system prompt eklentisi.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SystemPromptAddon {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub task_id: String,
+    pub target_agent: String,
+    pub knowledge_hit: f32,
+    pub context: ExperienceContext,
+    pub prompt: String,
+}
+
+impl SystemPromptAddon {
+    pub fn from_context(
+        task_id: impl Into<String>,
+        target_agent: impl Into<String>,
+        knowledge_hit: f32,
+        context: ExperienceContext,
+    ) -> Self {
+        let prompt = context.prompt_block();
+        Self {
+            msg_type: "system_prompt".into(),
+            task_id: task_id.into(),
+            target_agent: target_agent.into(),
+            knowledge_hit,
+            context,
+            prompt,
+        }
     }
 }
 
@@ -335,6 +455,53 @@ mod tests {
         assert_eq!(json["task"]["assigned"], TASK_ASSIGNED);
         assert_eq!(json["task"]["completed"], TASK_COMPLETED);
         assert_eq!(json["task"]["failed"], TASK_FAILED);
+        assert_eq!(json["task"]["resume"], TASK_RESUME);
+        assert_eq!(json["alert"]["security"], ALERT_SECURITY);
+        assert_eq!(json["alert"]["quota"], ALERT_QUOTA);
+        assert_ne!(ALERT_QUOTA, ALERT_SECURITY);
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
+        assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
+        assert_eq!(json["context"]["whisper"], CONTEXT_WHISPER);
+        assert_eq!(CONTEXT_WHISPER, "lounge.context.whisper");
+        assert_ne!(CONTEXT_WHISPER, AGENT_PROMPT);
+        assert_eq!(json["test"]["requested"], TEST_REQUESTED);
+        assert_eq!(json["test"]["completed"], TEST_COMPLETED);
+        assert_eq!(json["telemetry"]["decision"], TELEMETRY_DECISION);
+        assert_eq!(json["infra"]["status"], INFRA_STATUS);
+        assert_eq!(json["bus"]["connected"], "lounge.bus.connected");
+        assert_eq!(json["bus"]["heartbeat"], "lounge.bus.heartbeat");
+    }
+
+    #[test]
+    fn prompt_block_is_system_addon() {
+        let context = ExperienceContext {
+            experiences: vec![ExperienceHit {
+                id: "e1".into(),
+                project_id: "other".into(),
+                agent_id: "cursor".into(),
+                topic: "NATS listen".into(),
+                solution_summary: "spawn_blocking".into(),
+                adr_record: "sync client".into(),
+                score: 0.7,
+                source: "sqlite".into(),
+            }],
+            snippets: vec![CodeSnippet {
+                project_id: "lounge".into(),
+                file: "src/dispatcher.rs".into(),
+                line: Some(12),
+                symbol: "listen_once".into(),
+                kind: "fn".into(),
+                body: "fn listen_once() {}".into(),
+            }],
+            knowledge_hit: Some(0.81),
+        };
+        let prompt = context.prompt_block();
+        assert!(prompt.contains("Cross-Project Memory"));
+        assert!(prompt.contains("KNOWLEDGE_HIT=0.81"));
+        assert!(prompt.contains("listen_once"));
+        let addon = SystemPromptAddon::from_context("task-1", "cursor", 0.81, context);
+        assert_eq!(addon.msg_type, "system_prompt");
+        assert_eq!(addon.target_agent, "cursor");
+        assert!(addon.prompt.contains("spawn_blocking"));
     }
 }

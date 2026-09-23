@@ -12,18 +12,33 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3" }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.3" }
+tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
 tokio = { version = "1.53.1", features = ["full"] }
 nats = "0.26.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 anyhow = "1.0.104"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
+sysinfo = "0.33"
 uuid = { version = "1.20.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
+lounge_protocol = { path = "../shared/lounge_protocol" }
+candle-core = { version = "0.9.1", default-features = false }
+candle-nn = { version = "0.9.1", default-features = false }
+candle-transformers = { version = "0.9.1", default-features = false }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+safetensors = "0.4"
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
+sha2 = "0.10"
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+candle-core = { version = "0.9.1", default-features = false, features = ["metal"] }
+candle-nn = { version = "0.9.1", default-features = false, features = ["metal"] }

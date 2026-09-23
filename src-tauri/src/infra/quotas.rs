@@ -1,175 +1,25 @@
-use std::time::Duration;
-
 use crate::models::ToolQuota;
-use crate::services::MemoryBridge;
+use crate::services::{collect_quota_state, MemoryBridge};
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+pub use crate::services::quota_manager::{
+    evaluate_assignment as check_quota, limit_policy_percent, quota_blocked_for,
+    quota_exhausted_for, quota_matches_agent,
+};
 
 pub async fn probe_quotas(
     ollama_endpoint: &str,
     nats_monitor: &str,
     memory: &MemoryBridge,
 ) -> Vec<ToolQuota> {
-    let (ollama, nats, mem) = tokio::join!(
-        probe_ollama(ollama_endpoint),
-        probe_nats(nats_monitor),
-        async { probe_memory(memory) }
-    );
-    let mut rows = vec![ollama, nats, mem];
-    rows.extend([
-        unconfigured("cursor", "Cursor · Grok 4.6", "ai", "provider API yok"),
-        unconfigured("claude", "Claude · Sonnet", "ai", "provider API yok"),
-        unconfigured("xai", "xAI · Grok API", "ai", "provider API yok"),
-        unconfigured("stitch", "Stitch · Gemini", "bot", "provider API yok"),
-    ]);
-    rows
+    collect_quota_state(ollama_endpoint, nats_monitor, memory)
+        .await
+        .quotas
 }
 
-fn unconfigured(id: &str, tool: &str, kind: &str, label: &str) -> ToolQuota {
-    ToolQuota {
-        id: id.into(),
-        tool: tool.into(),
-        kind: kind.into(),
-        unit: "api".into(),
-        used: "unconfigured".into(),
-        remaining: "—".into(),
-        reset: "—".into(),
-        percent: None,
-        tone: "warn".into(),
-        label: label.into(),
-        source: "infra".into(),
-        exhausted: false,
-    }
-}
-
-pub fn quota_exhausted_for(quotas: &[ToolQuota], agent: &str) -> bool {
-    let needle = agent.to_ascii_lowercase();
-    quotas
-        .iter()
-        .filter(|row| {
-            row.id.to_ascii_lowercase().contains(&needle)
-                || row.tool.to_ascii_lowercase().contains(&needle)
-        })
-        .any(ToolQuota::is_exhausted)
-}
-
-async fn probe_ollama(endpoint: &str) -> ToolQuota {
-    let url = format!("{endpoint}/api/ps");
-    match http_json(&url).await {
-        Ok(payload) => {
-            let running = payload
-                .get("models")
-                .and_then(|v| v.as_array())
-                .map(|rows| rows.len())
-                .unwrap_or(0);
-            let size: u64 = payload
-                .get("models")
-                .and_then(|v| v.as_array())
-                .map(|rows| {
-                    rows.iter()
-                        .filter_map(|row| row.get("size").and_then(|v| v.as_u64()))
-                        .sum()
-                })
-                .unwrap_or(0);
-            let gb = size as f32 / (1024.0 * 1024.0 * 1024.0);
-            ToolQuota {
-                id: "ollama".into(),
-                tool: "Ollama · local".into(),
-                kind: "ai".into(),
-                unit: "local".into(),
-                used: format!("{running} loaded · {gb:.1} GB"),
-                remaining: "unlimited".into(),
-                reset: "LOCAL".into(),
-                percent: None,
-                tone: "local".into(),
-                label: "ok LOCAL".into(),
-                source: url,
-                exhausted: false,
-            }
-        }
-        Err(err) => ToolQuota {
-            id: "ollama".into(),
-            tool: "Ollama · local".into(),
-            kind: "ai".into(),
-            unit: "local".into(),
-            used: "down".into(),
-            remaining: "—".into(),
-            reset: "LOCAL".into(),
-            percent: None,
-            tone: "warn".into(),
-            label: err,
-            source: url,
-            exhausted: false,
-        },
-    }
-}
-
-async fn probe_nats(monitor: &str) -> ToolQuota {
-    let url = format!("{monitor}/varz");
-    match http_json(&url).await {
-        Ok(payload) => {
-            let connections = payload
-                .get("connections")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let in_msgs = payload.get("in_msgs").and_then(|v| v.as_u64()).unwrap_or(0);
-            ToolQuota {
-                id: "nats".into(),
-                tool: "NATS broker".into(),
-                kind: "bot".into(),
-                unit: "conn".into(),
-                used: format!("{connections} conn · {in_msgs} in_msgs"),
-                remaining: "local".into(),
-                reset: "LOCAL".into(),
-                percent: None,
-                tone: "ok".into(),
-                label: "ok LOCAL".into(),
-                source: url,
-                exhausted: false,
-            }
-        }
-        Err(_) => ToolQuota {
-            id: "nats".into(),
-            tool: "NATS broker".into(),
-            kind: "bot".into(),
-            unit: "conn".into(),
-            used: "monitor kapalı".into(),
-            remaining: "—".into(),
-            reset: "LOCAL".into(),
-            percent: None,
-            tone: "warn".into(),
-            label: "no /varz".into(),
-            source: url,
-            exhausted: false,
-        },
-    }
-}
-
-fn probe_memory(memory: &MemoryBridge) -> ToolQuota {
-    let health = memory.diagnose();
-    ToolQuota {
-        id: "cbm".into(),
-        tool: "codebase-memory-mcp".into(),
-        kind: "bot".into(),
-        unit: "local".into(),
-        used: if health.running { "ready" } else { "missing" }.into(),
-        remaining: "unlimited".into(),
-        reset: "LOCAL".into(),
-        percent: None,
-        tone: if health.running { "local" } else { "warn" }.into(),
-        label: if health.running {
-            "ok LOCAL".into()
-        } else {
-            health.error.unwrap_or_else(|| "binary yok".into())
-        },
-        source: health.endpoint,
-        exhausted: false,
-    }
-}
-
-async fn http_json(url: &str) -> Result<serde_json::Value, String> {
+/// Hafif GET JSON — keşif / Ollama tags (subscription_usage HTTP'sinden bağımsız).
+pub async fn http_json(url: &str) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
+        .timeout(std::time::Duration::from_secs(2))
         .build()
         .map_err(|err| err.to_string())?;
     let response = client
@@ -186,24 +36,92 @@ async fn http_json(url: &str) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{QuotaVerdict, LIMIT_POLICY_PERCENT};
+
+    fn row(id: &str, tool: &str, mode: &str, host: Option<&str>, exhausted: bool) -> ToolQuota {
+        ToolQuota {
+            id: id.into(),
+            tool: tool.into(),
+            percent: exhausted.then_some(100.0),
+            exhausted,
+            ..ToolQuota::default()
+        }
+        .with_mode(mode, host)
+    }
 
     #[test]
-    fn exhausted_matches_agent_id() {
-        let quotas = vec![ToolQuota {
-            id: "cursor".into(),
-            tool: "Cursor".into(),
-            kind: "ai".into(),
-            unit: "req".into(),
-            used: "500 / 500".into(),
-            remaining: "0".into(),
-            reset: "00:00 UTC".into(),
-            percent: Some(100.0),
-            tone: "warn".into(),
-            label: "exhausted".into(),
-            source: "infra".into(),
-            exhausted: true,
-        }];
+    fn exhausted_matches_subscription_cursor() {
+        let quotas = vec![row(
+            "app:cursor",
+            "Cursor",
+            "subscription",
+            Some("cursor"),
+            true,
+        )];
         assert!(quota_exhausted_for(&quotas, "cursor"));
         assert!(!quota_exhausted_for(&quotas, "ollama"));
+    }
+
+    #[test]
+    fn claude_agent_does_not_use_anthropic_api_row() {
+        let quotas = vec![
+            row(
+                "app:claude_desktop",
+                "Claude Desktop",
+                "subscription",
+                Some("claude_desktop"),
+                false,
+            ),
+            row("anthropic", "Anthropic API", "api", None, true),
+        ];
+        assert!(!quota_exhausted_for(&quotas, "claude"));
+        assert!(quota_exhausted_for(&quotas, "anthropic"));
+        assert!(!quota_matches_agent(&quotas[1], "claude"));
+    }
+
+    #[test]
+    fn grok_bot_does_not_use_xai_api_row() {
+        let quotas = vec![
+            row(
+                "app:grok_bot",
+                "Grok Bot",
+                "subscription",
+                Some("grok_bot"),
+                false,
+            ),
+            row("xai", "Grok API", "api", None, true),
+        ];
+        assert!(!quota_exhausted_for(&quotas, "grok"));
+        assert!(quota_exhausted_for(&quotas, "xai"));
+    }
+
+    #[test]
+    fn check_quota_block_matches_verdict() {
+        let quotas = vec![row(
+            "app:cursor",
+            "Cursor",
+            "subscription",
+            Some("cursor"),
+            true,
+        )];
+        let verdict = check_quota(&quotas, "cursor", LIMIT_POLICY_PERCENT);
+        assert!(matches!(verdict, QuotaVerdict::Block { .. }));
+    }
+
+    #[test]
+    fn limit_policy_blocks_at_ninety() {
+        let quotas = vec![ToolQuota {
+            id: "app:cursor".into(),
+            tool: "Cursor".into(),
+            percent: Some(90.0),
+            exhausted: false,
+            ..ToolQuota::default()
+        }
+        .with_mode("subscription", Some("cursor"))];
+        assert!(quota_blocked_for(&quotas, "cursor", LIMIT_POLICY_PERCENT));
+        assert!(matches!(
+            check_quota(&quotas, "cursor", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Block { .. }
+        ));
     }
 }

@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    app_lib::run();
+    let start_route = app_lib::initial_window_route();
+    app_lib::run_with_start_route(start_route);
 }

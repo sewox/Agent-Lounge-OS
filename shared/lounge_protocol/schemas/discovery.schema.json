@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/discovery.schema.json",
+  "title": "DiscoveryReport",
+  "description": "Yerel abonelik uygulamaları, plugin (MCP), LMR/Ollama modelleri ve PATH araçları. MCP env değerleri asla yer almaz.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scanned_at", "sources", "tools", "apps", "models", "mcp_servers", "system_tools"],
+  "properties": {
+    "scanned_at": { "type": "string", "format": "date-time" },
+    "sources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoverySource" }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "apps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "models": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "mcp_servers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DiscoveredTool" }
+    },
+    "system_tools": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SystemTool" }
+    }
+  },
+  "$defs": {
+    "DiscoverySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "available"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "claude_desktop",
+            "claude_cli",
+            "cursor",
+            "grok_bot",
+            "antigravity",
+            "lmr",
+            "ollama",
+            "system",
+            "api"
+          ]
+        },
+        "available": { "type": "boolean" },
+        "origin_path": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
+    "DiscoveredTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "source", "args", "available"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": ["app", "cli", "plugin", "model", "mcp", "system"]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "claude_desktop",
+            "claude_cli",
+            "cursor",
+            "grok_bot",
+            "antigravity",
+            "lmr",
+            "ollama",
+            "system",
+            "api",
+            "app"
+          ]
+        },
+        "origin_path": { "type": ["string", "null"] },
+        "command": { "type": ["string", "null"] },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "endpoint": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "available": { "type": "boolean" },
+        "access_mode": {
+          "type": "string",
+          "enum": ["subscription", "api", "plugin", "local"]
+        },
+        "host_id": { "type": ["string", "null"] },
+        "host_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "SystemTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "available"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "available": { "type": "boolean" },
+        "path": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

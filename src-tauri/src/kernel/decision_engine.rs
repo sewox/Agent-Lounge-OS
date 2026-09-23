@@ -1,0 +1,1592 @@
+//! Native Rust DecisionGate: her NATS `LoungeMessage` için Laya Fast Inference.
+//!
+//! `model_manager` ağırlıkları indirdikten sonra `DecisionGate::install` candle
+//! `LayaSession`'ı RAM'e alır. `process_message` tokenize + option-marker sequence
+//! classification yapar (`ROUTING` / `SECURITY` / `CONTEXT_MATCH`), `elapsed_us`
+//! ölçer ve `DecisionResult`'ı results kanalı → NATS `lounge.telemetry.decision`
+//! olarak fırlatır.
+//!
+//! `process_message` senkron kalır: candle session `std::sync::Mutex` ve infer
+//! `laya-infer` thread'indedir (`infer_worker`). Tokio worker'da candle çağrılmaz.
+//! Async giriş: `infer_async` (kuyruk) veya `process_message_async` (`spawn_blocking`).
+
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc as std_mpsc, Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use lounge_protocol::LoungeMessage;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+use super::laya::{
+    build_sequence, confidence_from_probs, softmax_temp, temperature_for, LayaRuntimeConfig,
+    LayaSession, PackedQuestion, QuestionSpec, TokenEncode, QTYPE_CHOICE, QTYPE_NOUL,
+};
+use crate::services::model_manager;
+
+const JOB_CAP: usize = 32;
+const CACHE_TTL: Duration = Duration::from_secs(30);
+const MSG_MIN_WINDOW: Duration = Duration::from_secs(60);
+const CONFIDENCE_SKIP_OLLAMA: f32 = 0.7;
+const KNOWLEDGE_HIT_LOW: f32 = 0.3;
+const MIN_RAM_BYTES: u64 = 1610612736; // 1.5 GiB
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+pub const ROUTING: &str = "ROUTING";
+pub const SECURITY: &str = "SECURITY";
+pub const CONTEXT_MATCH: &str = "CONTEXT_MATCH";
+pub const ROUTING_TYPE: &str = "ROUTING_TYPE";
+pub const SECURITY_LEVEL: &str = "SECURITY_LEVEL";
+pub const KNOWLEDGE_HIT: &str = "KNOWLEDGE_HIT";
+pub const ROUTING_ID: &str = ROUTING;
+pub const SECURITY_ID: &str = SECURITY;
+pub const KNOWLEDGE_ID: &str = CONTEXT_MATCH;
+pub const DECISION_GATE_EVENT: &str = "decision-gate";
+
+/// Aynı güvenlik sınıfı için bu kadar `security_approve` ve yakın zamanda deny yoksa
+/// risk bir kademe düşürülür (Critical→Risky, Risky→Safe). Sıfır geçmiş Critical'ı düşürmez.
+pub const USER_BIAS_APPROVE_THRESHOLD: u32 = 3;
+
+/// Kullanıcı onay/ret istatistikleri — model yeniden eğitilmez; yalnızca skor sonrası düzeltme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserBiasStats {
+    pub alert_type: SecurityLevel,
+    pub approve_count: u32,
+    pub recent_denies: u32,
+}
+
+/// Laya sınıflandırmasından sonra User Bias uygula.
+///
+/// Kural:
+/// - `approve_count >= USER_BIAS_APPROVE_THRESHOLD` (3)
+/// - `recent_denies == 0`
+/// - sonuç güvenlik değeri `stats.alert_type` ile aynı
+/// - o zaman bir kademe düşür: Critical→Risky, Risky→Safe
+/// - `approve_count == 0` iken Critical asla düşmez (marka-yeni Critical korunur)
+pub fn apply_user_bias(mut result: DecisionResult, stats: &UserBiasStats) -> DecisionResult {
+    if stats.approve_count == 0 {
+        return result;
+    }
+    if stats.approve_count < USER_BIAS_APPROVE_THRESHOLD || stats.recent_denies > 0 {
+        return result;
+    }
+    if result.security.value != stats.alert_type {
+        return result;
+    }
+    let next = match result.security.value {
+        SecurityLevel::Critical => SecurityLevel::Risky,
+        SecurityLevel::Risky => SecurityLevel::Safe,
+        SecurityLevel::Safe => return result,
+    };
+    let key = next.as_str().to_string();
+    result.security.value = next;
+    // Etiketi güncelle; güven skorunu hafifçe yumuşat (ağırlık yeniden eğitimi yok).
+    result.security.confidence = (result.security.confidence * 0.92).clamp(0.35, 1.0);
+    result
+        .security
+        .probabilities
+        .entry(key)
+        .and_modify(|p| *p = (*p).max(result.security.confidence))
+        .or_insert(result.security.confidence);
+    result
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RoutingType {
+    Task,
+    Experience,
+    Review,
+}
+
+impl RoutingType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "Task",
+            Self::Experience => "Experience",
+            Self::Review => "Review",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SecurityLevel {
+    Safe,
+    Risky,
+    Critical,
+}
+
+impl SecurityLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Safe => "Safe",
+            Self::Risky => "Risky",
+            Self::Critical => "Critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Scored<T> {
+    pub value: T,
+    pub confidence: f32,
+    pub probabilities: HashMap<String, f32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecallHint {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub source_agent: String,
+    #[serde(default)]
+    pub target_agent: Option<String>,
+    #[serde(default)]
+    pub ast_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionResult {
+    pub message_id: String,
+    pub subject: String,
+    pub routing: Scored<RoutingType>,
+    pub security: Scored<SecurityLevel>,
+    pub knowledge_hit: f32,
+    pub elapsed_ms: u128,
+    #[serde(default)]
+    pub elapsed_us: u128,
+    pub device: String,
+    #[serde(default)]
+    pub recall: RecallHint,
+}
+
+impl DecisionResult {
+    pub fn latency_ms(&self) -> f64 {
+        if self.elapsed_us > 0 {
+            micros_to_millis(self.elapsed_us)
+        } else {
+            self.elapsed_ms as f64
+        }
+    }
+
+    pub fn confident(&self) -> bool {
+        self.routing.confidence >= CONFIDENCE_SKIP_OLLAMA
+            && self.security.confidence >= CONFIDENCE_SKIP_OLLAMA
+    }
+
+    pub fn knowledge_is_low(&self) -> bool {
+        self.knowledge_hit < KNOWLEDGE_HIT_LOW
+    }
+
+    pub fn knowledge_is_hit(&self) -> bool {
+        self.knowledge_hit >= KNOWLEDGE_HIT_LOW
+    }
+
+    pub fn context_match(&self) -> f32 {
+        self.knowledge_hit
+    }
+}
+
+pub type DecisionCache = Arc<StdMutex<HashMap<String, (Instant, DecisionResult)>>>;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionGatePhase {
+    Loading,
+    Ready,
+    Failed,
+    Available,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DecisionGateStatus {
+    pub phase: DecisionGatePhase,
+    pub title: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub device: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl DecisionGateStatus {
+    pub fn loading() -> Self {
+        Self {
+            phase: DecisionGatePhase::Loading,
+            title: "OpenJev Laya yükleniyor".into(),
+            message: "Karar motoru ağırlıkları okunuyor. Bu sırada kernel LMR ile çalışır.".into(),
+            detail: None,
+            device: None,
+            reason: None,
+        }
+    }
+
+    pub fn ready(device: impl Into<String>) -> Self {
+        let device = device.into();
+        Self {
+            phase: DecisionGatePhase::Ready,
+            title: "OpenJev Laya hazır".into(),
+            message: format!("DecisionGate {device} üzerinde çalışıyor."),
+            detail: None,
+            device: Some(device),
+            reason: None,
+        }
+    }
+
+    pub fn available() -> Self {
+        Self {
+            phase: DecisionGatePhase::Available,
+            title: "OpenJev Laya kullanılabilir".into(),
+            message: "Bellek açıldı. Karar motoruna geçiş yapmak ister misiniz? Onaylamadan mevcut LMR akışı değişmez.".into(),
+            detail: None,
+            device: None,
+            reason: Some("ram".into()),
+        }
+    }
+
+    pub fn deferred() -> Self {
+        Self {
+            phase: DecisionGatePhase::Failed,
+            title: "OpenJev Laya ertelendi".into(),
+            message: "Laya'ya geçiş reddedildi. Kernel LMR ile akışa devam ediyor.".into(),
+            detail: None,
+            device: None,
+            reason: Some("ram".into()),
+        }
+    }
+
+    /// Dosyalar hazırlanana veya RAM yüklemesi başlayana kadar DecisionGate soğuk kalır.
+    pub fn cold() -> Self {
+        Self {
+            phase: DecisionGatePhase::Failed,
+            title: "OpenJev Laya kapalı".into(),
+            message: "Karar motoru henüz RAM'e alınmadı. Kernel LMR ile çalışıyor.".into(),
+            detail: None,
+            device: None,
+            reason: Some("weights".into()),
+        }
+    }
+
+    pub fn ram_blocked(&self) -> bool {
+        self.reason.as_deref() == Some("ram")
+    }
+}
+
+pub fn classify_load_reason(err: &str) -> &'static str {
+    let lower = err.to_lowercase();
+    if lower.contains("yetersiz ram") {
+        "ram"
+    } else if lower.contains("checksum") || lower.contains("bütünlük") || lower.contains("sha256")
+    {
+        "checksum"
+    } else if lower.contains("ağırlık") {
+        "weights"
+    } else if lower.contains("hf ")
+        || lower.contains("hugging face")
+        || lower.contains("huggingface")
+    {
+        "download"
+    } else {
+        "other"
+    }
+}
+
+pub fn bytes_to_gib(bytes: u64) -> f64 {
+    bytes as f64 / GIB
+}
+
+pub fn available_memory_bytes() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+pub fn ram_is_sufficient(available_bytes: u64) -> bool {
+    available_bytes >= MIN_RAM_BYTES
+}
+
+pub fn format_ram_blocked(available_bytes: u64) -> String {
+    format!(
+        "Laya için yetersiz RAM (en az {:.1} GiB boş, sysinfo available {:.2} GiB)",
+        bytes_to_gib(MIN_RAM_BYTES),
+        bytes_to_gib(available_bytes)
+    )
+}
+
+pub fn ram_blocked_status(available_bytes: u64) -> DecisionGateStatus {
+    let required = bytes_to_gib(MIN_RAM_BYTES);
+    let available = bytes_to_gib(available_bytes);
+    DecisionGateStatus {
+        phase: DecisionGatePhase::Failed,
+        title: "OpenJev Laya yüklenemedi".into(),
+        message: format!(
+            "Karar motoru için en az {required:.1} GiB boş bellek yok (sysinfo: {available:.2} GiB). Yönlendirme LMR ve sezgisel kurallarla sürüyor."
+        ),
+        detail: Some(format_ram_blocked(available_bytes)),
+        device: None,
+        reason: Some("ram".into()),
+    }
+}
+
+fn parse_available_from_ram_err(err: &str) -> Option<u64> {
+    let rest = err.split_once("sysinfo available ")?.1;
+    let token = rest.split_whitespace().next()?;
+    let gib: f64 = token.trim_end_matches("GiB").trim().parse().ok()?;
+    if !gib.is_finite() || gib < 0.0 {
+        return None;
+    }
+    Some((gib * GIB).round() as u64)
+}
+
+pub fn status_from_load_error(err: &str) -> DecisionGateStatus {
+    let reason = classify_load_reason(err);
+    if reason == "ram" {
+        if let Some(available) = parse_available_from_ram_err(err) {
+            return ram_blocked_status(available);
+        }
+    }
+    let (title, message) = match reason {
+        "ram" => (
+            "OpenJev Laya yüklenemedi".into(),
+            "Karar motoru için en az 1.5 GiB boş bellek yok. Yönlendirme LMR ve sezgisel kurallarla sürüyor."
+                .into(),
+        ),
+        "weights" => (
+            "OpenJev Laya ağırlıkları yok".into(),
+            "Gerekli model dosyaları bulunamadı. DecisionGate kapalı; kernel LMR ile çalışıyor."
+                .into(),
+        ),
+        "checksum" => (
+            "OpenJev Laya bütünlüğü bozuldu".into(),
+            "Model dosyası checksum doğrulaması başarısız. Bozuk ağırlıklar yüklenmedi; kernel LMR ile çalışıyor."
+                .into(),
+        ),
+        "download" => (
+            "OpenJev Laya indirilemedi".into(),
+            "Hugging Face deposundan convaiinnovations/laya alınamadı. Ağ veya kimlik bilgisi gerekebilir."
+                .into(),
+        ),
+        _ => (
+            "OpenJev Laya yüklenemedi".into(),
+            "Karar motoru başlatılamadı. Kernel LMR ve mevcut kurallarla çalışmaya devam ediyor."
+                .into(),
+        ),
+    };
+    let detail = err.trim();
+    DecisionGateStatus {
+        phase: DecisionGatePhase::Failed,
+        title,
+        message,
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(detail.to_string())
+        },
+        device: None,
+        reason: Some(reason.into()),
+    }
+}
+
+#[derive(Clone)]
+pub struct DecisionGate {
+    jobs: std_mpsc::SyncSender<LoungeMessage>,
+    session: Arc<StdMutex<Option<LayaSession>>>,
+    cache: DecisionCache,
+    results: mpsc::Sender<DecisionResult>,
+    status: Arc<StdMutex<DecisionGateStatus>>,
+    declined: Arc<AtomicBool>,
+    load_in_flight: Arc<AtomicBool>,
+    /// Feedback SQLite — User Bias için (opsiyonel; testlerde boş kalabilir).
+    bias_store: Arc<StdMutex<Option<crate::db::ExperienceStore>>>,
+}
+
+impl DecisionGate {
+    pub fn new(results: mpsc::Sender<DecisionResult>) -> Self {
+        let (jobs, job_rx) = std_mpsc::sync_channel(JOB_CAP);
+        let session = Arc::new(StdMutex::new(None));
+        let cache: DecisionCache = Arc::new(StdMutex::new(HashMap::new()));
+        let status = Arc::new(StdMutex::new(DecisionGateStatus::cold()));
+        let declined = Arc::new(AtomicBool::new(false));
+        let load_in_flight = Arc::new(AtomicBool::new(false));
+        let gate = Self {
+            jobs,
+            session,
+            cache,
+            results,
+            status,
+            declined,
+            load_in_flight,
+            bias_store: Arc::new(StdMutex::new(None)),
+        };
+        let worker = gate.clone();
+        let _ = std::thread::Builder::new()
+            .name("laya-infer".into())
+            .spawn(move || infer_worker(job_rx, worker));
+        gate
+    }
+
+    /// Feedback Loop: sınıflandırma sonrası User Bias için tecrübe DB'sini bağla.
+    pub fn attach_bias_store(&self, store: crate::db::ExperienceStore) {
+        *self.bias_store.lock().expect("bias store lock") = Some(store);
+    }
+
+    pub fn cache(&self) -> DecisionCache {
+        self.cache.clone()
+    }
+
+    pub fn results_sender(&self) -> mpsc::Sender<DecisionResult> {
+        self.results.clone()
+    }
+
+    pub fn install(&self, session: LayaSession) {
+        log::info!(
+            "DecisionGate yüklendi ({}, max_len={})",
+            session.device_name,
+            session.cfg.max_len
+        );
+        self.declined.store(false, Ordering::SeqCst);
+        self.load_in_flight.store(false, Ordering::SeqCst);
+        self.set_status(DecisionGateStatus::ready(&session.device_name));
+        *self.session.lock().expect("laya session lock") = Some(session);
+    }
+
+    pub fn fail_load(&self, err: &str) {
+        let status = status_from_load_error(err);
+        log::warn!(
+            "DecisionGate soğuk: {}",
+            status.detail.as_deref().unwrap_or(err)
+        );
+        self.load_in_flight.store(false, Ordering::SeqCst);
+        self.set_status(status);
+    }
+
+    pub fn begin_load(&self) -> bool {
+        if self.is_ready() {
+            return false;
+        }
+        if self
+            .load_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        self.declined.store(false, Ordering::SeqCst);
+        self.set_status(DecisionGateStatus::loading());
+        true
+    }
+
+    /// Kullanıcı açıkça yükleme istedi (`Yeniden dene` / `Laya'ya geç`).
+    /// `declined` temizlenir; Failed / Available / cold durumundan yükleme başlar.
+    pub fn request_enable(&self) -> bool {
+        self.declined.store(false, Ordering::SeqCst);
+        if self.is_ready() {
+            return false;
+        }
+        if self.status().phase != DecisionGatePhase::Loading {
+            self.load_in_flight.store(false, Ordering::SeqCst);
+        }
+        self.begin_load()
+    }
+
+    pub fn mark_available(&self) -> bool {
+        if self.declined.load(Ordering::SeqCst) || self.is_ready() {
+            return false;
+        }
+        let status = self.status();
+        if status.phase == DecisionGatePhase::Available {
+            return false;
+        }
+        if status.phase != DecisionGatePhase::Failed || !status.ram_blocked() {
+            return false;
+        }
+        self.set_status(DecisionGateStatus::available());
+        true
+    }
+
+    pub fn decline_offer(&self) {
+        self.declined.store(true, Ordering::SeqCst);
+        self.set_status(DecisionGateStatus::deferred());
+    }
+
+    pub fn clear_declined(&self) {
+        self.declined.store(false, Ordering::SeqCst);
+    }
+
+    pub fn declined(&self) -> bool {
+        self.declined.load(Ordering::SeqCst)
+    }
+
+    pub fn status(&self) -> DecisionGateStatus {
+        self.status.lock().expect("laya status lock").clone()
+    }
+
+    fn set_status(&self, status: DecisionGateStatus) {
+        *self.status.lock().expect("laya status lock") = status;
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.session.lock().expect("laya session lock").is_some()
+    }
+
+    /// Kuyruğa aldıysa `true`. `skip_bus_subject` eşleşirse (bus/telemetry/prompt) `false`.
+    pub fn infer_async(&self, msg: &LoungeMessage) -> bool {
+        if skip_bus_subject(&msg.subject) {
+            return false;
+        }
+        if let Err(err) = self.jobs.try_send(msg.clone()) {
+            log::debug!("DecisionGate kuyruk dolu: {err}");
+            return false;
+        }
+        true
+    }
+
+    /// Tokenize + Laya sequence classification; latency mikro-saniye. Sonucu NATS kanalına basar.
+    ///
+    /// Public infer API senkron: candle `LayaSession` `std::sync::Mutex` altındadır.
+    /// Çıkarsama Tokio worker'da değil, `laya-infer` thread'inde (`infer_worker`)
+    /// çalışır; runtime deadlock olmaz. Async için `process_message_async` veya
+    /// bus üzerindeki `infer_async` kuyruğunu kullan.
+    pub fn process_message(&self, message: LoungeMessage) -> Result<DecisionResult> {
+        if skip_bus_subject(&message.subject) {
+            anyhow::bail!("DecisionGate skip subject: {}", message.subject);
+        }
+        let start_time = Instant::now();
+        let inferred = {
+            let guard = self.session.lock().expect("laya session lock");
+            let sess = guard.as_ref().context("DecisionGate soğuk: session yok")?;
+            infer_message(sess, &message)?
+        };
+        let elapsed_us = infer_elapsed_us(start_time, Instant::now());
+        Ok(self.commit_decision(&message, inferred, elapsed_us))
+    }
+
+    /// Async sarmalayıcı: senkron `process_message` yolunu Tokio worker'da değil
+    /// `spawn_blocking` havuzunda koşturur. Bus üretimi `infer_async` → `laya-infer`.
+    pub async fn process_message_async(&self, message: LoungeMessage) -> Result<DecisionResult> {
+        let gate = self.clone();
+        tokio::task::spawn_blocking(move || gate.process_message(message))
+            .await
+            .context("DecisionGate infer join")?
+    }
+
+    fn commit_decision(
+        &self,
+        msg: &LoungeMessage,
+        inferred: DecisionResult,
+        elapsed_us: u128,
+    ) -> DecisionResult {
+        let mut result = inferred;
+        result.elapsed_us = elapsed_us;
+        result.elapsed_ms = elapsed_us / 1000;
+        // User Bias: Laya ağırlıkları sabit; skor sonrası küçük kademe düşürme.
+        if let Ok(guard) = self.bias_store.lock() {
+            if let Some(store) = guard.as_ref() {
+                result = crate::db::feedback::with_conn_bias(store, result);
+            }
+        }
+        if result.elapsed_us > 10_000 {
+            log::debug!(
+                "DecisionGate {} {:.1}ms (hedef 10ms, device={})",
+                result.message_id,
+                result.latency_ms(),
+                result.device
+            );
+        }
+        remember(&self.cache, &result);
+        if let Some(payload_id) = msg.payload.get("id").and_then(|v| v.as_str()) {
+            if payload_id != result.message_id {
+                let mut extra = result.clone();
+                extra.message_id = payload_id.into();
+                remember(&self.cache, &extra);
+            }
+        }
+        let _ = self.results.try_send(result.clone());
+        result
+    }
+
+    pub fn inject(&self, result: DecisionResult) {
+        remember(&self.cache, &result);
+        let _ = self.results.try_send(result);
+    }
+}
+
+pub fn skip_bus_subject(subject: &str) -> bool {
+    subject.starts_with("lounge.bus.")
+        || subject.starts_with("lounge.telemetry.")
+        || subject.starts_with("lounge.infra.")
+        || subject == crate::models::AGENT_PROMPT
+        || subject == crate::models::CONTEXT_WHISPER
+}
+
+pub fn infer_elapsed_us(start_time: Instant, end_time: Instant) -> u128 {
+    end_time.saturating_duration_since(start_time).as_micros()
+}
+
+pub fn micros_to_millis(us: u128) -> f64 {
+    us as f64 / 1000.0
+}
+
+/// DecisionGate infer tamamlanınca NATS `lounge.telemetry.decision` gövdesi.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoungeTelemetry {
+    pub kind: String,
+    pub message_id: String,
+    pub subject: String,
+    pub latency_us: u64,
+    pub latency_ms: f64,
+    pub routing: String,
+    pub security: String,
+    pub knowledge_hit: f32,
+    pub context_match: f32,
+    pub decision: DecisionResult,
+    pub device: String,
+    pub timestamp: String,
+    pub msg_per_min: u32,
+}
+
+impl LoungeTelemetry {
+    pub fn from_decision(result: &DecisionResult, msg_per_min: u32) -> Self {
+        Self {
+            kind: "decision".into(),
+            message_id: result.message_id.clone(),
+            subject: result.subject.clone(),
+            latency_us: u64::try_from(result.elapsed_us).unwrap_or(u64::MAX),
+            latency_ms: result.latency_ms(),
+            routing: result.routing.value.as_str().into(),
+            security: result.security.value.as_str().into(),
+            knowledge_hit: result.knowledge_hit,
+            context_match: result.context_match(),
+            decision: result.clone(),
+            device: result.device.clone(),
+            timestamp: crate::models::now_rfc3339(),
+            msg_per_min,
+        }
+    }
+
+    pub fn envelope(&self) -> LoungeMessage {
+        let payload = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
+        let mut msg = LoungeMessage::new(
+            crate::models::TELEMETRY_DECISION,
+            crate::models::KERNEL_AGENT,
+            payload,
+        );
+        msg.target_agent = Some("ui".into());
+        msg
+    }
+}
+
+/// DecisionGate tamamlanma sayısı — kayan 60 saniye penceresi.
+#[derive(Debug, Default)]
+pub struct InferMeter {
+    completions: VecDeque<Instant>,
+}
+
+impl InferMeter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&mut self) -> u32 {
+        self.record_at(Instant::now())
+    }
+
+    pub fn record_at(&mut self, at: Instant) -> u32 {
+        self.completions.push_back(at);
+        self.prune(at);
+        self.completions.len() as u32
+    }
+
+    pub fn count(&self) -> u32 {
+        self.completions.len() as u32
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while let Some(front) = self.completions.front().copied() {
+            if now.saturating_duration_since(front) > MSG_MIN_WINDOW {
+                self.completions.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+pub fn lookup_decision(cache: &DecisionCache, id: &str) -> Option<DecisionResult> {
+    let mut map = cache.lock().expect("decision cache");
+    let now = Instant::now();
+    map.retain(|_, (at, _)| now.duration_since(*at) < CACHE_TTL);
+    map.get(id).map(|(_, result)| result.clone())
+}
+
+pub fn remember(cache: &DecisionCache, result: &DecisionResult) {
+    let mut map = cache.lock().expect("decision cache");
+    let now = Instant::now();
+    map.insert(result.message_id.clone(), (now, result.clone()));
+}
+
+pub fn state_from_message(msg: &LoungeMessage) -> String {
+    let payload = match &msg.payload {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    let mut payload = payload;
+    if payload.len() > 1500 {
+        payload.truncate(1500);
+    }
+    format!(
+        "subject={} type={} source={} payload={}",
+        msg.subject, msg.msg_type, msg.source_agent, payload
+    )
+}
+
+pub fn lounge_questions() -> [QuestionSpec; 3] {
+    [
+        QuestionSpec {
+            id: ROUTING,
+            qtype: QTYPE_CHOICE,
+            instructions: "Classify this Agent Lounge OS bus message.",
+            options: vec![
+                ("Task", Some("a work order to execute")),
+                ("Experience", Some("a remembered outcome or ADR")),
+                ("Review", Some("a code or design review")),
+            ],
+        },
+        QuestionSpec {
+            id: SECURITY,
+            qtype: QTYPE_CHOICE,
+            instructions: "How risky is acting on this message without a human in the loop?",
+            options: vec![
+                ("Safe", Some("routine, no secrets or destructive actions")),
+                (
+                    "Risky",
+                    Some("needs care: credentials, production, or irreversible edits"),
+                ),
+                (
+                    "Critical",
+                    Some("exfiltration, privilege, wipe, or untrusted takeover"),
+                ),
+            ],
+        },
+        QuestionSpec {
+            id: CONTEXT_MATCH,
+            qtype: QTYPE_NOUL,
+            instructions: "Is a similar record already in Lounge memory for this topic?",
+            options: vec![("Miss", None), ("Hit", None)],
+        },
+    ]
+}
+
+pub fn pack_message(
+    tok: &impl TokenEncode,
+    msg: &LoungeMessage,
+    cfg: &LayaRuntimeConfig,
+) -> Vec<PackedQuestion> {
+    let state = state_from_message(msg);
+    lounge_questions()
+        .iter()
+        .map(|q| build_sequence(tok, &state, q, cfg.max_len, cfg.head_max_len))
+        .collect()
+}
+
+pub fn result_from_logits(
+    msg: &LoungeMessage,
+    packed: &[PackedQuestion],
+    logits: &[Vec<f32>],
+    cfg: &LayaRuntimeConfig,
+    elapsed_us: u128,
+    device: &str,
+) -> Result<DecisionResult> {
+    let mut routing = None;
+    let mut security = None;
+    let mut knowledge_hit = 0.0;
+    for (item, z) in packed.iter().zip(logits.iter()) {
+        let k = item.markers.len().min(z.len());
+        let slice = &z[..k];
+        let temp = temperature_for(cfg, item.qtype, k);
+        let probs = softmax_temp(slice, temp);
+        match item.id.as_str() {
+            ROUTING | ROUTING_TYPE => {
+                routing = Some(scored_routing(&item.option_keys, &probs));
+            }
+            SECURITY | SECURITY_LEVEL => {
+                security = Some(scored_security(&item.option_keys, &probs));
+            }
+            CONTEXT_MATCH | KNOWLEDGE_HIT => {
+                knowledge_hit = probs.get(1).copied().unwrap_or(0.0);
+            }
+            _ => {}
+        }
+    }
+    Ok(DecisionResult {
+        message_id: msg.id.clone(),
+        subject: msg.subject.clone(),
+        routing: routing.context("ROUTING yok")?,
+        security: security.context("SECURITY yok")?,
+        knowledge_hit,
+        elapsed_ms: elapsed_us / 1000,
+        elapsed_us,
+        device: device.into(),
+        recall: recall_from_message(msg),
+    })
+}
+
+fn recall_from_message(msg: &LoungeMessage) -> RecallHint {
+    let payload = &msg.payload;
+    let nested = payload.get("task").cloned().unwrap_or(payload.clone());
+    RecallHint {
+        query: string_from(
+            &nested,
+            &["summary", "topic", "adr_summary", "query", "text"],
+        )
+        .or_else(|| {
+            payload
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default(),
+        project_id: string_from(&nested, &["project_id"]).unwrap_or_default(),
+        source_agent: if msg.source_agent.is_empty() {
+            string_from(&nested, &["source_agent", "agent"]).unwrap_or_default()
+        } else {
+            msg.source_agent.clone()
+        },
+        target_agent: msg
+            .target_agent
+            .clone()
+            .or_else(|| string_from(&nested, &["target_agent"])),
+        ast_refs: string_list(&nested, "ast_refs"),
+    }
+}
+
+fn string_from(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .filter(|item| !item.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn scored_routing(keys: &[String], probs: &[f32]) -> Scored<RoutingType> {
+    let probabilities = zip_probs(keys, probs);
+    let (label, _) = argmax(&probabilities);
+    let value = match label.as_str() {
+        "Experience" => RoutingType::Experience,
+        "Review" => RoutingType::Review,
+        _ => RoutingType::Task,
+    };
+    Scored {
+        value,
+        confidence: confidence_from_probs(probs),
+        probabilities,
+    }
+}
+
+fn scored_security(keys: &[String], probs: &[f32]) -> Scored<SecurityLevel> {
+    let probabilities = zip_probs(keys, probs);
+    let (label, _) = argmax(&probabilities);
+    let value = match label.as_str() {
+        "Risky" => SecurityLevel::Risky,
+        "Critical" => SecurityLevel::Critical,
+        _ => SecurityLevel::Safe,
+    };
+    Scored {
+        value,
+        confidence: confidence_from_probs(probs),
+        probabilities,
+    }
+}
+
+fn zip_probs(keys: &[String], probs: &[f32]) -> HashMap<String, f32> {
+    keys.iter().cloned().zip(probs.iter().copied()).collect()
+}
+
+fn argmax(map: &HashMap<String, f32>) -> (String, f32) {
+    map.iter()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(k, v)| (k.clone(), *v))
+        .unwrap_or_else(|| ("Task".into(), 0.0))
+}
+
+fn infer_worker(jobs: std_mpsc::Receiver<LoungeMessage>, gate: DecisionGate) {
+    while let Ok(msg) = jobs.recv() {
+        if let Err(err) = gate.process_message(msg) {
+            log::warn!("DecisionGate çıkarsama: {err}");
+        }
+    }
+}
+
+fn infer_message(session: &LayaSession, msg: &LoungeMessage) -> Result<DecisionResult> {
+    let packed = pack_message(&session.tokenizer, msg, &session.cfg);
+    let logits = session.infer_batch(packed.clone())?;
+    result_from_logits(msg, &packed, &logits, &session.cfg, 0, &session.device_name)
+}
+
+pub fn ram_allows_load() -> bool {
+    ram_is_sufficient(available_memory_bytes())
+}
+
+pub fn laya_dir() -> PathBuf {
+    model_manager::laya_dir()
+}
+
+pub fn skip_download() -> bool {
+    model_manager::skip_download()
+}
+
+pub fn ensure_artifacts(dir: &Path, download: bool) -> Result<()> {
+    model_manager::ensure_artifacts(dir, download)
+}
+
+pub fn load_session(dir: &Path) -> Result<LayaSession> {
+    let available = available_memory_bytes();
+    if !ram_is_sufficient(available) {
+        anyhow::bail!("{}", format_ram_blocked(available));
+    }
+    // Yerel app-support yolu; DecisionGate HF'ye yeniden inmez.
+    ensure_artifacts(dir, false)?;
+    LayaSession::load(dir)
+}
+
+pub fn security_approval(
+    task_id: &str,
+    summary: &str,
+    from_agent: &str,
+    decision: &DecisionResult,
+) -> Option<crate::models::ApprovalRequest> {
+    if decision.security.value != SecurityLevel::Critical {
+        return None;
+    }
+    Some(crate::models::ApprovalRequest {
+        task_id: task_id.into(),
+        summary: summary.into(),
+        from_agent: from_agent.into(),
+        to_agent: crate::models::KERNEL_AGENT.into(),
+        kind: crate::models::ApprovalKind::SecurityCritical,
+        reason: format!(
+            "DecisionGate SECURITY_LEVEL=Critical (p={:.2})",
+            decision
+                .security
+                .probabilities
+                .get("Critical")
+                .copied()
+                .unwrap_or(decision.security.confidence)
+        ),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::laya::HashTokenizer;
+    use lounge_protocol::LoungeMessage;
+
+    fn sample_msg() -> LoungeMessage {
+        LoungeMessage::new(
+            "lounge.task.requested",
+            "cursor",
+            serde_json::json!({
+                "id": "task-1",
+                "type": "task",
+                "summary": "index kernel dispatcher"
+            }),
+        )
+    }
+
+    #[test]
+    fn skips_bus_heartbeats() {
+        assert!(skip_bus_subject("lounge.bus.heartbeat"));
+        assert!(skip_bus_subject("lounge.bus.probe"));
+        assert!(skip_bus_subject("lounge.bus.connected"));
+        assert!(!skip_bus_subject("lounge.task.requested"));
+        assert!(!skip_bus_subject("lounge.experience.reported"));
+        assert!(skip_bus_subject("lounge.agent.prompt"));
+        assert!(skip_bus_subject("lounge.context.whisper"));
+        assert!(skip_bus_subject("lounge.telemetry.decision"));
+        assert!(skip_bus_subject("lounge.telemetry.other"));
+        assert!(skip_bus_subject("lounge.infra.status"));
+        assert!(skip_bus_subject("lounge.infra.other"));
+        assert!(skip_bus_subject(crate::models::TELEMETRY_DECISION));
+        assert!(skip_bus_subject(crate::models::INFRA_STATUS));
+        assert!(skip_bus_subject(crate::models::AGENT_PROMPT));
+        assert!(skip_bus_subject(crate::models::CONTEXT_WHISPER));
+        assert_eq!(crate::models::KERNEL_AGENT, "lounge-kernel");
+        assert_eq!(
+            crate::models::TELEMETRY_DECISION,
+            "lounge.telemetry.decision"
+        );
+    }
+
+    #[test]
+    fn infer_async_triggers_on_non_bus_message() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let task = LoungeMessage::from_nats(
+            "lounge.task.requested",
+            br#"{"id":"task-infer","type":"task","source_agent":"test"}"#,
+        );
+        assert!(gate.infer_async(&task));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.bus.heartbeat", b"{}")));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats(
+            "lounge.telemetry.decision",
+            b"{}"
+        )));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.agent.prompt", b"{}")));
+        assert!(!gate.infer_async(&LoungeMessage::from_nats("lounge.infra.status", b"{}")));
+    }
+
+    #[test]
+    fn packs_three_typed_questions() {
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &sample_msg(),
+            &LayaRuntimeConfig::default(),
+        );
+        assert_eq!(packed.len(), 3);
+        assert_eq!(packed[0].markers.len(), 3);
+        assert_eq!(packed[1].markers.len(), 3);
+        assert_eq!(packed[2].markers.len(), 2);
+        assert_eq!(packed[0].id, ROUTING);
+        assert_eq!(packed[1].id, SECURITY);
+        assert_eq!(packed[2].id, CONTEXT_MATCH);
+        assert_eq!(ROUTING_ID, ROUTING);
+        assert_eq!(SECURITY_ID, SECURITY);
+        assert_eq!(KNOWLEDGE_ID, CONTEXT_MATCH);
+        assert_eq!(ROUTING_TYPE, "ROUTING_TYPE");
+        assert_eq!(SECURITY_LEVEL, "SECURITY_LEVEL");
+        assert_eq!(KNOWLEDGE_HIT, "KNOWLEDGE_HIT");
+    }
+
+    #[test]
+    fn process_message_requires_session_and_skips_bus() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let skip = gate
+            .process_message(LoungeMessage::from_nats("lounge.bus.heartbeat", b"{}"))
+            .unwrap_err()
+            .to_string();
+        assert!(skip.contains("skip subject"));
+        let infra = gate
+            .process_message(LoungeMessage::from_nats("lounge.infra.status", b"{}"))
+            .unwrap_err()
+            .to_string();
+        assert!(infra.contains("skip subject"));
+        let cold = gate.process_message(sample_msg()).unwrap_err().to_string();
+        assert!(cold.contains("soğuk"));
+        assert!(!gate.is_ready());
+    }
+
+    #[tokio::test]
+    async fn process_message_async_skips_bus_and_cold_session() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let skip_subjects = [
+            "lounge.bus.heartbeat",
+            "lounge.telemetry.decision",
+            "lounge.telemetry.other",
+            "lounge.infra.status",
+            "lounge.infra.other",
+            "lounge.agent.prompt",
+            crate::models::TELEMETRY_DECISION,
+            crate::models::INFRA_STATUS,
+            crate::models::AGENT_PROMPT,
+        ];
+        for subject in skip_subjects {
+            let skip = gate
+                .process_message_async(LoungeMessage::from_nats(subject, b"{}"))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                skip.contains("skip subject"),
+                "{subject} skip edilmeli: {skip}"
+            );
+        }
+        let cold = gate
+            .process_message_async(sample_msg())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(cold.contains("soğuk"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn process_message_async_concurrent_skips_do_not_deadlock() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let mut joins = Vec::new();
+        for subject in [
+            "lounge.bus.heartbeat",
+            "lounge.telemetry.decision",
+            "lounge.infra.status",
+            "lounge.agent.prompt",
+        ] {
+            let gate = gate.clone();
+            joins.push(tokio::spawn(async move {
+                gate.process_message_async(LoungeMessage::from_nats(subject, b"{}"))
+                    .await
+            }));
+        }
+        for join in joins {
+            let err = join
+                .await
+                .expect("spawn_blocking join")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("skip subject"), "{err}");
+        }
+    }
+
+    #[test]
+    fn commit_decision_overwrites_elapsed_us_and_nests_on_nats_subject() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let inferred = classified_sample(0);
+        assert_eq!(inferred.elapsed_us, 0);
+        let committed = gate.commit_decision(&sample_msg(), inferred, 4_200);
+        assert_eq!(committed.elapsed_us, 4_200);
+        assert_eq!(committed.elapsed_ms, 4);
+        let got = rx
+            .try_recv()
+            .expect("process_message results kanalına DecisionResult basmalı");
+        assert_eq!(got.elapsed_us, 4_200);
+        let telemetry = LoungeTelemetry::from_decision(&got, 3);
+        assert_eq!(telemetry.decision.elapsed_us, 4_200);
+        assert_eq!(telemetry.latency_us, 4_200);
+        assert_eq!(
+            telemetry.envelope().subject,
+            crate::models::TELEMETRY_DECISION
+        );
+        assert_eq!(telemetry.decision.routing.value, RoutingType::Task);
+        assert_eq!(telemetry.decision.security.value, SecurityLevel::Critical);
+        assert!(telemetry.decision.knowledge_hit > 0.8);
+    }
+
+    fn classified_sample(elapsed_us: u128) -> DecisionResult {
+        let msg = sample_msg();
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            elapsed_us,
+            "cpu",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn result_from_logits_accepts_legacy_category_ids() {
+        let msg = sample_msg();
+        let mut packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        packed[0].id = ROUTING_TYPE.into();
+        packed[1].id = SECURITY_LEVEL.into();
+        packed[2].id = KNOWLEDGE_HIT.into();
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            4_200,
+            "cpu",
+        )
+        .unwrap();
+        assert_eq!(result.routing.value, RoutingType::Task);
+        assert_eq!(result.security.value, SecurityLevel::Critical);
+        assert!(result.knowledge_hit > 0.8);
+        assert_eq!(result.context_match(), result.knowledge_hit);
+        assert_eq!(result.elapsed_us, 4_200);
+    }
+
+    #[test]
+    fn inject_emits_decision_result_with_elapsed_us() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let gate = DecisionGate::new(tx);
+        let result = classified_sample(4_200);
+        gate.inject(result.clone());
+        let got = rx
+            .try_recv()
+            .expect("DecisionResult results kanalına gitmeli");
+        assert_eq!(got.elapsed_us, 4_200);
+        assert_eq!(got.message_id, result.message_id);
+        let telemetry = LoungeTelemetry::from_decision(&got, 1);
+        assert_eq!(telemetry.decision.elapsed_us, 4_200);
+        assert_eq!(telemetry.latency_us, 4_200);
+        assert_eq!(
+            telemetry.envelope().subject,
+            crate::models::TELEMETRY_DECISION
+        );
+        assert_eq!(
+            telemetry.envelope().source_agent,
+            crate::models::KERNEL_AGENT
+        );
+    }
+
+    #[test]
+    fn builds_result_from_logits() {
+        let msg = sample_msg();
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            8_000,
+            "cpu",
+        )
+        .unwrap();
+        assert_eq!(result.routing.value, RoutingType::Task);
+        assert_eq!(result.security.value, SecurityLevel::Critical);
+        assert!(result.knowledge_hit > 0.8);
+        assert_eq!(result.context_match(), result.knowledge_hit);
+        assert_eq!(result.elapsed_us, 8_000);
+        assert_eq!(result.elapsed_ms, 8);
+        assert!((result.latency_ms() - 8.0).abs() < f64::EPSILON);
+        assert_eq!(result.device, "cpu");
+        assert_eq!(result.recall.query, "index kernel dispatcher");
+        assert_eq!(result.recall.source_agent, "cursor");
+        let json = serde_json::to_value(&result).unwrap();
+        let back: DecisionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.security.value, SecurityLevel::Critical);
+    }
+
+    #[test]
+    fn critical_security_requests_approval() {
+        let msg = sample_msg();
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        let logits = vec![vec![1.0, 0.0, 0.0], vec![0.0, 0.0, 4.0], vec![1.0, 0.0]];
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            4_000,
+            "cpu",
+        )
+        .unwrap();
+        let request = security_approval("task-1", "wipe secrets", "cursor", &result).unwrap();
+        assert_eq!(request.kind, crate::models::ApprovalKind::SecurityCritical);
+    }
+
+    #[test]
+    fn load_errors_are_user_facing() {
+        let ram = status_from_load_error("Laya için yetersiz RAM (en az 1.5 GiB boş)");
+        assert_eq!(ram.phase, DecisionGatePhase::Failed);
+        assert_eq!(ram.reason.as_deref(), Some("ram"));
+        assert!(ram.title.contains("OpenJev Laya"));
+        assert!(ram.message.contains("1.5 GiB"));
+        assert!(ram.detail.as_deref().unwrap().contains("yetersiz RAM"));
+        let numbered = status_from_load_error(&format_ram_blocked(512 * 1024 * 1024));
+        assert!(numbered.message.contains("sysinfo: 0.50 GiB"));
+        assert!(numbered.ram_blocked());
+
+        let weights = status_from_load_error("Laya ağırlıkları yok: /tmp/laya");
+        assert_eq!(weights.reason.as_deref(), Some("weights"));
+        assert!(weights.message.contains("model dosyaları"));
+
+        let hf = status_from_load_error("HF get model.safetensors");
+        assert_eq!(hf.reason.as_deref(), Some("download"));
+        assert!(hf.title.contains("indirilemedi"));
+
+        let checksum =
+            status_from_load_error("Laya checksum uyuşmazlığı (sha256): model.safetensors");
+        assert_eq!(checksum.reason.as_deref(), Some("checksum"));
+        assert!(checksum.message.contains("checksum"));
+    }
+
+    #[test]
+    fn decision_gate_uses_model_manager_path() {
+        assert_eq!(laya_dir(), crate::services::model_manager::laya_dir());
+        let dir = std::env::temp_dir().join(format!("laya-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+        std::fs::create_dir_all(dir.join("encoder")).unwrap();
+        for rel in crate::services::model_manager::ARTIFACTS {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"seed").unwrap();
+        }
+        crate::services::model_manager::verify_dir(&dir, None, true).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"corrupt").unwrap();
+        let err = ensure_artifacts(&dir, false).unwrap_err().to_string();
+        assert_eq!(classify_load_reason(&err), "checksum");
+        assert!(!dir.join("model.safetensors").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ram_recovery_asks_before_loading() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load("Laya için yetersiz RAM (en az 1.5 GiB boş)");
+        assert!(!gate.is_ready());
+        assert!(gate.mark_available());
+        let offer = gate.status();
+        assert_eq!(offer.phase, DecisionGatePhase::Available);
+        assert!(offer.message.contains("geçiş"));
+        assert!(!gate.is_ready());
+        assert!(!gate.mark_available());
+        gate.decline_offer();
+        assert!(gate.declined());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(!gate.mark_available());
+        gate.clear_declined();
+        assert!(gate.mark_available());
+    }
+
+    #[test]
+    fn ram_probe_agrees_with_allows_load() {
+        assert_eq!(
+            ram_allows_load(),
+            ram_is_sufficient(available_memory_bytes())
+        );
+        assert!(!ram_is_sufficient(0));
+        assert!(ram_is_sufficient(MIN_RAM_BYTES));
+        assert_eq!(MIN_RAM_BYTES, 1_610_612_736);
+    }
+
+    #[test]
+    fn enable_from_failed_retries_load() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load("Laya checksum uyuşmazlığı (sha256): model.safetensors");
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(gate.request_enable());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Loading);
+        assert!(!gate.declined());
+        assert!(!gate.is_ready());
+    }
+
+    #[test]
+    fn enable_when_ram_blocked_surfaces_failed_status() {
+        let available = 512 * 1024 * 1024;
+        let status = ram_blocked_status(available);
+        assert_eq!(status.phase, DecisionGatePhase::Failed);
+        assert_eq!(status.reason.as_deref(), Some("ram"));
+        assert!(status.ram_blocked());
+        assert!(status.message.contains("1.5 GiB"));
+        assert!(status.message.contains("0.50 GiB"));
+        assert!(status
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("sysinfo available 0.50 GiB"));
+
+        let from_err = status_from_load_error(&format_ram_blocked(available));
+        assert_eq!(from_err, status);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load(&format_ram_blocked(available));
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(gate.status().ram_blocked());
+        assert!(gate.request_enable());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Loading);
+        gate.fail_load(&format_ram_blocked(available));
+        let again = gate.status();
+        assert_eq!(again.phase, DecisionGatePhase::Failed);
+        assert!(again.ram_blocked());
+        assert!(again.message.contains("sysinfo: 0.50 GiB"));
+        assert_ne!(again, DecisionGateStatus::loading());
+    }
+
+    #[test]
+    fn explicit_retry_clears_declined() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let gate = DecisionGate::new(tx);
+        gate.fail_load(&format_ram_blocked(512 * 1024 * 1024));
+        assert!(gate.mark_available());
+        gate.decline_offer();
+        assert!(gate.declined());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Failed);
+        assert!(!gate.mark_available());
+        assert!(gate.request_enable());
+        assert!(!gate.declined());
+        assert_eq!(gate.status().phase, DecisionGatePhase::Loading);
+    }
+
+    #[test]
+    fn elapsed_is_microsecond_precision() {
+        let start_time = Instant::now();
+        std::thread::sleep(Duration::from_millis(2));
+        let elapsed_us = infer_elapsed_us(start_time, Instant::now());
+        assert!(
+            elapsed_us >= 1_000,
+            "süre mikro-saniye olmalı, alındı {elapsed_us}"
+        );
+        assert_eq!(format!("{:.1}", micros_to_millis(4_200)), "4.2");
+        assert!((micros_to_millis(4_200) - 4.2).abs() < 1e-9);
+        assert_eq!(micros_to_millis(elapsed_us), elapsed_us as f64 / 1000.0);
+    }
+
+    #[test]
+    fn telemetry_payload_shape_from_decision() {
+        let msg = sample_msg();
+        let packed = pack_message(
+            &HashTokenizer::default(),
+            &msg,
+            &LayaRuntimeConfig::default(),
+        );
+        let logits = vec![vec![4.0, 0.1, 0.2], vec![0.1, 0.2, 5.0], vec![0.2, 3.0]];
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &LayaRuntimeConfig::default(),
+            4_200,
+            "cpu",
+        )
+        .unwrap();
+        let telemetry = LoungeTelemetry::from_decision(&result, 12);
+        assert_eq!(telemetry.kind, "decision");
+        assert_eq!(telemetry.message_id, result.message_id);
+        assert_eq!(telemetry.latency_us, 4_200);
+        assert_eq!(format!("{:.1}", telemetry.latency_ms), "4.2");
+        assert_eq!(telemetry.routing, "Task");
+        assert_eq!(telemetry.security, "Critical");
+        assert_eq!(telemetry.context_match, result.knowledge_hit);
+        assert_eq!(telemetry.decision.elapsed_us, 4_200);
+        assert_eq!(telemetry.decision.routing.value, RoutingType::Task);
+        assert_eq!(telemetry.device, "cpu");
+        assert_eq!(telemetry.msg_per_min, 12);
+        assert!(!telemetry.timestamp.is_empty());
+        let json = serde_json::to_value(&telemetry).unwrap();
+        assert_eq!(json["latency_us"], 4_200);
+        assert_eq!(json["kind"], "decision");
+        assert!(json["latency_ms"].as_f64().is_some());
+        assert!(json["knowledge_hit"].as_f64().is_some());
+        assert_eq!(json["context_match"], json["knowledge_hit"]);
+        assert_eq!(json["decision"]["elapsed_us"], 4_200);
+        assert_eq!(json["decision"]["subject"], msg.subject);
+        let envelope = telemetry.envelope();
+        assert_eq!(envelope.subject, crate::models::TELEMETRY_DECISION);
+        assert_eq!(envelope.source_agent, crate::models::KERNEL_AGENT);
+        assert_eq!(envelope.target_agent.as_deref(), Some("ui"));
+        assert_eq!(envelope.msg_type, "telemetry");
+    }
+
+    #[test]
+    fn infer_meter_rolls_sixty_second_window() {
+        let t0 = Instant::now();
+        let mut meter = InferMeter::new();
+        assert_eq!(meter.record_at(t0), 1);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(10)), 2);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(59)), 3);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(61)), 3);
+        assert_eq!(meter.count(), 3);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(72)), 3);
+        assert_eq!(meter.record_at(t0 + Duration::from_secs(122)), 2);
+    }
+
+    #[test]
+    fn apply_user_bias_three_risky_approves_lower_to_safe() {
+        let base = DecisionResult {
+            message_id: "bias-1".into(),
+            subject: "lounge.task.requested".into(),
+            routing: Scored {
+                value: RoutingType::Task,
+                confidence: 0.9,
+                probabilities: HashMap::from([("Task".into(), 0.9)]),
+            },
+            security: Scored {
+                value: SecurityLevel::Risky,
+                confidence: 0.88,
+                probabilities: HashMap::from([("Risky".into(), 0.88)]),
+            },
+            knowledge_hit: 0.1,
+            elapsed_ms: 1,
+            elapsed_us: 1_000,
+            device: "cpu".into(),
+            recall: RecallHint::default(),
+        };
+        let stats = UserBiasStats {
+            alert_type: SecurityLevel::Risky,
+            approve_count: USER_BIAS_APPROVE_THRESHOLD,
+            recent_denies: 0,
+        };
+        let out = apply_user_bias(base.clone(), &stats);
+        assert_eq!(out.security.value, SecurityLevel::Safe);
+
+        let zero = UserBiasStats {
+            alert_type: SecurityLevel::Critical,
+            approve_count: 0,
+            recent_denies: 0,
+        };
+        let critical = DecisionResult {
+            security: Scored {
+                value: SecurityLevel::Critical,
+                confidence: 0.95,
+                probabilities: HashMap::from([("Critical".into(), 0.95)]),
+            },
+            ..base
+        };
+        assert_eq!(
+            apply_user_bias(critical, &zero).security.value,
+            SecurityLevel::Critical
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn live_laya_infer() {
+        let dir = std::env::var("LAYA_MODEL_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| laya_dir());
+        let session = LayaSession::load(&dir).expect("LAYA_MODEL_DIR");
+        let msg = sample_msg();
+        let packed = pack_message(&session.tokenizer, &msg, &session.cfg);
+        let logits = session.infer_batch(packed.clone()).unwrap();
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &session.cfg,
+            0,
+            &session.device_name,
+        )
+        .unwrap();
+        assert!(result.elapsed_ms < 60_000);
+        assert!((0.0..=1.0).contains(&result.knowledge_hit));
+    }
+}
