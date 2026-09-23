@@ -5,9 +5,7 @@ use anyhow::Result;
 use crate::db::{knowledge_hit_triggers, ExperienceStore, FastRetrieveQuery};
 use crate::infra::BusManager;
 use crate::kernel::decision_engine::DecisionResult;
-use crate::models::{
-    is_kernel, now_rfc3339, SystemPromptAddon, CONTEXT_WHISPER, KERNEL_AGENT,
-};
+use crate::models::{is_kernel, now_rfc3339, SystemPromptAddon, CONTEXT_WHISPER, KERNEL_AGENT};
 
 pub async fn inject_knowledge_hit(
     store: &ExperienceStore,
@@ -78,7 +76,9 @@ mod tests {
     use super::*;
     use crate::db::get_relevant_context;
     use crate::kernel::decision_engine::{RecallHint, RoutingType, Scored, SecurityLevel};
-    use crate::models::{ExperienceOutcome, ExperienceRecord, LoungeTask, AGENT_PROMPT, TASK_REQUESTED};
+    use crate::models::{
+        ExperienceOutcome, ExperienceRecord, LoungeTask, AGENT_PROMPT, TASK_REQUESTED,
+    };
     use std::collections::HashMap;
 
     fn scored<T: Clone>(value: T) -> Scored<T> {
