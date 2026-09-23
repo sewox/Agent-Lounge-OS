@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::db::{lexical_embedding, ExperienceStore, FastRetrieveQuery};
-use crate::infra::{probe_quotas, quota_exhausted_for};
+use crate::infra::probe_quotas;
 use crate::kernel::decision_engine::{
     lookup_decision, DecisionCache, DecisionResult, RoutingType, SecurityLevel,
 };
@@ -21,11 +21,15 @@ use crate::kernel::policy_manager::{
 };
 use crate::models::{
     decide_route, default_ollama_model, AnalysisDecision, ApprovalRequest, ExperienceContext,
-    ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask, RouteIntent, RoutingVote,
-    TaskAssignment, EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED,
-    TASK_REQUESTED,
+    ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask, QuotaVerdict, RouteIntent,
+    RoutingVote, TaskAssignment, ALERT_QUOTA, EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED,
+    TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
 };
-use crate::services::{chat_json, embed_model, embed_text, nats_monitor_endpoint, MemoryBridge};
+use crate::services::{
+    chat_json, embed_model, embed_text, evaluate_assignment, is_quota_approval,
+    limit_policy_percent, lmr_endpoint_up, nats_monitor_endpoint, normalize_lmr_agent,
+    quota_alert_envelope, MemoryBridge,
+};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -409,6 +413,7 @@ impl Dispatcher {
                             task,
                             request,
                             Some(gate.security.value),
+                            None,
                             &policy.local_fallback_agent,
                             &policy.local_fallback_model,
                         )
@@ -433,19 +438,40 @@ impl Dispatcher {
             .as_deref()
             .or(task.target_agent.as_deref())
             .unwrap_or(KERNEL_AGENT);
-        let exhausted = quota_exhausted_for(&quotas, to);
+        let limit = limit_policy_percent();
+        let verdict = evaluate_assignment(&quotas, to, limit);
+        let quota_blocked = verdict.is_blocked();
 
-        match decide_route(&policy, task, &task.source_agent, to, exhausted) {
+        match decide_route(&policy, task, &task.source_agent, to, quota_blocked) {
             RouteIntent::Allow { agent } => {
                 task.target_agent = Some(agent);
                 Ok(())
             }
             RouteIntent::Stop { reason } => anyhow::bail!(reason),
             RouteIntent::NeedApproval { request } => {
+                let request = if is_quota_approval(&request.kind) {
+                    let mut enriched = request;
+                    if let QuotaVerdict::Block {
+                        reason,
+                        tool,
+                        percent,
+                    } = &verdict
+                    {
+                        enriched.reason = format!(
+                            "{reason} · tool={tool} · %{:.0} · limit={limit:.0}%",
+                            percent.unwrap_or(100.0)
+                        );
+                        enriched.to_agent = normalize_lmr_agent(&policy.local_fallback_agent);
+                    }
+                    enriched
+                } else {
+                    request
+                };
                 self.await_approval(
                     task,
                     request,
                     None,
+                    Some(verdict),
                     &policy.local_fallback_agent,
                     &policy.local_fallback_model,
                 )
@@ -454,12 +480,13 @@ impl Dispatcher {
         }
     }
 
-    /// Görev ajana gitmeden önce onay hold; güvenlikte NATS alert + resume.
+    /// Görev ajana gitmeden önce onay hold; güvenlik / kota NATS alert + resume.
     async fn await_approval(
         &self,
         task: &mut LoungeTask,
         request: ApprovalRequest,
         security_level: Option<SecurityLevel>,
+        quota_verdict: Option<QuotaVerdict>,
         local_agent: &str,
         local_model: &str,
     ) -> Result<()> {
@@ -476,6 +503,17 @@ impl Dispatcher {
             if let Err(err) = self.publish_subject(ALERT_SECURITY, &payload).await {
                 log::warn!("lounge.alert.security yayınlanamadı: {err}");
             }
+        } else if is_quota_approval(&request.kind) {
+            let lmr_up = lmr_endpoint_up(&self.ollama_endpoint).await;
+            let verdict = quota_verdict.unwrap_or(QuotaVerdict::Block {
+                reason: request.reason.clone(),
+                tool: request.to_agent.clone(),
+                percent: None,
+            });
+            let payload = quota_alert_envelope(&request, &verdict, limit_policy_percent(), lmr_up);
+            if let Err(err) = self.publish_subject(ALERT_QUOTA, &payload).await {
+                log::warn!("lounge.alert.quota yayınlanamadı: {err}");
+            }
         }
 
         let vote = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
@@ -490,6 +528,19 @@ impl Dispatcher {
         match vote {
             RoutingVote::Approve => {
                 if is_security_approval(&request.kind) {
+                    let level = security_level.unwrap_or(match request.kind {
+                        crate::models::ApprovalKind::SecurityRisky => SecurityLevel::Risky,
+                        _ => SecurityLevel::Critical,
+                    });
+                    if let Err(err) = crate::db::feedback::with_conn_record_security(
+                        &self.store,
+                        true,
+                        level,
+                        &task_id,
+                        &request.summary,
+                    ) {
+                        log::warn!("security_approve feedback yazılamadı: {err}");
+                    }
                     let payload = resume_envelope_payload(&task_id);
                     if let Err(err) = self.publish_subject(TASK_RESUME, &payload).await {
                         log::warn!("lounge.task.resume yayınlanamadı: {err}");
@@ -499,19 +550,42 @@ impl Dispatcher {
                 Ok(())
             }
             RoutingVote::ApproveLocal => {
-                task.target_agent = Some(local_agent.into());
+                // Continue → Lounge LMR (:18790), host Ollama (:11434) değil.
+                if !lmr_endpoint_up(&self.ollama_endpoint).await {
+                    anyhow::bail!(
+                        "Lounge LMR (127.0.0.1:18790) ayakta değil; host Ollama ile devam edilmez"
+                    );
+                }
+                task.target_agent = Some(normalize_lmr_agent(local_agent));
                 task.model = Some(local_model.into());
+                let payload = resume_envelope_payload(&task_id);
+                if let Err(err) = self.publish_subject(TASK_RESUME, &payload).await {
+                    log::warn!("lounge.task.resume (quota→LMR) yayınlanamadı: {err}");
+                }
                 Ok(())
             }
             RoutingVote::Deny => {
                 if is_security_approval(&request.kind) {
+                    let level = security_level.unwrap_or(match request.kind {
+                        crate::models::ApprovalKind::SecurityRisky => SecurityLevel::Risky,
+                        _ => SecurityLevel::Critical,
+                    });
+                    if let Err(err) = crate::db::feedback::with_conn_record_security(
+                        &self.store,
+                        false,
+                        level,
+                        &task_id,
+                        &request.summary,
+                    ) {
+                        log::warn!("security_deny feedback yazılamadı: {err}");
+                    }
                     let payload = cancel_envelope_payload(&task_id);
                     if let Err(err) = self.publish_subject(TASK_CANCEL, &payload).await {
                         log::warn!("lounge.task.failed (cancel) yayınlanamadı: {err}");
                     }
                     anyhow::bail!("{SECURITY_DENIED_MARKER}: kullanıcı güvenlik onayını reddetti");
                 }
-                anyhow::bail!("kullanıcı ajan geçişini reddetti")
+                anyhow::bail!("kota uyarısı reddedildi; görev durduruldu")
             }
         }
     }
@@ -917,6 +991,8 @@ mod tests {
     fn resume_subject_matches_catalog() {
         assert_eq!(TASK_RESUME, "lounge.task.resume");
         assert_eq!(ALERT_SECURITY, "lounge.alert.security");
+        assert_eq!(ALERT_QUOTA, "lounge.alert.quota");
+        assert_ne!(ALERT_QUOTA, ALERT_SECURITY);
         let payload = resume_envelope_payload("task-approve-1");
         assert_eq!(payload["vote"], "approve");
         assert_eq!(payload["task_id"], "task-approve-1");

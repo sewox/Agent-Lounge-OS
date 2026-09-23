@@ -130,7 +130,7 @@ pub fn decide_route(
 
     if quota_exhausted {
         let reason = format!(
-            "{} kotası tükendi (policy={:?})",
+            "{} kotası engellendi (exhausted veya Limit Policy; policy={:?})",
             to, policy.on_quota_exhausted
         );
         return match policy.on_quota_exhausted {

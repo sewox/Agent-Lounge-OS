@@ -10,7 +10,10 @@ import { useLounge } from "@/components/lounge-provider";
 import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 import {
   isSecurityApproval,
+  isQuotaApproval,
   SECURITY_OVERLAY_PROMPT,
+  QUOTA_ALERT_PROMPT,
+  QUOTA_CONTINUE_LOCAL_LABEL,
   type DecisionGateStatus,
 } from "@/lib/lounge";
 
@@ -71,6 +74,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     declineLaya,
     indexWorkspace,
     resolveApproval,
+    setOpenCommandPalette,
   } = useLounge();
 
   const crumb = TITLES[pathname] ?? "Lounge";
@@ -91,8 +95,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       !layaDismissed &&
       layaEngine?.phase !== "downloading");
   const securityHold = Boolean(approval && isSecurityApproval(approval.kind));
+  const quotaHold = Boolean(approval && isQuotaApproval(approval.kind));
   const statusBanner =
-    (approval && !securityHold) || indexing || indexNotice || layaBanner;
+    (approval && !securityHold && !quotaHold) || indexing || indexNotice || layaBanner;
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-50"
@@ -141,7 +146,50 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      {approval && !securityHold ? (
+      {quotaHold && approval ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="quota-overlay-title"
+        >
+          <div className="w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg">
+            <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-tertiary uppercase">
+              Quota Alert · QUOTA_BLOCKED
+            </p>
+            <h2
+              id="quota-overlay-title"
+              className="mt-3 font-body text-base font-semibold text-on-surface"
+            >
+              {QUOTA_ALERT_PROMPT}
+            </h2>
+            <p className="mt-2 font-mono text-[11px] text-outline">
+              {approval.from_agent} → {approval.to_agent} · {approval.summary}
+            </p>
+            <p className="mt-1 font-mono text-[10px] text-outline/80">{approval.reason}</p>
+            <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => void resolveApproval("deny")}
+                className="rounded border border-outline-variant bg-surface-container px-3 py-1.5 font-mono text-[11px] text-on-surface"
+              >
+                Kapat
+              </button>
+              {approval.kind === "quota_local_fallback" ? (
+                <button
+                  type="button"
+                  onClick={() => void resolveApproval("approve_local")}
+                  className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
+                >
+                  {QUOTA_CONTINUE_LOCAL_LABEL}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {approval && !securityHold && !quotaHold ? (
         <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="min-w-0 truncate text-on-surface">
@@ -150,7 +198,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <span className="ml-2 text-outline">{approval.reason}</span>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
-              {approval.kind === "quota_local_fallback" || approval.kind === "agent_switch" ? (
+              {approval.kind === "agent_switch" ? (
                 <button
                   type="button"
                   onClick={() => void resolveApproval("approve_local")}
@@ -310,14 +358,26 @@ export function AppShell({ children }: { children: ReactNode }) {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+                    event.preventDefault();
+                    setOpenCommandPalette(true);
+                  }
+                }}
                 className="w-full min-w-0 rounded-lg border border-outline-variant bg-surface-container-low py-1 pr-12 pl-8 font-body text-xs text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
                 placeholder="Filter subjects, repos, experiences"
               />
-              <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
-                <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
+              <button
+                type="button"
+                onClick={() => setOpenCommandPalette(true)}
+                className="absolute inset-y-0 right-1.5 flex items-center"
+                title="Command Palette"
+                aria-label="Open command palette"
+              >
+                <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant hover:border-primary hover:text-primary">
                   ⌘K
                 </kbd>
-              </span>
+              </button>
             </label>
           )}
         </div>

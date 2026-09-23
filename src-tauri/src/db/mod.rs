@@ -4,6 +4,7 @@ mod connected_tools;
 mod embedding;
 mod experience_store;
 mod experiences;
+pub mod feedback;
 mod project_index;
 mod vector_memory;
 

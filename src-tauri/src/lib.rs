@@ -14,14 +14,17 @@ use kernel::{
 };
 use lounge_protocol::LoungeMessage;
 use models::{
-    merge_project_summaries, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
-    DiscoveryReport, IndexSnapshot, LoungeExperience, ProjectSummary, QuotaState,
-    RecommendedModels, RoutingPolicy, RoutingVote, SemanticMap, ServiceReport, ToolQuota,
+    merge_project_summaries, AstNode, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
+    DiscoveryReport, IndexSnapshot, LoungeExperience, LoungeTask, ProjectSummary, QuotaState,
+    RecommendedModels, RoutingPolicy, RoutingVote, SemanticMap, ServiceReport, TaskKind, ToolQuota,
+    TASK_REQUESTED,
 };
 use services::autodiscover::discovery_report;
 use services::{
-    api_keys_from_store, collect_quota_state_with_keys, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys,
+    record_dead_snapshot, record_whisper_injection, spawn_event_pump, spawn_quota_pump,
+    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, LayaEngineStatus, MemoryBridge,
+    ModelManager, ServiceManager, SharedServices,
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -92,6 +95,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             });
             let (decision_tx, mut decision_rx) = tokio::sync::mpsc::channel(64);
             let gate = DecisionGate::new(decision_tx);
+            gate.attach_bias_store(store.clone());
             let dispatcher = Dispatcher::new(
                 "nats://127.0.0.1:4222",
                 services::lounge_ollama_endpoint(),
@@ -143,10 +147,16 @@ pub fn run_with_start_route(start_route: &'static str) {
                     if let Err(err) = retrieve_bus.publish(&telemetry.envelope()).await {
                         log::warn!("DecisionGate telemetry: {err}");
                     }
-                    if let Err(err) =
-                        inject_knowledge_hit(&retrieve_store, &retrieve_bus, &result).await
-                    {
-                        log::warn!("Cross-Project Memory: {err}");
+                    match inject_knowledge_hit(&retrieve_store, &retrieve_bus, &result).await {
+                        Ok(Some(addon)) => {
+                            if let Err(err) =
+                                record_whisper_injection(&retrieve_store, &result, &addon).await
+                            {
+                                log::warn!("efficiency whisper counter: {err}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => log::warn!("Cross-Project Memory: {err}"),
                     }
                 }
             });
@@ -202,18 +212,23 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_recommended_models,
             pull_lmr_model,
             list_experiences,
+            search_experiences,
+            search_index_nodes,
+            trigger_grok_test,
             list_projects,
             list_quotas,
             get_quota_state,
             get_routing_policy,
             set_routing_policy,
             resolve_routing,
+            record_whisper_feedback,
             probe_bus,
             discover_system,
             get_discovery_report,
             save_connected_tools,
             save_selected_tools,
-            list_connected_tools
+            list_connected_tools,
+            agent_efficiency_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -248,10 +263,18 @@ async fn index_workspace(
         .index_workspace(path)
         .await
         .map_err(|err| err.to_string())?;
-    store
+    let snapshot = store
         .save_project_index(graph.clone())
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    if !snapshot.project.is_empty() {
+        if let Err(err) =
+            record_dead_snapshot(&store, snapshot.project.clone(), snapshot.dead).await
+        {
+            log::warn!("dead snapshot: {err}");
+        }
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -259,8 +282,35 @@ async fn get_dead_symbols(
     store: tauri::State<'_, ExperienceStore>,
     project_id: Option<String>,
 ) -> Result<Vec<DeadSymbol>, String> {
-    store
-        .list_dead_symbols(project_id)
+    let symbols = store
+        .list_dead_symbols(project_id.clone())
+        .await
+        .map_err(|err| err.to_string())?;
+    if let Some(pid) = project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Err(err) = record_dead_snapshot(&store, pid, symbols.len() as u64).await {
+            log::warn!("dead snapshot: {err}");
+        }
+    }
+    Ok(symbols)
+}
+
+#[tauri::command]
+async fn agent_efficiency_report(
+    store: tauri::State<'_, ExperienceStore>,
+    weekly: Option<bool>,
+    project_id: Option<String>,
+) -> Result<AgentEfficiencyReport, String> {
+    let query = EfficiencyReportQuery {
+        weekly: weekly.unwrap_or(true),
+        project_id: project_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    };
+    build_agent_efficiency_report(&store, query)
         .await
         .map_err(|err| err.to_string())
 }
@@ -502,6 +552,82 @@ async fn list_experiences(
 }
 
 #[tauri::command]
+async fn search_experiences(
+    state: tauri::State<'_, ExperienceStore>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<LoungeExperience>, String> {
+    state
+        .search_experiences(query, limit)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn search_index_nodes(
+    state: tauri::State<'_, ExperienceStore>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<AstNode>, String> {
+    state
+        .search_index_nodes(query, limit)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[derive(serde::Serialize)]
+struct GrokTestResult {
+    task_id: String,
+    subject: String,
+    target_agent: String,
+    chain_label: String,
+}
+
+/// Command Palette: Grok Bot varsa `lounge.task.requested` → grok_bot (workflow ile aynı yol).
+#[tauri::command]
+#[allow(deprecated)]
+async fn trigger_grok_test(
+    bus: tauri::State<'_, BusManager>,
+    project_id: Option<String>,
+) -> Result<GrokTestResult, String> {
+    use kernel::workflow_engine::{grok_bot_in_fleet, GROK_BOT_WORKER};
+
+    if !grok_bot_in_fleet() {
+        return Err("Grok Bot fleet'te yok — test tetiklenemedi".into());
+    }
+
+    let project = project_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "agent-lounge-os".into());
+
+    let mut task = LoungeTask::new("command_palette", &project, "Manual Grok Test");
+    task.kind = TaskKind::Test;
+    task.target_agent = Some(GROK_BOT_WORKER.into());
+    let chain = format!("{project} -> Triggered Manual Grok Test");
+    task.workflow_chain = Some(chain.clone());
+
+    let url = bus.nats_url().to_string();
+    let subject = TASK_REQUESTED.to_string();
+    let bytes = serde_json::to_vec(&task).map_err(|err| err.to_string())?;
+    let subject_err = subject.clone();
+    tokio::task::spawn_blocking(move || {
+        let nc = nats::connect(&url).map_err(|err| err.to_string())?;
+        nc.publish(&subject, bytes).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(|err| format!("NATS publish başarısız ({subject_err}): {err}"))?;
+
+    Ok(GrokTestResult {
+        task_id: task.id,
+        subject: TASK_REQUESTED.into(),
+        target_agent: GROK_BOT_WORKER.into(),
+        chain_label: chain,
+    })
+}
+
+#[tauri::command]
 async fn list_projects(
     services: tauri::State<'_, SharedServices>,
     store: tauri::State<'_, ExperienceStore>,
@@ -571,6 +697,32 @@ async fn resolve_routing(
         .resolve_vote(task_id, vote)
         .await
         .map_err(|err| err.to_string())
+}
+
+/// Context Whisper tecrübesini kullanıcı "faydalı" bulduğunda Feedback Loop kaydı.
+#[tauri::command]
+async fn record_whisper_feedback(
+    store: tauri::State<'_, ExperienceStore>,
+    experience_id: String,
+    project_id: Option<String>,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    if experience_id.trim().is_empty() {
+        return Err("experience_id gerekli".into());
+    }
+    let store = store.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        db::feedback::with_conn_record_whisper(
+            &store,
+            &experience_id,
+            project_id.as_deref(),
+            task_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

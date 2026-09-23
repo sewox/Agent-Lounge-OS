@@ -288,6 +288,7 @@ mod tests {
         let raw = include_str!("../../../shared/lounge_protocol/subjects.json");
         let json: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert_eq!(json["alert"]["security"], ALERT_SECURITY);
+        assert_eq!(json["alert"]["quota"], "lounge.alert.quota");
         assert_eq!(json["task"]["resume"], TASK_RESUME);
         assert_eq!(json["task"]["failed"], TASK_CANCEL);
     }

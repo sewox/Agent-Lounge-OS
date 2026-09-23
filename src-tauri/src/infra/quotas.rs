@@ -1,6 +1,11 @@
 use crate::models::ToolQuota;
 use crate::services::{collect_quota_state, MemoryBridge};
 
+pub use crate::services::quota_manager::{
+    evaluate_assignment as check_quota, limit_policy_percent, quota_blocked_for,
+    quota_exhausted_for, quota_matches_agent,
+};
+
 pub async fn probe_quotas(
     ollama_endpoint: &str,
     nats_monitor: &str,
@@ -11,49 +16,8 @@ pub async fn probe_quotas(
         .quotas
 }
 
-pub fn quota_exhausted_for(quotas: &[ToolQuota], agent: &str) -> bool {
-    quotas
-        .iter()
-        .filter(|row| quota_matches_agent(row, agent))
-        .any(ToolQuota::is_exhausted)
-}
-
-pub fn quota_matches_agent(row: &ToolQuota, agent: &str) -> bool {
-    let needle = agent.trim().to_ascii_lowercase();
-    if needle.is_empty() {
-        return false;
-    }
-    let id = row.id.to_ascii_lowercase();
-    let mode = row.access_mode.to_ascii_lowercase();
-    let host = row
-        .host_id
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match needle.as_str() {
-        "claude" | "claude_desktop" | "claude_cli" => {
-            mode == "subscription"
-                && (id.contains("claude_desktop")
-                    || id.contains("claude_cli")
-                    || host == "claude_desktop"
-                    || host == "claude_cli")
-        }
-        "anthropic" => mode == "api" && (id == "anthropic" || id.contains("anthropic")),
-        "cursor" => mode == "subscription" && (id.contains("cursor") || host == "cursor"),
-        "antigravity" => {
-            mode == "subscription" && (id.contains("antigravity") || host == "antigravity")
-        }
-        "grok" | "grok_bot" => {
-            mode == "subscription" && (id.contains("grok_bot") || host == "grok_bot")
-        }
-        "xai" | "grok_api" => mode == "api" && (id == "xai" || id.contains("xai")),
-        "openai" => mode == "api" && id.contains("openai"),
-        "lmr" | "ollama" => mode == "local" && (id == "lmr" || id.contains("ollama")),
-        other => id == other || id.ends_with(&format!(":{other}")) || host == other,
-    }
-}
-
-pub(crate) async fn http_json(url: &str) -> Result<serde_json::Value, String> {
+/// Hafif GET JSON — keşif / Ollama tags (subscription_usage HTTP'sinden bağımsız).
+pub async fn http_json(url: &str) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -72,6 +36,7 @@ pub(crate) async fn http_json(url: &str) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{QuotaVerdict, LIMIT_POLICY_PERCENT};
 
     fn row(id: &str, tool: &str, mode: &str, host: Option<&str>, exhausted: bool) -> ToolQuota {
         ToolQuota {
@@ -111,6 +76,7 @@ mod tests {
         ];
         assert!(!quota_exhausted_for(&quotas, "claude"));
         assert!(quota_exhausted_for(&quotas, "anthropic"));
+        assert!(!quota_matches_agent(&quotas[1], "claude"));
     }
 
     #[test]
@@ -127,5 +93,35 @@ mod tests {
         ];
         assert!(!quota_exhausted_for(&quotas, "grok"));
         assert!(quota_exhausted_for(&quotas, "xai"));
+    }
+
+    #[test]
+    fn check_quota_block_matches_verdict() {
+        let quotas = vec![row(
+            "app:cursor",
+            "Cursor",
+            "subscription",
+            Some("cursor"),
+            true,
+        )];
+        let verdict = check_quota(&quotas, "cursor", LIMIT_POLICY_PERCENT);
+        assert!(matches!(verdict, QuotaVerdict::Block { .. }));
+    }
+
+    #[test]
+    fn limit_policy_blocks_at_ninety() {
+        let quotas = vec![ToolQuota {
+            id: "app:cursor".into(),
+            tool: "Cursor".into(),
+            percent: Some(90.0),
+            exhausted: false,
+            ..ToolQuota::default()
+        }
+        .with_mode("subscription", Some("cursor"))];
+        assert!(quota_blocked_for(&quotas, "cursor", LIMIT_POLICY_PERCENT));
+        assert!(matches!(
+            check_quota(&quotas, "cursor", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Block { .. }
+        ));
     }
 }

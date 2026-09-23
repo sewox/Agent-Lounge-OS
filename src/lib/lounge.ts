@@ -421,15 +421,20 @@ export const LAYA_ENGINE_EVENT = "laya-engine";
 export const INFRA_STATUS = "lounge.infra.status";
 export const TELEMETRY_DECISION = "lounge.telemetry.decision";
 export const ALERT_SECURITY = "lounge.alert.security";
+export const ALERT_QUOTA = "lounge.alert.quota";
 export const TASK_RESUME = "lounge.task.resume";
 export const CONTEXT_WHISPER = "lounge.context.whisper";
 export const AGENT_PROMPT = "lounge.agent.prompt";
 export const SECURITY_OVERLAY_PROMPT =
   "Ajan kritik bir dosyaya erişmek istiyor. Onaylıyor musunuz?";
+export const QUOTA_ALERT_PROMPT =
+  "Kota limiti aşıldı. Görev durduruldu. Yerel LMR ile devam edebilirsiniz.";
+export const QUOTA_CONTINUE_LOCAL_LABEL = "Yerel Model (Ollama) ile devam et";
 export const LATENCY_SPARK_CAP = 24;
 export const MSG_MIN_WINDOW_MS = 60_000;
 export const PAGE_SIZE = 25;
 export const AMBER_THRESHOLD = 80;
+export const LIMIT_POLICY_PERCENT = 90;
 
 /** NATS `lounge.context.whisper` — canlı Cross-Project Memory fısıltısı. */
 export type ContextWhisper = {
@@ -1259,6 +1264,10 @@ export function isSecurityApproval(kind: ApprovalKind | string | undefined): boo
   return kind === "security_critical" || kind === "security_risky";
 }
 
+export function isQuotaApproval(kind: ApprovalKind | string | undefined): boolean {
+  return kind === "quota_local_fallback" || kind === "quota_abort";
+}
+
 export function parseSecurityAlert(message: LoungeMessage): ApprovalRequest | null {
   if (message.subject !== ALERT_SECURITY) {
     return null;
@@ -1287,6 +1296,42 @@ export function parseSecurityAlert(message: LoungeMessage): ApprovalRequest | nu
         : typeof row.message === "string"
           ? row.message
           : SECURITY_OVERLAY_PROMPT,
+  };
+}
+
+export function parseQuotaAlert(message: LoungeMessage): ApprovalRequest | null {
+  if (message.subject !== ALERT_QUOTA) {
+    return null;
+  }
+  const payload = message.payload;
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const row = payload as Record<string, unknown>;
+  const taskId = typeof row.task_id === "string" ? row.task_id : "";
+  if (!taskId) {
+    return null;
+  }
+  const kindRaw = typeof row.kind === "string" ? row.kind : "quota_local_fallback";
+  const kind: ApprovalKind =
+    kindRaw === "quota_abort" ? "quota_abort" : "quota_local_fallback";
+  const lmrDown =
+    row.lmr_available === false
+      ? " · Lounge LMR (127.0.0.1:18790) ayakta değil; host Ollama kullanılmaz."
+      : "";
+  const baseReason =
+    typeof row.reason === "string"
+      ? row.reason
+      : typeof row.message === "string"
+        ? row.message
+        : QUOTA_ALERT_PROMPT;
+  return {
+    task_id: taskId,
+    summary: typeof row.summary === "string" ? row.summary : "",
+    from_agent: typeof row.from_agent === "string" ? row.from_agent : message.source_agent,
+    to_agent: typeof row.to_agent === "string" ? row.to_agent : "lmr",
+    kind,
+    reason: `${baseReason}${lmrDown}`,
   };
 }
 
@@ -1470,6 +1515,276 @@ export function quotaToneClass(tone: QuotaTone): string {
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** Ajan Verimlilik Raporu — Rust `AgentEfficiencyReport` ile snake/camel uyumlu. */
+export type AgentFailureRow = {
+  agentId: string;
+  failureCount: number;
+  metricLabel: string;
+};
+
+export type DeadCleanupStats = {
+  remaining: number;
+  cleaned: number | null;
+  rate: number | null;
+  previousCount: number | null;
+  note: string;
+};
+
+export type AgentEfficiencyReport = {
+  generatedAt: string;
+  scopeLabel: string;
+  weekly: boolean;
+  projectId: string | null;
+  windowStart: string | null;
+  windowEnd: string;
+  failuresByAgent: AgentFailureRow[];
+  totalFailures: number;
+  crossProjectWhisperEvents: number;
+  crossProjectExperienceHits: number;
+  dead: DeadCleanupStats;
+  markdown: string;
+  sourceNotes: string[];
+};
+
+function asCamelReport(raw: Record<string, unknown>): AgentEfficiencyReport {
+  const deadRaw =
+    raw.dead && typeof raw.dead === "object" && !Array.isArray(raw.dead)
+      ? (raw.dead as Record<string, unknown>)
+      : {};
+  const failuresRaw = Array.isArray(raw.failuresByAgent)
+    ? raw.failuresByAgent
+    : Array.isArray(raw.failures_by_agent)
+      ? raw.failures_by_agent
+      : [];
+  const failuresByAgent: AgentFailureRow[] = [];
+  for (const row of failuresRaw) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const r = row as Record<string, unknown>;
+    failuresByAgent.push({
+      agentId: String(r.agentId ?? r.agent_id ?? "unknown"),
+      failureCount: Number(r.failureCount ?? r.failure_count ?? 0) || 0,
+      metricLabel: String(r.metricLabel ?? r.metric_label ?? "hata/failure sayısı"),
+    });
+  }
+  const notesRaw = Array.isArray(raw.sourceNotes)
+    ? raw.sourceNotes
+    : Array.isArray(raw.source_notes)
+      ? raw.source_notes
+      : [];
+  return {
+    generatedAt: String(raw.generatedAt ?? raw.generated_at ?? new Date().toISOString()),
+    scopeLabel: String(raw.scopeLabel ?? raw.scope_label ?? ""),
+    weekly: Boolean(raw.weekly ?? true),
+    projectId: (raw.projectId ?? raw.project_id ?? null) as string | null,
+    windowStart: (raw.windowStart ?? raw.window_start ?? null) as string | null,
+    windowEnd: String(raw.windowEnd ?? raw.window_end ?? new Date().toISOString()),
+    failuresByAgent,
+    totalFailures: Number(raw.totalFailures ?? raw.total_failures ?? 0) || 0,
+    crossProjectWhisperEvents:
+      Number(raw.crossProjectWhisperEvents ?? raw.cross_project_whisper_events ?? 0) || 0,
+    crossProjectExperienceHits:
+      Number(raw.crossProjectExperienceHits ?? raw.cross_project_experience_hits ?? 0) || 0,
+    dead: {
+      remaining: Number(deadRaw.remaining ?? 0) || 0,
+      cleaned: (() => {
+        const v = deadRaw.cleaned;
+        if (v === null || v === undefined) return null;
+        return Number(v) || 0;
+      })(),
+      rate: (() => {
+        const v = deadRaw.rate;
+        if (v === null || v === undefined) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      })(),
+      previousCount: (() => {
+        const v = deadRaw.previousCount ?? deadRaw.previous_count;
+        if (v === null || v === undefined) return null;
+        return Number(v) || 0;
+      })(),
+      note: String(deadRaw.note ?? ""),
+    },
+    markdown: String(raw.markdown ?? ""),
+    sourceNotes: notesRaw.map((n) => String(n)),
+  };
+}
+
+/** Tarayıcı / mock: bellek içi event + deadSymbols'dan dürüst boş/örnek rapor. */
+export function buildBrowserEfficiencyReport(input: {
+  events: NatsEvent[];
+  experiences: LoungeExperience[];
+  deadSymbols: DeadSymbol[];
+  weekly?: boolean;
+  projectId?: string | null;
+}): AgentEfficiencyReport {
+  const weekly = input.weekly !== false;
+  const projectId = input.projectId?.trim() || null;
+  const now = new Date();
+  const windowStart = weekly
+    ? new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    : null;
+  const since = windowStart ? Date.parse(windowStart) : 0;
+
+  const failCounts = new Map<string, number>();
+  for (const ev of input.events) {
+    if (!ev.subject?.includes("task.failed") && ev.state !== "error") continue;
+    const agent = ev.from || "unknown";
+    failCounts.set(agent, (failCounts.get(agent) ?? 0) + 1);
+  }
+  for (const exp of input.experiences) {
+    if (exp.outcome !== "failure") continue;
+    if (projectId && exp.project_id !== projectId) continue;
+    const created = Date.parse(exp.created_at || "");
+    if (windowStart && Number.isFinite(created) && created < since) continue;
+    const agent = exp.agent || "unknown";
+    failCounts.set(agent, (failCounts.get(agent) ?? 0) + 1);
+  }
+  const failuresByAgent: AgentFailureRow[] = [...failCounts.entries()]
+    .map(([agentId, failureCount]) => ({
+      agentId,
+      failureCount,
+      metricLabel: "hata/failure sayısı",
+    }))
+    .sort((a, b) => b.failureCount - a.failureCount);
+
+  let crossHits = 0;
+  let crossEvents = 0;
+  for (const ev of input.events) {
+    if (ev.subject !== CONTEXT_WHISPER && !ev.subject?.includes("context.whisper")) continue;
+    crossEvents += 1;
+    crossHits += 1;
+  }
+  for (const exp of input.experiences) {
+    if (exp.tags?.includes("cross-project") || exp.tags?.includes("whisper")) {
+      if (projectId && exp.project_id === projectId) continue;
+      crossHits += 1;
+    }
+  }
+
+  const remaining = projectId
+    ? input.deadSymbols.filter((d) => !d.project_id || d.project_id === projectId).length
+    : input.deadSymbols.length;
+
+  const scopeLabel = weekly
+    ? projectId
+      ? `haftalık + proje (${projectId}) · tarayıcı mock`
+      : "haftalık (son 7 gün) · tarayıcı mock"
+    : projectId
+      ? `proje (${projectId}) · tarayıcı mock`
+      : "tüm zamanlar · tarayıcı mock";
+
+  const report: AgentEfficiencyReport = {
+    generatedAt: now.toISOString(),
+    scopeLabel,
+    weekly,
+    projectId,
+    windowStart,
+    windowEnd: now.toISOString(),
+    failuresByAgent,
+    totalFailures: failuresByAgent.reduce((s, r) => s + r.failureCount, 0),
+    crossProjectWhisperEvents: crossEvents,
+    crossProjectExperienceHits: crossHits,
+    dead: {
+      remaining,
+      cleaned: null,
+      rate: null,
+      previousCount: null,
+      note: "Tarayıcı modu: ölü sembol snapshot geçmişi yok; yalnızca mevcut sayı.",
+    },
+    markdown: "",
+    sourceNotes: [
+      "Tarayıcı mock: Tauri SQLite yok — NATS event / bellek içi experiences kullanıldı.",
+      "Hata: task.failed event + outcome=failure experiences.",
+      "Cross-Project: lounge.context.whisper event + whisper etiketli experiences.",
+      "Ölü sembol oranı: snapshot yok → % uydurulmadı.",
+    ],
+  };
+  report.markdown = renderEfficiencyMarkdown(report);
+  return report;
+}
+
+export function renderEfficiencyMarkdown(report: AgentEfficiencyReport): string {
+  const lines: string[] = [
+    "# Agent Efficiency Report / Ajan Verimlilik Raporu",
+    "",
+    `- Üretilme: ${report.generatedAt}`,
+    `- Kapsam: ${report.scopeLabel}`,
+  ];
+  if (report.windowStart) {
+    lines.push(`- Pencere: ${report.windowStart} → ${report.windowEnd}`);
+  }
+  if (report.projectId) {
+    lines.push(`- Proje: \`${report.projectId}\``);
+  }
+  lines.push("", "## 1. Ajan başına hata / failure", "");
+  lines.push("Metrik: failure sayısı (uydurma bug sayacı değil).", "");
+  if (report.failuresByAgent.length === 0) {
+    lines.push("_Kayıt yok._", "");
+  } else {
+    lines.push("| Ajan | Hata/failure |", "| --- | ---: |");
+    for (const row of report.failuresByAgent) {
+      lines.push(`| ${row.agentId} | ${row.failureCount} |`);
+    }
+    lines.push("", `**Toplam:** ${report.totalFailures}`, "");
+  }
+  lines.push(
+    "## 2. Cross-Project Experience kullanımı",
+    "",
+    `- Fısıltı olayları: **${report.crossProjectWhisperEvents}**`,
+    `- Çapraz-proje tecrübe satırı: **${report.crossProjectExperienceHits}**`,
+    "",
+    "## 3. Ölü sembol (Dead Symbol) temizleme",
+    "",
+    `- Kalan (mevcut): **${report.dead.remaining}**`,
+    report.dead.cleaned == null
+      ? "- Temizlenen: _hesaplanamadı_"
+      : `- Temizlenen: **${report.dead.cleaned}**`,
+    report.dead.rate == null
+      ? "- Oran: _yok (sahte % üretilmedi)_"
+      : `- Oran: **${(report.dead.rate * 100).toFixed(1)}%**`,
+    `- Not: ${report.dead.note}`,
+    "",
+    "## Kaynak notları",
+    "",
+  );
+  for (const note of report.sourceNotes) {
+    lines.push(`- ${note}`);
+  }
+  lines.push("", "---", "_Agent Lounge OS · Markdown dışa aktarım (PDF için yazdırın)._");
+  return lines.join("\n");
+}
+
+export async function fetchAgentEfficiencyReport(options?: {
+  weekly?: boolean;
+  projectId?: string | null;
+}): Promise<AgentEfficiencyReport> {
+  if (!isTauri()) {
+    throw new Error("Tauri yok");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const raw = await invoke<Record<string, unknown>>("agent_efficiency_report", {
+    weekly: options?.weekly ?? true,
+    projectId: options?.projectId?.trim() || null,
+  });
+  const report = asCamelReport(raw ?? {});
+  if (!report.markdown) {
+    report.markdown = renderEfficiencyMarkdown(report);
+  }
+  return report;
+}
+
+export function downloadMarkdownFile(filename: string, content: string): void {
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename.endsWith(".md") ? filename : `${filename}.md`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function pickWorkspaceFolder(): Promise<string | null> {

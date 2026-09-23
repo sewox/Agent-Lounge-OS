@@ -10,7 +10,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import {
   DEFAULT_POLICY,
@@ -34,6 +36,7 @@ import {
   parseDecisionTelemetry,
   parseLayaEngineStatus,
   parseSecurityAlert,
+  parseQuotaAlert,
   parseContextWhisper,
   mergeWhisperedExperiences,
   pruneMsgWindow,
@@ -75,11 +78,17 @@ type LoungeContextValue = {
   amberAlert: boolean;
   amberTools: string[];
   projects: ProjectSummary[];
+  /** Command Palette / vault proje filtresi. */
+  selectedProject: string | null;
   lastIndex: IndexSnapshot | null;
   semanticMap: SemanticMap;
   deadSymbols: DeadSymbol[];
   query: string;
   setQuery: (value: string) => void;
+  openCommandPalette: boolean;
+  setOpenCommandPalette: Dispatch<SetStateAction<boolean>>;
+  switchProject: (name: string | null) => void;
+  focusExperience: (experience: LoungeExperience) => void;
   clock: string;
   indexing: boolean;
   indexNotice: IndexNotice | null;
@@ -97,9 +106,13 @@ type LoungeContextValue = {
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
   resolveApproval: (vote: RoutingVote) => Promise<void>;
+  /** Context Whisper satırını açıkça "faydalı" olarak işaretle (Feedback Loop). */
+  markWhisperUseful: (experienceId: string, projectId?: string) => Promise<void>;
   ingestBusMessage: (message: LoungeMessage) => void;
   probeBus: () => Promise<void>;
 };
+
+const WHISPER_FOCUS_MS = 12_000;
 
 const LoungeContext = createContext<LoungeContextValue | null>(null);
 
@@ -120,11 +133,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     MOCK_QUOTAS.filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD).map((row) => row.id),
   );
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [lastIndex, setLastIndex] = useState<IndexSnapshot | null>(null);
   const [semanticMap, setSemanticMap] = useState<SemanticMap>({ projects: [] });
   const [deadSymbols, setDeadSymbols] = useState<DeadSymbol[]>([]);
   const [query, setQuery] = useState("");
+  const [openCommandPalette, setOpenCommandPalette] = useState(false);
   const [clock, setClock] = useState("--:--");
+  const whisperFocusTimer = useRef<number | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
@@ -362,6 +378,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     if (security) {
       setApproval(security);
     }
+    const quota = parseQuotaAlert(message);
+    if (quota) {
+      setApproval(quota);
+    }
     const whisper = parseContextWhisper(message);
     if (whisper) {
       setWhisperedExperienceIds(whisper.experienceIds);
@@ -443,6 +463,31 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     await invoke<LoungeMessage>("probe_bus");
   }, [ingestBusMessage]);
 
+  const switchProject = useCallback((name: string | null) => {
+    setSelectedProject(name);
+  }, []);
+
+  const focusExperience = useCallback((experience: LoungeExperience) => {
+    setSelectedProject(experience.project_id || null);
+    setQuery(experience.adr_summary.slice(0, 64));
+    setExperiences((current) => {
+      if (current.some((row) => row.id === experience.id)) {
+        return current;
+      }
+      return [experience, ...current];
+    });
+    setWhisperedExperienceIds([experience.id]);
+    if (whisperFocusTimer.current != null) {
+      window.clearTimeout(whisperFocusTimer.current);
+    }
+    whisperFocusTimer.current = window.setTimeout(() => {
+      setWhisperedExperienceIds((ids) =>
+        ids.length === 1 && ids[0] === experience.id ? [] : ids,
+      );
+      whisperFocusTimer.current = null;
+    }, WHISPER_FOCUS_MS);
+  }, []);
+
   const resolveApproval = useCallback(async (vote: RoutingVote) => {
     if (!approval) {
       return;
@@ -452,6 +497,27 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }
     setApproval(null);
   }, [approval]);
+
+  const markWhisperUseful = useCallback(async (experienceId: string, projectId?: string) => {
+    if (!experienceId.trim()) {
+      return;
+    }
+    if (isTauri()) {
+      await invoke("record_whisper_feedback", {
+        experienceId,
+        projectId: projectId ?? null,
+        taskId: null,
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (whisperFocusTimer.current != null) {
+        window.clearTimeout(whisperFocusTimer.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!indexNotice) {
@@ -588,11 +654,16 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       amberAlert,
       amberTools,
       projects,
+      selectedProject,
       lastIndex,
       semanticMap,
       deadSymbols,
       query,
       setQuery,
+      openCommandPalette,
+      setOpenCommandPalette,
+      switchProject,
+      focusExperience,
       clock,
       indexing,
       indexNotice,
@@ -610,6 +681,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      markWhisperUseful,
       ingestBusMessage,
       probeBus,
     }),
@@ -625,10 +697,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       amberAlert,
       amberTools,
       projects,
+      selectedProject,
       lastIndex,
       semanticMap,
       deadSymbols,
       query,
+      openCommandPalette,
+      switchProject,
+      focusExperience,
       clock,
       indexing,
       indexNotice,
@@ -646,6 +722,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      markWhisperUseful,
       ingestBusMessage,
       probeBus,
     ],

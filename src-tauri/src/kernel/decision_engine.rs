@@ -46,6 +46,54 @@ pub const SECURITY_ID: &str = SECURITY;
 pub const KNOWLEDGE_ID: &str = CONTEXT_MATCH;
 pub const DECISION_GATE_EVENT: &str = "decision-gate";
 
+/// Aynı güvenlik sınıfı için bu kadar `security_approve` ve yakın zamanda deny yoksa
+/// risk bir kademe düşürülür (Critical→Risky, Risky→Safe). Sıfır geçmiş Critical'ı düşürmez.
+pub const USER_BIAS_APPROVE_THRESHOLD: u32 = 3;
+
+/// Kullanıcı onay/ret istatistikleri — model yeniden eğitilmez; yalnızca skor sonrası düzeltme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserBiasStats {
+    pub alert_type: SecurityLevel,
+    pub approve_count: u32,
+    pub recent_denies: u32,
+}
+
+/// Laya sınıflandırmasından sonra User Bias uygula.
+///
+/// Kural:
+/// - `approve_count >= USER_BIAS_APPROVE_THRESHOLD` (3)
+/// - `recent_denies == 0`
+/// - sonuç güvenlik değeri `stats.alert_type` ile aynı
+/// - o zaman bir kademe düşür: Critical→Risky, Risky→Safe
+/// - `approve_count == 0` iken Critical asla düşmez (marka-yeni Critical korunur)
+pub fn apply_user_bias(mut result: DecisionResult, stats: &UserBiasStats) -> DecisionResult {
+    if stats.approve_count == 0 {
+        return result;
+    }
+    if stats.approve_count < USER_BIAS_APPROVE_THRESHOLD || stats.recent_denies > 0 {
+        return result;
+    }
+    if result.security.value != stats.alert_type {
+        return result;
+    }
+    let next = match result.security.value {
+        SecurityLevel::Critical => SecurityLevel::Risky,
+        SecurityLevel::Risky => SecurityLevel::Safe,
+        SecurityLevel::Safe => return result,
+    };
+    let key = next.as_str().to_string();
+    result.security.value = next;
+    // Etiketi güncelle; güven skorunu hafifçe yumuşat (ağırlık yeniden eğitimi yok).
+    result.security.confidence = (result.security.confidence * 0.92).clamp(0.35, 1.0);
+    result
+        .security
+        .probabilities
+        .entry(key)
+        .and_modify(|p| *p = (*p).max(result.security.confidence))
+        .or_insert(result.security.confidence);
+    result
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RoutingType {
     Task,
@@ -351,6 +399,8 @@ pub struct DecisionGate {
     status: Arc<StdMutex<DecisionGateStatus>>,
     declined: Arc<AtomicBool>,
     load_in_flight: Arc<AtomicBool>,
+    /// Feedback SQLite — User Bias için (opsiyonel; testlerde boş kalabilir).
+    bias_store: Arc<StdMutex<Option<crate::db::ExperienceStore>>>,
 }
 
 impl DecisionGate {
@@ -369,12 +419,18 @@ impl DecisionGate {
             status,
             declined,
             load_in_flight,
+            bias_store: Arc::new(StdMutex::new(None)),
         };
         let worker = gate.clone();
         let _ = std::thread::Builder::new()
             .name("laya-infer".into())
             .spawn(move || infer_worker(job_rx, worker));
         gate
+    }
+
+    /// Feedback Loop: sınıflandırma sonrası User Bias için tecrübe DB'sini bağla.
+    pub fn attach_bias_store(&self, store: crate::db::ExperienceStore) {
+        *self.bias_store.lock().expect("bias store lock") = Some(store);
     }
 
     pub fn cache(&self) -> DecisionCache {
@@ -526,6 +582,12 @@ impl DecisionGate {
         let mut result = inferred;
         result.elapsed_us = elapsed_us;
         result.elapsed_ms = elapsed_us / 1000;
+        // User Bias: Laya ağırlıkları sabit; skor sonrası küçük kademe düşürme.
+        if let Ok(guard) = self.bias_store.lock() {
+            if let Some(store) = guard.as_ref() {
+                result = crate::db::feedback::with_conn_bias(store, result);
+            }
+        }
         if result.elapsed_us > 10_000 {
             log::debug!(
                 "DecisionGate {} {:.1}ms (hedef 10ms, device={})",
@@ -1455,6 +1517,54 @@ mod tests {
         assert_eq!(meter.count(), 3);
         assert_eq!(meter.record_at(t0 + Duration::from_secs(72)), 3);
         assert_eq!(meter.record_at(t0 + Duration::from_secs(122)), 2);
+    }
+
+    #[test]
+    fn apply_user_bias_three_risky_approves_lower_to_safe() {
+        let base = DecisionResult {
+            message_id: "bias-1".into(),
+            subject: "lounge.task.requested".into(),
+            routing: Scored {
+                value: RoutingType::Task,
+                confidence: 0.9,
+                probabilities: HashMap::from([("Task".into(), 0.9)]),
+            },
+            security: Scored {
+                value: SecurityLevel::Risky,
+                confidence: 0.88,
+                probabilities: HashMap::from([("Risky".into(), 0.88)]),
+            },
+            knowledge_hit: 0.1,
+            elapsed_ms: 1,
+            elapsed_us: 1_000,
+            device: "cpu".into(),
+            recall: RecallHint::default(),
+        };
+        let stats = UserBiasStats {
+            alert_type: SecurityLevel::Risky,
+            approve_count: USER_BIAS_APPROVE_THRESHOLD,
+            recent_denies: 0,
+        };
+        let out = apply_user_bias(base.clone(), &stats);
+        assert_eq!(out.security.value, SecurityLevel::Safe);
+
+        let zero = UserBiasStats {
+            alert_type: SecurityLevel::Critical,
+            approve_count: 0,
+            recent_denies: 0,
+        };
+        let critical = DecisionResult {
+            security: Scored {
+                value: SecurityLevel::Critical,
+                confidence: 0.95,
+                probabilities: HashMap::from([("Critical".into(), 0.95)]),
+            },
+            ..base
+        };
+        assert_eq!(
+            apply_user_bias(critical, &zero).security.value,
+            SecurityLevel::Critical
+        );
     }
 
     #[test]
