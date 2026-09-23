@@ -33,6 +33,7 @@ import {
   SERVICE_UI_EVENT,
   parseDecisionTelemetry,
   parseLayaEngineStatus,
+  parseSecurityAlert,
   pruneMsgWindow,
   recordMsgTick,
   type ApprovalRequest,
@@ -153,11 +154,18 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
             files: row.files,
           })),
         );
-      } else {
-        const rows = await invoke<ProjectSummary[]>("list_projects");
-        if (rows.length > 0) {
-          setProjects(rows);
+        const fromMap = map.projects.flatMap((row) => row.dead);
+        try {
+          const listed = await invoke<DeadSymbol[]>("get_dead_symbols");
+          setDeadSymbols(listed.length > 0 ? listed : fromMap);
+        } catch {
+          setDeadSymbols(fromMap);
         }
+        return;
+      }
+      const rows = await invoke<ProjectSummary[]>("list_projects");
+      if (rows.length > 0) {
+        setProjects(rows);
       }
     } catch {
       try {
@@ -344,6 +352,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     const engine = parseLayaEngineStatus(message);
     if (engine) {
       setLayaEngine(engine);
+    }
+    const security = parseSecurityAlert(message);
+    if (security) {
+      setApproval(security);
     }
     if (row.subject.includes("experience")) {
       void refreshSemantic();

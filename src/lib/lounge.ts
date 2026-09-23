@@ -63,6 +63,8 @@ export type NatsEvent = {
   payload: string;
   state: "queued" | "ok" | "error" | "retry";
   decisionLabel?: string;
+  /** Multi-agent zinciri — örn. `Claude (Code) -> Grok (Test)`. */
+  chainLabel?: string;
 };
 
 export type NatsTone = "task" | "success" | "error";
@@ -418,6 +420,10 @@ export const DECISION_GATE_EVENT = "decision-gate";
 export const LAYA_ENGINE_EVENT = "laya-engine";
 export const INFRA_STATUS = "lounge.infra.status";
 export const TELEMETRY_DECISION = "lounge.telemetry.decision";
+export const ALERT_SECURITY = "lounge.alert.security";
+export const TASK_RESUME = "lounge.task.resume";
+export const SECURITY_OVERLAY_PROMPT =
+  "Ajan kritik bir dosyayı değiştirmek istiyor. Onaylıyor musunuz?";
 export const LATENCY_SPARK_CAP = 24;
 export const MSG_MIN_WINDOW_MS = 60_000;
 export const PAGE_SIZE = 25;
@@ -622,6 +628,88 @@ export function formatDecisionStreamLabel(ms: number | null | undefined): string
   return `Decision: ${Math.round(ms)}ms`;
 }
 
+/** Payload / zarftan workflow zincir etiketini çıkarır. */
+export function extractWorkflowChainLabel(payload: unknown): string | undefined {
+  const record = asRecord(payload);
+  if (!record) {
+    return undefined;
+  }
+  const direct =
+    (typeof record.workflow_chain === "string" && record.workflow_chain.trim()) ||
+    (typeof record.chain_label === "string" && record.chain_label.trim()) ||
+    "";
+  if (direct) {
+    return direct;
+  }
+  const nested = asRecord(record.task);
+  if (nested && typeof nested.workflow_chain === "string" && nested.workflow_chain.trim()) {
+    return nested.workflow_chain.trim();
+  }
+  return undefined;
+}
+
+/**
+ * Ajan + kind etiketini birleştirir — örn. `Claude (Code) -> Grok (Test)`.
+ * Rust `format_workflow_chain` ile aynı sözleşme.
+ */
+export function formatWorkflowChainLabel(
+  fromAgent: string,
+  fromKind: string,
+  toAgent: string,
+  toKind: string,
+): string {
+  return `${agentChainLabel(fromAgent)} (${kindChainLabel(fromKind)}) -> ${agentChainLabel(toAgent)} (${kindChainLabel(toKind)})`;
+}
+
+function kindChainLabel(kind: string): string {
+  const key = kind.trim().toLowerCase();
+  if (key === "code_analysis" || key === "code" || key === "coding") {
+    return "Code";
+  }
+  if (key === "review") {
+    return "Review";
+  }
+  if (key === "test") {
+    return "Test";
+  }
+  if (key === "orchestration") {
+    return "Orchestration";
+  }
+  if (key === "general" || !key) {
+    return "General";
+  }
+  return kind.trim();
+}
+
+function agentChainLabel(agent: string): string {
+  const lower = agent.trim().toLowerCase();
+  if (lower.includes("claude")) {
+    return "Claude";
+  }
+  if (lower.includes("grok")) {
+    return "Grok";
+  }
+  if (lower.includes("cursor")) {
+    return "Cursor";
+  }
+  if (lower.includes("antigravity")) {
+    return "Antigravity";
+  }
+  if (lower === "lmr" || lower.includes("laya")) {
+    return "LMR";
+  }
+  if (
+    !lower ||
+    lower === "lounge-kernel" ||
+    lower === "kernel" ||
+    lower === "dispatcher" ||
+    lower === "workflow_engine"
+  ) {
+    return "Kernel";
+  }
+  return agent.trim();
+}
+
 export function eventDecisionLabel(
   event: Pick<NatsEvent, "decisionLabel">,
   latestMs?: number | null,
@@ -663,6 +751,89 @@ export function pageSlice<T>(items: T[], page: number, pageSize = PAGE_SIZE): T[
   const safe = Math.min(Math.max(0, page), pages - 1);
   const start = safe * pageSize;
   return items.slice(start, start + pageSize);
+}
+
+/** Semantic map düğümü seçimi — experience filtresi için. */
+export type SemanticMapSelection = {
+  id: string;
+  name: string;
+  kind: string;
+  file?: string | null;
+  project?: string | null;
+};
+
+export function pathBasename(path: string | null | undefined): string | null {
+  if (!path?.trim()) {
+    return null;
+  }
+  return path.split(/[/\\]/).filter(Boolean).at(-1) ?? null;
+}
+
+/** Canlı dead sayımı: deadSymbols → map.dead → lastIndex.dead; indeks yoksa mock toplamı. */
+export function resolveDeadSymbolCount(input: {
+  deadSymbols: DeadSymbol[];
+  semanticMap: SemanticMap;
+  lastIndex: IndexSnapshot | null;
+  projects: ProjectSummary[];
+}): number {
+  const hasIndex =
+    Boolean(input.lastIndex) ||
+    input.projects.length > 0 ||
+    input.semanticMap.projects.length > 0;
+  if (!hasIndex) {
+    return MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
+  }
+  const fromList = input.deadSymbols.length;
+  const fromMap = input.semanticMap.projects.reduce((sum, row) => sum + row.dead.length, 0);
+  return fromList || fromMap || input.lastIndex?.dead || 0;
+}
+
+/**
+ * Düğüm tıklanınca: name / file basename / project, adr_summary + tags (+ agent, project_id) içinde.
+ * Seçim yoksa yalnızca metin sorgusu uygulanır.
+ */
+export function experiencesMatchingSelection(
+  experiences: LoungeExperience[],
+  selection: SemanticMapSelection | null,
+  query = "",
+): LoungeExperience[] {
+  const q = query.trim().toLowerCase();
+  let rows = experiences;
+  if (q) {
+    rows = rows.filter((item) =>
+      `${item.project_id} ${item.adr_summary} ${item.agent} ${item.tags.join(" ")}`
+        .toLowerCase()
+        .includes(q),
+    );
+  }
+  if (!selection) {
+    return rows;
+  }
+  const tokens = [
+    selection.name,
+    selection.id,
+    selection.file,
+    pathBasename(selection.file),
+    // Proje adı yalnızca project düğümünde; fn/file seçiminde tüm repo experience'larını şişirmesin.
+    selection.kind === "project" ? selection.project : null,
+  ]
+    .map((token) => token?.trim().toLowerCase() ?? "")
+    .filter((token) => token.length >= 2);
+  if (tokens.length === 0) {
+    return rows;
+  }
+  return rows.filter((item) => {
+    const hay = [
+      item.project_id,
+      item.adr_summary,
+      item.agent,
+      item.related_task_id ?? "",
+      ...item.tags,
+    ]
+      .join(" ")
+      .toLowerCase();
+    return tokens.some((token) => hay.includes(token));
+  });
 }
 
 export function natsEventTone(subject: string, state?: NatsEvent["state"]): NatsTone {
@@ -717,6 +888,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     payload: `${kb}kb`,
     state,
     decisionLabel: ownMs != null ? formatDecisionStreamLabel(ownMs) : undefined,
+    chainLabel: extractWorkflowChainLabel(message.payload),
   };
 }
 
@@ -740,7 +912,8 @@ export const MOCK_EVENTS: NatsEvent[] = [
   { id: "d1", time: "14:09:29.004", subject: "lounge.telemetry.decision", from: "decision_engine", to: "bus", payload: "0.2kb", state: "ok", decisionLabel: "Decision: 4ms" },
   { id: "1", time: "14:09:18.441", subject: "lounge.task.requested", from: "kernel", to: "dispatcher", payload: "1.2kb", state: "queued" },
   { id: "2", time: "14:09:18.512", subject: "lounge.task.assigned", from: "dispatcher", to: "ollama", payload: "0.4kb", state: "ok" },
-  { id: "3", time: "14:09:19.108", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "3.8kb", state: "ok" },
+  { id: "3", time: "14:09:19.108", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "3.8kb", state: "ok", chainLabel: "Claude (Code) -> Grok (Test)" },
+  { id: "w1", time: "14:09:19.220", subject: "lounge.task.requested", from: "workflow_engine", to: "grok_bot", payload: "0.8kb", state: "queued", chainLabel: "Claude (Code) -> Grok (Test)" },
   { id: "4", time: "14:09:19.140", subject: "lounge.experience.reported", from: "kernel", to: "vault", payload: "2.1kb", state: "ok" },
   { id: "5", time: "14:09:21.002", subject: "lounge.task.requested", from: "alice", to: "kernel", payload: "0.9kb", state: "queued" },
   { id: "6", time: "14:09:22.774", subject: "lounge.task.failed", from: "dispatcher", to: "nats", payload: "0.6kb", state: "error" },
@@ -946,7 +1119,8 @@ export type ApprovalKind =
   | "agent_switch"
   | "quota_local_fallback"
   | "quota_abort"
-  | "security_critical";
+  | "security_critical"
+  | "security_risky";
 
 export type ApprovalRequest = {
   task_id: string;
@@ -956,6 +1130,41 @@ export type ApprovalRequest = {
   kind: ApprovalKind;
   reason: string;
 };
+
+export function isSecurityApproval(kind: ApprovalKind | string | undefined): boolean {
+  return kind === "security_critical" || kind === "security_risky";
+}
+
+export function parseSecurityAlert(message: LoungeMessage): ApprovalRequest | null {
+  if (message.subject !== ALERT_SECURITY) {
+    return null;
+  }
+  const payload = message.payload;
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const row = payload as Record<string, unknown>;
+  const taskId = typeof row.task_id === "string" ? row.task_id : "";
+  if (!taskId) {
+    return null;
+  }
+  const kindRaw = typeof row.kind === "string" ? row.kind : "security_critical";
+  const kind: ApprovalKind =
+    kindRaw === "security_risky" ? "security_risky" : "security_critical";
+  return {
+    task_id: taskId,
+    summary: typeof row.summary === "string" ? row.summary : "",
+    from_agent: typeof row.from_agent === "string" ? row.from_agent : message.source_agent,
+    to_agent: typeof row.to_agent === "string" ? row.to_agent : "lounge-kernel",
+    kind,
+    reason:
+      typeof row.reason === "string"
+        ? row.reason
+        : typeof row.message === "string"
+          ? row.message
+          : SECURITY_OVERLAY_PROMPT,
+  };
+}
 
 export type RoutingVote = "approve" | "approve_local" | "deny";
 

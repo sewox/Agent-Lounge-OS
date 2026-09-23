@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
+import { SemanticMap } from "@/components/SemanticMap";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
   eventDecisionLabel,
+  experiencesMatchingSelection,
   formatDecisionStreamLabel,
   formatExperienceTime,
   formatLayaDecision,
@@ -14,7 +16,6 @@ import {
   formatLatencyMs,
   layaEnginePercentage,
   MOCK_HEALTH,
-  MOCK_NODES,
   natsEventTone,
   natsToneLabel,
   PAGE_SIZE,
@@ -22,9 +23,10 @@ import {
   pageSlice,
   quotaBarClass,
   quotaToneClass,
+  resolveDeadSymbolCount,
   type QuotaExhaustedAction,
   type QuotaKind,
-  type SemanticProject,
+  type SemanticMapSelection,
 } from "@/lib/lounge";
 
 type SubjectFilter = "all" | "task" | "exp";
@@ -59,11 +61,12 @@ export function OverviewKpis() {
   const fromMap = semanticMap.projects.reduce((sum, row) => sum + row.files, 0);
   const fromProjects = projects.reduce((sum, row) => sum + (row.files ?? 0), 0);
   const indexedFiles = fromMap || fromProjects || lastIndex?.files || 0;
-  const hasIndex =
-    Boolean(lastIndex) || projects.length > 0 || semanticMap.projects.length > 0;
-  const deadCount = hasIndex
-    ? deadSymbols.length || lastIndex?.dead || 0
-    : MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
+  const deadCount = resolveDeadSymbolCount({
+    deadSymbols,
+    semanticMap,
+    lastIndex,
+    projects,
+  });
   const latencyMs = decisionTelemetry?.latency_ms;
   const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
   const latencyValue = latencyLive ? formatLatencyMs(latencyMs) : "—";
@@ -191,7 +194,7 @@ export function EventStreamPanel() {
       if (!query.trim()) {
         return true;
       }
-      const haystack = `${event.subject} ${event.from} ${event.to} ${eventDecisionLabel(event, decisionLive ? latencyMs : null)}`.toLowerCase();
+      const haystack = `${event.subject} ${event.from} ${event.to} ${eventDecisionLabel(event, decisionLive ? latencyMs : null)} ${event.chainLabel ?? ""}`.toLowerCase();
       return haystack.includes(query.trim().toLowerCase());
     });
   }, [decisionLive, events, latencyMs, query, subjectFilter]);
@@ -268,6 +271,14 @@ export function EventStreamPanel() {
                         label={eventDecisionLabel(event, decisionLive ? latencyMs : null)}
                         live={selected || Boolean(event.decisionLabel)}
                       />
+                      {event.chainLabel ? (
+                        <span
+                          className="max-w-full truncate rounded border border-secondary/35 bg-secondary-container/25 px-1.5 py-0.5 font-mono text-[10px] font-medium text-secondary"
+                          title={event.chainLabel}
+                        >
+                          {event.chainLabel}
+                        </span>
+                      ) : null}
                     </div>
                   </td>
                   <td className="px-2 py-1.5 text-on-surface-variant">
@@ -318,40 +329,26 @@ export function EventStreamPanel() {
 
 export function VaultPanel() {
   const { experiences, projects, query, lastIndex, semanticMap } = useLounge();
-  const nodes = semanticMap.projects.length
-    ? semanticMap.projects.map((row) => ({
-        name: row.name || "unnamed",
-        edges: row.edge_count,
-        modules: semanticModules(row),
-      }))
-    : projects.length
-      ? projects.map((row) => ({
-          name: row.name || "unnamed",
-          edges: row.edges,
-          modules: [
-            `${row.files ?? 0} files`,
-            `${row.nodes} nodes`,
-            row.root_path ?? "sqlite+cbm",
-          ],
-        }))
-      : MOCK_NODES;
+  const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const fileTotal =
     semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
     projects.reduce((sum, row) => sum + (row.files ?? 0), 0) ||
     lastIndex?.files ||
     0;
-  const edgeTotal = nodes.reduce((sum, row) => sum + row.edges, 0);
-  const log = experiences.filter((item) => {
-    if (!query.trim()) {
-      return true;
-    }
-    return `${item.project_id} ${item.adr_summary} ${item.agent}`.toLowerCase().includes(query.trim().toLowerCase());
-  });
+  const edgeTotal =
+    semanticMap.projects.reduce((sum, row) => sum + row.edge_count, 0) ||
+    projects.reduce((sum, row) => sum + row.edges, 0);
+  const log = useMemo(
+    () => experiencesMatchingSelection(experiences, selected, query),
+    [experiences, selected, query],
+  );
 
   const [logPage, setLogPage] = useState(0);
   const logPages = pageCount(log.length);
   const safeLogPage = Math.min(logPage, logPages - 1);
   const logVisible = pageSlice(log, safeLogPage);
+  const repoCount =
+    semanticMap.projects.length || projects.length || (experiences.length ? 1 : 0);
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
@@ -367,53 +364,65 @@ export function VaultPanel() {
         <span className="font-mono text-[10px] text-outline">memory_bridge + sqlite</span>
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <div className="min-h-0 flex-1 space-y-2.5 overflow-auto border-b border-outline-variant bg-surface-container-low/40 p-2.5 font-mono text-[11px] sm:border-r sm:border-b-0">
-          <div className="flex items-center justify-between text-[10px] font-semibold tracking-wider text-outline uppercase">
-            <span>Indexed Files</span>
-            <span className="text-on-surface-variant">
-              {projects.length ? `${fileTotal} files · ${edgeTotal} edges` : `${edgeTotal} edges`}
-            </span>
-          </div>
-          {nodes.map((node, index) => (
-            <div key={node.name}>
-              <div className="flex items-center justify-between font-medium text-on-surface">
-                <span className={`flex items-center gap-1 ${index === 0 ? "text-primary" : "text-on-surface"}`}>
-                  <Icon name="folder" className="h-3 w-3" />
-                  <span>{node.name}</span>
-                </span>
-                <span className="text-[10px] text-outline">{node.edges} edges</span>
-              </div>
-              <div className="mt-1 ml-1.5 space-y-0.5 border-l border-outline-variant/60 pl-3.5 text-[10px] text-on-surface-variant">
-                {node.modules.map((mod) => (
-                  <div key={mod}>↳ {mod}</div>
-                ))}
-              </div>
-            </div>
-          ))}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0">
+          <SemanticMap
+            semanticMap={semanticMap}
+            projects={projects}
+            fileTotal={fileTotal}
+            edgeTotal={edgeTotal}
+            selected={selected}
+            onSelect={(next) => {
+              setSelected(next);
+              setLogPage(0);
+            }}
+          />
         </div>
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
           <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
             <span>Experience Log</span>
-            <span className="text-secondary">Synced</span>
+            <span className={selected ? "text-primary" : "text-secondary"}>
+              {selected ? `filter · ${selected.name}` : "Synced"}
+            </span>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-auto font-mono text-[10.5px]">
-            {logVisible.map((item) => (
-              <div key={item.id} className="space-y-1 rounded border border-outline-variant/40 bg-surface-container-high/60 p-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="tnum text-on-surface-variant">{formatExperienceTime(item.created_at)}</span>
-                  <span className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}>
-                    {item.outcome === "success" ? "Success" : item.outcome === "partial" ? "Partial" : "Failed"}
-                  </span>
-                </div>
-                <div className="truncate text-[11px] font-medium text-on-surface">{item.project_id}</div>
-                <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">“{item.adr_summary}”</div>
+            {logVisible.length === 0 ? (
+              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-[10px] text-on-surface-variant">
+                {selected
+                  ? `Bu düğüm için experience yok · ${selected.name}`
+                  : "Experience kaydı yok"}
               </div>
-            ))}
+            ) : (
+              logVisible.map((item) => (
+                <div
+                  key={item.id}
+                  className="space-y-1 rounded border border-outline-variant/40 bg-surface-container-high/60 p-1.5"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="tnum text-on-surface-variant">
+                      {formatExperienceTime(item.created_at)}
+                    </span>
+                    <span className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}>
+                      {item.outcome === "success"
+                        ? "Success"
+                        : item.outcome === "partial"
+                          ? "Partial"
+                          : "Failed"}
+                    </span>
+                  </div>
+                  <div className="truncate text-[11px] font-medium text-on-surface">
+                    {item.project_id}
+                  </div>
+                  <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">
+                    “{item.adr_summary}”
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
       <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[10px] text-outline">
-        <span>codebase-memory-mcp · {projects.length || nodes.length} repos</span>
+        <span>codebase-memory-mcp · {repoCount} repos</span>
         <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
     </section>
@@ -894,19 +903,4 @@ export function TelemetryPanel() {
       </div>
     </section>
   );
-}
-
-function semanticModules(project: SemanticProject): string[] {
-  const files = [
-    ...new Set(
-      project.nodes
-        .map((node) => node.file)
-        .filter((file): file is string => Boolean(file && file.trim())),
-    ),
-  ];
-  const names = [...new Set(files.map((file) => file.split(/[/\\]/).filter(Boolean).at(-1) ?? file))];
-  if (names.length === 0) {
-    return [`${project.files} files`, `${project.node_count} nodes`, project.repo_path || "sqlite"];
-  }
-  return names.slice(0, 8);
 }

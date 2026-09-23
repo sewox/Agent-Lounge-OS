@@ -79,6 +79,7 @@ pub enum ApprovalKind {
     QuotaLocalFallback,
     QuotaAbort,
     SecurityCritical,
+    SecurityRisky,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

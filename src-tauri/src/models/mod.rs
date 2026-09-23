@@ -24,9 +24,10 @@ pub use policy::{
 pub use protocol::{
     default_ollama_model, now_rfc3339, AnalysisDecision, CodeSnippet, ExperienceContext,
     ExperienceHit, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
-    SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority, AGENT_PROMPT, DEFAULT_OLLAMA_MODEL,
-    EXPERIENCE_REPORTED, INFRA_STATUS, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
-    TELEMETRY_DECISION,
+    SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority, AGENT_PROMPT, ALERT_SECURITY,
+    CONTEXT_WHISPER, DEFAULT_OLLAMA_MODEL, EXPERIENCE_REPORTED, INFRA_STATUS, TASK_ASSIGNED,
+    TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED, TASK_RESUME, TELEMETRY_DECISION, TEST_COMPLETED,
+    TEST_REQUESTED,
 };
 pub use quota::{NatsUiEvent, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT};
 pub use service::{ServiceHealth, ServiceId, ServiceReport, SERVICE_EVENT};
