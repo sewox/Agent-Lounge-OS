@@ -10,6 +10,7 @@ pub const TASK_COMPLETED: &str = "lounge.task.completed";
 pub const TASK_FAILED: &str = "lounge.task.failed";
 pub const TASK_RESUME: &str = "lounge.task.resume";
 pub const ALERT_SECURITY: &str = "lounge.alert.security";
+pub const ALERT_QUOTA: &str = "lounge.alert.quota";
 pub const EXPERIENCE_REPORTED: &str = "lounge.experience.reported";
 pub const AGENT_PROMPT: &str = "lounge.agent.prompt";
 /// Cross-Project Memory fısıltısı — kanonik NATS konusu (`subjects.json` `context.whisper`).
@@ -456,6 +457,8 @@ mod tests {
         assert_eq!(json["task"]["failed"], TASK_FAILED);
         assert_eq!(json["task"]["resume"], TASK_RESUME);
         assert_eq!(json["alert"]["security"], ALERT_SECURITY);
+        assert_eq!(json["alert"]["quota"], ALERT_QUOTA);
+        assert_ne!(ALERT_QUOTA, ALERT_SECURITY);
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
         assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
         assert_eq!(json["context"]["whisper"], CONTEXT_WHISPER);

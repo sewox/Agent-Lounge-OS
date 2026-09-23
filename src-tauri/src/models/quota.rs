@@ -57,7 +57,47 @@ impl ToolQuota {
 }
 
 pub const AMBER_THRESHOLD: f32 = 80.0;
+/// Limit Policy: bu dolulukta (veya exhausted) ücretli ajan ataması engellenir.
+pub const LIMIT_POLICY_PERCENT: f32 = 90.0;
 pub const QUOTA_EVENT: &str = "quota-update";
+
+/// Atama öncesi kota kararı: allow | block(reason, tool, percent).
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuotaVerdict {
+    Allow,
+    Block {
+        reason: String,
+        tool: String,
+        percent: Option<f32>,
+    },
+}
+
+impl QuotaVerdict {
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Self::Block { .. })
+    }
+
+    pub fn tool(&self) -> Option<&str> {
+        match self {
+            Self::Block { tool, .. } => Some(tool.as_str()),
+            Self::Allow => None,
+        }
+    }
+
+    pub fn percent(&self) -> Option<f32> {
+        match self {
+            Self::Block { percent, .. } => *percent,
+            Self::Allow => None,
+        }
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Block { reason, .. } => Some(reason.as_str()),
+            Self::Allow => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QuotaState {

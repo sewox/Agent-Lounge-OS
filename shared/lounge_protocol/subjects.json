@@ -7,7 +7,8 @@
     "resume": "lounge.task.resume"
   },
   "alert": {
-    "security": "lounge.alert.security"
+    "security": "lounge.alert.security",
+    "quota": "lounge.alert.quota"
   },
   "experience": {
     "reported": "lounge.experience.reported"

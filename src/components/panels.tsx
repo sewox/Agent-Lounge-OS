@@ -1,20 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { SemanticMap } from "@/components/SemanticMap";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
+  buildBrowserEfficiencyReport,
   deadSymbolsMatchingSelection,
+  downloadMarkdownFile,
   eventDecisionLabel,
   experiencesMatchingSelection,
+  fetchAgentEfficiencyReport,
   formatDecisionStreamLabel,
   formatExperienceTime,
   formatLayaDecision,
   formatLayaEngineFleetStatus,
   formatLatencyMs,
+  isTauri,
   layaEnginePercentage,
   MOCK_HEALTH,
   natsEventTone,
@@ -26,6 +30,7 @@ import {
   quotaBarClass,
   quotaToneClass,
   resolveDeadSymbolCount,
+  type AgentEfficiencyReport,
   type QuotaExhaustedAction,
   type QuotaKind,
   type SemanticMapSelection,
@@ -339,9 +344,31 @@ export function VaultPanel() {
     semanticMap,
     deadSymbols,
     whisperedExperienceIds,
+    selectedProject,
+    switchProject,
+    markWhisperUseful,
   } = useLounge();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
+  const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
+
+  useEffect(() => {
+    if (!selectedProject) {
+      return;
+    }
+    setSelected((current) => {
+      if (current?.kind === "project" && current.name === selectedProject) {
+        return current;
+      }
+      return {
+        id: `project:${selectedProject}`,
+        name: selectedProject,
+        kind: "project",
+        project: selectedProject,
+      };
+    });
+  }, [selectedProject]);
+
   const fileTotal =
     semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
     projects.reduce((sum, row) => sum + (row.files ?? 0), 0) ||
@@ -396,6 +423,11 @@ export function VaultPanel() {
             onSelect={(next) => {
               setSelected(next);
               setLogPage(0);
+              if (next?.kind === "project") {
+                switchProject(next.name);
+              } else if (!next) {
+                switchProject(null);
+              }
             }}
           />
         </div>
@@ -463,6 +495,7 @@ export function VaultPanel() {
             ) : (
               logVisible.map((item) => {
                 const isWhisper = whispered.has(item.id);
+                const alreadyUseful = markedUseful.has(item.id);
                 return (
                   <div
                     key={item.id}
@@ -499,6 +532,25 @@ export function VaultPanel() {
                     <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">
                       “{item.adr_summary}”
                     </div>
+                    {isWhisper ? (
+                      <div className="flex justify-end pt-0.5">
+                        <button
+                          type="button"
+                          disabled={alreadyUseful}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void (async () => {
+                              await markWhisperUseful(item.id, item.project_id);
+                              setMarkedUseful((prev) => new Set(prev).add(item.id));
+                            })();
+                          }}
+                          className="rounded border border-primary/40 px-1.5 py-0.5 font-mono text-[9px] text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
+                          aria-label="Bu fısıltıyı faydalı olarak işaretle"
+                        >
+                          {alreadyUseful ? "Faydalı ✓" : "Faydalı"}
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })
@@ -939,6 +991,9 @@ export function TelemetryPanel() {
   const {
     events,
     quotas,
+    experiences,
+    deadSymbols,
+    projects,
     decisionTelemetry,
     decisionLatencyHistory,
     decisionMsgPerMin,
@@ -949,41 +1004,246 @@ export function TelemetryPanel() {
   const latencyMs = decisionTelemetry?.latency_ms;
   const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
   const msgLive = decisionMsgPerMin > 0;
+
+  const [weekly, setWeekly] = useState(true);
+  const [projectId, setProjectId] = useState<string>("");
+  const [report, setReport] = useState<AgentEfficiencyReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const projectOptions = useMemo(() => {
+    const ids = new Set<string>();
+    for (const p of projects) {
+      if (p.name) ids.add(p.name);
+    }
+    for (const e of experiences) {
+      if (e.project_id) ids.add(e.project_id);
+    }
+    return [...ids].sort();
+  }, [projects, experiences]);
+
+  useEffect(() => {
+    if (isTauri()) return;
+    setReport(
+      buildBrowserEfficiencyReport({
+        events,
+        experiences,
+        deadSymbols,
+        weekly,
+        projectId: projectId || null,
+      }),
+    );
+    setLoading(false);
+    setError(null);
+  }, [weekly, projectId, events, experiences, deadSymbols]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const next = await fetchAgentEfficiencyReport({
+          weekly,
+          projectId: projectId || null,
+        });
+        if (!cancelled) setReport(next);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+          setReport(
+            buildBrowserEfficiencyReport({
+              events,
+              experiences,
+              deadSymbols,
+              weekly,
+              projectId: projectId || null,
+            }),
+          );
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [weekly, projectId]);
+
+  const rateLabel =
+    report?.dead.rate != null ? `${(report.dead.rate * 100).toFixed(1)}%` : "—";
+
   return (
-    <section className="grid h-full min-h-0 min-w-0 auto-rows-fr gap-3 md:grid-cols-2">
-      <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-        <div className="text-[10px] tracking-wider text-outline uppercase">Laya Decision</div>
-        <div
-          key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
-          className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
-        >
-          {latencyLive ? formatLatencyMs(latencyMs) : "—"}
+    <section className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+      <div className="grid shrink-0 gap-3 md:grid-cols-2">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+          <div className="text-[10px] tracking-wider text-outline uppercase">Laya Decision</div>
+          <div
+            key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
+            className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
+          >
+            {latencyLive ? formatLatencyMs(latencyMs) : "—"}
+          </div>
+          <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
+          <div className="mt-3 min-h-0 flex-1 overflow-auto">
+            {latencyLive ? (
+              <LatencySparkline values={decisionLatencyHistory} />
+            ) : (
+              <span className="text-[10px] text-on-surface-variant">
+                {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
+              </span>
+            )}
+          </div>
+          <div className="mt-auto pt-4 text-[10px] text-outline">
+            lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
+          </div>
         </div>
-        <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
-        <div className="mt-3 min-h-0 flex-1 overflow-auto">
-          {latencyLive ? (
-            <LatencySparkline values={decisionLatencyHistory} />
-          ) : (
-            <span className="text-[10px] text-on-surface-variant">
-              {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
-            </span>
-          )}
-        </div>
-        <div className="mt-auto pt-4 text-[10px] text-outline">
-          lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+          <div className="text-[10px] tracking-wider text-outline uppercase">MSG / MIN</div>
+          <div
+            key={decisionMsgPerMin}
+            className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
+          >
+            {decisionMsgPerMin}
+          </div>
+          <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
+          <div className="mt-auto pt-4 text-[10px] text-outline">
+            NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
+          </div>
         </div>
       </div>
-      <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-        <div className="text-[10px] tracking-wider text-outline uppercase">MSG / MIN</div>
-        <div
-          key={decisionMsgPerMin}
-          className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
-        >
-          {decisionMsgPerMin}
+
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
+          <h2 className="font-mono text-xs font-bold tracking-wider uppercase">
+            Agent Efficiency Report
+          </h2>
+          <span className="text-[10px] text-outline">Ajan Verimlilik Raporu</span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1.5 font-mono text-[10px] text-on-surface-variant">
+              <input
+                type="checkbox"
+                checked={weekly}
+                onChange={(e) => setWeekly(e.target.checked)}
+                className="accent-primary"
+              />
+              Haftalık (7g)
+            </label>
+            <select
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-[10px] text-on-surface"
+              aria-label="Proje filtresi"
+            >
+              <option value="">Tüm projeler</option>
+              {projectOptions.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!report}
+              onClick={() => {
+                if (!report) return;
+                const stamp = report.generatedAt.slice(0, 10);
+                downloadMarkdownFile(`agent-efficiency-${stamp}.md`, report.markdown);
+              }}
+              className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-on-surface uppercase enabled:hover:bg-surface-container disabled:opacity-40"
+            >
+              Markdown indir
+            </button>
+          </div>
         </div>
-        <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
-        <div className="mt-auto pt-4 text-[10px] text-outline">
-          NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
+        <div className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[11px]">
+          {loading && !report ? (
+            <p className="text-on-surface-variant">Rapor yükleniyor…</p>
+          ) : null}
+          {error ? (
+            <p className="mb-2 text-[10px] text-error">Tauri rapor hatası · mock gösteriliyor: {error}</p>
+          ) : null}
+          {report ? (
+            <div className="space-y-4">
+              <p className="text-[10px] text-outline">
+                {report.scopeLabel}
+                {isTauri() ? "" : " · tarayıcı"}
+                {loading ? " · yenileniyor…" : ""}
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
+                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                    Toplam failure
+                  </div>
+                  <div className="tnum mt-1 text-xl font-bold text-on-surface">
+                    {report.totalFailures}
+                  </div>
+                  <div className="text-[10px] text-on-surface-variant">ajan × hata/failure</div>
+                </div>
+                <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
+                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                    Cross-Project
+                  </div>
+                  <div className="tnum mt-1 text-xl font-bold text-on-surface">
+                    {report.crossProjectExperienceHits}
+                  </div>
+                  <div className="text-[10px] text-on-surface-variant">
+                    {report.crossProjectWhisperEvents} fısıltı olayı
+                  </div>
+                </div>
+                <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
+                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                    Dead cleanup
+                  </div>
+                  <div className="tnum mt-1 text-xl font-bold text-on-surface">{rateLabel}</div>
+                  <div className="text-[10px] text-on-surface-variant">
+                    kalan {report.dead.remaining}
+                    {report.dead.cleaned != null ? ` · temizlenen ${report.dead.cleaned}` : ""}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h3 className="mb-1.5 text-[10px] font-bold tracking-wider text-outline uppercase">
+                  Ajan başına hata / failure
+                </h3>
+                {report.failuresByAgent.length === 0 ? (
+                  <p className="text-on-surface-variant">Kayıt yok.</p>
+                ) : (
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] text-outline">
+                        <th className="py-1 font-normal">Ajan</th>
+                        <th className="py-1 text-right font-normal">Sayı</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.failuresByAgent.map((row) => (
+                        <tr key={row.agentId} className="border-t border-outline-variant/40">
+                          <td className="py-1.5 text-on-surface">{row.agentId}</td>
+                          <td className="tnum py-1.5 text-right text-on-surface">
+                            {row.failureCount}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div className="text-[10px] text-on-surface-variant">
+                <div className="mb-1 font-bold tracking-wider text-outline uppercase">Kaynak</div>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {report.sourceNotes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-outline">{report.dead.note}</p>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

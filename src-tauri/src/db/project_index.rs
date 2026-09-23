@@ -89,6 +89,22 @@ impl ExperienceStore {
         .await
         .context("project_index semantic map join")?
     }
+
+    /// Command Palette: proje indeksinde ucuz isim/dosya araması (memory_bridge SQLite).
+    pub async fn search_index_nodes(
+        &self,
+        query: String,
+        limit: Option<usize>,
+    ) -> Result<Vec<AstNode>> {
+        let conn = self.conn.clone();
+        let lim = limit.unwrap_or(8).max(1);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            search_index_nodes_blocking(&conn, &query, lim)
+        })
+        .await
+        .context("project_index search join")?
+    }
 }
 
 fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<()> {
@@ -328,6 +344,50 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
         projects.push(row?);
     }
     Ok(projects)
+}
+
+fn search_index_nodes_blocking(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<AstNode>> {
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let like = format!("%{needle}%");
+    let sql = r#"
+        SELECT name, kind, file_path, line, ref_count
+        FROM project_index
+        WHERE kind = 'node'
+          AND (
+            lower(name) LIKE ?1
+            OR lower(COALESCE(file_path, '')) LIKE ?1
+            OR lower(COALESCE(detail, '')) LIKE ?1
+          )
+        ORDER BY ref_count DESC, name
+        LIMIT ?2
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![like, limit as i64], |row| {
+        Ok(AstNode {
+            id: format!(
+                "{}:{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(2)?.unwrap_or_default()
+            ),
+            name: row.get(0)?,
+            kind: row.get(1)?,
+            file: row.get(2)?,
+            line: row.get(3)?,
+            ref_count: row.get::<_, i64>(4)? as u64,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Result<SemanticMap> {

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, IBM_Plex_Sans, JetBrains_Mono, Public_Sans } from "next/font/google";
 import { AppShell } from "@/components/app-shell";
+import { CommandPalette } from "@/components/command-palette";
 import { LoungeProvider } from "@/components/lounge-provider";
 import "./globals.css";
 
@@ -45,6 +46,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="h-full overflow-hidden bg-surface text-on-surface font-body">
         <LoungeProvider>
           <AppShell>{children}</AppShell>
+          <CommandPalette />
         </LoungeProvider>
       </body>
     </html>

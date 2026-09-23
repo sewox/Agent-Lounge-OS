@@ -88,6 +88,80 @@ impl ExperienceStore {
         .context("experience latest join")?
     }
 
+    /// Command Palette / vault: lexical+vektör benzerliği, boşsa substring fallback.
+    pub async fn search_experiences(
+        &self,
+        query: String,
+        limit: Option<usize>,
+    ) -> Result<Vec<LoungeExperience>> {
+        let lim = limit.unwrap_or(12).max(1);
+        let needle = query.trim().to_string();
+        if needle.is_empty() {
+            return self.latest(lim).await;
+        }
+
+        let embedding = lexical_embedding(&needle);
+        let hits = self
+            .similar_cross(String::new(), embedding, Some(lim * 2))
+            .await
+            .unwrap_or_default();
+
+        let mut out: Vec<LoungeExperience> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for hit in hits {
+            if out.len() >= lim {
+                break;
+            }
+            if !seen.insert(hit.id.clone()) {
+                continue;
+            }
+            if let Some(row) = self.get(hit.id.clone()).await? {
+                out.push(row);
+            } else {
+                out.push(crate::models::LoungeExperience {
+                    id: hit.id,
+                    msg_type: "experience".into(),
+                    agent: hit.agent_id,
+                    project_id: hit.project_id,
+                    adr_summary: if hit.adr_record.trim().is_empty() {
+                        hit.solution_summary
+                    } else {
+                        hit.adr_record
+                    },
+                    outcome: crate::models::ExperienceOutcome::Partial,
+                    related_task_id: None,
+                    tags: vec![format!("score:{:.2}", hit.score)],
+                    created_at: crate::models::now_rfc3339(),
+                });
+            }
+        }
+
+        if out.len() < lim {
+            let lower = needle.to_ascii_lowercase();
+            for row in self.latest(80).await? {
+                if out.len() >= lim {
+                    break;
+                }
+                if !seen.insert(row.id.clone()) {
+                    continue;
+                }
+                let hay = format!(
+                    "{} {} {} {}",
+                    row.project_id,
+                    row.adr_summary,
+                    row.agent,
+                    row.tags.join(" ")
+                )
+                .to_ascii_lowercase();
+                if hay.contains(&lower) {
+                    out.push(row);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Semantik (kosinüs) arama: aynı `project_id` öncelikli, yoksa küresel.
     pub async fn similar(
         &self,
@@ -211,6 +285,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;
+    crate::db::feedback::migrate_feedback(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
@@ -608,6 +683,48 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits[0].topic.to_ascii_lowercase().contains("nats"));
         assert!(hits[0].score >= MIN_COSINE);
+    }
+
+    #[tokio::test]
+    async fn search_experiences_surfaces_nats_topic() {
+        let store = ExperienceStore::memory().unwrap();
+        let nats = LoungeTask::new("cursor", "agent-lounge-os", "NATS dispatcher dinleyici");
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &nats,
+                "NATS dispatcher listen + spawn_blocking",
+                "sync nats client blocking thread",
+                ExperienceOutcome::Success,
+                vec!["memory_bridge".into()],
+            ))
+            .await
+            .unwrap();
+        let other = LoungeTask::new("cursor", "echo-mind", "ollama tags probe");
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &other,
+                "Ollama tags probe",
+                "tags endpoint",
+                ExperienceOutcome::Partial,
+                vec![],
+            ))
+            .await
+            .unwrap();
+
+        let rows = store
+            .search_experiences("dispatcher NATS".into(), Some(4))
+            .await
+            .unwrap();
+        assert!(!rows.is_empty());
+        let hay = rows
+            .iter()
+            .map(|row| row.adr_summary.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            hay.contains("nats") || hay.contains("dispatcher"),
+            "expected NATS/dispatcher hit, got {hay}"
+        );
     }
 
     #[tokio::test]

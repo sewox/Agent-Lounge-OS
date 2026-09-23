@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System};
 use tauri::{AppHandle, Emitter, Manager};
@@ -14,18 +15,36 @@ use tokio::time::sleep;
 use super::autodiscover::scan_subscription_hosts;
 use super::hardware::{device_profile, is_apple_silicon};
 use super::plugin::{lounge_workspace, scan_plugin_catalog};
-use super::probe::{tcp_ready, DEFAULT_NATS_HOST, DEFAULT_NATS_PORT};
+use super::probe::{
+    lounge_ollama_endpoint, tcp_ready, DEFAULT_NATS_HOST, DEFAULT_NATS_PORT, LOUNGE_OLLAMA_PORT,
+    SYSTEM_OLLAMA_PORT,
+};
 use super::subscription_usage::{live_subscription_usage, local_subscription_usage};
 use super::MemoryBridge;
 use super::SharedServices;
 use crate::db::ExperienceStore;
 use crate::models::{
-    now_rfc3339, DiscoveredTool, QuotaState, ToolQuota, AMBER_THRESHOLD, QUOTA_EVENT,
+    is_kernel, now_rfc3339, ApprovalKind, ApprovalRequest, DiscoveredTool, QuotaState,
+    QuotaVerdict, ToolQuota, AMBER_THRESHOLD, LIMIT_POLICY_PERCENT, QUOTA_EVENT,
 };
 
 const POLL: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 const LMR_PORT_MARK: &str = "18790";
+const LMR_HEALTH_WAIT: Duration = Duration::from_millis(250);
+
+/// Overlay / NATS Quota Alert metni (Stitch / TR).
+pub const QUOTA_ALERT_PROMPT: &str =
+    "Kota limiti aşıldı. Görev durduruldu. Yerel LMR ile devam edebilirsiniz.";
+/// UI düğmesi — metin birebir sabit.
+pub const QUOTA_CONTINUE_LOCAL_LABEL: &str = "Yerel Model (Ollama) ile devam et";
+/// Görev askı durumu (protokol / UI).
+pub const QUOTA_PENDING: &str = "QUOTA_BLOCKED";
+
+/// Env `LOUNGE_QUOTA_LIMIT_PERCENT` yoksa Limit Policy = 90%.
+pub fn limit_policy_percent() -> f32 {
+    env_f32("LOUNGE_QUOTA_LIMIT_PERCENT", LIMIT_POLICY_PERCENT)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApiKeys {
@@ -208,6 +227,274 @@ pub async fn api_keys_from_store(store: &ExperienceStore) -> ApiKeys {
     };
     keys.fill_if_empty(openai, anthropic, grok);
     keys
+}
+
+/// Yerel LMR / kernel hedefleri kota engeline takılmaz (continue yolu LMR'ye gider).
+pub fn is_local_quota_target(agent: &str) -> bool {
+    if is_kernel(agent) {
+        return true;
+    }
+    matches!(
+        agent.trim().to_ascii_lowercase().as_str(),
+        "lmr" | "ollama" | "lounge-lmr" | "local"
+    )
+}
+
+pub fn quota_matches_agent(row: &ToolQuota, agent: &str) -> bool {
+    let needle = agent.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    let id = row.id.to_ascii_lowercase();
+    let mode = row.access_mode.to_ascii_lowercase();
+    let host = row
+        .host_id
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match needle.as_str() {
+        "claude" | "claude_desktop" | "claude_cli" => {
+            mode == "subscription"
+                && (id.contains("claude_desktop")
+                    || id.contains("claude_cli")
+                    || host == "claude_desktop"
+                    || host == "claude_cli")
+        }
+        "anthropic" => mode == "api" && (id == "anthropic" || id.contains("anthropic")),
+        "cursor" => mode == "subscription" && (id.contains("cursor") || host == "cursor"),
+        "antigravity" => {
+            mode == "subscription" && (id.contains("antigravity") || host == "antigravity")
+        }
+        "grok" | "grok_bot" => {
+            mode == "subscription" && (id.contains("grok_bot") || host == "grok_bot")
+        }
+        "xai" | "grok_api" => mode == "api" && (id == "xai" || id.contains("xai")),
+        "openai" => mode == "api" && id.contains("openai"),
+        "lmr" | "ollama" => mode == "local" && (id == "lmr" || id.contains("ollama")),
+        other => id == other || id.ends_with(&format!(":{other}")) || host == other,
+    }
+}
+
+/// Atama öncesi: allow | block(reason, tool, percent).
+/// Yapılandırılmamış araç satırı yoksa Allow (sahte kota satırı üretilmez).
+/// Exhausted veya `percent >= limit` → Block.
+pub fn evaluate_assignment(quotas: &[ToolQuota], agent: &str, limit_percent: f32) -> QuotaVerdict {
+    if is_local_quota_target(agent) {
+        return QuotaVerdict::Allow;
+    }
+    let matching: Vec<&ToolQuota> = quotas
+        .iter()
+        .filter(|row| quota_matches_agent(row, agent))
+        .collect();
+    if matching.is_empty() {
+        return QuotaVerdict::Allow;
+    }
+
+    let limit = if limit_percent > 0.0 {
+        limit_percent
+    } else {
+        LIMIT_POLICY_PERCENT
+    };
+
+    let mut worst: Option<(&ToolQuota, Option<f32>, bool)> = None;
+    for row in matching {
+        let exhausted = row.is_exhausted();
+        let percent = row.percent;
+        let over_limit = percent.map(|value| value >= limit).unwrap_or(false);
+        if !exhausted && !over_limit {
+            continue;
+        }
+        let score = percent.unwrap_or(if exhausted { 100.0 } else { 0.0 });
+        let replace = worst
+            .map(|(_, prev, _)| score >= prev.unwrap_or(0.0))
+            .unwrap_or(true);
+        if replace {
+            worst = Some((row, percent, exhausted));
+        }
+    }
+
+    match worst {
+        Some((row, percent, exhausted)) => {
+            let tool = if row.tool.is_empty() {
+                row.id.clone()
+            } else {
+                row.tool.clone()
+            };
+            let reason = if exhausted {
+                format!("{tool} kotası tükendi (exhausted); Limit Policy ≥ {limit:.0}%")
+            } else {
+                format!(
+                    "{tool} kotası Limit Policy'yi aştı ({:.0}% ≥ {limit:.0}%)",
+                    percent.unwrap_or(limit)
+                )
+            };
+            QuotaVerdict::Block {
+                reason,
+                tool,
+                percent,
+            }
+        }
+        None => QuotaVerdict::Allow,
+    }
+}
+
+pub fn quota_exhausted_for(quotas: &[ToolQuota], agent: &str) -> bool {
+    quotas
+        .iter()
+        .filter(|row| quota_matches_agent(row, agent))
+        .any(ToolQuota::is_exhausted)
+}
+
+pub fn quota_blocked_for(quotas: &[ToolQuota], agent: &str, limit_percent: f32) -> bool {
+    evaluate_assignment(quotas, agent, limit_percent).is_blocked()
+}
+
+/// Lounge LMR (127.0.0.1:18790) ayakta mı? Host :11434 Ollama sayılmaz.
+pub async fn lmr_runtime_up() -> bool {
+    lmr_endpoint_up(&lounge_ollama_endpoint()).await
+}
+
+pub async fn lmr_endpoint_up(endpoint: &str) -> bool {
+    if let Some((host, port)) = parse_http_host_port(endpoint) {
+        if port == SYSTEM_OLLAMA_PORT {
+            log::warn!(
+                "lmr_endpoint_up: host Ollama portu ({SYSTEM_OLLAMA_PORT}) reddedildi; LMR={LOUNGE_OLLAMA_PORT}"
+            );
+            return false;
+        }
+        return tcp_ready(&host, port, LMR_HEALTH_WAIT).await;
+    }
+    tcp_ready("127.0.0.1", LOUNGE_OLLAMA_PORT, LMR_HEALTH_WAIT).await
+}
+
+fn parse_http_host_port(endpoint: &str) -> Option<(String, u16)> {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    let without = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))?;
+    let authority = without.split('/').next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse().ok()?),
+        None => (authority.to_string(), 80),
+    };
+    Some((host, port))
+}
+
+/// Fallback ajan adını LMR'ye normalize et (host `ollama` PATH'i değil).
+pub fn normalize_lmr_agent(agent: &str) -> String {
+    let trimmed = agent.trim();
+    if trimmed.is_empty() || is_local_quota_target(trimmed) {
+        "lmr".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuotaAlertPayload {
+    pub task_id: String,
+    pub summary: String,
+    pub from_agent: String,
+    pub to_agent: String,
+    pub kind: ApprovalKind,
+    pub reason: String,
+    pub tool: String,
+    pub percent: Option<f32>,
+    pub limit_percent: f32,
+    pub message: String,
+    pub continue_label: String,
+    pub lmr_available: bool,
+    pub lmr_endpoint: String,
+    pub status: String,
+}
+
+impl QuotaAlertPayload {
+    pub fn from_block(
+        request: &ApprovalRequest,
+        verdict: &QuotaVerdict,
+        limit_percent: f32,
+        lmr_available: bool,
+    ) -> Self {
+        let (tool, percent) = match verdict {
+            QuotaVerdict::Block { tool, percent, .. } => (tool.clone(), *percent),
+            QuotaVerdict::Allow => (String::new(), None),
+        };
+        let mut reason = request.reason.clone();
+        if !lmr_available {
+            reason = format!(
+                "{reason} · Lounge LMR (127.0.0.1:{LOUNGE_OLLAMA_PORT}) ayakta değil; host Ollama kullanılmaz."
+            );
+        }
+        Self {
+            task_id: request.task_id.clone(),
+            summary: request.summary.clone(),
+            from_agent: request.from_agent.clone(),
+            to_agent: request.to_agent.clone(),
+            kind: request.kind.clone(),
+            reason,
+            tool,
+            percent,
+            limit_percent,
+            message: QUOTA_ALERT_PROMPT.into(),
+            continue_label: QUOTA_CONTINUE_LOCAL_LABEL.into(),
+            lmr_available,
+            lmr_endpoint: lounge_ollama_endpoint(),
+            status: QUOTA_PENDING.into(),
+        }
+    }
+
+    pub fn as_approval(&self) -> ApprovalRequest {
+        ApprovalRequest {
+            task_id: self.task_id.clone(),
+            summary: self.summary.clone(),
+            from_agent: self.from_agent.clone(),
+            to_agent: self.to_agent.clone(),
+            kind: self.kind.clone(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+pub fn is_quota_approval(kind: &ApprovalKind) -> bool {
+    matches!(
+        kind,
+        ApprovalKind::QuotaLocalFallback | ApprovalKind::QuotaAbort
+    )
+}
+
+pub fn quota_alert_envelope(
+    request: &ApprovalRequest,
+    verdict: &QuotaVerdict,
+    limit_percent: f32,
+    lmr_available: bool,
+) -> serde_json::Value {
+    serde_json::to_value(QuotaAlertPayload::from_block(
+        request,
+        verdict,
+        limit_percent,
+        lmr_available,
+    ))
+    .unwrap_or_else(|_| serde_json::json!({ "task_id": request.task_id }))
+}
+
+/// Kota engeli için ApprovalRequest üretir (AskThenLocal varsayılan yolu).
+pub fn quota_approval_request(
+    task_id: &str,
+    summary: &str,
+    from_agent: &str,
+    blocked_agent: &str,
+    verdict: &QuotaVerdict,
+    local_fallback_agent: &str,
+) -> ApprovalRequest {
+    let reason = verdict.reason().unwrap_or("kota limiti aşıldı").to_string();
+    ApprovalRequest {
+        task_id: task_id.into(),
+        summary: summary.into(),
+        from_agent: from_agent.into(),
+        to_agent: normalize_lmr_agent(local_fallback_agent),
+        kind: ApprovalKind::QuotaLocalFallback,
+        reason: format!("{reason} · hedef={blocked_agent} → LMR"),
+    }
 }
 
 fn emit_quota_state(app: &AppHandle, state: &QuotaState) {
@@ -1117,5 +1404,141 @@ mod tests {
         let payload = json!({ "used": 12, "limit": 100 });
         assert_eq!(parse_local_usage_pair(&payload), Some((12, 100)));
         assert_eq!(parse_local_usage_pair(&json!({ "used": 12 })), None);
+    }
+
+    fn sub_row(
+        id: &str,
+        tool: &str,
+        host: &str,
+        percent: Option<f32>,
+        exhausted: bool,
+    ) -> ToolQuota {
+        ToolQuota {
+            id: id.into(),
+            tool: tool.into(),
+            percent,
+            exhausted,
+            ..ToolQuota::default()
+        }
+        .with_mode("subscription", Some(host))
+    }
+
+    #[test]
+    fn evaluate_allows_under_limit_policy() {
+        let quotas = vec![sub_row(
+            "app:claude_desktop",
+            "Claude",
+            "claude_desktop",
+            Some(89.0),
+            false,
+        )];
+        assert_eq!(
+            evaluate_assignment(&quotas, "claude", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn evaluate_blocks_at_ninety_percent() {
+        let quotas = vec![sub_row(
+            "app:claude_desktop",
+            "Claude",
+            "claude_desktop",
+            Some(90.0),
+            false,
+        )];
+        let verdict = evaluate_assignment(&quotas, "claude", LIMIT_POLICY_PERCENT);
+        assert!(verdict.is_blocked());
+        assert_eq!(verdict.tool(), Some("Claude"));
+        assert_eq!(verdict.percent(), Some(90.0));
+    }
+
+    #[test]
+    fn evaluate_blocks_when_exhausted() {
+        let quotas = vec![sub_row("app:cursor", "Cursor", "cursor", Some(100.0), true)];
+        assert!(evaluate_assignment(&quotas, "cursor", LIMIT_POLICY_PERCENT).is_blocked());
+    }
+
+    #[test]
+    fn evaluate_allows_when_no_configured_rows() {
+        assert_eq!(
+            evaluate_assignment(&[], "claude", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Allow
+        );
+        let anthropic_only = vec![ToolQuota {
+            id: "anthropic".into(),
+            tool: "Anthropic API".into(),
+            percent: Some(99.0),
+            exhausted: false,
+            ..ToolQuota::default()
+        }
+        .with_mode("api", None)];
+        // Claude abonelik satırı yok → sahte blok yok
+        assert_eq!(
+            evaluate_assignment(&anthropic_only, "claude", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn evaluate_allows_local_lmr_target() {
+        let quotas = vec![sub_row("app:cursor", "Cursor", "cursor", Some(95.0), false)];
+        assert_eq!(
+            evaluate_assignment(&quotas, "lmr", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Allow
+        );
+        assert_eq!(
+            evaluate_assignment(&quotas, "ollama", LIMIT_POLICY_PERCENT),
+            QuotaVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn normalize_lmr_agent_forces_lounge_runtime() {
+        assert_eq!(normalize_lmr_agent("ollama"), "lmr");
+        assert_eq!(normalize_lmr_agent("lmr"), "lmr");
+        assert_eq!(normalize_lmr_agent(""), "lmr");
+        assert_eq!(normalize_lmr_agent("cursor"), "cursor");
+    }
+
+    #[test]
+    fn continue_path_endpoint_is_lounge_lmr_not_host() {
+        let endpoint = lounge_ollama_endpoint();
+        assert!(
+            endpoint.contains(&LOUNGE_OLLAMA_PORT.to_string()),
+            "LMR endpoint beklenirdi: {endpoint}"
+        );
+        assert!(
+            !endpoint.contains(&SYSTEM_OLLAMA_PORT.to_string()),
+            "host Ollama portu olmamalı: {endpoint}"
+        );
+        let parsed = parse_http_host_port(&endpoint).expect("endpoint parse");
+        assert_eq!(parsed.1, LOUNGE_OLLAMA_PORT);
+        assert_ne!(parsed.1, SYSTEM_OLLAMA_PORT);
+    }
+
+    #[test]
+    fn quota_alert_payload_mentions_lmr_down() {
+        let request = ApprovalRequest {
+            task_id: "t1".into(),
+            summary: "gen".into(),
+            from_agent: "cursor".into(),
+            to_agent: "lmr".into(),
+            kind: ApprovalKind::QuotaLocalFallback,
+            reason: "Cursor kotası".into(),
+        };
+        let verdict = QuotaVerdict::Block {
+            reason: "Cursor kotası Limit Policy'yi aştı (92% ≥ 90%)".into(),
+            tool: "Cursor".into(),
+            percent: Some(92.0),
+        };
+        let alert = QuotaAlertPayload::from_block(&request, &verdict, 90.0, false);
+        assert_eq!(alert.continue_label, QUOTA_CONTINUE_LOCAL_LABEL);
+        assert_eq!(alert.continue_label, "Yerel Model (Ollama) ile devam et");
+        assert!(!alert.lmr_available);
+        assert!(alert.reason.contains("ayakta değil"));
+        assert!(alert.lmr_endpoint.contains("18790"));
+        assert!(!alert.lmr_endpoint.contains("11434"));
+        assert_eq!(crate::models::ALERT_QUOTA, "lounge.alert.quota");
     }
 }

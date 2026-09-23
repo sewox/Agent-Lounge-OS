@@ -13,6 +13,7 @@ mod probe;
 pub mod quota_manager;
 pub mod subscription_usage;
 pub mod supervisor;
+pub mod telemetry;
 
 use std::sync::Arc;
 
@@ -33,9 +34,17 @@ pub use probe::{
     LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
 pub use quota_manager::{
-    api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, spawn_quota_pump,
+    api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,
+    is_quota_approval, limit_policy_percent, lmr_endpoint_up, lmr_runtime_up, normalize_lmr_agent,
+    quota_alert_envelope, quota_approval_request, quota_blocked_for, quota_exhausted_for,
+    quota_matches_agent, spawn_quota_pump, QuotaAlertPayload, QUOTA_ALERT_PROMPT,
+    QUOTA_CONTINUE_LOCAL_LABEL,
 };
 pub use supervisor::spawn_supervisor;
+pub use telemetry::{
+    build_agent_efficiency_report, record_dead_snapshot, record_whisper_injection,
+    AgentEfficiencyReport, EfficiencyReportQuery,
+};
 
 /// Paylaşılan, thread-safe servis yöneticisi (EchoMind `Arc<Mutex<T>>` kalıbı).
 pub type SharedServices = Arc<Mutex<ServiceManager>>;
