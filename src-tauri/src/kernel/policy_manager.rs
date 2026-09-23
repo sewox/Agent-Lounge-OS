@@ -121,7 +121,10 @@ impl TaskResumePayload {
 }
 
 /// `lounge.alert.security` zarf gövdesi.
-pub fn alert_envelope_payload(request: &ApprovalRequest, level: SecurityLevel) -> serde_json::Value {
+pub fn alert_envelope_payload(
+    request: &ApprovalRequest,
+    level: SecurityLevel,
+) -> serde_json::Value {
     serde_json::to_value(SecurityAlertPayload::from_request(request, level))
         .unwrap_or_else(|_| serde_json::json!({ "task_id": request.task_id }))
 }

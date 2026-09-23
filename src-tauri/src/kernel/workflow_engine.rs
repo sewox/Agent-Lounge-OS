@@ -50,7 +50,9 @@ impl WorkflowEngine {
     pub async fn listen(&self) -> Result<()> {
         loop {
             match self.listen_once().await {
-                Ok(()) => log::warn!("workflow_engine NATS dinleyici kapandı, yeniden bağlanılıyor"),
+                Ok(()) => {
+                    log::warn!("workflow_engine NATS dinleyici kapandı, yeniden bağlanılıyor")
+                }
                 Err(err) => log::error!("workflow_engine NATS: {err}"),
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -126,7 +128,11 @@ impl WorkflowEngine {
             &TaskKind::Test,
         );
 
-        let mut task = LoungeTask::new(WORKFLOW_AGENT, &completed.project_id, test_summary(completed));
+        let mut task = LoungeTask::new(
+            WORKFLOW_AGENT,
+            &completed.project_id,
+            test_summary(completed),
+        );
         task.kind = TaskKind::Test;
         task.target_agent = Some(target_agent.clone());
         task.parent_task_id = Some(completed.id.clone());
@@ -255,10 +261,18 @@ mod tests {
             let parent = completed(kind.clone(), "claude");
             let dispatch = engine.plan_test_followup(&parent).expect("follow-up");
             assert_eq!(dispatch.task.kind, TaskKind::Test);
-            assert_eq!(dispatch.task.parent_task_id.as_deref(), Some(parent.id.as_str()));
+            assert_eq!(
+                dispatch.task.parent_task_id.as_deref(),
+                Some(parent.id.as_str())
+            );
             assert_eq!(dispatch.target_agent, GROK_BOT_WORKER);
             assert_eq!(dispatch.subject, TASK_REQUESTED);
-            assert!(dispatch.task.workflow_chain.as_ref().unwrap().contains("->"));
+            assert!(dispatch
+                .task
+                .workflow_chain
+                .as_ref()
+                .unwrap()
+                .contains("->"));
         }
     }
 
@@ -284,18 +298,25 @@ mod tests {
         let dispatch = engine.plan_test_followup(&parent).expect("follow-up");
         assert_eq!(dispatch.target_agent, LOCAL_TEST_WORKER);
         assert_eq!(dispatch.subject, TEST_REQUESTED);
-        assert_eq!(
-            dispatch.chain_label,
-            "Cursor (Code) -> Kernel (Test)"
-        );
+        assert_eq!(dispatch.chain_label, "Cursor (Code) -> Kernel (Test)");
     }
 
     #[test]
     fn chain_label_formats_claude_code_to_grok_test() {
-        let label = format_workflow_chain("claude", &TaskKind::CodeAnalysis, "grok_bot", &TaskKind::Test);
+        let label = format_workflow_chain(
+            "claude",
+            &TaskKind::CodeAnalysis,
+            "grok_bot",
+            &TaskKind::Test,
+        );
         assert_eq!(label, "Claude (Code) -> Grok (Test)");
 
-        let review = format_workflow_chain("Claude Desktop", &TaskKind::Review, GROK_BOT_WORKER, &TaskKind::Test);
+        let review = format_workflow_chain(
+            "Claude Desktop",
+            &TaskKind::Review,
+            GROK_BOT_WORKER,
+            &TaskKind::Test,
+        );
         assert_eq!(review, "Claude (Review) -> Grok (Test)");
     }
 

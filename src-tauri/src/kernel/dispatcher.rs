@@ -503,11 +503,7 @@ impl Dispatcher {
         }
     }
 
-    async fn publish_subject<T: serde::Serialize>(
-        &self,
-        subject: &str,
-        payload: &T,
-    ) -> Result<()> {
+    async fn publish_subject<T: serde::Serialize>(&self, subject: &str, payload: &T) -> Result<()> {
         let url = self.nats_url.clone();
         let subject = subject.to_string();
         let bytes = serde_json::to_vec(payload).context("NATS payload serialize")?;

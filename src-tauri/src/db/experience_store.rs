@@ -489,12 +489,9 @@ mod tests {
             .await
             .unwrap();
 
-        let context = get_relevant_context(
-            &store,
-            "dispatcher NATS mesajlarını dinle".into(),
-        )
-        .await
-        .unwrap();
+        let context = get_relevant_context(&store, "dispatcher NATS mesajlarını dinle".into())
+            .await
+            .unwrap();
         assert!(
             !context.experiences.is_empty(),
             "get_relevant_context çapraz proje tecrübesi"

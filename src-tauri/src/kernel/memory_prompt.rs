@@ -145,7 +145,10 @@ mod tests {
     async fn miss_does_not_build_whisper() {
         let store = ExperienceStore::memory().unwrap();
         let low = decision(0.1, "nats dispatcher", TASK_REQUESTED);
-        assert!(build_knowledge_whisper(&store, &low).await.unwrap().is_none());
+        assert!(build_knowledge_whisper(&store, &low)
+            .await
+            .unwrap()
+            .is_none());
 
         let wrong_subject = decision(0.9, "nats dispatcher", AGENT_PROMPT);
         assert!(build_knowledge_whisper(&store, &wrong_subject)
