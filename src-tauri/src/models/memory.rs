@@ -35,11 +35,25 @@ pub struct AstNode {
     pub ref_count: u64,
 }
 
+/// Caller → callee kenarı. `from_id` / `to_id` birincil alanlar;
+/// CBM `CALLS` ve CLI JSON'unda `caller` / `callee` / `source_id` / `target_id` alias olarak gelir.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct CodeReference {
-    #[serde(default, alias = "from", alias = "source")]
+    #[serde(
+        default,
+        alias = "from",
+        alias = "source",
+        alias = "source_id",
+        alias = "caller"
+    )]
     pub from_id: String,
-    #[serde(default, alias = "to", alias = "target")]
+    #[serde(
+        default,
+        alias = "to",
+        alias = "target",
+        alias = "target_id",
+        alias = "callee"
+    )]
     pub to_id: String,
     #[serde(default)]
     pub file: Option<String>,
@@ -87,6 +101,19 @@ pub struct IndexGraph {
 }
 
 impl IndexGraph {
+    pub fn to_semantic_project(&self) -> SemanticProject {
+        SemanticProject {
+            name: self.project.clone(),
+            repo_path: self.repo_path.clone(),
+            files: self.files.unwrap_or(0).max(self.unique_file_count()),
+            node_count: self.node_count.max(self.nodes.len() as u64),
+            edge_count: self.edge_count.max(self.references.len() as u64),
+            nodes: self.nodes.clone(),
+            references: self.references.clone(),
+            dead: self.dead.clone(),
+        }
+    }
+
     pub fn unique_file_count(&self) -> u64 {
         let mut files = HashSet::new();
         for node in &self.nodes {
@@ -173,6 +200,49 @@ pub struct ProjectList {
     pub projects: Vec<ProjectSummary>,
 }
 
+/// `get_semantic_map` UI yükü — SQLite `project_index` satırlarından.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SemanticProject {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub repo_path: String,
+    #[serde(default)]
+    pub files: u64,
+    #[serde(default)]
+    pub node_count: u64,
+    #[serde(default)]
+    pub edge_count: u64,
+    #[serde(default)]
+    pub nodes: Vec<AstNode>,
+    #[serde(default)]
+    pub references: Vec<CodeReference>,
+    #[serde(default)]
+    pub dead: Vec<DeadSymbol>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SemanticMap {
+    #[serde(default)]
+    pub projects: Vec<SemanticProject>,
+}
+
+impl SemanticMap {
+    pub fn from_projects(mut projects: Vec<SemanticProject>) -> Self {
+        projects.sort_by(|left, right| {
+            left.name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.repo_path.cmp(&right.repo_path))
+        });
+        Self { projects }
+    }
+
+    pub fn file_total(&self) -> u64 {
+        self.projects.iter().map(|row| row.files).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +270,7 @@ mod tests {
         };
         assert_eq!(graph.unique_file_count(), 3);
         assert_eq!(graph.snapshot().files, Some(3));
+        assert_eq!(graph.to_semantic_project().nodes.len(), 2);
     }
 
     #[test]

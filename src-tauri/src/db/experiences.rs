@@ -52,12 +52,15 @@ impl ExperienceStore {
 
     pub async fn insert_record(&self, record: ExperienceRecord) -> Result<()> {
         let conn = self.conn.clone();
+        let for_vector = record.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
             insert_record_blocking(&conn, &record)
         })
         .await
-        .context("experience insert join")?
+        .context("experience insert join")??;
+        super::vector_memory::spawn_upsert(for_vector);
+        Ok(())
     }
 
     pub async fn get(&self, id: String) -> Result<Option<LoungeExperience>> {
@@ -85,6 +88,80 @@ impl ExperienceStore {
         .context("experience latest join")?
     }
 
+    /// Command Palette / vault: lexical+vektör benzerliği, boşsa substring fallback.
+    pub async fn search_experiences(
+        &self,
+        query: String,
+        limit: Option<usize>,
+    ) -> Result<Vec<LoungeExperience>> {
+        let lim = limit.unwrap_or(12).max(1);
+        let needle = query.trim().to_string();
+        if needle.is_empty() {
+            return self.latest(lim).await;
+        }
+
+        let embedding = lexical_embedding(&needle);
+        let hits = self
+            .similar_cross(String::new(), embedding, Some(lim * 2))
+            .await
+            .unwrap_or_default();
+
+        let mut out: Vec<LoungeExperience> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for hit in hits {
+            if out.len() >= lim {
+                break;
+            }
+            if !seen.insert(hit.id.clone()) {
+                continue;
+            }
+            if let Some(row) = self.get(hit.id.clone()).await? {
+                out.push(row);
+            } else {
+                out.push(crate::models::LoungeExperience {
+                    id: hit.id,
+                    msg_type: "experience".into(),
+                    agent: hit.agent_id,
+                    project_id: hit.project_id,
+                    adr_summary: if hit.adr_record.trim().is_empty() {
+                        hit.solution_summary
+                    } else {
+                        hit.adr_record
+                    },
+                    outcome: crate::models::ExperienceOutcome::Partial,
+                    related_task_id: None,
+                    tags: vec![format!("score:{:.2}", hit.score)],
+                    created_at: crate::models::now_rfc3339(),
+                });
+            }
+        }
+
+        if out.len() < lim {
+            let lower = needle.to_ascii_lowercase();
+            for row in self.latest(80).await? {
+                if out.len() >= lim {
+                    break;
+                }
+                if !seen.insert(row.id.clone()) {
+                    continue;
+                }
+                let hay = format!(
+                    "{} {} {} {}",
+                    row.project_id,
+                    row.adr_summary,
+                    row.agent,
+                    row.tags.join(" ")
+                )
+                .to_ascii_lowercase();
+                if hay.contains(&lower) {
+                    out.push(row);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Semantik (kosinüs) arama: aynı `project_id` öncelikli, yoksa küresel.
     pub async fn similar(
         &self,
@@ -110,6 +187,23 @@ impl ExperienceStore {
         })
         .await
         .context("experience similar join")?
+    }
+
+    /// Tüm projeler üzerinde kosinüs araması (Cross-Project Memory).
+    pub async fn similar_cross(
+        &self,
+        project_id: String,
+        query: Vec<f32>,
+        limit: Option<usize>,
+    ) -> Result<Vec<ExperienceHit>> {
+        let conn = self.conn.clone();
+        let limit = limit.unwrap_or(DEFAULT_SIMILAR_LIMIT);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            similar_cross_blocking(&conn, &project_id, &query, limit)
+        })
+        .await
+        .context("experience similar_cross join")?
     }
 
     pub async fn get_setting(&self, key: String) -> Result<Option<String>> {
@@ -191,6 +285,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;
+    crate::db::feedback::migrate_feedback(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
@@ -356,6 +451,29 @@ fn similar_blocking(
     Ok(hits)
 }
 
+const SAME_PROJECT_BOOST: f32 = 0.04;
+
+fn similar_cross_blocking(
+    conn: &Connection,
+    project_id: &str,
+    query: &[f32],
+    limit: usize,
+) -> Result<Vec<ExperienceHit>> {
+    let mut hits = score_rows(conn, None, query)?;
+    for hit in &mut hits {
+        if hit.project_id == project_id {
+            hit.score = (hit.score + SAME_PROJECT_BOOST).min(1.0);
+        }
+    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hits.truncate(limit);
+    Ok(hits)
+}
+
 fn score_rows(
     conn: &Connection,
     project_id: Option<&str>,
@@ -367,9 +485,11 @@ fn score_rows(
             FROM experiences WHERE project_id = ?1
             "#
     } else {
+        // Cross-Project Memory: başarılı tecrübe + ADR satırları (outcome=success).
         r#"
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record, embedding
             FROM experiences
+            WHERE lower(outcome) = 'success'
             "#
     };
     let mut stmt = conn.prepare(sql)?;
@@ -411,6 +531,7 @@ fn map_hit_row(
         solution_summary: solution.clone(),
         adr_record: row.get(5)?,
         score: 0.0,
+        source: "sqlite".into(),
     };
     Ok((hit, row.get(6)?, topic, solution))
 }
@@ -562,6 +683,48 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits[0].topic.to_ascii_lowercase().contains("nats"));
         assert!(hits[0].score >= MIN_COSINE);
+    }
+
+    #[tokio::test]
+    async fn search_experiences_surfaces_nats_topic() {
+        let store = ExperienceStore::memory().unwrap();
+        let nats = LoungeTask::new("cursor", "agent-lounge-os", "NATS dispatcher dinleyici");
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &nats,
+                "NATS dispatcher listen + spawn_blocking",
+                "sync nats client blocking thread",
+                ExperienceOutcome::Success,
+                vec!["memory_bridge".into()],
+            ))
+            .await
+            .unwrap();
+        let other = LoungeTask::new("cursor", "echo-mind", "ollama tags probe");
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &other,
+                "Ollama tags probe",
+                "tags endpoint",
+                ExperienceOutcome::Partial,
+                vec![],
+            ))
+            .await
+            .unwrap();
+
+        let rows = store
+            .search_experiences("dispatcher NATS".into(), Some(4))
+            .await
+            .unwrap();
+        assert!(!rows.is_empty());
+        let hay = rows
+            .iter()
+            .map(|row| row.adr_summary.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            hay.contains("nats") || hay.contains("dispatcher"),
+            "expected NATS/dispatcher hit, got {hay}"
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,12 @@
     "requested": "lounge.task.requested",
     "assigned": "lounge.task.assigned",
     "completed": "lounge.task.completed",
-    "failed": "lounge.task.failed"
+    "failed": "lounge.task.failed",
+    "resume": "lounge.task.resume"
+  },
+  "alert": {
+    "security": "lounge.alert.security",
+    "quota": "lounge.alert.quota"
   },
   "experience": {
     "reported": "lounge.experience.reported"
@@ -18,7 +23,17 @@
   },
   "agent": {
     "heartbeat": "lounge.agent.heartbeat",
-    "status": "lounge.agent.status"
+    "status": "lounge.agent.status",
+    "prompt": "lounge.agent.prompt"
+  },
+  "context": {
+    "whisper": "lounge.context.whisper"
+  },
+  "telemetry": {
+    "decision": "lounge.telemetry.decision"
+  },
+  "infra": {
+    "status": "lounge.infra.status"
   },
   "bus": {
     "connected": "lounge.bus.connected",

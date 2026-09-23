@@ -1,43 +1,134 @@
 "use client";
 
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
-import { eventStateClass, Kpi, outcomeClass, Pip, subjectClass } from "@/components/ui";
+import { SemanticMap } from "@/components/SemanticMap";
+import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
-  BUS_UI_EVENT,
+  buildBrowserEfficiencyReport,
+  deadSymbolsMatchingSelection,
+  downloadMarkdownFile,
+  eventDecisionLabel,
+  experiencesMatchingSelection,
+  fetchAgentEfficiencyReport,
+  formatDecisionStreamLabel,
   formatExperienceTime,
+  formatLayaDecision,
+  formatLayaEngineFleetStatus,
+  formatLatencyMs,
   isTauri,
+  layaEnginePercentage,
   MOCK_HEALTH,
-  MOCK_NODES,
+  natsEventTone,
+  natsToneLabel,
+  PAGE_SIZE,
+  pageCount,
+  pageSlice,
+  pathBasename,
   quotaBarClass,
   quotaToneClass,
-  type LoungeMessage,
+  resolveDeadSymbolCount,
+  type AgentEfficiencyReport,
   type QuotaExhaustedAction,
   type QuotaKind,
+  type SemanticMapSelection,
 } from "@/lib/lounge";
 
 type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
 
+function quotaKindClass(mode: string): string {
+  if (mode === "subscription") {
+    return "text-primary";
+  }
+  if (mode === "api") {
+    return "text-tertiary";
+  }
+  if (mode === "plugin") {
+    return "text-secondary";
+  }
+  return "text-on-surface-variant";
+}
+
 export function OverviewKpis() {
-  const { experiences, events, projects, deadSymbols, lastIndex } = useLounge();
-  const indexedFiles =
-    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) || lastIndex?.files || 0;
-  const deadCount = projects.length
-    ? deadSymbols.length
-    : MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
+  const {
+    experiences,
+    projects,
+    deadSymbols,
+    lastIndex,
+    semanticMap,
+    indexing,
+    decisionTelemetry,
+    decisionLatencyHistory,
+    decisionMsgPerMin,
+    decisionGate,
+  } = useLounge();
+  const fromMap = semanticMap.projects.reduce((sum, row) => sum + row.files, 0);
+  const fromProjects = projects.reduce((sum, row) => sum + (row.files ?? 0), 0);
+  const indexedFiles = fromMap || fromProjects || lastIndex?.files || 0;
+  const deadCount = resolveDeadSymbolCount({
+    deadSymbols,
+    semanticMap,
+    lastIndex,
+    projects,
+  });
+  const latencyMs = decisionTelemetry?.latency_ms;
+  const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
+  const latencyValue = latencyLive ? formatLatencyMs(latencyMs) : "—";
+  const layaHint = formatLayaDecision(latencyLive ? latencyMs : null);
+  const msgLive = decisionMsgPerMin > 0;
   return (
-    <section className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+    <section className="shrink-0 space-y-2.5">
+      {indexing ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-2 rounded-lg border border-outline-variant bg-surface-container px-3 py-2 font-mono text-[11px] text-on-surface"
+        >
+          <span
+            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-transparent border-t-primary"
+            aria-hidden
+          />
+          <span className="font-bold tracking-wider uppercase">Scanning...</span>
+          <span className="text-outline">Index Workspace</span>
+        </div>
+      ) : null}
+      <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
+      <Kpi
+        label="LATENCY"
+        value={latencyValue}
+        live={latencyLive}
+        hint={
+          decisionTelemetry?.device
+            ? `${layaHint} · ${decisionTelemetry.device}`
+            : layaHint
+        }
+        badge={
+          latencyLive ? (
+            <LatencySparkline values={decisionLatencyHistory} />
+          ) : (
+            <span className="font-mono text-[10px] text-on-surface-variant">
+              {decisionGate?.phase === "ready" ? "idle" : "cold"}
+            </span>
+          )
+        }
+      />
       <Kpi
         label="MSG / MIN"
-        value={String(Math.max(events.length, 1))}
-        hint="buffered lounge.> events"
+        value={String(decisionMsgPerMin)}
+        live={msgLive}
+        hint="NATS / 60s"
         badge={
-          <span className="flex items-center gap-0.5 rounded border border-primary/30 bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary">
-            live
+          <span
+            className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+              msgLive
+                ? "border-primary/30 bg-surface-container-high text-primary"
+                : "border-outline-variant bg-surface-container-high text-on-surface-variant"
+            }`}
+          >
+            {msgLive ? "live" : "idle"}
           </span>
         }
       />
@@ -63,40 +154,41 @@ export function OverviewKpis() {
             ▼ amber alert
           </span>
         }
-      />
+        />
+      </div>
     </section>
   );
 }
 
+function DecisionStreamChip({
+  label,
+  live = false,
+}: {
+  label: string;
+  live?: boolean;
+}) {
+  return (
+    <span
+      key={label}
+      className={`kpi-tick shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium tnum ${
+        live
+          ? "border-primary/30 bg-primary-container/20 text-primary"
+          : "border-primary/25 bg-surface-container-high text-primary"
+      }`}
+    >
+      {label}
+    </span>
+  );
+}
+
 export function EventStreamPanel() {
-  const { events, query, ingestBusMessage, probeBus } = useLounge();
+  const { events, query, probeBus, decisionTelemetry } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
   const [probing, setProbing] = useState(false);
-
-  useEffect(() => {
-    if (!isTauri()) {
-      return;
-    }
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    void listen<LoungeMessage>(BUS_UI_EVENT, (event) => {
-      if (!cancelled) {
-        ingestBusMessage(event.payload);
-      }
-    }).then((fn) => {
-      if (cancelled) {
-        void fn();
-        return;
-      }
-      unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      if (unlisten) {
-        void unlisten();
-      }
-    };
-  }, [ingestBusMessage]);
+  const [page, setPage] = useState(0);
+  const latencyMs = decisionTelemetry?.latency_ms;
+  const decisionLive = latencyMs != null && Number.isFinite(latencyMs);
+  const liveDecisionLabel = formatDecisionStreamLabel(decisionLive ? latencyMs : null);
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
@@ -109,14 +201,18 @@ export function EventStreamPanel() {
       if (!query.trim()) {
         return true;
       }
-      const haystack = `${event.subject} ${event.from} ${event.to}`.toLowerCase();
+      const haystack = `${event.subject} ${event.from} ${event.to} ${eventDecisionLabel(event, decisionLive ? latencyMs : null)} ${event.chainLabel ?? ""}`.toLowerCase();
       return haystack.includes(query.trim().toLowerCase());
     });
-  }, [events, query, subjectFilter]);
+  }, [decisionLive, events, latencyMs, query, subjectFilter]);
+
+  const pages = pageCount(filtered.length);
+  const safePage = Math.min(page, pages - 1);
+  const visible = pageSlice(filtered, safePage);
 
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2.5">
           <Pip live tone="primary" />
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">NATS EVENT STREAM</h2>
@@ -124,6 +220,7 @@ export function EventStreamPanel() {
           <span className="rounded border border-primary/30 bg-primary-container/20 px-1.5 py-0.5 font-mono text-[10px] text-primary">
             bus live
           </span>
+          {decisionLive ? <DecisionStreamChip label={liveDecisionLabel} live /> : null}
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 rounded border border-outline-variant/60 bg-surface-container-high px-2 py-0.5">
@@ -135,7 +232,10 @@ export function EventStreamPanel() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setSubjectFilter(key)}
+                onClick={() => {
+                  setSubjectFilter(key);
+                  setPage(0);
+                }}
                 className={`rounded px-2 py-0.5 ${subjectFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
                 {key === "all" ? "all" : key === "task" ? "task.*" : "exp.*"}
@@ -144,10 +244,10 @@ export function EventStreamPanel() {
           </div>
         </div>
       </div>
-      <div className="overflow-x-auto">
+      <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse text-left font-mono text-[11px]">
-          <thead>
-            <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
+          <thead className="sticky top-0 z-10">
+            <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 text-[10px] text-outline uppercase">
               <th className="w-[90px] px-2.5 py-1.5 font-medium">Time</th>
               <th className="px-2 py-1.5 font-medium">Subject</th>
               <th className="px-2 py-1.5 font-medium">Route</th>
@@ -156,28 +256,46 @@ export function EventStreamPanel() {
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
-            {filtered.map((event, index) => {
-              const selected = index === 0 && subjectFilter === "all" && !query;
+            {visible.map((event, index) => {
+              const selected = safePage === 0 && index === 0 && subjectFilter === "all" && !query;
+              const tone = natsEventTone(event.subject, event.state);
               return (
                 <tr
                   key={event.id}
                   className={
-                    event.state === "error"
+                    tone === "error"
                       ? "bg-error-container/10 hover:bg-error-container/20"
-                      : selected
-                        ? "border-l-2 border-primary bg-primary-container/20 text-on-surface hover:bg-primary-container/30"
-                        : "hover:bg-surface-container-high/50"
+                      : tone === "task"
+                        ? "border-l-2 border-primary bg-primary-container/15 hover:bg-primary-container/25"
+                        : "bg-secondary-container/10 hover:bg-secondary-container/20"
                   }
                 >
                   <td className="tnum px-2.5 py-1.5 text-on-surface-variant">{event.time}</td>
-                  <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>{event.subject}</td>
+                  <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="min-w-0 truncate">{event.subject}</span>
+                      <DecisionStreamChip
+                        label={eventDecisionLabel(event, decisionLive ? latencyMs : null)}
+                        live={selected || Boolean(event.decisionLabel)}
+                      />
+                      {event.chainLabel ? (
+                        <span
+                          className="max-w-full truncate rounded border border-secondary/40 bg-secondary-container/30 px-1.5 py-0.5 font-mono text-[10px] font-medium text-secondary underline decoration-secondary/50 underline-offset-2"
+                          title={event.chainLabel}
+                          data-workflow-chain={event.chainLabel}
+                        >
+                          {event.chainLabel}
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="px-2 py-1.5 text-on-surface-variant">
                     {event.from} <span className="text-outline">→</span> {event.to}
                   </td>
-                  <td className="tnum px-2 py-1.5 text-right text-on-surface-variant">{event.payload}</td>
+                  <td className="tnum px-2.5 py-1.5 text-right text-on-surface-variant">{event.payload}</td>
                   <td className="px-2.5 py-1.5 text-right">
-                    <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] ${eventStateClass(event.state)}`}>
-                      {event.state}
+                    <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase ${eventToneClass(tone)}`}>
+                      {natsToneLabel(tone)}
                     </span>
                   </td>
                 </tr>
@@ -193,11 +311,12 @@ export function EventStreamPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
         <span>
-          Streaming: {filtered.length} events visible / {events.length} buffered
+          {visible.length}/{filtered.length} · {PAGE_SIZE}/sayfa · {events.length} buffered
         </span>
         <div className="flex items-center gap-2">
+          <Pager page={safePage} pages={pages} total={filtered.length} onPage={setPage} />
           <button
             type="button"
             onClick={() => {
@@ -217,31 +336,62 @@ export function EventStreamPanel() {
 }
 
 export function VaultPanel() {
-  const { experiences, projects, query, lastIndex } = useLounge();
-  const nodes = projects.length
-    ? projects.map((row) => ({
-        name: row.name || "unnamed",
-        edges: row.edges,
-        modules: [
-          `${row.files ?? 0} files`,
-          `${row.nodes} nodes`,
-          row.root_path ?? "sqlite+cbm",
-        ],
-      }))
-    : MOCK_NODES;
-  const fileTotal =
-    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) || lastIndex?.files || 0;
-  const edgeTotal = nodes.reduce((sum, row) => sum + row.edges, 0);
-  const log = experiences.filter((item) => {
-    if (!query.trim()) {
-      return true;
+  const {
+    experiences,
+    projects,
+    query,
+    lastIndex,
+    semanticMap,
+    deadSymbols,
+    whisperedExperienceIds,
+    selectedProject,
+    switchProject,
+    markWhisperUseful,
+  } = useLounge();
+  const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
+  const [selectionProject, setSelectionProject] = useState(selectedProject);
+  const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
+  const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
+
+  if (selectionProject !== selectedProject) {
+    setSelectionProject(selectedProject);
+    if (selectedProject) {
+      setSelected({
+        id: `project:${selectedProject}`,
+        name: selectedProject,
+        kind: "project",
+        project: selectedProject,
+      });
     }
-    return `${item.project_id} ${item.adr_summary} ${item.agent}`.toLowerCase().includes(query.trim().toLowerCase());
-  });
+  }
+
+  const fileTotal =
+    semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
+    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) ||
+    lastIndex?.files ||
+    0;
+  const edgeTotal =
+    semanticMap.projects.reduce((sum, row) => sum + row.edge_count, 0) ||
+    projects.reduce((sum, row) => sum + row.edges, 0);
+  const log = useMemo(
+    () => experiencesMatchingSelection(experiences, selected, query),
+    [experiences, selected, query],
+  );
+  const deadForNode = useMemo(
+    () => deadSymbolsMatchingSelection(deadSymbols, semanticMap, selected),
+    [deadSymbols, semanticMap, selected],
+  );
+
+  const [logPage, setLogPage] = useState(0);
+  const logPages = pageCount(log.length);
+  const safeLogPage = Math.min(logPage, logPages - 1);
+  const logVisible = pageSlice(log, safeLogPage);
+  const repoCount =
+    semanticMap.projects.length || projects.length || (experiences.length ? 1 : 0);
 
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
-      <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="tree" />
@@ -250,65 +400,181 @@ export function VaultPanel() {
             SEMANTIC MAP + EXPERIENCES
           </h3>
         </div>
-        <span className="font-mono text-[10px] text-outline">memory_bridge + sqlite</span>
+        <span className="font-mono text-[10px] text-outline">
+          {whispered.size > 0 ? (
+            <span className="text-primary">whisper · live</span>
+          ) : (
+            "memory_bridge + sqlite"
+          )}
+        </span>
       </div>
-      <div className="flex min-h-[220px] flex-col sm:flex-row">
-        <div className="space-y-2.5 border-b border-outline-variant bg-surface-container-low/40 p-2.5 font-mono text-[11px] sm:w-1/2 sm:border-r sm:border-b-0">
-          <div className="flex items-center justify-between text-[10px] font-semibold tracking-wider text-outline uppercase">
-            <span>Indexed Files</span>
-            <span className="text-on-surface-variant">
-              {projects.length ? `${fileTotal} files · ${edgeTotal} edges` : `${edgeTotal} edges`}
+      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0">
+          <SemanticMap
+            semanticMap={semanticMap}
+            projects={projects}
+            fileTotal={fileTotal}
+            edgeTotal={edgeTotal}
+            selected={selected}
+            onSelect={(next) => {
+              setSelected(next);
+              setLogPage(0);
+              if (next?.kind === "project") {
+                switchProject(next.name);
+              } else if (!next) {
+                switchProject(null);
+              }
+            }}
+          />
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
+          {selected ? (
+            <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
+              <div className="flex items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
+                <span>Dead Symbols</span>
+                <span className={deadForNode.length > 0 ? "text-error" : "text-outline"}>
+                  {deadForNode.length > 0 ? `${deadForNode.length} uyarı` : "temiz"}
+                </span>
+              </div>
+              {deadForNode.length === 0 ? (
+                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-2 text-center font-mono text-[10px] text-on-surface-variant">
+                  Bu düğüm için dead symbol yok · {selected.name}
+                </div>
+              ) : (
+                <div className="max-h-24 space-y-1 overflow-auto font-mono text-[10px]">
+                  {deadForNode.slice(0, 8).map((symbol) => (
+                    <div
+                      key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
+                      className="flex items-start justify-between gap-2 rounded border border-error/30 bg-error/5 px-1.5 py-1"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-error">{symbol.name}</div>
+                        <div className="truncate text-[9px] text-on-surface-variant">
+                          {symbol.detail ||
+                            (symbol.file
+                              ? `${pathBasename(symbol.file) || symbol.file}${
+                                  symbol.line != null ? `:${symbol.line}` : ""
+                                }`
+                              : symbol.kind)}
+                        </div>
+                      </div>
+                      <span className="shrink-0 rounded border border-error/40 px-1 text-[9px] text-error uppercase">
+                        {symbol.kind || "dead"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+          <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
+            <span>Experience Log</span>
+            <span
+              className={
+                whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
+              }
+            >
+              {whispered.size > 0
+                ? `fısıltı · ${whispered.size}`
+                : selected
+                  ? `filter · ${selected.name}`
+                  : "Synced"}
             </span>
           </div>
-          {nodes.map((node, index) => (
-            <div key={node.name}>
-              <div className="flex items-center justify-between font-medium text-on-surface">
-                <span className={`flex items-center gap-1 ${index === 0 ? "text-primary" : "text-on-surface"}`}>
-                  <Icon name="folder" className="h-3 w-3" />
-                  <span>{node.name}</span>
-                </span>
-                <span className="text-[10px] text-outline">{node.edges} edges</span>
+          <div className="min-h-0 flex-1 space-y-2 overflow-auto font-mono text-[10.5px]">
+            {logVisible.length === 0 ? (
+              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-[10px] text-on-surface-variant">
+                {selected
+                  ? `Bu düğüm için experience yok · ${selected.name}`
+                  : "Experience kaydı yok"}
               </div>
-              <div className="mt-1 ml-1.5 space-y-0.5 border-l border-outline-variant/60 pl-3.5 text-[10px] text-on-surface-variant">
-                {node.modules.map((mod) => (
-                  <div key={mod}>↳ {mod}</div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="flex flex-col p-2.5 font-body sm:w-1/2">
-          <div className="mb-2 flex items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
-            <span>Experience Log</span>
-            <span className="text-secondary">Synced</span>
-          </div>
-          <div className="space-y-2 font-mono text-[10.5px]">
-            {log.slice(0, 8).map((item) => (
-              <div key={item.id} className="space-y-1 rounded border border-outline-variant/40 bg-surface-container-high/60 p-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="tnum text-on-surface-variant">{formatExperienceTime(item.created_at)}</span>
-                  <span className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}>
-                    {item.outcome === "success" ? "Success" : item.outcome === "partial" ? "Partial" : "Failed"}
-                  </span>
-                </div>
-                <div className="truncate text-[11px] font-medium text-on-surface">{item.project_id}</div>
-                <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">“{item.adr_summary}”</div>
-              </div>
-            ))}
+            ) : (
+              logVisible.map((item) => {
+                const isWhisper = whispered.has(item.id);
+                const alreadyUseful = markedUseful.has(item.id);
+                return (
+                  <div
+                    key={item.id}
+                    className={`space-y-1 rounded border p-1.5 transition-colors ${
+                      isWhisper
+                        ? "border-primary bg-primary-container/20 shadow-[0_0_0_1px_var(--color-primary)]"
+                        : "border-outline-variant/40 bg-surface-container-high/60"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="tnum text-on-surface-variant">
+                        {formatExperienceTime(item.created_at)}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        {isWhisper ? (
+                          <span className="rounded border border-primary/50 px-1 text-[9px] text-primary">
+                            WHISPER
+                          </span>
+                        ) : null}
+                        <span
+                          className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}
+                        >
+                          {item.outcome === "success"
+                            ? "Success"
+                            : item.outcome === "partial"
+                              ? "Partial"
+                              : "Failed"}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="truncate text-[11px] font-medium text-on-surface">
+                      {item.project_id}
+                    </div>
+                    <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">
+                      “{item.adr_summary}”
+                    </div>
+                    {isWhisper ? (
+                      <div className="flex justify-end pt-0.5">
+                        <button
+                          type="button"
+                          disabled={alreadyUseful}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void (async () => {
+                              await markWhisperUseful(item.id, item.project_id);
+                              setMarkedUseful((prev) => new Set(prev).add(item.id));
+                            })();
+                          }}
+                          className="rounded border border-primary/40 px-1.5 py-0.5 font-mono text-[9px] text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
+                          aria-label="Bu fısıltıyı faydalı olarak işaretle"
+                        >
+                          {alreadyUseful ? "Faydalı ✓" : "Faydalı"}
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })
+            )}
           </div>
         </div>
       </div>
-      <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[10px] text-outline">
-        <span>codebase-memory-mcp · {projects.length || nodes.length} repos</span>
-        <span className="text-on-surface-variant">vector_dims: 256 lexical / 768 ollama</span>
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[10px] text-outline">
+        <span>codebase-memory-mcp · {repoCount} repos</span>
+        <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
     </section>
   );
 }
 
 export function HealthPanel() {
-  const { projects, deadSymbols } = useLounge();
-  const rows = projects.length
+  const { projects, deadSymbols, semanticMap } = useLounge();
+  const rows = semanticMap.projects.length
+    ? semanticMap.projects.map((row) => ({
+        name: row.name || "unnamed",
+        indexed: row.node_count > 0 || row.files > 0 ? 100 : 0,
+        files: String(row.files),
+        nodes: String(row.node_count),
+        stale: 0,
+        dead: row.dead.length,
+        sync: "live",
+      }))
+    : projects.length
     ? projects.map((row) => ({
         name: row.name || "unnamed",
         indexed: row.nodes > 0 || (row.files ?? 0) > 0 ? 100 : 0,
@@ -325,9 +591,14 @@ export function HealthPanel() {
       }))
     : MOCK_HEALTH;
 
+  const [page, setPage] = useState(0);
+  const pages = pageCount(rows.length);
+  const safePage = Math.min(page, pages - 1);
+  const visible = pageSlice(rows, safePage);
+
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
-      <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="rule" />
@@ -338,8 +609,8 @@ export function HealthPanel() {
         </div>
         <span className="font-mono text-[10px] text-outline">memory_bridge</span>
       </div>
-      <div className="space-y-2.5 p-2.5 font-mono text-[11px]">
-        {rows.map((repo) => (
+      <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-[11px]">
+        {visible.map((repo) => (
           <div key={repo.name} className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-high/40 p-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -381,6 +652,9 @@ export function HealthPanel() {
           </div>
         ))}
       </div>
+      <div className="flex shrink-0 items-center justify-end border-t border-outline-variant bg-surface-container-low px-3 py-1.5">
+        <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
+      </div>
     </section>
   );
 }
@@ -390,23 +664,30 @@ export function QuotaPanel() {
   const [quotaFilter, setQuotaFilter] = useState<QuotaFilter>("all");
   const rows = useMemo(() => {
     return quotas.filter((row) => {
-      if (quotaFilter !== "all" && row.kind !== quotaFilter) {
+      const mode = row.access_mode || row.kind;
+      if (quotaFilter !== "all" && mode !== quotaFilter) {
         return false;
       }
       if (!query.trim()) {
         return true;
       }
-      return `${row.tool} ${row.unit} ${row.kind}`.toLowerCase().includes(query.trim().toLowerCase());
+      return `${row.tool} ${row.unit} ${mode} ${row.host_id ?? ""}`
+        .toLowerCase()
+        .includes(query.trim().toLowerCase());
     });
   }, [quotas, query, quotaFilter]);
+  const [page, setPage] = useState(0);
+  const pages = pageCount(rows.length);
+  const safePage = Math.min(page, pages - 1);
+  const visible = pageSlice(rows, safePage);
   const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
 
   return (
-    <section className="flex flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <Pip live tone="ok" />
-          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+          <h2 className="truncate font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             CONNECTED AI + BOT QUOTAS
           </h2>
           {amberAlert ? (
@@ -415,19 +696,21 @@ export function QuotaPanel() {
             </span>
           ) : (
             <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
-              60s probes
+              30s probes
             </span>
           )}
         </div>
         <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-[10px]">
-          {(["all", "ai", "bots"] as const).map((key) => {
-            const value: QuotaFilter = key === "bots" ? "bot" : key;
+          {(["all", "subscription", "api", "plugin", "local"] as const).map((key) => {
             return (
               <button
                 key={key}
                 type="button"
-                onClick={() => setQuotaFilter(value)}
-                className={`rounded px-2 py-0.5 ${quotaFilter === value ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
+                onClick={() => {
+                  setQuotaFilter(key);
+                  setPage(0);
+                }}
+                className={`rounded px-2 py-0.5 ${quotaFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
                 {key}
               </button>
@@ -435,21 +718,21 @@ export function QuotaPanel() {
           })}
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-left font-mono text-[11px]">
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="w-full min-w-[720px] border-collapse text-left font-mono text-[11px]">
           <thead>
             <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
               <th className="px-2.5 py-1.5 font-medium">Tool</th>
               <th className="w-14 px-2 py-1.5 font-medium">Kind</th>
               <th className="w-16 px-2 py-1.5 font-medium">Unit</th>
-              <th className="px-2 py-1.5 font-medium">Used / Limit</th>
-              <th className="px-2 py-1.5 text-right font-medium">Remaining</th>
-              <th className="w-20 px-2 py-1.5 text-right font-medium">Reset</th>
-              <th className="w-24 px-2.5 py-1.5 text-right font-medium">State</th>
+              <th className="min-w-[160px] px-2 py-1.5 font-medium">Used / Limit</th>
+              <th className="min-w-[160px] px-2 py-1.5 text-right font-medium">Remaining / Hosts</th>
+              <th className="min-w-[140px] px-2 py-1.5 text-right font-medium">Reset</th>
+              <th className="w-16 px-2.5 py-1.5 text-right font-medium">State</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
-            {rows.map((row) => (
+            {visible.map((row) => (
               <tr
                 key={row.id}
                 className={
@@ -459,8 +742,8 @@ export function QuotaPanel() {
                 }
               >
                 <td className="px-2.5 py-1.5 font-medium text-on-surface">{row.tool}</td>
-                <td className={`px-2 py-1.5 font-medium ${row.kind === "ai" ? "text-primary" : "text-secondary"}`}>
-                  {row.kind.toUpperCase()}
+                <td className={`px-2 py-1.5 font-medium ${quotaKindClass(row.access_mode || row.kind)}`}>
+                  {(row.access_mode || row.kind).toUpperCase()}
                 </td>
                 <td className={`px-2 py-1.5 ${row.unit === "local" ? "text-secondary" : "text-on-surface-variant"}`}>
                   {row.unit}
@@ -470,14 +753,29 @@ export function QuotaPanel() {
                     <span className={row.tone === "live" ? "font-medium text-primary" : "tnum text-outline"}>{row.used}</span>
                   ) : (
                     <div className="flex items-center gap-2">
-                      <span className="tnum min-w-[70px] text-on-surface">{row.used}</span>
-                      <div className="h-1 w-24 shrink-0 overflow-hidden rounded-full bg-surface-container-highest">
+                      <span className="tnum text-on-surface">{row.used}</span>
+                      <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-surface-container-highest">
                         <div className={`h-1 rounded-full ${quotaBarClass(row.percent)}`} style={{ width: `${row.percent}%` }} />
                       </div>
                     </div>
                   )}
                 </td>
-                <td className="tnum px-2 py-1.5 text-right text-on-surface-variant">{row.remaining}</td>
+                <td className="px-2 py-1.5 text-right">
+                  {row.access_mode === "plugin" || row.kind === "plugin" ? (
+                    <div className="flex flex-wrap justify-end gap-1">
+                      {row.remaining.split(" · ").filter(Boolean).map((host) => (
+                        <span
+                          key={host}
+                          className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[9px] text-on-surface-variant"
+                        >
+                          {host}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="tnum text-on-surface-variant">{row.remaining}</span>
+                  )}
+                </td>
                 <td className={`px-2 py-1.5 text-right ${row.reset === "LOCAL" ? "font-semibold text-secondary" : "tnum text-outline"}`}>
                   {row.reset}
                 </td>
@@ -499,11 +797,14 @@ export function QuotaPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
-        <span>quota source: LMR RAM · OpenAI · Anthropic · Grok · NATS /varz</span>
-        <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
-          <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
+        <span>abonelik: yerel plan · API keys · plugins · LMR sysinfo</span>
+        <div className="flex items-center gap-3">
+          <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
+          <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
+            <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
+          </div>
         </div>
       </div>
     </section>
@@ -520,13 +821,15 @@ export function SettingsPanel() {
   const { policy, savePolicy, model } = useLounge();
 
   return (
-    <section className="space-y-3">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
+      <div className="space-y-3">
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
           <div>
             <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Bağlı araçlar</h2>
             <p className="mt-1 font-body text-[11px] text-on-surface-variant">
-              Claude Desktop, Cursor MCP, LMR ve Ollama yeniden taranır; seçim connected_tools tablosuna yazılır.
+              Claude Desktop, Cursor uygulaması + plugin’leri, Antigravity, LMR ve Ollama yeniden taranır;
+              seçim connected_tools tablosuna yazılır.
             </p>
           </div>
           <Link
@@ -621,28 +924,58 @@ export function SettingsPanel() {
           </div>
         </div>
       </div>
+      </div>
     </section>
   );
 }
 
 export function FleetPanel() {
-  const { report, model } = useLounge();
+  const { report, model, decisionGate, layaEngine } = useLounge();
+  const engineLabel = formatLayaEngineFleetStatus(layaEngine);
+  const downloadPct = layaEnginePercentage(layaEngine);
+  const gateHint =
+    layaEngine?.phase === "downloading" && downloadPct != null
+      ? `${downloadPct}%`
+      : decisionGate?.phase === "ready"
+        ? decisionGate.device || "DecisionGate"
+        : "DecisionGate kapalı";
   const workers = [
     { id: "lounge-kernel", status: report?.ollama.running ? "ready" : "down", model },
     { id: "nats-hub", status: report?.nats.running ? "listening" : "down", model: "lounge.>" },
     { id: "memory-bridge", status: report?.memory.running ? "ready" : "missing", model: "cbm cli" },
+    {
+      id: "openjev-laya",
+      status: engineLabel,
+      model: gateHint,
+    },
   ];
+  const engineTone =
+    layaEngine?.phase === "failed"
+      ? "text-error"
+      : layaEngine?.phase === "downloading"
+        ? "text-on-surface-variant"
+        : "text-secondary";
   return (
-    <section className="rounded-lg border border-outline-variant bg-surface-container">
-      <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+      <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
         <h2 className="font-mono text-xs font-bold tracking-wider uppercase">Worker Fleet</h2>
       </div>
-      <div className="divide-y divide-outline-variant/40 font-mono text-[11px]">
+      <div className="min-h-0 flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-[11px]">
         {workers.map((row) => (
-          <div key={row.id} className="flex items-center justify-between px-3 py-2">
+          <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2">
             <span className="text-on-surface">{row.id}</span>
-            <span className="text-on-surface-variant">{row.model}</span>
-            <span className={row.status === "down" || row.status === "missing" ? "text-error" : "text-secondary"}>{row.status}</span>
+            <span className="min-w-0 truncate text-on-surface-variant">{row.model}</span>
+            <span
+              className={
+                row.id === "openjev-laya"
+                  ? engineTone
+                  : row.status === "down" || row.status === "missing"
+                    ? "text-error"
+                    : "text-secondary"
+              }
+            >
+              {row.status}
+            </span>
           </div>
         ))}
       </div>
@@ -651,18 +984,262 @@ export function FleetPanel() {
 }
 
 export function TelemetryPanel() {
-  const { events, quotas } = useLounge();
+  const {
+    events,
+    quotas,
+    experiences,
+    deadSymbols,
+    projects,
+    decisionTelemetry,
+    decisionLatencyHistory,
+    decisionMsgPerMin,
+    decisionGate,
+  } = useLounge();
+  const subscription = quotas.filter((row) => (row.access_mode || row.kind) === "subscription");
+  const plugins = quotas.filter((row) => (row.access_mode || row.kind) === "plugin");
+  const latencyMs = decisionTelemetry?.latency_ms;
+  const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
+  const msgLive = decisionMsgPerMin > 0;
+
+  const [weekly, setWeekly] = useState(true);
+  const [projectId, setProjectId] = useState<string>("");
+  const [tauriReport, setTauriReport] = useState<AgentEfficiencyReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const tauriHost = isTauri();
+
+  const projectOptions = useMemo(() => {
+    const ids = new Set<string>();
+    for (const p of projects) {
+      if (p.name) ids.add(p.name);
+    }
+    for (const e of experiences) {
+      if (e.project_id) ids.add(e.project_id);
+    }
+    return [...ids].sort();
+  }, [projects, experiences]);
+
+  const browserReport = useMemo(() => {
+    if (tauriHost) return null;
+    return buildBrowserEfficiencyReport({
+      events,
+      experiences,
+      deadSymbols,
+      weekly,
+      projectId: projectId || null,
+    });
+  }, [tauriHost, weekly, projectId, events, experiences, deadSymbols]);
+
+  const report = tauriHost ? tauriReport : browserReport;
+
+  useEffect(() => {
+    if (!tauriHost) return;
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const next = await fetchAgentEfficiencyReport({
+          weekly,
+          projectId: projectId || null,
+        });
+        if (!cancelled) setTauriReport(next);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+          setTauriReport(
+            buildBrowserEfficiencyReport({
+              events,
+              experiences,
+              deadSymbols,
+              weekly,
+              projectId: projectId || null,
+            }),
+          );
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [tauriHost, weekly, projectId, events, experiences, deadSymbols]);
+
+  const rateLabel =
+    report?.dead.rate != null ? `${(report.dead.rate * 100).toFixed(1)}%` : "—";
+
   return (
-    <section className="grid gap-2.5 lg:grid-cols-2">
-      <div className="rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-        <div className="text-[10px] tracking-wider text-outline uppercase">NATS buffer</div>
-        <div className="mt-2 text-2xl font-bold text-on-surface">{events.length}</div>
-        <div className="text-outline">events retained across routes</div>
+    <section className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+      <div className="grid shrink-0 gap-3 md:grid-cols-2">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+          <div className="text-[10px] tracking-wider text-outline uppercase">Laya Decision</div>
+          <div
+            key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
+            className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
+          >
+            {latencyLive ? formatLatencyMs(latencyMs) : "—"}
+          </div>
+          <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
+          <div className="mt-3 min-h-0 flex-1 overflow-auto">
+            {latencyLive ? (
+              <LatencySparkline values={decisionLatencyHistory} />
+            ) : (
+              <span className="text-[10px] text-on-surface-variant">
+                {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
+              </span>
+            )}
+          </div>
+          <div className="mt-auto pt-4 text-[10px] text-outline">
+            lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
+          <div className="text-[10px] tracking-wider text-outline uppercase">MSG / MIN</div>
+          <div
+            key={decisionMsgPerMin}
+            className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
+          >
+            {decisionMsgPerMin}
+          </div>
+          <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
+          <div className="mt-auto pt-4 text-[10px] text-outline">
+            NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
+          </div>
+        </div>
       </div>
-      <div className="rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-        <div className="text-[10px] tracking-wider text-outline uppercase">Quota probes</div>
-        <div className="mt-2 text-2xl font-bold text-on-surface">{quotas.length}</div>
-        <div className="text-outline">infra/ last snapshot</div>
+
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
+          <h2 className="font-mono text-xs font-bold tracking-wider uppercase">
+            Agent Efficiency Report
+          </h2>
+          <span className="text-[10px] text-outline">Ajan Verimlilik Raporu</span>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1.5 font-mono text-[10px] text-on-surface-variant">
+              <input
+                type="checkbox"
+                checked={weekly}
+                onChange={(e) => setWeekly(e.target.checked)}
+                className="accent-primary"
+              />
+              Haftalık (7g)
+            </label>
+            <select
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-[10px] text-on-surface"
+              aria-label="Proje filtresi"
+            >
+              <option value="">Tüm projeler</option>
+              {projectOptions.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={!report}
+              onClick={() => {
+                if (!report) return;
+                const stamp = report.generatedAt.slice(0, 10);
+                downloadMarkdownFile(`agent-efficiency-${stamp}.md`, report.markdown);
+              }}
+              className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-on-surface uppercase enabled:hover:bg-surface-container disabled:opacity-40"
+            >
+              Markdown indir
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[11px]">
+          {loading && !report ? (
+            <p className="text-on-surface-variant">Rapor yükleniyor…</p>
+          ) : null}
+          {error ? (
+            <p className="mb-2 text-[10px] text-error">Tauri rapor hatası · mock gösteriliyor: {error}</p>
+          ) : null}
+          {report ? (
+            <div className="space-y-4">
+              <p className="text-[10px] text-outline">
+                {report.scopeLabel}
+                {isTauri() ? "" : " · tarayıcı"}
+                {loading ? " · yenileniyor…" : ""}
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
+                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                    Toplam failure
+                  </div>
+                  <div className="tnum mt-1 text-xl font-bold text-on-surface">
+                    {report.totalFailures}
+                  </div>
+                  <div className="text-[10px] text-on-surface-variant">ajan × hata/failure</div>
+                </div>
+                <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
+                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                    Cross-Project
+                  </div>
+                  <div className="tnum mt-1 text-xl font-bold text-on-surface">
+                    {report.crossProjectExperienceHits}
+                  </div>
+                  <div className="text-[10px] text-on-surface-variant">
+                    {report.crossProjectWhisperEvents} fısıltı olayı
+                  </div>
+                </div>
+                <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
+                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                    Dead cleanup
+                  </div>
+                  <div className="tnum mt-1 text-xl font-bold text-on-surface">{rateLabel}</div>
+                  <div className="text-[10px] text-on-surface-variant">
+                    kalan {report.dead.remaining}
+                    {report.dead.cleaned != null ? ` · temizlenen ${report.dead.cleaned}` : ""}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h3 className="mb-1.5 text-[10px] font-bold tracking-wider text-outline uppercase">
+                  Ajan başına hata / failure
+                </h3>
+                {report.failuresByAgent.length === 0 ? (
+                  <p className="text-on-surface-variant">Kayıt yok.</p>
+                ) : (
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] text-outline">
+                        <th className="py-1 font-normal">Ajan</th>
+                        <th className="py-1 text-right font-normal">Sayı</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.failuresByAgent.map((row) => (
+                        <tr key={row.agentId} className="border-t border-outline-variant/40">
+                          <td className="py-1.5 text-on-surface">{row.agentId}</td>
+                          <td className="tnum py-1.5 text-right text-on-surface">
+                            {row.failureCount}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              <div className="text-[10px] text-on-surface-variant">
+                <div className="mb-1 font-bold tracking-wider text-outline uppercase">Kaynak</div>
+                <ul className="list-inside list-disc space-y-0.5">
+                  {report.sourceNotes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-outline">{report.dead.note}</p>
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
     </section>
   );

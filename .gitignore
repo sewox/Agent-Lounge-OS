@@ -53,6 +53,8 @@ bridge/codebase-memory-mcp.exe
 # LMR (Lounge Model Runner) — uygulama içi runtime + model deposu
 data/lmr/
 data/ollama/
+data/nats/
+data/laya/
 
 # Local experience store
 experiences/*.sqlite

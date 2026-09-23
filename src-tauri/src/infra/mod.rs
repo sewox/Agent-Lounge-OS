@@ -6,4 +6,7 @@ pub mod quotas;
 
 pub use autodiscover::scan_system;
 pub use bus::BusManager;
-pub use quotas::{probe_quotas, quota_exhausted_for};
+pub use quotas::{
+    check_quota, limit_policy_percent, probe_quotas, quota_blocked_for, quota_exhausted_for,
+    quota_matches_agent,
+};
