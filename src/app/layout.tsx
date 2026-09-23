@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, IBM_Plex_Sans, JetBrains_Mono, Public_Sans } from "next/font/google";
 import { AppShell } from "@/components/app-shell";
+import { CommandPalette } from "@/components/command-palette";
 import { LoungeProvider } from "@/components/lounge-provider";
 import "./globals.css";
 
@@ -30,6 +31,10 @@ const publicSans = Public_Sans({
 export const metadata: Metadata = {
   title: "Agent Lounge OS",
   description: "Yerel ajan orkestrasyon katmanı",
+  icons: {
+    icon: [{ url: "/logo.png", type: "image/png" }],
+    apple: "/logo.png",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -38,9 +43,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="tr"
       className={`${geistSans.variable} ${ibmPlex.variable} ${jetbrains.variable} ${publicSans.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-surface text-on-surface font-body">
+      <body className="h-full overflow-hidden bg-surface text-on-surface font-body">
         <LoungeProvider>
           <AppShell>{children}</AppShell>
+          <CommandPalette />
         </LoungeProvider>
       </body>
     </html>

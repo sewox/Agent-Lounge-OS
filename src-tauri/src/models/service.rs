@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+pub const SERVICE_EVENT: &str = "service-status";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceId {
     Ollama,
     Nats,
     MemoryBridge,
+    Plugin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +46,7 @@ pub struct ServiceReport {
     pub ollama: ServiceHealth,
     pub nats: ServiceHealth,
     pub memory: ServiceHealth,
+    pub plugin: ServiceHealth,
 }
 
 impl ServiceReport {

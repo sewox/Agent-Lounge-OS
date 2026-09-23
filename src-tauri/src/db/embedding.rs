@@ -63,7 +63,7 @@ pub fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
     Some(values)
 }
 
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|token| token.len() > 1)

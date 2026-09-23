@@ -40,7 +40,7 @@ impl Default for RoutingPolicy {
         Self {
             require_user_approval: true,
             on_quota_exhausted: QuotaExhaustedAction::AskThenLocal,
-            local_fallback_agent: "ollama".into(),
+            local_fallback_agent: "lmr".into(),
             local_fallback_model: crate::models::DEFAULT_OLLAMA_MODEL.into(),
             triggers: vec![
                 AgentTrigger {
@@ -62,8 +62,8 @@ impl Default for RoutingPolicy {
                     enabled: true,
                 },
                 AgentTrigger {
-                    agent_id: "ollama".into(),
-                    label: "Ollama (local)".into(),
+                    agent_id: "lmr".into(),
+                    label: "LMR".into(),
                     when: "fallback".into(),
                     enabled: true,
                 },
@@ -78,6 +78,8 @@ pub enum ApprovalKind {
     AgentSwitch,
     QuotaLocalFallback,
     QuotaAbort,
+    SecurityCritical,
+    SecurityRisky,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,7 +130,7 @@ pub fn decide_route(
 
     if quota_exhausted {
         let reason = format!(
-            "{} kotası tükendi (policy={:?})",
+            "{} kotası engellendi (exhausted veya Limit Policy; policy={:?})",
             to, policy.on_quota_exhausted
         );
         return match policy.on_quota_exhausted {
