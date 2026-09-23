@@ -104,6 +104,7 @@ pub fn migrate_telemetry(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn with_conn<T>(store: &ExperienceStore, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let conn = store.conn.lock().expect("experience db lock");
     migrate_telemetry(&conn)?;

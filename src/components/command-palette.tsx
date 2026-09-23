@@ -108,8 +108,18 @@ export function CommandPalette() {
   const [searching, setSearching] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [grokBusy, setGrokBusy] = useState(false);
+  const [wasOpen, setWasOpen] = useState(openCommandPalette);
   const inputRef = useRef<HTMLInputElement>(null);
   const mockMode = !isTauri();
+
+  if (wasOpen !== openCommandPalette) {
+    setWasOpen(openCommandPalette);
+    if (openCommandPalette) {
+      setQuery("");
+      setActive(0);
+      setStatus(null);
+    }
+  }
 
   const close = useCallback(() => {
     setOpenCommandPalette(false);
@@ -134,9 +144,6 @@ export function CommandPalette() {
     if (!openCommandPalette) {
       return;
     }
-    setQuery("");
-    setActive(0);
-    setStatus(null);
     const id = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => window.clearTimeout(id);
   }, [openCommandPalette]);
@@ -344,10 +351,6 @@ export function CommandPalette() {
     switchProject,
   ]);
 
-  useEffect(() => {
-    setActive(0);
-  }, [query, items.length]);
-
   const selectActive = useCallback(() => {
     const item = items[active];
     if (!item || item.disabled) {
@@ -402,7 +405,10 @@ export function CommandPalette() {
           <input
             ref={inputRef}
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActive(0);
+            }}
             onKeyDown={onInputKey}
             placeholder="Switch project · search experience · trigger grok…"
             className="min-w-0 flex-1 bg-transparent font-mono text-sm text-on-surface placeholder:text-outline focus:outline-none"

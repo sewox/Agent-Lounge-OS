@@ -585,6 +585,7 @@ struct GrokTestResult {
 
 /// Command Palette: Grok Bot varsa `lounge.task.requested` → grok_bot (workflow ile aynı yol).
 #[tauri::command]
+#[allow(deprecated)]
 async fn trigger_grok_test(
     bus: tauri::State<'_, BusManager>,
     project_id: Option<String>,

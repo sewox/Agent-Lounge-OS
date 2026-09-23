@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::decision_engine::{
-    apply_user_bias, DecisionResult, SecurityLevel, UserBiasStats, USER_BIAS_APPROVE_THRESHOLD,
+    apply_user_bias, DecisionResult, SecurityLevel, UserBiasStats,
 };
 use crate::models::now_rfc3339;
 
@@ -248,6 +248,7 @@ pub fn with_conn_record_whisper(
 mod tests {
     use super::*;
     use crate::db::ExperienceStore;
+    use crate::kernel::decision_engine::USER_BIAS_APPROVE_THRESHOLD;
     use crate::kernel::decision_engine::{RecallHint, RoutingType, Scored};
     use std::collections::HashMap;
 
@@ -298,6 +299,7 @@ mod tests {
 
     #[test]
     fn three_risky_approves_lower_next_risky_score() {
+        const _: () = assert!(USER_BIAS_APPROVE_THRESHOLD >= 3);
         let store = ExperienceStore::memory().unwrap();
         for i in 0..USER_BIAS_APPROVE_THRESHOLD {
             with_conn_record_security(
@@ -311,7 +313,6 @@ mod tests {
         }
         let lowered = with_conn_bias(&store, decision(SecurityLevel::Risky));
         assert_eq!(lowered.security.value, SecurityLevel::Safe);
-        assert!(USER_BIAS_APPROVE_THRESHOLD >= 3);
     }
 
     #[test]

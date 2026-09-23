@@ -349,25 +349,21 @@ export function VaultPanel() {
     markWhisperUseful,
   } = useLounge();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
+  const [selectionProject, setSelectionProject] = useState(selectedProject);
   const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
 
-  useEffect(() => {
-    if (!selectedProject) {
-      return;
-    }
-    setSelected((current) => {
-      if (current?.kind === "project" && current.name === selectedProject) {
-        return current;
-      }
-      return {
+  if (selectionProject !== selectedProject) {
+    setSelectionProject(selectedProject);
+    if (selectedProject) {
+      setSelected({
         id: `project:${selectedProject}`,
         name: selectedProject,
         kind: "project",
         project: selectedProject,
-      };
-    });
-  }, [selectedProject]);
+      });
+    }
+  }
 
   const fileTotal =
     semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
@@ -1007,9 +1003,10 @@ export function TelemetryPanel() {
 
   const [weekly, setWeekly] = useState(true);
   const [projectId, setProjectId] = useState<string>("");
-  const [report, setReport] = useState<AgentEfficiencyReport | null>(null);
+  const [tauriReport, setTauriReport] = useState<AgentEfficiencyReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const tauriHost = isTauri();
 
   const projectOptions = useMemo(() => {
     const ids = new Set<string>();
@@ -1022,23 +1019,21 @@ export function TelemetryPanel() {
     return [...ids].sort();
   }, [projects, experiences]);
 
-  useEffect(() => {
-    if (isTauri()) return;
-    setReport(
-      buildBrowserEfficiencyReport({
-        events,
-        experiences,
-        deadSymbols,
-        weekly,
-        projectId: projectId || null,
-      }),
-    );
-    setLoading(false);
-    setError(null);
-  }, [weekly, projectId, events, experiences, deadSymbols]);
+  const browserReport = useMemo(() => {
+    if (tauriHost) return null;
+    return buildBrowserEfficiencyReport({
+      events,
+      experiences,
+      deadSymbols,
+      weekly,
+      projectId: projectId || null,
+    });
+  }, [tauriHost, weekly, projectId, events, experiences, deadSymbols]);
+
+  const report = tauriHost ? tauriReport : browserReport;
 
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!tauriHost) return;
     let cancelled = false;
     const load = async () => {
       setLoading(true);
@@ -1048,11 +1043,11 @@ export function TelemetryPanel() {
           weekly,
           projectId: projectId || null,
         });
-        if (!cancelled) setReport(next);
+        if (!cancelled) setTauriReport(next);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
-          setReport(
+          setTauriReport(
             buildBrowserEfficiencyReport({
               events,
               experiences,
@@ -1070,7 +1065,7 @@ export function TelemetryPanel() {
     return () => {
       cancelled = true;
     };
-  }, [weekly, projectId]);
+  }, [tauriHost, weekly, projectId, events, experiences, deadSymbols]);
 
   const rateLabel =
     report?.dead.rate != null ? `${(report.dead.rate * 100).toFixed(1)}%` : "—";
