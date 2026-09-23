@@ -410,9 +410,11 @@ fn score_rows(
             FROM experiences WHERE project_id = ?1
             "#
     } else {
+        // Cross-Project Memory: başarılı tecrübe + ADR satırları (outcome=success).
         r#"
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record, embedding
             FROM experiences
+            WHERE lower(outcome) = 'success'
             "#
     };
     let mut stmt = conn.prepare(sql)?;

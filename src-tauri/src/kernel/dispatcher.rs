@@ -15,8 +15,9 @@ use crate::kernel::decision_engine::{
     lookup_decision, DecisionCache, DecisionResult, RoutingType, SecurityLevel,
 };
 use crate::kernel::policy_manager::{
-    alert_envelope_payload, evaluate_security, is_security_approval, resume_envelope_payload,
-    ALERT_SECURITY, TASK_RESUME,
+    alert_envelope_payload, cancel_envelope_payload, evaluate_security, is_security_approval,
+    is_security_denied_error, resume_envelope_payload, ALERT_SECURITY, SECURITY_DENIED_MARKER,
+    TASK_CANCEL, TASK_RESUME,
 };
 use crate::models::{
     decide_route, default_ollama_model, AnalysisDecision, ApprovalRequest, ExperienceContext,
@@ -195,7 +196,10 @@ impl Dispatcher {
             }
             Err(err) => {
                 log::error!("görev başarısız {}: {err}", task.id);
-                publish_json(nc, TASK_FAILED, &task).await?;
+                // Güvenlik Red zaten lounge.task.failed (cancel) yayınladı.
+                if !is_security_denied_error(&err) {
+                    publish_json(nc, TASK_FAILED, &task).await?;
+                }
             }
         }
         Ok(())
@@ -499,7 +503,16 @@ impl Dispatcher {
                 task.model = Some(local_model.into());
                 Ok(())
             }
-            RoutingVote::Deny => anyhow::bail!("kullanıcı ajan geçişini reddetti"),
+            RoutingVote::Deny => {
+                if is_security_approval(&request.kind) {
+                    let payload = cancel_envelope_payload(&task_id);
+                    if let Err(err) = self.publish_subject(TASK_CANCEL, &payload).await {
+                        log::warn!("lounge.task.failed (cancel) yayınlanamadı: {err}");
+                    }
+                    anyhow::bail!("{SECURITY_DENIED_MARKER}: kullanıcı güvenlik onayını reddetti");
+                }
+                anyhow::bail!("kullanıcı ajan geçişini reddetti")
+            }
         }
     }
 
@@ -907,5 +920,15 @@ mod tests {
         let payload = resume_envelope_payload("task-approve-1");
         assert_eq!(payload["vote"], "approve");
         assert_eq!(payload["task_id"], "task-approve-1");
+    }
+
+    #[test]
+    fn deny_cancel_uses_task_failed_subject() {
+        assert_eq!(TASK_CANCEL, "lounge.task.failed");
+        assert_eq!(TASK_FAILED, "lounge.task.failed");
+        let payload = cancel_envelope_payload("task-deny-1");
+        assert_eq!(payload["vote"], "deny");
+        assert_eq!(payload["status"], "cancelled");
+        assert_eq!(payload["task_id"], "task-deny-1");
     }
 }

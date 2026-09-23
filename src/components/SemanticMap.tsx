@@ -8,6 +8,7 @@ import {
   pageCount,
   pageSlice,
   pathBasename,
+  shortSymbolName,
   type AstNode,
   type CodeReference,
   type ProjectSummary,
@@ -81,18 +82,26 @@ function buildRows(
           continue;
         }
         for (const edge of outgoingRefs(node, project.references).slice(0, REF_PREVIEW)) {
-          const target = byId.get(edge.to_id);
+          const target = byId.get(edge.to_id) ?? byId.get(edge.callee ?? "");
+          const calleeLabel =
+            target?.name ||
+            edge.callee ||
+            shortSymbolName(edge.to_id) ||
+            edge.to_id ||
+            "unknown";
           rows.push({
             key: `ref:${project.name}:${edge.from_id}->${edge.to_id}:${edge.line ?? ""}`,
             selection: {
               id: edge.to_id || target?.id || edge.to_id,
-              name: target?.name || edge.to_id,
-              kind: target?.kind || "ref",
+              name: calleeLabel,
+              kind: target?.kind || "function",
               file: edge.file ?? target?.file ?? null,
               project: project.name,
             },
-            label: `→ ${target?.name || edge.to_id}`,
-            meta: edge.file ? pathBasename(edge.file) || edge.file : "ref",
+            label: `→ ${calleeLabel}`,
+            meta: edge.file
+              ? `CALLS · ${pathBasename(edge.file) || edge.file}`
+              : "CALLS",
             kind: "ref",
             depth: 2,
           });
@@ -171,8 +180,13 @@ function nodeRow(project: string, node: AstNode): MapRow {
 }
 
 function outgoingRefs(node: AstNode, references: CodeReference[]): CodeReference[] {
-  const ids = new Set([node.id, node.name].filter(Boolean));
-  return references.filter((edge) => ids.has(edge.from_id));
+  const ids = new Set(
+    [node.id, node.name, shortSymbolName(node.id)].filter((token) => Boolean(token)),
+  );
+  return references.filter((edge) => {
+    const from = edge.from_id || edge.caller || "";
+    return ids.has(from) || ids.has(shortSymbolName(from));
+  });
 }
 
 function selectionKey(row: SemanticMapSelection | null): string | null {

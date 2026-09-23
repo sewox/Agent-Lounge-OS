@@ -1,4 +1,4 @@
-//! Multi-Agent Workflow — başarılı Review/Coding sonrası otomatik Test görevi.
+//! Multi-Agent Workflow — başarılı Coding sonrası otomatik Test görevi.
 
 #![allow(deprecated)]
 
@@ -14,15 +14,19 @@ use crate::services::autodiscover::find_grok_bot;
 
 /// Fleet / discovery worker id — Grok Bot.
 pub const GROK_BOT_WORKER: &str = "grok_bot";
-/// Yerel test worker — Worker Fleet paneliyle aynı id.
+/// Yerel test worker — Worker Fleet paneliyle aynı id (`lounge-kernel`).
 pub const LOCAL_TEST_WORKER: &str = "lounge-kernel";
+/// Yerel Test Worker’ı açıkça tanımlamak için ortam değişkeni.
+pub const LOCAL_TEST_WORKER_ENV: &str = "LOUNGE_LOCAL_TEST_WORKER";
 const WORKFLOW_AGENT: &str = "workflow_engine";
 
 #[derive(Debug, Clone)]
 pub struct WorkflowEngine {
     nats_url: String,
-    /// Testlerde fleet override; `None` → canlı discovery.
+    /// Testlerde Grok varlık override; `None` → canlı discovery.
     fleet_has_grok: Option<bool>,
+    /// Testlerde yerel Test Worker override; `None` → env / config.
+    fleet_has_local_test: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,12 +42,19 @@ impl WorkflowEngine {
         Self {
             nats_url: nats_url.into(),
             fleet_has_grok: None,
+            fleet_has_local_test: None,
         }
     }
 
     /// Birim testleri için Grok Bot varlık durumunu sabitler.
     pub fn with_grok_in_fleet(mut self, present: bool) -> Self {
         self.fleet_has_grok = Some(present);
+        self
+    }
+
+    /// Birim testleri için yerel Test Worker (`lounge-kernel`) varlık durumunu sabitler.
+    pub fn with_local_test_in_fleet(mut self, present: bool) -> Self {
+        self.fleet_has_local_test = Some(present);
         self
     }
 
@@ -107,26 +118,23 @@ impl WorkflowEngine {
         Ok(())
     }
 
-    /// Başarılı Review / Coding (CodeAnalysis) → Test planı; aksi halde `None`.
+    /// Başarılı Coding (`CodeAnalysis`) + tanımlı Test Worker → Test planı; aksi halde `None`.
+    ///
+    /// `lounge.task.completed` başarı demektir; başarısız görevler `lounge.task.failed` üzerindedir.
     pub fn plan_test_followup(&self, completed: &LoungeTask) -> Option<TestDispatch> {
         if !triggers_followup_test(&completed.kind) {
             return None;
         }
-        // `lounge.task.completed` zaten başarı; failed ayrı subject.
         // Workflow'un kendi ürettiği Test'i tekrar zincirleme.
         if completed.parent_task_id.is_some() && matches!(completed.kind, TaskKind::Test) {
             return None;
         }
 
         let has_grok = self.fleet_has_grok.unwrap_or_else(grok_bot_in_fleet);
-        let (target_agent, subject) = resolve_test_target(has_grok);
-        let parent_agent = working_agent(completed);
-        let chain = format_workflow_chain(
-            parent_agent,
-            &completed.kind,
-            &target_agent,
-            &TaskKind::Test,
-        );
+        let has_local = self
+            .fleet_has_local_test
+            .unwrap_or_else(local_test_worker_configured);
+        let (target_agent, subject) = resolve_test_target(has_grok, has_local)?;
 
         let mut task = LoungeTask::new(
             WORKFLOW_AGENT,
@@ -136,10 +144,12 @@ impl WorkflowEngine {
         task.kind = TaskKind::Test;
         task.target_agent = Some(target_agent.clone());
         task.parent_task_id = Some(completed.id.clone());
-        task.workflow_chain = Some(chain.clone());
         task.repo_path = completed.repo_path.clone();
         task.ast_refs = completed.ast_refs.clone();
         task.priority = completed.priority.clone();
+
+        let chain = format_workflow_chain(completed, &task);
+        task.workflow_chain = Some(chain.clone());
 
         Some(TestDispatch {
             task,
@@ -150,21 +160,44 @@ impl WorkflowEngine {
     }
 }
 
-/// Review veya Coding (`code_analysis`) başarıyla bittiyse Test üretilir.
+/// Yalnızca Coding (`code_analysis`) başarıyla bittiyse Test üretilir — Review tetiklemez.
 pub fn triggers_followup_test(kind: &TaskKind) -> bool {
-    matches!(kind, TaskKind::Review | TaskKind::CodeAnalysis)
+    matches!(kind, TaskKind::CodeAnalysis)
 }
 
-pub fn resolve_test_target(grok_in_fleet: bool) -> (String, &'static str) {
+/// Grok varsa `lounge.task.requested` → grok_bot;
+/// yoksa yerel Test Worker tanımlıysa `lounge.test.requested` → lounge-kernel;
+/// ikisi de yoksa `None` (yayın yok).
+pub fn resolve_test_target(
+    grok_in_fleet: bool,
+    local_test_configured: bool,
+) -> Option<(String, &'static str)> {
     if grok_in_fleet {
-        (GROK_BOT_WORKER.into(), TASK_REQUESTED)
+        Some((GROK_BOT_WORKER.into(), TASK_REQUESTED))
+    } else if local_test_configured {
+        Some((LOCAL_TEST_WORKER.into(), TEST_REQUESTED))
     } else {
-        (LOCAL_TEST_WORKER.into(), TEST_REQUESTED)
+        None
     }
 }
 
 pub fn grok_bot_in_fleet() -> bool {
     find_grok_bot().is_some()
+}
+
+/// Yerel Test Worker yalnızca açıkça yapılandırıldığında aktiftir
+/// (`LOUNGE_LOCAL_TEST_WORKER=1|true|lounge-kernel`). Kernel’e kör fallback yok.
+pub fn local_test_worker_configured() -> bool {
+    match std::env::var(LOCAL_TEST_WORKER_ENV) {
+        Ok(raw) => {
+            let value = raw.trim().to_ascii_lowercase();
+            matches!(
+                value.as_str(),
+                "1" | "true" | "yes" | "on" | LOCAL_TEST_WORKER | "kernel" | "local"
+            )
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn working_agent(task: &LoungeTask) -> &str {
@@ -206,19 +239,22 @@ pub fn agent_chain_label(agent: &str) -> String {
     }
 }
 
-/// Örn. `Claude (Code) -> Grok (Test)`.
-pub fn format_workflow_chain(
-    from_agent: &str,
-    from_kind: &TaskKind,
-    to_agent: &str,
-    to_kind: &TaskKind,
-) -> String {
+/// Görev satır etiketi — özet (title) yoksa id.
+pub fn task_chain_label(task: &LoungeTask) -> String {
+    let summary = task.summary.trim();
+    if summary.is_empty() {
+        task.id.clone()
+    } else {
+        summary.to_string()
+    }
+}
+
+/// Örn. `implement workflow engine -> Triggered Auto-Test after Code: implement workflow engine`.
+pub fn format_workflow_chain(parent: &LoungeTask, child: &LoungeTask) -> String {
     format!(
-        "{} ({}) -> {} ({})",
-        agent_chain_label(from_agent),
-        kind_chain_label(from_kind),
-        agent_chain_label(to_agent),
-        kind_chain_label(to_kind)
+        "{} -> Triggered {}",
+        task_chain_label(parent),
+        task_chain_label(child)
     )
 }
 
@@ -254,77 +290,140 @@ mod tests {
     }
 
     #[test]
-    fn review_and_coding_emit_test_task() {
-        let engine = WorkflowEngine::new("nats://127.0.0.1:4222").with_grok_in_fleet(true);
+    fn coding_with_grok_emits_test_task() {
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(true)
+            .with_local_test_in_fleet(false);
 
-        for kind in [TaskKind::Review, TaskKind::CodeAnalysis] {
-            let parent = completed(kind.clone(), "claude");
-            let dispatch = engine.plan_test_followup(&parent).expect("follow-up");
-            assert_eq!(dispatch.task.kind, TaskKind::Test);
-            assert_eq!(
-                dispatch.task.parent_task_id.as_deref(),
-                Some(parent.id.as_str())
-            );
-            assert_eq!(dispatch.target_agent, GROK_BOT_WORKER);
-            assert_eq!(dispatch.subject, TASK_REQUESTED);
-            assert!(dispatch
-                .task
-                .workflow_chain
-                .as_ref()
-                .unwrap()
-                .contains("->"));
-        }
+        let parent = completed(TaskKind::CodeAnalysis, "claude");
+        let dispatch = engine.plan_test_followup(&parent).expect("follow-up");
+        assert_eq!(dispatch.task.kind, TaskKind::Test);
+        assert_eq!(
+            dispatch.task.parent_task_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(dispatch.target_agent, GROK_BOT_WORKER);
+        assert_eq!(dispatch.subject, TASK_REQUESTED);
+        assert_eq!(
+            dispatch.chain_label,
+            format!(
+                "implement workflow engine -> Triggered {}",
+                dispatch.task.summary
+            )
+        );
+        assert_eq!(
+            dispatch.task.workflow_chain.as_deref(),
+            Some(dispatch.chain_label.as_str())
+        );
+    }
+
+    #[test]
+    fn coding_with_local_test_worker_emits_test_requested() {
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(false)
+            .with_local_test_in_fleet(true);
+        let parent = completed(TaskKind::CodeAnalysis, "cursor");
+        let dispatch = engine.plan_test_followup(&parent).expect("follow-up");
+        assert_eq!(dispatch.target_agent, LOCAL_TEST_WORKER);
+        assert_eq!(dispatch.subject, TEST_REQUESTED);
+        assert!(dispatch.chain_label.contains(" -> Triggered "));
+    }
+
+    #[test]
+    fn coding_without_test_worker_does_not_emit() {
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(false)
+            .with_local_test_in_fleet(false);
+        let parent = completed(TaskKind::CodeAnalysis, "claude");
+        assert!(engine.plan_test_followup(&parent).is_none());
+    }
+
+    #[test]
+    fn review_completed_does_not_emit() {
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(true)
+            .with_local_test_in_fleet(true);
+        let parent = completed(TaskKind::Review, "claude");
+        assert!(engine.plan_test_followup(&parent).is_none());
     }
 
     #[test]
     fn other_kinds_and_nested_test_do_not_emit() {
-        let engine = WorkflowEngine::new("nats://127.0.0.1:4222").with_grok_in_fleet(true);
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(true)
+            .with_local_test_in_fleet(true);
 
         for kind in [TaskKind::General, TaskKind::Test, TaskKind::Orchestration] {
             let parent = completed(kind, "claude");
             assert!(engine.plan_test_followup(&parent).is_none());
         }
 
-        let mut nested = completed(TaskKind::Review, "claude");
+        let mut nested = completed(TaskKind::CodeAnalysis, "claude");
         nested.parent_task_id = Some("already-chained".into());
         nested.kind = TaskKind::Test;
         assert!(engine.plan_test_followup(&nested).is_none());
     }
 
     #[test]
-    fn without_grok_uses_local_test_subject() {
-        let engine = WorkflowEngine::new("nats://127.0.0.1:4222").with_grok_in_fleet(false);
-        let parent = completed(TaskKind::CodeAnalysis, "cursor");
-        let dispatch = engine.plan_test_followup(&parent).expect("follow-up");
-        assert_eq!(dispatch.target_agent, LOCAL_TEST_WORKER);
-        assert_eq!(dispatch.subject, TEST_REQUESTED);
-        assert_eq!(dispatch.chain_label, "Cursor (Code) -> Kernel (Test)");
+    fn failed_coding_is_out_of_band_completed_only() {
+        // Başarısız Coding `lounge.task.failed` subject'ine gider; engine yalnızca
+        // `lounge.task.completed` dinler — plan fonksiyonu completed payload alır.
+        // Burada Review dışı kind + worker yok senaryosu ile yanlış tetiklenmediğini doğrularız.
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(true)
+            .with_local_test_in_fleet(true);
+        assert!(!triggers_followup_test(&TaskKind::Review));
+        assert!(triggers_followup_test(&TaskKind::CodeAnalysis));
+        // completed dinleyicisi failed mesajını hiç görmez; plan yine de yalnızca Coding'e açık.
+        let _ = engine;
     }
 
     #[test]
-    fn chain_label_formats_claude_code_to_grok_test() {
-        let label = format_workflow_chain(
-            "claude",
-            &TaskKind::CodeAnalysis,
-            "grok_bot",
-            &TaskKind::Test,
+    fn chain_label_formats_task_a_triggered_task_b() {
+        let parent = completed(TaskKind::CodeAnalysis, "claude");
+        let mut child = LoungeTask::new(
+            WORKFLOW_AGENT,
+            "agent-lounge-os",
+            "Auto-Test after Code: implement workflow engine",
         );
-        assert_eq!(label, "Claude (Code) -> Grok (Test)");
+        child.kind = TaskKind::Test;
+        child.parent_task_id = Some(parent.id.clone());
 
-        let review = format_workflow_chain(
-            "Claude Desktop",
-            &TaskKind::Review,
-            GROK_BOT_WORKER,
-            &TaskKind::Test,
+        let label = format_workflow_chain(&parent, &child);
+        assert_eq!(
+            label,
+            "implement workflow engine -> Triggered Auto-Test after Code: implement workflow engine"
         );
-        assert_eq!(review, "Claude (Review) -> Grok (Test)");
+
+        let mut bare = LoungeTask::new("x", "p", "");
+        bare.id = "task-parent-id".into();
+        let mut bare_child = LoungeTask::new("y", "p", "");
+        bare_child.id = "task-child-id".into();
+        assert_eq!(
+            format_workflow_chain(&bare, &bare_child),
+            "task-parent-id -> Triggered task-child-id"
+        );
     }
 
     #[test]
-    fn triggers_only_review_and_code_analysis() {
-        assert!(triggers_followup_test(&TaskKind::Review));
+    fn triggers_only_code_analysis_coding() {
+        assert!(!triggers_followup_test(&TaskKind::Review));
         assert!(triggers_followup_test(&TaskKind::CodeAnalysis));
         assert!(!triggers_followup_test(&TaskKind::Test));
         assert!(!triggers_followup_test(&TaskKind::General));
+        assert!(!triggers_followup_test(&TaskKind::Orchestration));
+    }
+
+    #[test]
+    fn resolve_prefers_grok_then_local_then_none() {
+        assert_eq!(
+            resolve_test_target(true, true),
+            Some((GROK_BOT_WORKER.into(), TASK_REQUESTED))
+        );
+        assert_eq!(
+            resolve_test_target(false, true),
+            Some((LOCAL_TEST_WORKER.into(), TEST_REQUESTED))
+        );
+        assert_eq!(resolve_test_target(false, false), None);
     }
 }

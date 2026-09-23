@@ -35,11 +35,25 @@ pub struct AstNode {
     pub ref_count: u64,
 }
 
+/// Caller → callee kenarı. `from_id` / `to_id` birincil alanlar;
+/// CBM `CALLS` ve CLI JSON'unda `caller` / `callee` / `source_id` / `target_id` alias olarak gelir.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct CodeReference {
-    #[serde(default, alias = "from", alias = "source")]
+    #[serde(
+        default,
+        alias = "from",
+        alias = "source",
+        alias = "source_id",
+        alias = "caller"
+    )]
     pub from_id: String,
-    #[serde(default, alias = "to", alias = "target")]
+    #[serde(
+        default,
+        alias = "to",
+        alias = "target",
+        alias = "target_id",
+        alias = "callee"
+    )]
     pub to_id: String,
     #[serde(default)]
     pub file: Option<String>,

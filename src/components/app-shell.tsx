@@ -109,7 +109,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         >
           <div className="w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-error-dim uppercase">
-              Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} · Suspending
+              Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} ·
+              PENDING_APPROVAL
             </p>
             <h2
               id="security-overlay-title"

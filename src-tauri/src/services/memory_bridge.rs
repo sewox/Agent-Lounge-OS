@@ -15,6 +15,9 @@ use crate::models::{
 };
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(120);
+/// Semantic map UI için üst sınır — viewport kilitli listede sayfalama var.
+const SEMANTIC_NODE_LIMIT: u32 = 400;
+const SEMANTIC_CALL_LIMIT: u32 = 800;
 
 #[derive(Clone)]
 pub struct MemoryBridge {
@@ -75,7 +78,94 @@ impl MemoryBridge {
                 "json",
             ])
             .await?;
-        parse_index_graph(&stdout, &repo_path)
+        let mut graph = parse_index_graph(&stdout, &repo_path)?;
+        // index_repository yalnızca nodes/edges sayımı döner; gerçek CALLS kenarları query_graph'tan.
+        if graph.nodes.is_empty() || graph.references.is_empty() {
+            if let Err(err) = self.enrich_from_call_graph(&mut graph).await {
+                log::warn!("semantic map call-graph enrich atlandı: {err}");
+            }
+        }
+        Ok(graph)
+    }
+
+    /// codebase-memory-mcp `query_graph` ile Function/Method düğümleri + CALLS (caller→callee).
+    async fn enrich_from_call_graph(&self, graph: &mut IndexGraph) -> Result<()> {
+        let project = graph.project.trim();
+        if project.is_empty() {
+            return Ok(());
+        }
+
+        if graph.nodes.is_empty() {
+            let nodes = self.fetch_ast_nodes(project).await?;
+            if !nodes.is_empty() {
+                graph.nodes = nodes;
+            }
+        }
+        if graph.references.is_empty() {
+            let edges = self.fetch_call_edges(project).await?;
+            if !edges.is_empty() {
+                graph.references = edges;
+            }
+        }
+
+        apply_ref_counts(&mut graph.nodes, &graph.references);
+        if graph.dead.is_empty() && (!graph.nodes.is_empty() || !graph.references.is_empty()) {
+            graph.dead = derive_dead(&graph.nodes, &graph.references, project);
+            for item in &mut graph.dead {
+                if item.project_id.is_none() {
+                    item.project_id = Some(project.to_string());
+                }
+            }
+        }
+        graph.node_count = graph.node_count.max(graph.nodes.len() as u64);
+        graph.edge_count = graph.edge_count.max(graph.references.len() as u64);
+        if graph.files.unwrap_or(0) == 0 {
+            graph.files = Some(graph.unique_file_count());
+        }
+        Ok(())
+    }
+
+    async fn fetch_ast_nodes(&self, project: &str) -> Result<Vec<AstNode>> {
+        let mut nodes = Vec::new();
+        for (label, kind) in [("Function", "function"), ("Method", "method")] {
+            let query = format!(
+                "MATCH (f:{label}) RETURN f.name AS name, f.qualified_name AS id, \
+                 f.file_path AS file, f.start_line AS line LIMIT {SEMANTIC_NODE_LIMIT}"
+            );
+            let payload = self.query_graph_json(project, &query).await?;
+            nodes.extend(ast_nodes_from_query(&payload, kind));
+            if nodes.len() >= SEMANTIC_NODE_LIMIT as usize {
+                nodes.truncate(SEMANTIC_NODE_LIMIT as usize);
+                break;
+            }
+        }
+        Ok(nodes)
+    }
+
+    async fn fetch_call_edges(&self, project: &str) -> Result<Vec<CodeReference>> {
+        let query = format!(
+            "MATCH (caller)-[r:CALLS]->(callee) \
+             RETURN caller.name AS caller, callee.name AS callee, \
+             caller.qualified_name AS from_id, callee.qualified_name AS to_id, \
+             caller.file_path AS file, r.line AS line LIMIT {SEMANTIC_CALL_LIMIT}"
+        );
+        let payload = self.query_graph_json(project, &query).await?;
+        Ok(call_edges_from_query(&payload))
+    }
+
+    async fn query_graph_json(&self, project: &str, query: &str) -> Result<Value> {
+        let stdout = self
+            .run_cli(&[
+                "query_graph",
+                "--project",
+                project,
+                "--query",
+                query,
+                "--format",
+                "json",
+            ])
+            .await?;
+        parse_cli_json(&stdout)
     }
 
     pub async fn index_repository(&self, repo_path: impl AsRef<Path>) -> Result<IndexSnapshot> {
@@ -387,8 +477,13 @@ fn reference_from_value(value: &Value) -> Option<CodeReference> {
     if !value.is_object() {
         return None;
     }
-    let from_id = json_str(value, &["from", "source", "from_id", "caller"]).unwrap_or_default();
-    let to_id = json_str(value, &["to", "target", "to_id", "callee"]).unwrap_or_default();
+    // source_id/target_id CBM kenar kimlikleri; callee property kısa isim olabilir — sonda fallback.
+    let from_id =
+        json_str(value, &["from_id", "source_id", "from", "source", "caller"]).unwrap_or_default();
+    let mut to_id = json_str(value, &["to_id", "target_id", "to", "target"]).unwrap_or_default();
+    if to_id.is_empty() {
+        to_id = json_str(value, &["callee"]).unwrap_or_default();
+    }
     if from_id.is_empty() && to_id.is_empty() {
         return None;
     }
@@ -398,6 +493,117 @@ fn reference_from_value(value: &Value) -> Option<CodeReference> {
         file: json_str(value, &["file", "path", "file_path"]),
         line: json_i64(value, &["line", "lineno", "loc"]),
     })
+}
+
+/// `query_graph` satır tablosu → AST düğümleri.
+fn ast_nodes_from_query(value: &Value, default_kind: &str) -> Vec<AstNode> {
+    let rows = query_graph_maps(value);
+    let mut nodes = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row_str(&row, &["id", "qualified_name", "name"]).unwrap_or_default();
+        let name = row_str(&row, &["name", "id"]).unwrap_or_else(|| id.clone());
+        if id.is_empty() && name.is_empty() {
+            continue;
+        }
+        nodes.push(AstNode {
+            id: if id.is_empty() { name.clone() } else { id },
+            name,
+            kind: row_str(&row, &["kind", "label", "type"]).unwrap_or_else(|| default_kind.into()),
+            file: row_str(&row, &["file", "file_path", "path"]),
+            line: row_i64(&row, &["line", "start_line", "lineno"]),
+            ref_count: 0,
+        });
+    }
+    nodes
+}
+
+/// `query_graph` CALLS satırları → caller/callee referansları (`from_id`/`to_id`).
+fn call_edges_from_query(value: &Value) -> Vec<CodeReference> {
+    let rows = query_graph_maps(value);
+    let mut edges = Vec::with_capacity(rows.len());
+    for row in rows {
+        let from_id =
+            row_str(&row, &["from_id", "caller", "source_id", "source"]).unwrap_or_default();
+        let to_id = row_str(&row, &["to_id", "callee", "target_id", "target"]).unwrap_or_default();
+        if from_id.is_empty() && to_id.is_empty() {
+            continue;
+        }
+        edges.push(CodeReference {
+            from_id,
+            to_id,
+            file: row_str(&row, &["file", "file_path", "path"]),
+            line: row_i64(&row, &["line", "lineno", "loc"]),
+        });
+    }
+    edges
+}
+
+fn query_graph_maps(value: &Value) -> Vec<HashMap<String, Value>> {
+    let columns: Vec<String> = value
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|cols| {
+            cols.iter()
+                .filter_map(|col| col.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(rows) = value.get("rows").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let cells = row.as_array()?;
+            let mut map = HashMap::new();
+            for (idx, cell) in cells.iter().enumerate() {
+                let key = columns
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("c{idx}"));
+                map.insert(key, cell.clone());
+            }
+            Some(map)
+        })
+        .collect()
+}
+
+fn row_str(row: &HashMap<String, Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(item) = row.get(*key) {
+            if let Some(text) = item.as_str() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+            if let Some(n) = item.as_i64() {
+                return Some(n.to_string());
+            }
+            if let Some(n) = item.as_u64() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn row_i64(row: &HashMap<String, Value>, keys: &[&str]) -> Option<i64> {
+    for key in keys {
+        if let Some(item) = row.get(*key) {
+            if let Some(n) = item.as_i64() {
+                return Some(n);
+            }
+            if let Some(n) = item.as_u64() {
+                return Some(n as i64);
+            }
+            if let Some(text) = item.as_str() {
+                if let Ok(n) = text.parse::<i64>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn parse_dead_from_value(value: &Value, project: String) -> Vec<DeadSymbol> {
@@ -704,6 +910,60 @@ mod tests {
             .dead
             .iter()
             .any(|row| row.kind == "broken" && row.name == "lost"));
+    }
+
+    #[test]
+    fn parses_query_graph_calls_as_caller_callee_edges() {
+        let payload: Value = serde_json::from_str(
+            r#"{
+              "columns":["caller","callee","from_id","to_id","file","line"],
+              "rows":[
+                ["AppShell","useLounge","qn.AppShell","qn.useLounge","src/app-shell.tsx","70"],
+                ["main","ghost","qn.main","qn.ghost","src/main.rs",""]
+              ]
+            }"#,
+        )
+        .unwrap();
+        let edges = call_edges_from_query(&payload);
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].from_id, "qn.AppShell");
+        assert_eq!(edges[0].to_id, "qn.useLounge");
+        assert_eq!(edges[0].file.as_deref(), Some("src/app-shell.tsx"));
+        assert_eq!(edges[0].line, Some(70));
+        assert_eq!(edges[1].from_id, "qn.main");
+        assert_eq!(edges[1].to_id, "qn.ghost");
+    }
+
+    #[test]
+    fn parses_query_graph_functions_as_ast_nodes() {
+        let payload: Value = serde_json::from_str(
+            r#"{
+              "columns":["name","id","file","line"],
+              "rows":[["VaultPanel","qn.VaultPanel","src/components/panels.tsx","330"]]
+            }"#,
+        )
+        .unwrap();
+        let nodes = ast_nodes_from_query(&payload, "function");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "VaultPanel");
+        assert_eq!(nodes[0].id, "qn.VaultPanel");
+        assert_eq!(nodes[0].kind, "function");
+        assert_eq!(nodes[0].line, Some(330));
+    }
+
+    #[test]
+    fn reference_prefers_source_target_ids_over_callee_prop() {
+        let edge = reference_from_value(&serde_json::json!({
+            "source_id": "caller.qn",
+            "target_id": "callee.qn",
+            "callee": "shortName",
+            "file": "a.rs",
+            "line": 3
+        }))
+        .unwrap();
+        assert_eq!(edge.from_id, "caller.qn");
+        assert_eq!(edge.to_id, "callee.qn");
+        assert_eq!(edge.line, Some(3));
     }
 
     #[tokio::test]

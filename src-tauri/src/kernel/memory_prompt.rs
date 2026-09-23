@@ -1,12 +1,18 @@
-//! DecisionGate KNOWLEDGE_HIT → get_relevant_context / fast_retrieve → NATS fısıltı.
+//! DecisionGate CONTEXT_MATCH / KNOWLEDGE_HIT → get_relevant_context → NATS fısıltı.
+//!
+//! Kanonik konu: `lounge.context.whisper`. Ajan (Claude/Cursor) enjeksiyonu için aynı
+//! `SystemPromptAddon` ayrıca `lounge.agent.prompt` üzerinde de yayınlanır.
 
 use anyhow::Result;
 
 use crate::db::{knowledge_hit_triggers, ExperienceStore, FastRetrieveQuery};
 use crate::infra::BusManager;
 use crate::kernel::decision_engine::DecisionResult;
-use crate::models::{is_kernel, now_rfc3339, SystemPromptAddon, CONTEXT_WHISPER, KERNEL_AGENT};
+use crate::models::{
+    is_kernel, now_rfc3339, SystemPromptAddon, AGENT_PROMPT, CONTEXT_WHISPER, KERNEL_AGENT,
+};
 
+/// CONTEXT_MATCH eşiği aşıldığında çapraz-proje bağlamı üretir ve NATS'a fısıldar.
 pub async fn inject_knowledge_hit(
     store: &ExperienceStore,
     bus: &BusManager,
@@ -15,14 +21,16 @@ pub async fn inject_knowledge_hit(
     let Some(addon) = build_knowledge_whisper(store, result).await? else {
         return Ok(None);
     };
-    let mut envelope = lounge_protocol::LoungeMessage::new(
-        CONTEXT_WHISPER,
-        KERNEL_AGENT,
-        serde_json::to_value(&addon)?,
-    );
-    envelope.target_agent = Some(addon.target_agent.clone());
-    envelope.created_at = now_rfc3339();
-    bus.publish(&envelope).await?;
+    for subject in whisper_publish_subjects() {
+        let mut envelope = lounge_protocol::LoungeMessage::new(
+            subject,
+            KERNEL_AGENT,
+            serde_json::to_value(&addon)?,
+        );
+        envelope.target_agent = Some(addon.target_agent.clone());
+        envelope.created_at = now_rfc3339();
+        bus.publish(&envelope).await?;
+    }
     Ok(Some(addon))
 }
 
@@ -42,6 +50,7 @@ pub async fn build_knowledge_whisper(
         ast_refs: result.recall.ast_refs.clone(),
         limit: Some(4),
     };
+    // get_relevant_context / fast_retrieve: SQLite + vektör, proje kapsamı yok (cross).
     let context = store.fast_retrieve(query).await?;
     if context.is_empty() {
         return Ok(None);
@@ -53,6 +62,15 @@ pub async fn build_knowledge_whisper(
         result.knowledge_hit,
         context,
     )))
+}
+
+/// Kanonik fısıltı + (gerekirse) ajan prompt enjeksiyon konusu.
+pub fn whisper_publish_subjects() -> Vec<&'static str> {
+    let mut subjects = vec![CONTEXT_WHISPER];
+    if AGENT_PROMPT != CONTEXT_WHISPER {
+        subjects.push(AGENT_PROMPT);
+    }
+    subjects
 }
 
 fn prompt_target(result: &DecisionResult) -> String {
@@ -132,13 +150,17 @@ mod tests {
     }
 
     #[test]
-    fn whisper_subject_is_agent_prompt() {
-        assert_eq!(CONTEXT_WHISPER, "lounge.agent.prompt");
-        assert_eq!(CONTEXT_WHISPER, AGENT_PROMPT);
+    fn whisper_subject_is_context_whisper() {
+        assert_eq!(CONTEXT_WHISPER, "lounge.context.whisper");
+        assert_ne!(CONTEXT_WHISPER, AGENT_PROMPT);
         let raw = include_str!("../../../shared/lounge_protocol/subjects.json");
         let json: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert_eq!(json["context"]["whisper"], CONTEXT_WHISPER);
-        assert_eq!(json["agent"]["prompt"], CONTEXT_WHISPER);
+        assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
+        assert_eq!(
+            whisper_publish_subjects(),
+            vec![CONTEXT_WHISPER, AGENT_PROMPT]
+        );
     }
 
     #[tokio::test]
@@ -188,6 +210,15 @@ mod tests {
             "prompt addon tecrübe metni içermeli"
         );
         assert!(addon.knowledge_hit >= 0.3);
+        assert!(
+            !addon.context.experiences.is_empty(),
+            "injection payload tecrübe içermeli"
+        );
+        assert_eq!(
+            whisper_publish_subjects()[0],
+            "lounge.context.whisper",
+            "kanonik fısıltı konusu"
+        );
 
         let context = get_relevant_context(&store, result.recall.query.clone())
             .await
@@ -196,5 +227,16 @@ mod tests {
             !context.is_empty(),
             "get_relevant_context çapraz proje bulmalı"
         );
+        assert_eq!(context.experiences[0].project_id, "sister-os");
+    }
+
+    #[tokio::test]
+    async fn empty_store_match_does_not_whisper() {
+        let store = ExperienceStore::memory().unwrap();
+        let result = decision(0.9, "dispatcher NATS mesajlarını dinle", TASK_REQUESTED);
+        assert!(build_knowledge_whisper(&store, &result)
+            .await
+            .unwrap()
+            .is_none());
     }
 }
