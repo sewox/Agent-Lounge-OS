@@ -8,7 +8,11 @@ import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { daemonLabel, daemonTone, Pip } from "@/components/ui";
-import type { DecisionGateStatus } from "@/lib/lounge";
+import {
+  isSecurityApproval,
+  SECURITY_OVERLAY_PROMPT,
+  type DecisionGateStatus,
+} from "@/lib/lounge";
 
 export type NavId =
   | "dashboard"
@@ -86,7 +90,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       decisionGate?.phase !== "ready" &&
       !layaDismissed &&
       layaEngine?.phase !== "downloading");
-  const statusBanner = approval || indexing || indexNotice || layaBanner;
+  const securityHold = Boolean(approval && isSecurityApproval(approval.kind));
+  const statusBanner =
+    (approval && !securityHold) || indexing || indexNotice || layaBanner;
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-50"
@@ -94,7 +100,47 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex h-screen overflow-hidden bg-surface text-on-surface">
-      {approval ? (
+      {securityHold && approval ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="security-overlay-title"
+        >
+          <div className="w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg">
+            <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-error-dim uppercase">
+              Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} · Suspending
+            </p>
+            <h2
+              id="security-overlay-title"
+              className="mt-3 font-body text-base font-semibold text-on-surface"
+            >
+              {SECURITY_OVERLAY_PROMPT}
+            </h2>
+            <p className="mt-2 truncate font-mono text-[11px] text-outline">
+              {approval.from_agent} · {approval.summary}
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => void resolveApproval("deny")}
+                className="rounded border border-error bg-error-container px-3 py-1.5 font-mono text-[11px] text-on-error-container"
+              >
+                Reddet
+              </button>
+              <button
+                type="button"
+                onClick={() => void resolveApproval("approve")}
+                className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
+              >
+                Onayla
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {approval && !securityHold ? (
         <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="min-w-0 truncate text-on-surface">

@@ -10,7 +10,7 @@ use db::ExperienceStore;
 use infra::BusManager;
 use kernel::{
     default_model_lock, inject_knowledge_hit, DecisionGate, DecisionGatePhase, DecisionGateStatus,
-    Dispatcher, InferMeter, LoungeTelemetry, DECISION_GATE_EVENT,
+    Dispatcher, InferMeter, LoungeTelemetry, WorkflowEngine, DECISION_GATE_EVENT,
 };
 use lounge_protocol::LoungeMessage;
 use models::{
@@ -102,6 +102,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             )
             .with_decision_cache(gate.cache());
             dispatcher.attach_app(app.handle().clone());
+            let workflow = WorkflowEngine::new("nats://127.0.0.1:4222");
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let models = ModelManager::with_nats_url(bus.nats_url());
             let handle = app.handle().clone();
@@ -170,6 +171,12 @@ pub fn run_with_start_route(start_route: &'static str) {
                 spawn_supervisor(supervisor_handle, supervisor_services);
                 spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
+                let workflow_listen = workflow.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = workflow_listen.listen().await {
+                        log::error!("workflow_engine durdu: {err}");
+                    }
+                });
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
                 }

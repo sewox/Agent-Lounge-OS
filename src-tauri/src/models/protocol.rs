@@ -8,8 +8,14 @@ pub const TASK_REQUESTED: &str = "lounge.task.requested";
 pub const TASK_ASSIGNED: &str = "lounge.task.assigned";
 pub const TASK_COMPLETED: &str = "lounge.task.completed";
 pub const TASK_FAILED: &str = "lounge.task.failed";
+pub const TASK_RESUME: &str = "lounge.task.resume";
+pub const ALERT_SECURITY: &str = "lounge.alert.security";
 pub const EXPERIENCE_REPORTED: &str = "lounge.experience.reported";
 pub const AGENT_PROMPT: &str = "lounge.agent.prompt";
+/// Cross-Project Memory "fısıltı" — `subjects.json` `agent.prompt` ile aynı NATS konusu.
+pub const CONTEXT_WHISPER: &str = AGENT_PROMPT;
+pub const TEST_REQUESTED: &str = "lounge.test.requested";
+pub const TEST_COMPLETED: &str = "lounge.test.completed";
 pub const TELEMETRY_DECISION: &str = "lounge.telemetry.decision";
 pub const INFRA_STATUS: &str = "lounge.infra.status";
 
@@ -62,6 +68,12 @@ pub struct LoungeTask {
     pub repo_path: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Zincirleme workflow: bu görevi tetikleyen tamamlanmış ebeveyn id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    /// Event Stream etiketi — örn. `Claude (Code) -> Grok (Test)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_chain: Option<String>,
 }
 
 impl LoungeTask {
@@ -83,6 +95,8 @@ impl LoungeTask {
             kind: TaskKind::General,
             repo_path: None,
             model: None,
+            parent_task_id: None,
+            workflow_chain: None,
         }
     }
 
@@ -439,8 +453,14 @@ mod tests {
         assert_eq!(json["task"]["assigned"], TASK_ASSIGNED);
         assert_eq!(json["task"]["completed"], TASK_COMPLETED);
         assert_eq!(json["task"]["failed"], TASK_FAILED);
+        assert_eq!(json["task"]["resume"], TASK_RESUME);
+        assert_eq!(json["alert"]["security"], ALERT_SECURITY);
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
         assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
+        assert_eq!(json["context"]["whisper"], CONTEXT_WHISPER);
+        assert_eq!(CONTEXT_WHISPER, AGENT_PROMPT);
+        assert_eq!(json["test"]["requested"], TEST_REQUESTED);
+        assert_eq!(json["test"]["completed"], TEST_COMPLETED);
         assert_eq!(json["telemetry"]["decision"], TELEMETRY_DECISION);
         assert_eq!(json["infra"]["status"], INFRA_STATUS);
         assert_eq!(json["bus"]["connected"], "lounge.bus.connected");

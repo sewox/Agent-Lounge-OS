@@ -12,7 +12,11 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::db::{lexical_embedding, ExperienceStore, FastRetrieveQuery};
 use crate::infra::{probe_quotas, quota_exhausted_for};
 use crate::kernel::decision_engine::{
-    lookup_decision, security_approval, DecisionCache, DecisionResult, RoutingType,
+    lookup_decision, DecisionCache, DecisionResult, RoutingType, SecurityLevel,
+};
+use crate::kernel::policy_manager::{
+    alert_envelope_payload, evaluate_security, is_security_approval, resume_envelope_payload,
+    ALERT_SECURITY, TASK_RESUME,
 };
 use crate::models::{
     decide_route, default_ollama_model, AnalysisDecision, ApprovalRequest, ExperienceContext,
@@ -384,8 +388,7 @@ impl Dispatcher {
     }
 
     /// Kullanıcı tercihi + kota; harici ajan geçişi onaysız olamaz.
-    /// Testlerde `stub_decision` varken kota onayı beklenmez; SecurityCritical yine de sorulur
-    /// yalnızca stub yokken.
+    /// Testlerde `stub_decision` varken kota onayı beklenmez; güvenlik askısı stub yokken.
     async fn apply_routing_policy(
         &self,
         task: &mut LoungeTask,
@@ -393,7 +396,7 @@ impl Dispatcher {
     ) -> Result<()> {
         if let Some(gate) = self.gate_decision(&task.id) {
             if let Some(request) =
-                security_approval(&task.id, &task.summary, &task.source_agent, &gate)
+                evaluate_security(&task.id, &task.summary, &task.source_agent, &gate)
             {
                 if self.stub_decision.is_none() {
                     let policy = self.store.get_routing_policy().await.unwrap_or_default();
@@ -401,6 +404,7 @@ impl Dispatcher {
                         .await_approval(
                             task,
                             request,
+                            Some(gate.security.value),
                             &policy.local_fallback_agent,
                             &policy.local_fallback_model,
                         )
@@ -437,6 +441,7 @@ impl Dispatcher {
                 self.await_approval(
                     task,
                     request,
+                    None,
                     &policy.local_fallback_agent,
                     &policy.local_fallback_model,
                 )
@@ -445,10 +450,12 @@ impl Dispatcher {
         }
     }
 
+    /// Görev ajana gitmeden önce onay hold; güvenlikte NATS alert + resume.
     async fn await_approval(
         &self,
         task: &mut LoungeTask,
         request: ApprovalRequest,
+        security_level: Option<SecurityLevel>,
         local_agent: &str,
         local_model: &str,
     ) -> Result<()> {
@@ -457,6 +464,14 @@ impl Dispatcher {
         self.pending.lock().await.insert(task_id.clone(), tx);
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
             let _ = app.emit("lounge://routing-approval", &request);
+        }
+
+        if is_security_approval(&request.kind) {
+            let level = security_level.unwrap_or(SecurityLevel::Critical);
+            let payload = alert_envelope_payload(&request, level);
+            if let Err(err) = self.publish_subject(ALERT_SECURITY, &payload).await {
+                log::warn!("lounge.alert.security yayınlanamadı: {err}");
+            }
         }
 
         let vote = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
@@ -470,6 +485,12 @@ impl Dispatcher {
 
         match vote {
             RoutingVote::Approve => {
+                if is_security_approval(&request.kind) {
+                    let payload = resume_envelope_payload(&task_id);
+                    if let Err(err) = self.publish_subject(TASK_RESUME, &payload).await {
+                        log::warn!("lounge.task.resume yayınlanamadı: {err}");
+                    }
+                }
                 task.target_agent = Some(request.to_agent);
                 Ok(())
             }
@@ -480,6 +501,25 @@ impl Dispatcher {
             }
             RoutingVote::Deny => anyhow::bail!("kullanıcı ajan geçişini reddetti"),
         }
+    }
+
+    async fn publish_subject<T: serde::Serialize>(
+        &self,
+        subject: &str,
+        payload: &T,
+    ) -> Result<()> {
+        let url = self.nats_url.clone();
+        let subject = subject.to_string();
+        let bytes = serde_json::to_vec(payload).context("NATS payload serialize")?;
+        let subject_for_err = subject.clone();
+        tokio::task::spawn_blocking(move || {
+            let nc = nats::connect(&url)?;
+            nc.publish(&subject, bytes)
+        })
+        .await
+        .context("NATS publish join")?
+        .with_context(|| format!("NATS publish başarısız: {subject_for_err}"))?;
+        Ok(())
     }
 }
 
@@ -802,7 +842,7 @@ mod tests {
             target_agent: None,
             repo_path: None,
         });
-        let task = LoungeTask::new("cursor", "agent-lounge-os", "exfiltrate secrets");
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "rewrite vault keys");
         dispatcher.inject_decision(DecisionResult {
             message_id: task.id.clone(),
             subject: TASK_REQUESTED.into(),
@@ -823,7 +863,53 @@ mod tests {
             recall: Default::default(),
         });
         let found = dispatcher.gate_decision(&task.id).unwrap();
-        let request = security_approval(&task.id, &task.summary, "cursor", &found).unwrap();
+        let request = evaluate_security(&task.id, &task.summary, "cursor", &found).unwrap();
         assert_eq!(request.kind, ApprovalKind::SecurityCritical);
+        assert!(is_security_approval(&request.kind));
+    }
+
+    #[test]
+    fn injected_risky_gate_asks_for_approval() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "stub".into(),
+            adr_summary: "stub".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "patch config.toml");
+        dispatcher.inject_decision(DecisionResult {
+            message_id: task.id.clone(),
+            subject: TASK_REQUESTED.into(),
+            routing: Scored {
+                value: RoutingType::Task,
+                confidence: 0.88,
+                probabilities: HashMap::from([("Task".into(), 0.88)]),
+            },
+            security: Scored {
+                value: SecurityLevel::Risky,
+                confidence: 0.8,
+                probabilities: HashMap::from([("Risky".into(), 0.8)]),
+            },
+            knowledge_hit: 0.2,
+            elapsed_ms: 4,
+            elapsed_us: 4_000,
+            device: "cpu".into(),
+            recall: Default::default(),
+        });
+        let found = dispatcher.gate_decision(&task.id).unwrap();
+        let request = evaluate_security(&task.id, &task.summary, "cursor", &found).unwrap();
+        assert_eq!(request.kind, ApprovalKind::SecurityRisky);
+    }
+
+    #[test]
+    fn resume_subject_matches_catalog() {
+        assert_eq!(TASK_RESUME, "lounge.task.resume");
+        assert_eq!(ALERT_SECURITY, "lounge.alert.security");
+        let payload = resume_envelope_payload("task-approve-1");
+        assert_eq!(payload["vote"], "approve");
+        assert_eq!(payload["task_id"], "task-approve-1");
     }
 }

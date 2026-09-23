@@ -3,7 +3,11 @@
     "requested": "lounge.task.requested",
     "assigned": "lounge.task.assigned",
     "completed": "lounge.task.completed",
-    "failed": "lounge.task.failed"
+    "failed": "lounge.task.failed",
+    "resume": "lounge.task.resume"
+  },
+  "alert": {
+    "security": "lounge.alert.security"
   },
   "experience": {
     "reported": "lounge.experience.reported"
@@ -20,6 +24,9 @@
     "heartbeat": "lounge.agent.heartbeat",
     "status": "lounge.agent.status",
     "prompt": "lounge.agent.prompt"
+  },
+  "context": {
+    "whisper": "lounge.agent.prompt"
   },
   "telemetry": {
     "decision": "lounge.telemetry.decision"

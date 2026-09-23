@@ -54,7 +54,28 @@ pub async fn fast_retrieve(
     store.fast_retrieve(query).await
 }
 
+/// DecisionGate MATCH sonrası çağrılan ince alias: görev metninden çapraz-proje bağlamı.
+pub async fn get_relevant_context(
+    store: &ExperienceStore,
+    current_task: String,
+) -> Result<ExperienceContext> {
+    store.get_relevant_context(current_task).await
+}
+
 impl ExperienceStore {
+    /// `fast_retrieve` için kullanıcı-yüzü API (`current_task` → lexical/vektör + SQLite cross).
+    pub async fn get_relevant_context(&self, current_task: String) -> Result<ExperienceContext> {
+        self.fast_retrieve(FastRetrieveQuery {
+            project_id: String::new(),
+            text: current_task,
+            embedding: None,
+            knowledge_hit: KNOWLEDGE_HIT_THRESHOLD,
+            ast_refs: Vec::new(),
+            limit: Some(DEFAULT_LIMIT),
+        })
+        .await
+    }
+
     pub async fn fast_retrieve(&self, query: FastRetrieveQuery) -> Result<ExperienceContext> {
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT).max(1);
         let embedding = query
@@ -451,5 +472,33 @@ mod tests {
         );
         assert!(context.prompt_block().len() <= MAX_PROMPT_CHARS);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn get_relevant_context_alias_cross_project() {
+        let store = ExperienceStore::memory().unwrap();
+        let other = LoungeTask::new("claude", "other-os", "NATS dispatcher dinleyici");
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &other,
+                "spawn_blocking + mpsc ile NATS listen",
+                "sync nats client blocking thread",
+                ExperienceOutcome::Success,
+                vec![],
+            ))
+            .await
+            .unwrap();
+
+        let context = get_relevant_context(
+            &store,
+            "dispatcher NATS mesajlarını dinle".into(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !context.experiences.is_empty(),
+            "get_relevant_context çapraz proje tecrübesi"
+        );
+        assert_eq!(context.experiences[0].project_id, "other-os");
     }
 }
