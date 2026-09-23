@@ -54,7 +54,8 @@ pub async fn fast_retrieve(
     store.fast_retrieve(query).await
 }
 
-/// DecisionGate MATCH sonrası çağrılan ince alias: görev metninden çapraz-proje bağlamı.
+/// DecisionGate CONTEXT_MATCH sonrası: SQLite + vektör DB üzerinden mevcut task'a benzer
+/// çapraz-proje Experience / ADR kayıtlarını döner (proje filtresi yok).
 pub async fn get_relevant_context(
     store: &ExperienceStore,
     current_task: String,
@@ -63,7 +64,7 @@ pub async fn get_relevant_context(
 }
 
 impl ExperienceStore {
-    /// `fast_retrieve` için kullanıcı-yüzü API (`current_task` → lexical/vektör + SQLite cross).
+    /// Cross-Project Memory girişi: görev metni → lexical/vektör + SQLite (tüm projeler).
     pub async fn get_relevant_context(&self, current_task: String) -> Result<ExperienceContext> {
         self.fast_retrieve(FastRetrieveQuery {
             project_id: String::new(),

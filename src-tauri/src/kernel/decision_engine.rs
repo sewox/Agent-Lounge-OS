@@ -557,6 +557,7 @@ pub fn skip_bus_subject(subject: &str) -> bool {
         || subject.starts_with("lounge.telemetry.")
         || subject.starts_with("lounge.infra.")
         || subject == crate::models::AGENT_PROMPT
+        || subject == crate::models::CONTEXT_WHISPER
 }
 
 pub fn infer_elapsed_us(start_time: Instant, end_time: Instant) -> u128 {
@@ -957,6 +958,7 @@ mod tests {
         assert!(!skip_bus_subject("lounge.task.requested"));
         assert!(!skip_bus_subject("lounge.experience.reported"));
         assert!(skip_bus_subject("lounge.agent.prompt"));
+        assert!(skip_bus_subject("lounge.context.whisper"));
         assert!(skip_bus_subject("lounge.telemetry.decision"));
         assert!(skip_bus_subject("lounge.telemetry.other"));
         assert!(skip_bus_subject("lounge.infra.status"));
@@ -964,6 +966,7 @@ mod tests {
         assert!(skip_bus_subject(crate::models::TELEMETRY_DECISION));
         assert!(skip_bus_subject(crate::models::INFRA_STATUS));
         assert!(skip_bus_subject(crate::models::AGENT_PROMPT));
+        assert!(skip_bus_subject(crate::models::CONTEXT_WHISPER));
         assert_eq!(crate::models::KERNEL_AGENT, "lounge-kernel");
         assert_eq!(
             crate::models::TELEMETRY_DECISION,

@@ -12,8 +12,9 @@ pub const TASK_RESUME: &str = "lounge.task.resume";
 pub const ALERT_SECURITY: &str = "lounge.alert.security";
 pub const EXPERIENCE_REPORTED: &str = "lounge.experience.reported";
 pub const AGENT_PROMPT: &str = "lounge.agent.prompt";
-/// Cross-Project Memory "fısıltı" — `subjects.json` `agent.prompt` ile aynı NATS konusu.
-pub const CONTEXT_WHISPER: &str = AGENT_PROMPT;
+/// Cross-Project Memory fısıltısı — kanonik NATS konusu (`subjects.json` `context.whisper`).
+/// Ajan enjeksiyonu ayrıca `AGENT_PROMPT` üzerinden de yayınlanır.
+pub const CONTEXT_WHISPER: &str = "lounge.context.whisper";
 pub const TEST_REQUESTED: &str = "lounge.test.requested";
 pub const TEST_COMPLETED: &str = "lounge.test.completed";
 pub const TELEMETRY_DECISION: &str = "lounge.telemetry.decision";
@@ -71,7 +72,7 @@ pub struct LoungeTask {
     /// Zincirleme workflow: bu görevi tetikleyen tamamlanmış ebeveyn id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
-    /// Event Stream etiketi — örn. `Claude (Code) -> Grok (Test)`.
+    /// Event Stream etiketi — örn. `Task A -> Triggered Task B`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_chain: Option<String>,
 }
@@ -458,7 +459,8 @@ mod tests {
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
         assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
         assert_eq!(json["context"]["whisper"], CONTEXT_WHISPER);
-        assert_eq!(CONTEXT_WHISPER, AGENT_PROMPT);
+        assert_eq!(CONTEXT_WHISPER, "lounge.context.whisper");
+        assert_ne!(CONTEXT_WHISPER, AGENT_PROMPT);
         assert_eq!(json["test"]["requested"], TEST_REQUESTED);
         assert_eq!(json["test"]["completed"], TEST_COMPLETED);
         assert_eq!(json["telemetry"]["decision"], TELEMETRY_DECISION);

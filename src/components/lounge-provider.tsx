@@ -34,6 +34,8 @@ import {
   parseDecisionTelemetry,
   parseLayaEngineStatus,
   parseSecurityAlert,
+  parseContextWhisper,
+  mergeWhisperedExperiences,
   pruneMsgWindow,
   recordMsgTick,
   type ApprovalRequest,
@@ -66,6 +68,8 @@ type LoungeContextValue = {
   setModel: (value: string) => void;
   models: string[];
   experiences: LoungeExperience[];
+  /** Knowledge Vault'ta parlatılacak canlı fısıltı tecrübe id'leri. */
+  whisperedExperienceIds: string[];
   events: NatsEvent[];
   quotas: ToolQuota[];
   amberAlert: boolean;
@@ -106,6 +110,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [experiences, setExperiences] = useState<LoungeExperience[]>(MOCK_EXPERIENCES);
+  const [whisperedExperienceIds, setWhisperedExperienceIds] = useState<string[]>([]);
   const [events, setEvents] = useState<NatsEvent[]>(MOCK_EVENTS);
   const [quotas, setQuotas] = useState<ToolQuota[]>(MOCK_QUOTAS);
   const [amberAlert, setAmberAlert] = useState(
@@ -357,6 +362,13 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     if (security) {
       setApproval(security);
     }
+    const whisper = parseContextWhisper(message);
+    if (whisper) {
+      setWhisperedExperienceIds(whisper.experienceIds);
+      if (whisper.experiences.length > 0) {
+        setExperiences((current) => mergeWhisperedExperiences(current, whisper));
+      }
+    }
     if (row.subject.includes("experience")) {
       void refreshSemantic();
     }
@@ -570,6 +582,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setModel,
       models,
       experiences,
+      whisperedExperienceIds,
       events,
       quotas,
       amberAlert,
@@ -606,6 +619,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       model,
       models,
       experiences,
+      whisperedExperienceIds,
       events,
       quotas,
       amberAlert,

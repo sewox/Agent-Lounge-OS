@@ -1,18 +1,26 @@
-//! Security Policy — DecisionGate SECURITY Risky/Critical → görev askıya alma + UI onayı.
+//! Security Policy — DecisionGate SECURITY Risky/Critical → PENDING_APPROVAL + UI onayı.
 
 use serde::{Deserialize, Serialize};
 
 use crate::kernel::decision_engine::{DecisionResult, SecurityLevel};
-use crate::models::{ApprovalKind, ApprovalRequest, KERNEL_AGENT};
+use crate::models::{ApprovalKind, ApprovalRequest, KERNEL_AGENT, TASK_FAILED};
 
 /// NATS: güvenlik uyarısı (UI Security Overlay).
 pub const ALERT_SECURITY: &str = "lounge.alert.security";
 /// NATS: kullanıcı onayı sonrası görevi sürdür.
 pub const TASK_RESUME: &str = "lounge.task.resume";
+/// NATS: güvenlik reddi / görev iptali (mevcut failed konusu).
+pub const TASK_CANCEL: &str = TASK_FAILED;
+
+/// Görev askı durumu (protokol / UI).
+pub const PENDING_APPROVAL: &str = "PENDING_APPROVAL";
 
 /// Overlay metni (Stitch / TR).
 pub const SECURITY_OVERLAY_PROMPT: &str =
-    "Ajan kritik bir dosyayı değiştirmek istiyor. Onaylıyor musunuz?";
+    "Ajan kritik bir dosyaya erişmek istiyor. Onaylıyor musunuz?";
+
+/// `anyhow` zincirinde güvenlik reddinin zaten `lounge.task.failed` yayınladığını işaretler.
+pub const SECURITY_DENIED_MARKER: &str = "security_approval_denied";
 
 /// Risky veya Critical → işlem askıya alınır.
 pub fn requires_suspend(level: SecurityLevel) -> bool {
@@ -72,7 +80,7 @@ pub struct SecurityAlertPayload {
     pub reason: String,
     pub security_level: String,
     pub message: String,
-    /// UI / protokol: görev askıda.
+    /// UI / protokol: görev onay bekliyor.
     pub status: String,
 }
 
@@ -87,7 +95,7 @@ impl SecurityAlertPayload {
             reason: request.reason.clone(),
             security_level: level.as_str().into(),
             message: SECURITY_OVERLAY_PROMPT.into(),
-            status: "suspending".into(),
+            status: PENDING_APPROVAL.into(),
         }
     }
 
@@ -120,6 +128,26 @@ impl TaskResumePayload {
     }
 }
 
+/// `lounge.task.failed` — güvenlik reddi / iptal gövdesi.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskCancelPayload {
+    pub task_id: String,
+    pub vote: String,
+    pub status: String,
+    pub reason: String,
+}
+
+impl TaskCancelPayload {
+    pub fn denied(task_id: impl Into<String>) -> Self {
+        Self {
+            task_id: task_id.into(),
+            vote: "deny".into(),
+            status: "cancelled".into(),
+            reason: "security_approval_denied".into(),
+        }
+    }
+}
+
 /// `lounge.alert.security` zarf gövdesi.
 pub fn alert_envelope_payload(
     request: &ApprovalRequest,
@@ -133,6 +161,21 @@ pub fn alert_envelope_payload(
 pub fn resume_envelope_payload(task_id: &str) -> serde_json::Value {
     serde_json::to_value(TaskResumePayload::approved(task_id))
         .unwrap_or_else(|_| serde_json::json!({ "task_id": task_id, "vote": "approve" }))
+}
+
+/// `lounge.task.failed` iptal zarf gövdesi (güvenlik Red).
+pub fn cancel_envelope_payload(task_id: &str) -> serde_json::Value {
+    serde_json::to_value(TaskCancelPayload::denied(task_id)).unwrap_or_else(|_| {
+        serde_json::json!({
+            "task_id": task_id,
+            "vote": "deny",
+            "status": "cancelled",
+        })
+    })
+}
+
+pub fn is_security_denied_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains(SECURITY_DENIED_MARKER)
 }
 
 #[cfg(test)]
@@ -171,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn risky_and_critical_suspend() {
+    fn risky_and_critical_pending_approval() {
         assert!(requires_suspend(SecurityLevel::Risky));
         assert!(requires_suspend(SecurityLevel::Critical));
 
@@ -194,12 +237,18 @@ mod tests {
         .expect("critical");
         assert_eq!(critical.kind, ApprovalKind::SecurityCritical);
         assert!(is_security_approval(&critical.kind));
+
+        let alert = SecurityAlertPayload::from_request(&critical, SecurityLevel::Critical);
+        assert_eq!(alert.status, PENDING_APPROVAL);
+        assert_eq!(alert.status, "PENDING_APPROVAL");
+        assert_eq!(alert.message, SECURITY_OVERLAY_PROMPT);
     }
 
     #[test]
-    fn alert_and_resume_subjects_and_payloads() {
+    fn alert_resume_and_cancel_subjects_and_payloads() {
         assert_eq!(ALERT_SECURITY, "lounge.alert.security");
         assert_eq!(TASK_RESUME, "lounge.task.resume");
+        assert_eq!(TASK_CANCEL, "lounge.task.failed");
 
         let req = evaluate_security(
             "task-9",
@@ -209,8 +258,11 @@ mod tests {
         )
         .unwrap();
         let alert = SecurityAlertPayload::from_request(&req, SecurityLevel::Critical);
-        assert_eq!(alert.status, "suspending");
-        assert_eq!(alert.message, SECURITY_OVERLAY_PROMPT);
+        assert_eq!(alert.status, PENDING_APPROVAL);
+        assert_eq!(
+            alert.message,
+            "Ajan kritik bir dosyaya erişmek istiyor. Onaylıyor musunuz?"
+        );
         assert_eq!(alert.as_approval().task_id, "task-9");
 
         let resume = TaskResumePayload::approved("task-9");
@@ -220,6 +272,15 @@ mod tests {
         let resume_json = resume_envelope_payload("task-9");
         assert_eq!(resume_json["task_id"], "task-9");
         assert_eq!(resume_json["vote"], "approve");
+
+        let cancel = TaskCancelPayload::denied("task-9");
+        assert_eq!(cancel.vote, "deny");
+        assert_eq!(cancel.status, "cancelled");
+
+        let cancel_json = cancel_envelope_payload("task-9");
+        assert_eq!(cancel_json["task_id"], "task-9");
+        assert_eq!(cancel_json["vote"], "deny");
+        assert_eq!(cancel_json["status"], "cancelled");
     }
 
     #[test]
@@ -228,5 +289,6 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert_eq!(json["alert"]["security"], ALERT_SECURITY);
         assert_eq!(json["task"]["resume"], TASK_RESUME);
+        assert_eq!(json["task"]["failed"], TASK_CANCEL);
     }
 }

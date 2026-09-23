@@ -7,6 +7,7 @@ import { useLounge } from "@/components/lounge-provider";
 import { SemanticMap } from "@/components/SemanticMap";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
+  deadSymbolsMatchingSelection,
   eventDecisionLabel,
   experiencesMatchingSelection,
   formatDecisionStreamLabel,
@@ -21,6 +22,7 @@ import {
   PAGE_SIZE,
   pageCount,
   pageSlice,
+  pathBasename,
   quotaBarClass,
   quotaToneClass,
   resolveDeadSymbolCount,
@@ -273,8 +275,9 @@ export function EventStreamPanel() {
                       />
                       {event.chainLabel ? (
                         <span
-                          className="max-w-full truncate rounded border border-secondary/35 bg-secondary-container/25 px-1.5 py-0.5 font-mono text-[10px] font-medium text-secondary"
+                          className="max-w-full truncate rounded border border-secondary/40 bg-secondary-container/30 px-1.5 py-0.5 font-mono text-[10px] font-medium text-secondary underline decoration-secondary/50 underline-offset-2"
                           title={event.chainLabel}
+                          data-workflow-chain={event.chainLabel}
                         >
                           {event.chainLabel}
                         </span>
@@ -328,8 +331,17 @@ export function EventStreamPanel() {
 }
 
 export function VaultPanel() {
-  const { experiences, projects, query, lastIndex, semanticMap } = useLounge();
+  const {
+    experiences,
+    projects,
+    query,
+    lastIndex,
+    semanticMap,
+    deadSymbols,
+    whisperedExperienceIds,
+  } = useLounge();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
+  const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
   const fileTotal =
     semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
     projects.reduce((sum, row) => sum + (row.files ?? 0), 0) ||
@@ -341,6 +353,10 @@ export function VaultPanel() {
   const log = useMemo(
     () => experiencesMatchingSelection(experiences, selected, query),
     [experiences, selected, query],
+  );
+  const deadForNode = useMemo(
+    () => deadSymbolsMatchingSelection(deadSymbols, semanticMap, selected),
+    [deadSymbols, semanticMap, selected],
   );
 
   const [logPage, setLogPage] = useState(0);
@@ -361,7 +377,13 @@ export function VaultPanel() {
             SEMANTIC MAP + EXPERIENCES
           </h3>
         </div>
-        <span className="font-mono text-[10px] text-outline">memory_bridge + sqlite</span>
+        <span className="font-mono text-[10px] text-outline">
+          {whispered.size > 0 ? (
+            <span className="text-primary">whisper · live</span>
+          ) : (
+            "memory_bridge + sqlite"
+          )}
+        </span>
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0">
@@ -378,10 +400,57 @@ export function VaultPanel() {
           />
         </div>
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
+          {selected ? (
+            <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
+              <div className="flex items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
+                <span>Dead Symbols</span>
+                <span className={deadForNode.length > 0 ? "text-error" : "text-outline"}>
+                  {deadForNode.length > 0 ? `${deadForNode.length} uyarı` : "temiz"}
+                </span>
+              </div>
+              {deadForNode.length === 0 ? (
+                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-2 text-center font-mono text-[10px] text-on-surface-variant">
+                  Bu düğüm için dead symbol yok · {selected.name}
+                </div>
+              ) : (
+                <div className="max-h-24 space-y-1 overflow-auto font-mono text-[10px]">
+                  {deadForNode.slice(0, 8).map((symbol) => (
+                    <div
+                      key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
+                      className="flex items-start justify-between gap-2 rounded border border-error/30 bg-error/5 px-1.5 py-1"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-error">{symbol.name}</div>
+                        <div className="truncate text-[9px] text-on-surface-variant">
+                          {symbol.detail ||
+                            (symbol.file
+                              ? `${pathBasename(symbol.file) || symbol.file}${
+                                  symbol.line != null ? `:${symbol.line}` : ""
+                                }`
+                              : symbol.kind)}
+                        </div>
+                      </div>
+                      <span className="shrink-0 rounded border border-error/40 px-1 text-[9px] text-error uppercase">
+                        {symbol.kind || "dead"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
           <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
             <span>Experience Log</span>
-            <span className={selected ? "text-primary" : "text-secondary"}>
-              {selected ? `filter · ${selected.name}` : "Synced"}
+            <span
+              className={
+                whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
+              }
+            >
+              {whispered.size > 0
+                ? `fısıltı · ${whispered.size}`
+                : selected
+                  ? `filter · ${selected.name}`
+                  : "Synced"}
             </span>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-auto font-mono text-[10.5px]">
@@ -392,31 +461,47 @@ export function VaultPanel() {
                   : "Experience kaydı yok"}
               </div>
             ) : (
-              logVisible.map((item) => (
-                <div
-                  key={item.id}
-                  className="space-y-1 rounded border border-outline-variant/40 bg-surface-container-high/60 p-1.5"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="tnum text-on-surface-variant">
-                      {formatExperienceTime(item.created_at)}
-                    </span>
-                    <span className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}>
-                      {item.outcome === "success"
-                        ? "Success"
-                        : item.outcome === "partial"
-                          ? "Partial"
-                          : "Failed"}
-                    </span>
+              logVisible.map((item) => {
+                const isWhisper = whispered.has(item.id);
+                return (
+                  <div
+                    key={item.id}
+                    className={`space-y-1 rounded border p-1.5 transition-colors ${
+                      isWhisper
+                        ? "border-primary bg-primary-container/20 shadow-[0_0_0_1px_var(--color-primary)]"
+                        : "border-outline-variant/40 bg-surface-container-high/60"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="tnum text-on-surface-variant">
+                        {formatExperienceTime(item.created_at)}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        {isWhisper ? (
+                          <span className="rounded border border-primary/50 px-1 text-[9px] text-primary">
+                            WHISPER
+                          </span>
+                        ) : null}
+                        <span
+                          className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}
+                        >
+                          {item.outcome === "success"
+                            ? "Success"
+                            : item.outcome === "partial"
+                              ? "Partial"
+                              : "Failed"}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="truncate text-[11px] font-medium text-on-surface">
+                      {item.project_id}
+                    </div>
+                    <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">
+                      “{item.adr_summary}”
+                    </div>
                   </div>
-                  <div className="truncate text-[11px] font-medium text-on-surface">
-                    {item.project_id}
-                  </div>
-                  <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">
-                    “{item.adr_summary}”
-                  </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

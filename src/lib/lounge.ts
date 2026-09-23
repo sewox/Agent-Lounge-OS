@@ -63,7 +63,7 @@ export type NatsEvent = {
   payload: string;
   state: "queued" | "ok" | "error" | "retry";
   decisionLabel?: string;
-  /** Multi-agent zinciri — örn. `Claude (Code) -> Grok (Test)`. */
+  /** Multi-agent zinciri — örn. `Task A -> Triggered Task B`. */
   chainLabel?: string;
 };
 
@@ -422,12 +422,116 @@ export const INFRA_STATUS = "lounge.infra.status";
 export const TELEMETRY_DECISION = "lounge.telemetry.decision";
 export const ALERT_SECURITY = "lounge.alert.security";
 export const TASK_RESUME = "lounge.task.resume";
+export const CONTEXT_WHISPER = "lounge.context.whisper";
+export const AGENT_PROMPT = "lounge.agent.prompt";
 export const SECURITY_OVERLAY_PROMPT =
-  "Ajan kritik bir dosyayı değiştirmek istiyor. Onaylıyor musunuz?";
+  "Ajan kritik bir dosyaya erişmek istiyor. Onaylıyor musunuz?";
 export const LATENCY_SPARK_CAP = 24;
 export const MSG_MIN_WINDOW_MS = 60_000;
 export const PAGE_SIZE = 25;
 export const AMBER_THRESHOLD = 80;
+
+/** NATS `lounge.context.whisper` — canlı Cross-Project Memory fısıltısı. */
+export type ContextWhisper = {
+  taskId: string;
+  targetAgent: string;
+  knowledgeHit: number;
+  experienceIds: string[];
+  experiences: LoungeExperience[];
+  prompt: string;
+};
+
+export function parseContextWhisper(message: LoungeMessage): ContextWhisper | null {
+  if (message.subject !== CONTEXT_WHISPER) {
+    return null;
+  }
+  if (!message.payload || typeof message.payload !== "object" || Array.isArray(message.payload)) {
+    return null;
+  }
+  const payload = message.payload as Record<string, unknown>;
+  const msgType = typeof payload.type === "string" ? payload.type : "";
+  if (msgType && msgType !== "system_prompt") {
+    return null;
+  }
+  const context =
+    payload.context && typeof payload.context === "object" && !Array.isArray(payload.context)
+      ? (payload.context as Record<string, unknown>)
+      : null;
+  const rawHits = Array.isArray(context?.experiences)
+    ? context.experiences
+    : Array.isArray(payload.experiences)
+      ? payload.experiences
+      : [];
+  const experiences: LoungeExperience[] = [];
+  const experienceIds: string[] = [];
+  for (const row of rawHits) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      continue;
+    }
+    const hit = row as Record<string, unknown>;
+    const id = typeof hit.id === "string" ? hit.id.trim() : "";
+    if (!id) {
+      continue;
+    }
+    experienceIds.push(id);
+    const adr =
+      (typeof hit.adr_record === "string" && hit.adr_record) ||
+      (typeof hit.solution_summary === "string" && hit.solution_summary) ||
+      (typeof hit.topic === "string" && hit.topic) ||
+      "";
+    experiences.push({
+      id,
+      type: "experience",
+      agent: typeof hit.agent_id === "string" ? hit.agent_id : "kernel",
+      project_id: typeof hit.project_id === "string" ? hit.project_id : "",
+      adr_summary: adr,
+      outcome: "success",
+      related_task_id: typeof payload.task_id === "string" ? payload.task_id : null,
+      tags: ["whisper", "cross-project"],
+      created_at: message.created_at || new Date().toISOString(),
+    });
+  }
+  if (experienceIds.length === 0 && typeof payload.experience_id === "string") {
+    const id = payload.experience_id.trim();
+    if (id) {
+      experienceIds.push(id);
+    }
+  }
+  return {
+    taskId: typeof payload.task_id === "string" ? payload.task_id : message.id,
+    targetAgent: typeof payload.target_agent === "string" ? payload.target_agent : "",
+    knowledgeHit: asFiniteNumber(payload.knowledge_hit) ?? 0,
+    experienceIds,
+    experiences,
+    prompt: typeof payload.prompt === "string" ? payload.prompt : "",
+  };
+}
+
+export function mergeWhisperedExperiences(
+  current: LoungeExperience[],
+  whisper: ContextWhisper,
+): LoungeExperience[] {
+  if (whisper.experiences.length === 0) {
+    return current;
+  }
+  const byId = new Map(current.map((row) => [row.id, row]));
+  for (const row of whisper.experiences) {
+    if (!byId.has(row.id)) {
+      byId.set(row.id, row);
+    }
+  }
+  const merged = Array.from(byId.values());
+  const whispered = new Set(whisper.experienceIds);
+  merged.sort((left, right) => {
+    const leftLive = whispered.has(left.id) ? 1 : 0;
+    const rightLive = whispered.has(right.id) ? 1 : 0;
+    if (leftLive !== rightLive) {
+      return rightLive - leftLive;
+    }
+    return right.created_at.localeCompare(left.created_at);
+  });
+  return merged;
+}
 
 export type LoungeTelemetry = {
   kind: string;
@@ -649,65 +753,13 @@ export function extractWorkflowChainLabel(payload: unknown): string | undefined 
 }
 
 /**
- * Ajan + kind etiketini birleştirir — örn. `Claude (Code) -> Grok (Test)`.
+ * Görev zinciri — örn. `implement feature -> Triggered Auto-Test after Code: implement feature`.
  * Rust `format_workflow_chain` ile aynı sözleşme.
  */
-export function formatWorkflowChainLabel(
-  fromAgent: string,
-  fromKind: string,
-  toAgent: string,
-  toKind: string,
-): string {
-  return `${agentChainLabel(fromAgent)} (${kindChainLabel(fromKind)}) -> ${agentChainLabel(toAgent)} (${kindChainLabel(toKind)})`;
-}
-
-function kindChainLabel(kind: string): string {
-  const key = kind.trim().toLowerCase();
-  if (key === "code_analysis" || key === "code" || key === "coding") {
-    return "Code";
-  }
-  if (key === "review") {
-    return "Review";
-  }
-  if (key === "test") {
-    return "Test";
-  }
-  if (key === "orchestration") {
-    return "Orchestration";
-  }
-  if (key === "general" || !key) {
-    return "General";
-  }
-  return kind.trim();
-}
-
-function agentChainLabel(agent: string): string {
-  const lower = agent.trim().toLowerCase();
-  if (lower.includes("claude")) {
-    return "Claude";
-  }
-  if (lower.includes("grok")) {
-    return "Grok";
-  }
-  if (lower.includes("cursor")) {
-    return "Cursor";
-  }
-  if (lower.includes("antigravity")) {
-    return "Antigravity";
-  }
-  if (lower === "lmr" || lower.includes("laya")) {
-    return "LMR";
-  }
-  if (
-    !lower ||
-    lower === "lounge-kernel" ||
-    lower === "kernel" ||
-    lower === "dispatcher" ||
-    lower === "workflow_engine"
-  ) {
-    return "Kernel";
-  }
-  return agent.trim();
+export function formatWorkflowChainLabel(parentLabel: string, childLabel: string): string {
+  const parent = parentLabel.trim() || "Task A";
+  const child = childLabel.trim() || "Task B";
+  return `${parent} -> Triggered ${child}`;
 }
 
 export function eventDecisionLabel(
@@ -836,6 +888,73 @@ export function experiencesMatchingSelection(
   });
 }
 
+/** Seçili düğüm/dosya ile ilişkili dead symbols (liste + map.dead birleşimi). */
+export function deadSymbolsMatchingSelection(
+  deadSymbols: DeadSymbol[],
+  semanticMap: SemanticMap,
+  selection: SemanticMapSelection | null,
+): DeadSymbol[] {
+  if (!selection) {
+    return [];
+  }
+  const fromMap = semanticMap.projects.flatMap((project) => {
+    if (selection.project && project.name && project.name !== selection.project) {
+      return [];
+    }
+    return project.dead;
+  });
+  const pool = deadSymbols.length > 0 ? deadSymbols : fromMap;
+  if (pool.length === 0) {
+    return [];
+  }
+
+  if (selection.kind === "project") {
+    const projectKey = (selection.project || selection.name || "").toLowerCase();
+    return pool.filter((symbol) => {
+      const pid = (symbol.project_id ?? "").toLowerCase();
+      return !pid || !projectKey || pid === projectKey || pid.includes(projectKey);
+    });
+  }
+
+  const nameTokens = [selection.name, selection.id]
+    .map((token) => token?.trim().toLowerCase() ?? "")
+    .filter((token) => token.length >= 2);
+  const fileTokens = [selection.file, pathBasename(selection.file)]
+    .map((token) => token?.trim().toLowerCase() ?? "")
+    .filter((token) => token.length >= 2);
+
+  return pool.filter((symbol) => {
+    const symbolName = (symbol.name ?? "").toLowerCase();
+    const symbolFile = (symbol.file ?? "").toLowerCase();
+    const symbolBase = (pathBasename(symbol.file) ?? "").toLowerCase();
+    const detail = (symbol.detail ?? "").toLowerCase();
+    if (nameTokens.some((token) => symbolName.includes(token) || detail.includes(token))) {
+      return true;
+    }
+    if (
+      fileTokens.some(
+        (token) =>
+          symbolFile.includes(token) ||
+          symbolBase.includes(token) ||
+          (token.includes("/") && symbolFile.endsWith(token)),
+      )
+    ) {
+      return true;
+    }
+    return false;
+  });
+}
+
+/** CALLS kenarı hedefi: kısa isim (qualified_name son segment). */
+export function shortSymbolName(id: string | null | undefined): string {
+  if (!id?.trim()) {
+    return "";
+  }
+  const trimmed = id.trim();
+  const parts = trimmed.split(/[.:/\\]/).filter(Boolean);
+  return parts.at(-1) ?? trimmed;
+}
+
 export function natsEventTone(subject: string, state?: NatsEvent["state"]): NatsTone {
   const text = `${subject} ${state ?? ""}`.toLowerCase();
   if (state === "error" || text.includes("failed") || text.includes(".error")) {
@@ -912,8 +1031,8 @@ export const MOCK_EVENTS: NatsEvent[] = [
   { id: "d1", time: "14:09:29.004", subject: "lounge.telemetry.decision", from: "decision_engine", to: "bus", payload: "0.2kb", state: "ok", decisionLabel: "Decision: 4ms" },
   { id: "1", time: "14:09:18.441", subject: "lounge.task.requested", from: "kernel", to: "dispatcher", payload: "1.2kb", state: "queued" },
   { id: "2", time: "14:09:18.512", subject: "lounge.task.assigned", from: "dispatcher", to: "ollama", payload: "0.4kb", state: "ok" },
-  { id: "3", time: "14:09:19.108", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "3.8kb", state: "ok", chainLabel: "Claude (Code) -> Grok (Test)" },
-  { id: "w1", time: "14:09:19.220", subject: "lounge.task.requested", from: "workflow_engine", to: "grok_bot", payload: "0.8kb", state: "queued", chainLabel: "Claude (Code) -> Grok (Test)" },
+  { id: "3", time: "14:09:19.108", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "3.8kb", state: "ok", chainLabel: "implement workflow engine -> Triggered Auto-Test after Code: implement workflow engine" },
+  { id: "w1", time: "14:09:19.220", subject: "lounge.task.requested", from: "workflow_engine", to: "grok_bot", payload: "0.8kb", state: "queued", chainLabel: "implement workflow engine -> Triggered Auto-Test after Code: implement workflow engine" },
   { id: "4", time: "14:09:19.140", subject: "lounge.experience.reported", from: "kernel", to: "vault", payload: "2.1kb", state: "ok" },
   { id: "5", time: "14:09:21.002", subject: "lounge.task.requested", from: "alice", to: "kernel", payload: "0.9kb", state: "queued" },
   { id: "6", time: "14:09:22.774", subject: "lounge.task.failed", from: "dispatcher", to: "nats", payload: "0.6kb", state: "error" },
@@ -1077,8 +1196,13 @@ export type AstNode = {
 };
 
 export type CodeReference = {
+  /** Caller (CBM CALLS source). */
   from_id: string;
+  /** Callee (CBM CALLS target). */
   to_id: string;
+  /** Optional wire aliases from memory_bridge / CBM. */
+  caller?: string;
+  callee?: string;
   file?: string | null;
   line?: number | null;
 };
