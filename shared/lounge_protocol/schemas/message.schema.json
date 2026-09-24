@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/message.schema.json",
+  "title": "LoungeMessage",
+  "description": "NATS lounge.> bus zarfı. Domain payload'ları (task, experience) bu struct içinde taşınır veya ham JSON'dan wrap edilir.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "type", "subject", "source_agent", "created_at"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "type": { "type": "string", "minLength": 1 },
+    "subject": { "type": "string", "minLength": 1 },
+    "source_agent": { "type": "string", "minLength": 1 },
+    "target_agent": { "type": ["string", "null"] },
+    "created_at": { "type": "string", "format": "date-time" },
+    "payload": {},
+    "payload_bytes": { "type": "integer", "minimum": 0 }
+  }
+}

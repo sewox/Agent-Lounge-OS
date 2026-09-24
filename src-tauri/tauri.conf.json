@@ -12,7 +12,11 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "Agent Lounge OS",
+        "minWidth": 960,
+        "minHeight": 640,
         "width": 1280,
         "height": 800,
         "resizable": true,
