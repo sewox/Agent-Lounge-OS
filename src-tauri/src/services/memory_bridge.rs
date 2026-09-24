@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use super::probe::{find_executable, first_existing, repo_root_from_crate};
+use super::probe::{find_executable, repo_root_from_crate};
 use crate::models::{
     AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectList, ProjectSummary,
     ServiceHealth, ServiceId,
@@ -328,9 +328,28 @@ fn resolve_binary(repo_root: &Path) -> Result<PathBuf> {
         candidates.push(on_path);
     }
 
-    first_existing(candidates).ok_or_else(|| {
+    // Skip build.rs / prepare-sidecar --stub placeholders (tiny shell scripts).
+    let real = candidates
+        .into_iter()
+        .find(|path| path.is_file() && !is_compile_stub(path));
+    real.ok_or_else(|| {
         anyhow::anyhow!("codebase-memory-mcp bulunamadı (sidecar, bridge/ veya PATH)")
     })
+}
+
+/// Tauri externalBin compile stubs are <4KB shell scripts that exit 127.
+fn is_compile_stub(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() >= 4096 {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    text.contains("codebase-memory-mcp stub")
 }
 
 /// `bundle.externalBin` ile aynı isimlendirme: name-target_triple[.exe]
@@ -1033,7 +1052,7 @@ mod tests {
         let Ok(bridge) = MemoryBridge::discover() else {
             return;
         };
-        if !bridge.binary_path().is_file() {
+        if !bridge.binary_path().is_file() || is_compile_stub(bridge.binary_path()) {
             return;
         }
         let projects = bridge.list_projects().await.expect("list_projects parse");
@@ -1089,7 +1108,7 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         let Ok(bridge) = MemoryBridge::discover() else {
             return;
         };
-        if !bridge.binary_path().is_file() {
+        if !bridge.binary_path().is_file() || is_compile_stub(bridge.binary_path()) {
             return;
         }
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
