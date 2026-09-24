@@ -14,6 +14,8 @@ import {
   SECURITY_OVERLAY_PROMPT,
   QUOTA_ALERT_PROMPT,
   QUOTA_CONTINUE_LOCAL_LABEL,
+  coreServicesDegraded,
+  degradedCoreServiceNames,
   type DecisionGateStatus,
 } from "@/lib/lounge";
 
@@ -96,8 +98,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       layaEngine?.phase !== "downloading");
   const securityHold = Boolean(approval && isSecurityApproval(approval.kind));
   const quotaHold = Boolean(approval && isQuotaApproval(approval.kind));
+  const serviceDegraded = coreServicesDegraded(report);
+  const degradedNames = degradedCoreServiceNames(report);
   const statusBanner =
-    (approval && !securityHold && !quotaHold) || indexing || indexNotice || layaBanner;
+    serviceDegraded ||
+    (approval && !securityHold && !quotaHold) ||
+    indexing ||
+    indexNotice ||
+    layaBanner;
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-50"
@@ -189,7 +197,37 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      {approval && !securityHold && !quotaHold ? (
+      {serviceDegraded ? (
+        <div
+          className={`${bannerPos} border-b border-error-container bg-error-container/25 py-2 px-4`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
+            <div className="min-w-0 truncate text-on-surface">
+              <span className="font-bold tracking-wider text-error-dim uppercase">
+                Service Degraded ·{" "}
+              </span>
+              <span className="text-on-surface">
+                {degradedNames.join(", ")} kapalı — otomatik yeniden başlatma deneniyor
+              </span>
+              {degradedNames.includes("LMR") && report?.ollama.error ? (
+                <span className="ml-2 truncate text-outline" title={report.ollama.error}>
+                  · {report.ollama.error}
+                </span>
+              ) : null}
+              {degradedNames.includes("NATS") && report?.nats.error ? (
+                <span className="ml-2 truncate text-outline" title={report.nats.error}>
+                  · {report.nats.error}
+                </span>
+              ) : null}
+            </div>
+            <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-[10px] tracking-wider text-error-dim uppercase">
+              auto-restart
+            </span>
+          </div>
+        </div>
+      ) : approval && !securityHold && !quotaHold ? (
         <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="min-w-0 truncate text-on-surface">
@@ -394,14 +432,26 @@ export function AppShell({ children }: { children: ReactNode }) {
               />
               <div
                 className={`hidden items-center gap-1 rounded border px-2 py-0.5 font-mono text-[11px] 2xl:flex ${
-                  report?.nats.running
-                    ? "border-outline-variant bg-surface-container-high text-primary"
-                    : "border-outline-variant bg-surface-container-high text-on-surface-variant"
+                  serviceDegraded
+                    ? "border-error-container bg-error-container/20 text-error-dim"
+                    : report?.nats.running
+                      ? "border-outline-variant bg-surface-container-high text-primary"
+                      : "border-outline-variant bg-surface-container-high text-on-surface-variant"
                 }`}
-                title={report?.nats.running ? "NATS bağlı" : "NATS kapalı"}
+                title={
+                  serviceDegraded
+                    ? `Service Degraded · ${degradedNames.join(", ")}`
+                    : report?.nats.running
+                      ? "NATS bağlı"
+                      : "NATS kapalı"
+                }
               >
-                <span className={`h-1.5 w-1.5 rounded-full ${report?.nats.running ? "bg-secondary" : "bg-error"}`} />
-                <span>NATS</span>
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    serviceDegraded ? "animate-pulse bg-error" : report?.nats.running ? "bg-secondary" : "bg-error"
+                  }`}
+                />
+                <span>{serviceDegraded ? "DEGRADED" : "NATS"}</span>
               </div>
               <Link
                 href="/quotas"
@@ -456,7 +506,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <div className="whitespace-nowrap font-headline text-xs font-black tracking-wider text-on-surface uppercase">
                   AL-OS CORE
                 </div>
-                <div className="font-mono text-[10px] text-on-surface-variant">v0.1.0 · {kernel}</div>
+                <div className="font-mono text-[10px] text-on-surface-variant">
+                  v0.1.0 · {serviceDegraded ? "degraded" : kernel}
+                </div>
               </div>
             </div>
             <button
@@ -492,6 +544,17 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <div className="space-y-3 border-t border-outline-variant/60 pt-3 pb-10">
+          {serviceDegraded ? (
+            <div
+              className="rounded border border-error-container/70 bg-error-container/15 px-2 py-1.5 font-mono text-[10px] text-error-dim"
+              role="status"
+            >
+              <div className="font-bold tracking-wider uppercase">Service Degraded</div>
+              <div className="mt-0.5 truncate text-on-surface-variant">
+                {degradedNames.join(" · ")} down
+              </div>
+            </div>
+          ) : null}
           <div className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-lowest/60 p-2">
             <div className="mb-1 font-mono text-[10px] tracking-wider text-outline uppercase">Active daemons</div>
             {[

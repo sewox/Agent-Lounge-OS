@@ -50,6 +50,10 @@ shared/lounge_protocol/Cargo.lock
 bridge/codebase-memory-mcp
 bridge/codebase-memory-mcp.exe
 
+# Tauri 2 externalBin sidecars (staged by src-tauri/scripts/prepare-sidecar.sh)
+src-tauri/binaries/codebase-memory-mcp-*
+!src-tauri/binaries/.gitkeep
+
 # LMR (Lounge Model Runner) — uygulama içi runtime + model deposu
 data/lmr/
 data/ollama/

@@ -21,14 +21,26 @@ export function daemonTone(health: ServiceHealth | undefined): "ok" | "warn" | "
   if (!health) {
     return "warn";
   }
-  return health.running ? "ok" : "down";
+  if (health.running) {
+    return "ok";
+  }
+  if (health.error?.includes("Service Degraded")) {
+    return "warn";
+  }
+  return "down";
 }
 
 export function daemonLabel(health: ServiceHealth | undefined, fallback: string): string {
   if (!health) {
     return fallback;
   }
-  return health.running ? "up" : "down";
+  if (health.running) {
+    return "up";
+  }
+  if (health.error?.includes("Service Degraded")) {
+    return "degraded";
+  }
+  return "down";
 }
 
 export function LatencySparkline({ values }: { values: number[] }) {

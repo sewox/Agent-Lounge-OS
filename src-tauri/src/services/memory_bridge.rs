@@ -305,16 +305,87 @@ fn resolve_binary(repo_root: &Path) -> Result<PathBuf> {
         return Ok(PathBuf::from(from_env));
     }
 
-    let mut candidates = vec![
-        repo_root.join("bridge/codebase-memory-mcp"),
-        repo_root.join("bridge/codebase-memory-mcp.exe"),
-    ];
+    let mut candidates = Vec::new();
+
+    // Tauri 2 externalBin: paket içinde sidecar, ana exe ile aynı dizinde (triple yok).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("codebase-memory-mcp"));
+            candidates.push(dir.join("codebase-memory-mcp.exe"));
+        }
+    }
+
+    candidates.push(repo_root.join("bridge/codebase-memory-mcp"));
+    candidates.push(repo_root.join("bridge/codebase-memory-mcp.exe"));
+
+    // Yerel paketleme / prepare-sidecar: binaries/codebase-memory-mcp-$TARGET_TRIPLE
+    let binaries_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+    candidates.push(binaries_dir.join("codebase-memory-mcp"));
+    candidates.push(binaries_dir.join("codebase-memory-mcp.exe"));
+    candidates.push(binaries_dir.join(packaged_sidecar_filename()));
+
     if let Some(on_path) = find_executable("codebase-memory-mcp") {
         candidates.push(on_path);
     }
 
-    first_existing(candidates)
-        .ok_or_else(|| anyhow::anyhow!("codebase-memory-mcp bulunamadı (bridge/ veya PATH)"))
+    // Skip build.rs / prepare-sidecar --stub placeholders (tiny shell scripts).
+    first_existing(candidates.into_iter().filter(|path| !is_compile_stub(path))).ok_or_else(|| {
+        anyhow::anyhow!("codebase-memory-mcp bulunamadı (sidecar, bridge/ veya PATH)")
+    })
+}
+
+/// Tauri externalBin compile stubs are <4KB shell scripts that exit 127.
+fn is_compile_stub(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() >= 4096 {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    text.contains("codebase-memory-mcp stub")
+}
+
+/// `bundle.externalBin` ile aynı isimlendirme: name-target_triple[.exe]
+fn packaged_sidecar_filename() -> String {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "codebase-memory-mcp-aarch64-apple-darwin".into()
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        "codebase-memory-mcp-x86_64-apple-darwin".into()
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "codebase-memory-mcp-x86_64-pc-windows-msvc.exe".into()
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        "codebase-memory-mcp-aarch64-pc-windows-msvc.exe".into()
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "codebase-memory-mcp-x86_64-unknown-linux-gnu".into()
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "codebase-memory-mcp-aarch64-unknown-linux-gnu".into()
+    }
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        "codebase-memory-mcp".into()
+    }
 }
 
 pub fn parse_index_stdout(stdout: &str) -> Result<IndexSnapshot> {
@@ -978,7 +1049,7 @@ mod tests {
         let Ok(bridge) = MemoryBridge::discover() else {
             return;
         };
-        if !bridge.binary_path().is_file() {
+        if !bridge.binary_path().is_file() || is_compile_stub(bridge.binary_path()) {
             return;
         }
         let projects = bridge.list_projects().await.expect("list_projects parse");
@@ -1034,7 +1105,7 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         let Ok(bridge) = MemoryBridge::discover() else {
             return;
         };
-        if !bridge.binary_path().is_file() {
+        if !bridge.binary_path().is_file() || is_compile_stub(bridge.binary_path()) {
             return;
         }
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
