@@ -40,7 +40,7 @@ pub use quota_manager::{
     quota_matches_agent, spawn_quota_pump, QuotaAlertPayload, QUOTA_ALERT_PROMPT,
     QUOTA_CONTINUE_LOCAL_LABEL,
 };
-pub use supervisor::spawn_supervisor;
+pub use supervisor::{max_restart_attempts, next_backoff, spawn_supervisor};
 pub use telemetry::{
     build_agent_efficiency_report, record_dead_snapshot, record_whisper_injection,
     AgentEfficiencyReport, EfficiencyReportQuery,
@@ -72,6 +72,16 @@ impl ServiceManager {
 
     pub fn shared() -> SharedServices {
         Arc::new(Mutex::new(Self::new()))
+    }
+
+    /// Test / stub: gerçek daemon olmadan health + recovery yollarını doğrula.
+    #[cfg(test)]
+    pub(crate) fn for_test(ollama: OllamaService, nats: NatsService, memory: MemoryBridge) -> Self {
+        Self {
+            ollama,
+            nats,
+            memory,
+        }
     }
 
     pub fn memory(&self) -> &MemoryBridge {

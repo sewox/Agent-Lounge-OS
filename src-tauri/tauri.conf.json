@@ -7,7 +7,8 @@
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": "bash src-tauri/scripts/prepare-sidecar.sh"
   },
   "app": {
     "windows": [
@@ -29,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["dmg", "nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,8 +38,30 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "android": {
-      "debugApplicationIdSuffix": ".debug"
+    "publisher": "Agent Lounge",
+    "copyright": "Copyright © Agent Lounge",
+    "category": "DeveloperTool",
+    "shortDescription": "Yerel ajan orkestrasyon katmanı",
+    "longDescription": "Agent Lounge OS — Lounge Kernel üzerinde yerel ajan orkestrasyonu, bellek köprüsü ve model çalışma zamanı.",
+    "homepage": "https://github.com/sewox/Agent-Lounge-OS",
+    "externalBin": ["binaries/codebase-memory-mcp"],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "hardenedRuntime": true,
+      "dmg": {
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 },
+        "windowSize": { "width": 660, "height": 400 }
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "languages": ["English", "Turkish"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Agent Lounge OS"
+      }
     }
   }
 }

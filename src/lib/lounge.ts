@@ -15,6 +15,29 @@ export type ServiceReport = {
   plugin: ServiceHealth;
 };
 
+/** Çekirdek daemon'lar (Lounge LMR + NATS) ayakta değilse degraded. */
+export function coreServicesDegraded(report: ServiceReport | null | undefined): boolean {
+  if (!report) {
+    return false;
+  }
+  return !report.ollama.running || !report.nats.running;
+}
+
+/** UI banner: hangi servis(ler) down — LMR adı host Ollama değil, Lounge runtime. */
+export function degradedCoreServiceNames(report: ServiceReport | null | undefined): string[] {
+  if (!report) {
+    return [];
+  }
+  const names: string[] = [];
+  if (!report.ollama.running) {
+    names.push("LMR");
+  }
+  if (!report.nats.running) {
+    names.push("NATS");
+  }
+  return names;
+}
+
 export type DecisionGatePhase = "loading" | "ready" | "failed" | "available";
 
 export type DecisionGateStatus = {
