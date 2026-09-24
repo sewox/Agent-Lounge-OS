@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use super::probe::{find_executable, repo_root_from_crate};
+use super::probe::{find_executable, first_existing, repo_root_from_crate};
 use crate::models::{
     AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectList, ProjectSummary,
     ServiceHealth, ServiceId,
@@ -329,10 +329,7 @@ fn resolve_binary(repo_root: &Path) -> Result<PathBuf> {
     }
 
     // Skip build.rs / prepare-sidecar --stub placeholders (tiny shell scripts).
-    let real = candidates
-        .into_iter()
-        .find(|path| path.is_file() && !is_compile_stub(path));
-    real.ok_or_else(|| {
+    first_existing(candidates.into_iter().filter(|path| !is_compile_stub(path))).ok_or_else(|| {
         anyhow::anyhow!("codebase-memory-mcp bulunamadı (sidecar, bridge/ veya PATH)")
     })
 }
