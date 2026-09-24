@@ -75,6 +75,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Stage externalBin stub
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 

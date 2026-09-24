@@ -70,11 +70,21 @@ esac
 
 DEST="$BIN_DIR/${NAME}-${TRIPLE}${EXT}"
 
-if [[ -f "$DEST" && -x "$DEST" ]] || [[ -f "$DEST" && "$EXT" == ".exe" ]]; then
-  echo "prepare-sidecar: already staged → $DEST"
-  exit 0
-fi
+is_stub() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  # Real MCP binaries are tens/hundreds of MB; build.rs stubs are <1KB.
+  local sz
+  sz="$(wc -c <"$f" | tr -d "[:space:]")"
+  [[ "$sz" -lt 4096 ]]
+}
 
+ALLOW_STUB=0
+for arg in "$@"; do
+  case "$arg" in
+    --stub|--allow-stub) ALLOW_STUB=1 ;;
+  esac
+done
 SRC=""
 if [[ -n "${LOUNGE_MEMORY_BIN:-}" && -f "$LOUNGE_MEMORY_BIN" ]]; then
   SRC="$LOUNGE_MEMORY_BIN"
@@ -84,7 +94,25 @@ elif [[ -f "$ROOT/bridge/${NAME}" ]]; then
   SRC="$ROOT/bridge/${NAME}"
 elif command -v "$NAME" >/dev/null 2>&1; then
   SRC="$(command -v "$NAME")"
-else
+fi
+
+# Already have a real staged binary and no newer source → done.
+if [[ -z "$SRC" && -f "$DEST" ]] && ! is_stub "$DEST"; then
+  echo "prepare-sidecar: already staged → $DEST"
+  exit 0
+fi
+
+if [[ -z "$SRC" ]]; then
+  if [[ "$ALLOW_STUB" == "1" || "${LOUNGE_SIDECAR_ALLOW_STUB:-}" == "1" ]]; then
+    cat >"$DEST" <<'STUB'
+#!/bin/sh
+echo "codebase-memory-mcp stub - run prepare-sidecar.sh before packaging" >&2
+exit 127
+STUB
+    chmod +x "$DEST" 2>/dev/null || true
+    echo "prepare-sidecar: wrote compile stub → $DEST"
+    exit 0
+  fi
   cat >&2 <<EOF
 prepare-sidecar: ${NAME} bulunamadı.
 
