@@ -31,7 +31,7 @@ sysinfo = "0.33"
 uuid = { version = "1.20.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 lounge_protocol = { path = "../shared/lounge_protocol" }
-candle-core = { version = "0.9.1", default-features = false }
+candle-core = { version = "0.11.0", default-features = false }
 candle-nn = { version = "0.9.1", default-features = false }
 candle-transformers = { version = "0.9.1", default-features = false }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
