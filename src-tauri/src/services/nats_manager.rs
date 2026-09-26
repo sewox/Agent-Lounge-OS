@@ -402,12 +402,18 @@ fn windows_listen_pids(port: u16) -> Vec<u32> {
     let Ok(output) = output else {
         return Vec::new();
     };
+    // Match local address tokens that end with `:{port}` — substring
+    // `contains(":1")` falsely hits `:135`, `:139`, `:445`, etc.
     let needle = format!(":{port}");
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|line| {
             let upper = line.to_ascii_uppercase();
-            upper.contains("LISTEN") && line.contains(&needle)
+            if !upper.contains("LISTEN") {
+                return false;
+            }
+            line.split_whitespace()
+                .any(|token| token.ends_with(&needle))
         })
         .filter_map(|line| line.split_whitespace().last()?.parse().ok())
         .collect()

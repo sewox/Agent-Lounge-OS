@@ -1078,10 +1078,21 @@ mod tests {
         store.save_project_index(graph).await.expect("index");
 
         let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
-        let args = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"lounge_record_experience","arguments":{{"active_file":"{}","context":"pool","decision":"use bb8"}}}}}}"#,
-            file.display()
-        );
+        // serde_json escapes Windows `\` paths; raw format! does not.
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "active_file": file.to_string_lossy(),
+                    "context": "pool",
+                    "decision": "use bb8"
+                }
+            }
+        })
+        .to_string();
         let resp = server
             .handle_line(&args)
             .await
@@ -1245,10 +1256,19 @@ mod tests {
             .expect("index b");
 
         let mut server = McpServer::new(store, "nats://127.0.0.1:9");
-        let args = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"redis config","active_file":"{}"}}}}}}"#,
-            file_b.display()
-        );
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_search_experience",
+                "arguments": {
+                    "query": "redis config",
+                    "active_file": file_b.to_string_lossy()
+                }
+            }
+        })
+        .to_string();
         let resp = server
             .handle_line(&args)
             .await
@@ -1270,10 +1290,20 @@ mod tests {
             .iter()
             .any(|row| { row["project_id"] == "project-a" && row["same_project"] == false }));
 
-        let restricted = format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"redis config","active_file":"{}","restrict_to_project":true}}}}}}"#,
-            file_b.display()
-        );
+        let restricted = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_search_experience",
+                "arguments": {
+                    "query": "redis config",
+                    "active_file": file_b.to_string_lossy(),
+                    "restrict_to_project": true
+                }
+            }
+        })
+        .to_string();
         let resp2 = server
             .handle_line(&restricted)
             .await

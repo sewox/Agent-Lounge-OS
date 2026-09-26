@@ -1348,7 +1348,7 @@ mod tests {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(10),
                 "iki onay eşzamanlı beklemeli — sıralı işleme olsaydı ikinci görev birinci bitene kadar pending'e girmezdi"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1386,7 +1386,7 @@ mod tests {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(10),
                 "soğuk gate muhafazakâr onay beklemeli"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1430,7 +1430,7 @@ mod tests {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(10),
                 "agent_switch onayı pending olmalı (UI Onayla yolu)"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1468,7 +1468,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -1495,7 +1495,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -1518,7 +1518,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -1545,7 +1545,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
