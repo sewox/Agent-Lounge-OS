@@ -243,6 +243,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_routing_policy,
             set_routing_policy,
             resolve_routing,
+            pending_approvals,
             record_whisper_feedback,
             probe_bus,
             discover_system,
@@ -742,6 +743,14 @@ fn resolve_routing(
     state
         .resolve_vote(task_id, vote)
         .map_err(|err| err.to_string())
+}
+
+/// Bekleyen onayları UI'ye verir (listener yarışı / sayfa dönüşü rehydrate — Madde 8 hipotez a).
+#[tauri::command]
+fn pending_approvals(
+    state: tauri::State<'_, Dispatcher>,
+) -> Result<Vec<crate::models::ApprovalRequest>, String> {
+    Ok(state.pending_approvals())
 }
 
 /// Context Whisper tecrübesini kullanıcı "faydalı" bulduğunda Feedback Loop kaydı.

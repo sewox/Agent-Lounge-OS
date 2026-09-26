@@ -127,19 +127,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     Boolean(approvalError);
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding
-    ? "fixed inset-x-0 top-12 z-50"
-    : "fixed top-12 right-0 left-[var(--sidebar-w)] z-50";
+    ? "fixed inset-x-0 top-12 z-[55] pointer-events-auto"
+    : "fixed top-12 right-0 left-[var(--sidebar-w)] z-[55] pointer-events-auto";
 
   return (
     <div className="flex h-screen overflow-hidden bg-surface text-on-surface">
       {securityHold && approval ? (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm pointer-events-auto"
           role="alertdialog"
           aria-modal="true"
           aria-labelledby="security-overlay-title"
+          data-approval-chrome="security"
         >
-          <div className="w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg">
+          <div className="relative z-[61] w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg pointer-events-auto">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-error-dim uppercase">
               Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} ·
               PENDING_APPROVAL{countdownLabel}
@@ -153,7 +154,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <p className="mt-2 truncate font-mono text-[11px] text-outline">
               {approval.from_agent} · {approval.summary}
             </p>
-            <div className="mt-5 flex items-center justify-end gap-2">
+            <div className="relative z-[62] mt-5 flex items-center justify-end gap-2 pointer-events-auto">
               <button
                 type="button"
                 data-task-id={approval.task_id}
@@ -177,12 +178,13 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {quotaHold && approval ? (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm pointer-events-auto"
           role="alertdialog"
           aria-modal="true"
           aria-labelledby="quota-overlay-title"
+          data-approval-chrome="quota"
         >
-          <div className="w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg">
+          <div className="relative z-[61] w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg pointer-events-auto">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-tertiary uppercase">
               Quota Alert · QUOTA_BLOCKED{countdownLabel}
             </p>
@@ -196,7 +198,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               {approval.from_agent} → {approval.to_agent} · {approval.summary}
             </p>
             <p className="mt-1 font-mono text-[10px] text-outline/80">{approval.reason}</p>
-            <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+            <div className="relative z-[62] mt-5 flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
               <button
                 type="button"
                 data-task-id={approval.task_id}
@@ -251,7 +253,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       ) : approval && !securityHold && !quotaHold ? (
-        <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
+        <div
+          className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
+          data-approval-chrome="routing"
+        >
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="min-w-0 truncate text-on-surface">
               <span className="font-bold uppercase text-error-dim">
@@ -260,7 +265,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               {approval.from_agent} → {approval.to_agent} · {approval.summary}
               <span className="ml-2 text-outline">{approval.reason}</span>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="relative z-[56] flex shrink-0 items-center gap-1.5 pointer-events-auto">
               {approval.kind === "agent_switch" ? (
                 <button
                   type="button"

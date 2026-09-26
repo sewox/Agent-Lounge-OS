@@ -42,6 +42,8 @@ import {
   pruneMsgWindow,
   recordMsgTick,
   formatApprovalClearReason,
+  isQuotaApproval,
+  isSecurityApproval,
   ROUTING_APPROVAL_CLEARED_EVENT,
   ROUTING_APPROVAL_EVENT,
   type ApprovalCleared,
@@ -499,6 +501,35 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     approvalRef.current = approval;
   }, [approval]);
 
+  const syncPendingApprovals = useCallback(async () => {
+    if (!isTauri()) {
+      return;
+    }
+    try {
+      const pending = await invoke<ApprovalRequest[]>("pending_approvals");
+      if (pending.length === 0) {
+        return;
+      }
+      // Tek banner: güvenlik/kota overlay'i öncelikli, aksi halde ilk bekleyen.
+      const preferred =
+        pending.find((row) => isSecurityApproval(row.kind)) ??
+        pending.find((row) => isQuotaApproval(row.kind)) ??
+        pending[0];
+      if (!preferred?.task_id) {
+        return;
+      }
+      setApproval((current) => {
+        if (current?.task_id === preferred.task_id) {
+          return current;
+        }
+        return preferred;
+      });
+      setApprovalError(null);
+    } catch {
+      /* komut henüz bağlı olmayabilir */
+    }
+  }, []);
+
   const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
     const current = approvalRef.current;
     const id = (taskId ?? current?.task_id ?? "").trim();
@@ -676,18 +707,30 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
             setApprovalError(formatApprovalClearReason(event.payload.reason));
           }),
         );
+        // Hipotez (a): listener kurulana kadar kaçan event veya state kaybı → backend snapshot.
+        if (!cancelled) {
+          await syncPendingApprovals();
+        }
       } catch (error) {
         console.error(error);
       }
     })();
 
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        void syncPendingApprovals();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
       unlisteners.forEach((fn) => {
         void fn();
       });
     };
-  }, [ingestBusMessage, syncInstalledModels]);
+  }, [ingestBusMessage, syncInstalledModels, syncPendingApprovals]);
 
   const decisionMsgPerMin = decisionMsgTimes.length;
 

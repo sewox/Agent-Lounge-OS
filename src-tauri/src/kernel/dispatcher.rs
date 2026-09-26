@@ -68,6 +68,12 @@ Kod, AST, indeks, call graph, repo taraması veya memory_bridge gerektiren işle
 Önceki tecrübelerle çelişme; uygun olanı adr_summary içinde an.
 Ham kod kopyalama. Yalnızca JSON üret."#;
 
+/// Bekleyen onay: oneshot + UI'nin yeniden bağlanması için request anlığı.
+struct PendingApproval {
+    request: ApprovalRequest,
+    tx: oneshot::Sender<RoutingVote>,
+}
+
 #[derive(Clone)]
 pub struct Dispatcher {
     nats_url: String,
@@ -79,7 +85,8 @@ pub struct Dispatcher {
     stub_decision: Option<AnalysisDecision>,
     /// std Mutex: UI `resolve_routing` senkron komutu async runtime'ı beklemeden oneshot'a ulaştırır.
     /// (tokio::Mutex + async komut, await_approval ile aynı runtime'da kilitlenmeye yol açabiliyordu.)
-    pending: Arc<StdMutex<HashMap<String, oneshot::Sender<RoutingVote>>>>,
+    /// Request kopyası UI rehydrate için tutulur (listener yarışı / webview yenileme).
+    pending: Arc<StdMutex<HashMap<String, PendingApproval>>>,
     app: Arc<StdMutex<Option<AppHandle>>>,
     decisions: DecisionCache,
     workers: WorkerRegistry,
@@ -188,7 +195,7 @@ impl Dispatcher {
             .expect("dispatcher pending lock")
             .remove(&task_id);
         match sender {
-            Some(tx) => {
+            Some(PendingApproval { tx, .. }) => {
                 tx.send(vote)
                     .map_err(|_| anyhow::anyhow!("onay alıcısı kapanmış"))?;
                 Ok(())
@@ -207,6 +214,16 @@ impl Dispatcher {
             .lock()
             .expect("dispatcher pending lock")
             .contains_key(task_id)
+    }
+
+    /// UI rehydrate: dinleyici kurulmadan kaçan veya state kaybı sonrası bekleyen onaylar.
+    pub fn pending_approvals(&self) -> Vec<ApprovalRequest> {
+        self.pending
+            .lock()
+            .expect("dispatcher pending lock")
+            .values()
+            .map(|row| row.request.clone())
+            .collect()
     }
 
     pub async fn selected_model(&self) -> String {
@@ -654,7 +671,13 @@ impl Dispatcher {
         self.pending
             .lock()
             .expect("dispatcher pending lock")
-            .insert(task_id.clone(), tx);
+            .insert(
+                task_id.clone(),
+                PendingApproval {
+                    request: request.clone(),
+                    tx,
+                },
+            );
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
             let _ = app.emit(ROUTING_APPROVAL_EVENT, &request);
         }
@@ -1500,6 +1523,40 @@ mod tests {
         let outcome = handle.await.unwrap();
         // LMR ayakta değilse görev hata verir; önemli olan takılmadan sonuçlanması.
         assert!(outcome.is_err() || outcome.is_ok());
+        assert_eq!(dispatcher.pending_count(), 0);
+    }
+
+    /// Hipotez (a) sertleştirme: UI listener gelmeden / state kaybında pending request okunabilir.
+    #[tokio::test]
+    async fn pending_approvals_snapshot_survives_for_ui_rehydrate() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+
+        let mut task = LoungeTask::new("mcp:cursor", "agent-lounge-os", "rehydrate check");
+        task.target_agent = Some("grok-tester".into());
+        let id = task.id.clone();
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id) {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        let snap = dispatcher.pending_approvals();
+        assert_eq!(snap.len(), 1, "bekleyen onay UI snapshot'ta görünmeli");
+        assert_eq!(snap[0].task_id, id);
+        assert!(
+            snap[0].expires_at.is_some() && snap[0].timeout_secs.is_some(),
+            "rehydrate için süre damgası korunmalı"
+        );
+
+        dispatcher
+            .resolve_vote(id.clone(), RoutingVote::Deny)
+            .expect("Reddet");
+        let _ = handle.await;
+        assert!(dispatcher.pending_approvals().is_empty());
         assert_eq!(dispatcher.pending_count(), 0);
     }
 }
