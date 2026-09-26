@@ -9,10 +9,16 @@ pub const TASK_ASSIGNED: &str = "lounge.task.assigned";
 pub const TASK_COMPLETED: &str = "lounge.task.completed";
 pub const TASK_FAILED: &str = "lounge.task.failed";
 pub const TASK_RESUME: &str = "lounge.task.resume";
+pub const TASKS_INBOX_PREFIX: &str = "lounge.tasks.";
 pub const ALERT_SECURITY: &str = "lounge.alert.security";
 pub const ALERT_QUOTA: &str = "lounge.alert.quota";
 pub const EXPERIENCE_REPORTED: &str = "lounge.experience.reported";
 pub const AGENT_PROMPT: &str = "lounge.agent.prompt";
+pub const AGENT_HEARTBEAT: &str = "lounge.agent.heartbeat";
+pub const AGENT_STATUS: &str = "lounge.agent.status";
+pub const WORKERS_REGISTER: &str = "lounge.workers.register";
+pub const WORKERS_UNREGISTER: &str = "lounge.workers.unregister";
+pub const WORKERS_HEARTBEAT: &str = "lounge.workers.heartbeat";
 /// Cross-Project Memory fısıltısı — kanonik NATS konusu (`subjects.json` `context.whisper`).
 /// Ajan enjeksiyonu ayrıca `AGENT_PROMPT` üzerinden de yayınlanır.
 pub const CONTEXT_WHISPER: &str = "lounge.context.whisper";
@@ -20,6 +26,11 @@ pub const TEST_REQUESTED: &str = "lounge.test.requested";
 pub const TEST_COMPLETED: &str = "lounge.test.completed";
 pub const TELEMETRY_DECISION: &str = "lounge.telemetry.decision";
 pub const INFRA_STATUS: &str = "lounge.infra.status";
+
+/// `lounge.tasks.<bot_id>` — geçersiz bot_id için `None`.
+pub fn worker_tasks_subject(bot_id: &str) -> Option<String> {
+    lounge_protocol::worker_tasks_subject(bot_id)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -456,11 +467,17 @@ mod tests {
         assert_eq!(json["task"]["completed"], TASK_COMPLETED);
         assert_eq!(json["task"]["failed"], TASK_FAILED);
         assert_eq!(json["task"]["resume"], TASK_RESUME);
+        assert_eq!(json["tasks"]["inbox_prefix"], TASKS_INBOX_PREFIX);
         assert_eq!(json["alert"]["security"], ALERT_SECURITY);
         assert_eq!(json["alert"]["quota"], ALERT_QUOTA);
         assert_ne!(ALERT_QUOTA, ALERT_SECURITY);
         assert_eq!(json["experience"]["reported"], EXPERIENCE_REPORTED);
         assert_eq!(json["agent"]["prompt"], AGENT_PROMPT);
+        assert_eq!(json["agent"]["heartbeat"], AGENT_HEARTBEAT);
+        assert_eq!(json["agent"]["status"], AGENT_STATUS);
+        assert_eq!(json["workers"]["register"], WORKERS_REGISTER);
+        assert_eq!(json["workers"]["unregister"], WORKERS_UNREGISTER);
+        assert_eq!(json["workers"]["heartbeat"], WORKERS_HEARTBEAT);
         assert_eq!(json["context"]["whisper"], CONTEXT_WHISPER);
         assert_eq!(CONTEXT_WHISPER, "lounge.context.whisper");
         assert_ne!(CONTEXT_WHISPER, AGENT_PROMPT);
@@ -470,6 +487,10 @@ mod tests {
         assert_eq!(json["infra"]["status"], INFRA_STATUS);
         assert_eq!(json["bus"]["connected"], "lounge.bus.connected");
         assert_eq!(json["bus"]["heartbeat"], "lounge.bus.heartbeat");
+        assert_eq!(
+            worker_tasks_subject("grok-tester").as_deref(),
+            Some("lounge.tasks.grok-tester")
+        );
     }
 
     #[test]

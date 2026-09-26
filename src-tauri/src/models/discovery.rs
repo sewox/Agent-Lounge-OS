@@ -212,6 +212,7 @@ pub fn sqlite_tool_type(kind: &str) -> &'static str {
         "mcp" | "plugin" => "mcp",
         "model" => "model",
         "app" => "app",
+        "worker" => "worker",
         _ => "cli",
     }
 }

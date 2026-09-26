@@ -20,6 +20,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::db::ExperienceStore;
+use crate::kernel::worker_registry::{workers_status_json, WorkerRegistry};
 use crate::models::{
     host_display_name, now_rfc3339, DiscoveredTool, ExperienceOutcome, ExperienceRecord,
     LoungeExperience, LoungeTask, TASK_REQUESTED,
@@ -44,6 +45,7 @@ pub struct McpServer {
     client_name: String,
     client_version: String,
     initialized: bool,
+    workers: Option<WorkerRegistry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,7 +88,13 @@ impl McpServer {
             client_name: "mcp-client".into(),
             client_version: "0".into(),
             initialized: false,
+            workers: None,
         }
+    }
+
+    pub fn with_workers(mut self, workers: WorkerRegistry) -> Self {
+        self.workers = Some(workers);
+        self
     }
 
     pub fn with_client(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
@@ -462,6 +470,49 @@ impl McpServer {
             })
             .collect::<Vec<_>>();
 
+        let workers = if let Some(registry) = &self.workers {
+            workers_status_json(registry)
+        } else {
+            // Standalone: connected_tools kind=worker satırlarından türet.
+            let rows = self
+                .store
+                .list_connected_tools()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|t| t.kind == "worker")
+                .map(|t| {
+                    let online = t.is_active
+                        && t.enabled
+                        && t.payload
+                            .get("available")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                    let bot_id = t
+                        .payload
+                        .get("host_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            t.id.strip_prefix("worker:")
+                                .unwrap_or(t.name.as_str())
+                                .to_string()
+                        });
+                    json!({
+                        "bot_id": bot_id,
+                        "name": t.name,
+                        "capabilities": [],
+                        "version": "",
+                        "pid": 0,
+                        "online": online,
+                        "last_heartbeat": t.last_synced,
+                        "tasks_subject": t.endpoint,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!(rows)
+        };
+
         let nats_up = probe_tcp_host_port(&self.nats_url);
         let lmr = lounge_ollama_endpoint();
         let lmr_up = probe_lmr_reachable(&lmr).await;
@@ -492,8 +543,9 @@ impl McpServer {
                 "system_ollama": system_ollama,
             },
             "connected_agents": connected,
+            "workers": workers,
             "dispatch_requires_kernel": true,
-            "hint": "lounge_dispatch_task için NATS + çalışan Agent Lounge OS (Kernel) gerekir. Arama/kayıt SQLite (+ atomik vektör) ile çalışır."
+            "hint": "lounge_dispatch_task için NATS + çalışan Agent Lounge OS (Kernel) gerekir. Arama/kayıt SQLite (+ atomik vektör) ile çalışır. Dış botlar workers/*.py ile lounge.workers.register üzerinden bağlanır."
         }))
     }
 

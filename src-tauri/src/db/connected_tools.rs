@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::ExperienceStore;
 use crate::models::{now_rfc3339, sqlite_tool_type, ConnectedTool, DiscoveredTool};
@@ -117,6 +117,40 @@ impl ExperienceStore {
         })
         .await
         .context("connected_tools upsert join")?
+    }
+
+    /// Worker çevrimdışı: `is_active`/`enabled` kapat, payload.available=false.
+    pub async fn deactivate_connected_tool(&self, id: impl Into<String>) -> Result<()> {
+        let id = id.into();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
+            let payload_json: Option<String> = conn
+                .query_row(
+                    "SELECT payload_json FROM connected_tools WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut payload: serde_json::Value = payload_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("available".into(), serde_json::json!(false));
+            }
+            let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into());
+            conn.execute(
+                r#"UPDATE connected_tools
+                   SET enabled = 0, is_active = 0, last_synced = ?2, payload_json = ?3
+                   WHERE id = ?1"#,
+                params![id, now, payload_json],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("connected_tools deactivate join")?
     }
 
     pub fn connected_tools_empty(&self) -> Result<bool> {

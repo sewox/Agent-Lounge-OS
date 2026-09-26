@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 
 use super::mcp_server::{default_mcp_http_bind, McpServer};
 use crate::db::ExperienceStore;
+use crate::kernel::WorkerRegistry;
 
 #[derive(Clone)]
 struct Hub {
@@ -25,15 +26,23 @@ struct Hub {
 }
 
 /// Tauri setup'tan spawn edilir.
-pub async fn serve(store: ExperienceStore, nats_url: impl Into<String>) -> Result<()> {
+pub async fn serve(
+    store: ExperienceStore,
+    nats_url: impl Into<String>,
+    workers: Option<WorkerRegistry>,
+) -> Result<()> {
     let bind = default_mcp_http_bind();
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("MCP HTTP bind başarısız: {bind}"))?;
     log::info!("MCP HTTP dinliyor: http://{bind}");
 
+    let mut server = McpServer::new(store, nats_url);
+    if let Some(registry) = workers {
+        server = server.with_workers(registry);
+    }
     let hub = Hub {
-        server: Arc::new(Mutex::new(McpServer::new(store, nats_url))),
+        server: Arc::new(Mutex::new(server)),
     };
     let app = Router::new()
         .route("/mcp", post(mcp_post))

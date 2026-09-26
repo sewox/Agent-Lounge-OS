@@ -14,6 +14,28 @@ pub const BUS_CONNECTED: &str = "lounge.bus.connected";
 pub const BUS_HEARTBEAT: &str = "lounge.bus.heartbeat";
 pub const BUS_PROBE: &str = "lounge.bus.probe";
 
+pub const WORKERS_REGISTER: &str = "lounge.workers.register";
+pub const WORKERS_UNREGISTER: &str = "lounge.workers.unregister";
+pub const WORKERS_HEARTBEAT: &str = "lounge.workers.heartbeat";
+pub const AGENT_HEARTBEAT: &str = "lounge.agent.heartbeat";
+pub const AGENT_STATUS: &str = "lounge.agent.status";
+/// Per-bot görev kutusu öneki — tam konu: `lounge.tasks.<bot_id>`.
+pub const TASKS_INBOX_PREFIX: &str = "lounge.tasks.";
+
+/// `lounge.tasks.<bot_id>` — yalnızca `[a-z0-9_-]` kabul eder.
+pub fn worker_tasks_subject(bot_id: &str) -> Option<String> {
+    let id = bot_id.trim().to_ascii_lowercase();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        || !id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(format!("{TASKS_INBOX_PREFIX}{id}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LoungeMessage {
     pub id: String,
@@ -178,5 +200,19 @@ mod tests {
         assert_eq!(parsed.id, original.id);
         assert_eq!(parsed.source_agent, "lounge-bus");
         assert_eq!(parsed.subject, BUS_HEARTBEAT);
+    }
+
+    #[test]
+    fn worker_tasks_subject_sanitizes() {
+        assert_eq!(
+            worker_tasks_subject("grok-tester").as_deref(),
+            Some("lounge.tasks.grok-tester")
+        );
+        assert_eq!(
+            worker_tasks_subject("Grok_Tester").as_deref(),
+            Some("lounge.tasks.grok_tester")
+        );
+        assert!(worker_tasks_subject("bad.bot").is_none());
+        assert!(worker_tasks_subject("").is_none());
     }
 }

@@ -111,6 +111,7 @@ printf '%s\n' \
 LOUNGE_MCP_STANDALONE=1 cargo run --manifest-path src-tauri/Cargo.toml --bin lounge-mcp
 ```
 
-## Follow-up (bu PR dışı)
+## Follow-up
 
-NATS worker şablonu (`workers/bot_template.py`) — bot/Grok bağlantısı.
+NATS worker şablonu: [`workers/`](../workers/README.md) — `bot_template.py`, `grok_tester.py`.
+Botlar `lounge.workers.register` ile kaydolur; onaylı görevler `lounge.tasks.<bot_id>` kutusuna düşer.

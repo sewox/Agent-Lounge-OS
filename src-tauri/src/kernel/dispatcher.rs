@@ -19,11 +19,12 @@ use crate::kernel::policy_manager::{
     is_security_denied_error, resume_envelope_payload, ALERT_SECURITY, SECURITY_DENIED_MARKER,
     TASK_CANCEL, TASK_RESUME,
 };
+use crate::kernel::worker_registry::{route_subject_for, WorkerRegistry};
 use crate::models::{
-    decide_route, default_ollama_model, AnalysisDecision, ApprovalRequest, ExperienceContext,
-    ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask, QuotaVerdict, RouteIntent,
-    RoutingVote, TaskAssignment, ALERT_QUOTA, EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED,
-    TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
+    decide_route, default_ollama_model, is_kernel, AnalysisDecision, ApprovalRequest,
+    ExperienceContext, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
+    QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, ALERT_QUOTA, EXPERIENCE_REPORTED,
+    KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
 };
 use crate::services::{
     chat_json, embed_model, embed_text, evaluate_assignment, is_quota_approval,
@@ -32,6 +33,13 @@ use crate::services::{
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// `execute_task` sonucu — yerel tamamlandı veya dış worker'a delege edildi.
+#[derive(Debug, Clone)]
+enum TaskExecution {
+    Local(LoungeExperience),
+    Delegated { bot_id: String, subject: String },
+}
 
 const ANALYZE_SYSTEM: &str = r#"Sen Agent Lounge OS görev dağıtıcısısın.
 Gelen İş Emri'ni ve varsa önceki tecrübe context'ini analiz et.
@@ -61,6 +69,7 @@ pub struct Dispatcher {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<RoutingVote>>>>,
     app: Arc<StdMutex<Option<AppHandle>>>,
     decisions: DecisionCache,
+    workers: WorkerRegistry,
 }
 
 impl Dispatcher {
@@ -83,7 +92,17 @@ impl Dispatcher {
             pending: Arc::new(Mutex::new(HashMap::new())),
             app: Arc::new(StdMutex::new(None)),
             decisions: Arc::new(StdMutex::new(HashMap::new())),
+            workers: WorkerRegistry::new(),
         }
+    }
+
+    pub fn with_workers(mut self, workers: WorkerRegistry) -> Self {
+        self.workers = workers;
+        self
+    }
+
+    pub fn workers(&self) -> &WorkerRegistry {
+        &self.workers
     }
 
     pub fn with_stub_decision(mut self, decision: AnalysisDecision) -> Self {
@@ -194,9 +213,15 @@ impl Dispatcher {
         });
 
         match self.execute_task(task.clone(), context, Some(nc)).await {
-            Ok(experience) => {
+            Ok(TaskExecution::Local(experience)) => {
                 publish_json(nc, TASK_COMPLETED, &task).await?;
                 publish_json(nc, EXPERIENCE_REPORTED, &experience).await?;
+            }
+            Ok(TaskExecution::Delegated { bot_id, subject }) => {
+                log::info!(
+                    "görev {} onay sonrası dış worker'a yönlendirildi: {bot_id} → {subject}",
+                    task.id
+                );
             }
             Err(err) => {
                 log::error!("görev başarısız {}: {err}", task.id);
@@ -211,7 +236,14 @@ impl Dispatcher {
 
     pub async fn handle_task(&self, task: LoungeTask) -> Result<LoungeExperience> {
         let context = self.recall_context(&task).await.unwrap_or_default();
-        self.execute_task(task, context, None).await
+        match self.execute_task(task, context, None).await? {
+            TaskExecution::Local(experience) => Ok(experience),
+            TaskExecution::Delegated { bot_id, .. } => {
+                anyhow::bail!(
+                    "görev dış worker'a delegasyon bekliyor: {bot_id} (NATS bağlantısı yok)"
+                )
+            }
+        }
     }
 
     /// Yeni iş emri için benzer konuları semantik arar (Tokio).
@@ -279,7 +311,7 @@ impl Dispatcher {
         mut task: LoungeTask,
         context: ExperienceContext,
         nc: Option<&nats::Connection>,
-    ) -> Result<LoungeExperience> {
+    ) -> Result<TaskExecution> {
         if task.msg_type != "task" {
             anyhow::bail!("beklenen type=task, gelen={}", task.msg_type);
         }
@@ -297,12 +329,37 @@ impl Dispatcher {
         }
         self.apply_routing_policy(&mut task, &decision).await?;
 
+        let target = task
+            .target_agent
+            .clone()
+            .unwrap_or_else(|| KERNEL_AGENT.into());
+        let worker_inbox = if !is_kernel(&target) && self.workers.has_worker(&target) {
+            Some(route_subject_for(&self.workers, &target).ok_or_else(|| {
+                anyhow::anyhow!("hedef worker çevrimdışı veya heartbeat süresi doldu: {target}")
+            })?)
+        } else {
+            None
+        };
+
         if let Some(nc) = nc {
             let assignment = TaskAssignment {
                 task: task.clone(),
                 context: context.clone(),
             };
             publish_json(nc, TASK_ASSIGNED, &assignment).await?;
+            if let Some(subject) = worker_inbox.clone() {
+                publish_json(nc, &subject, &assignment).await?;
+                return Ok(TaskExecution::Delegated {
+                    bot_id: target,
+                    subject,
+                });
+            }
+        } else if let Some(subject) = worker_inbox {
+            // Test / senkron yol: NATS yokken de yerel çalıştırmayı atla.
+            return Ok(TaskExecution::Delegated {
+                bot_id: target,
+                subject,
+            });
         }
 
         let mut tags = vec![
@@ -361,7 +418,7 @@ impl Dispatcher {
             .insert_record(record.clone())
             .await
             .context("tecrübe SQLite'a yazılamadı")?;
-        Ok(record.to_lounge())
+        Ok(TaskExecution::Local(record.to_lounge()))
     }
 
     async fn analyze_work_order(
@@ -912,6 +969,87 @@ mod tests {
     #[test]
     fn assigned_subject_is_part_of_shared_catalog() {
         assert_eq!(TASK_ASSIGNED, "lounge.task.assigned");
+    }
+
+    #[tokio::test]
+    async fn delegates_approved_task_to_online_worker_inbox() {
+        use crate::kernel::worker_registry::WorkerRegistration;
+        use crate::models::worker_tasks_subject;
+
+        let workers = WorkerRegistry::new();
+        workers
+            .apply_registration(WorkerRegistration {
+                bot_id: "grok-tester".into(),
+                name: "Grok-Tester".into(),
+                capabilities: vec!["echo".into()],
+                version: "0.1.0".into(),
+                pid: 1,
+                action: "register".into(),
+                created_at: None,
+            })
+            .unwrap();
+
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "worker".into(),
+            adr_summary: "delegate".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: Some("grok-tester".into()),
+            repo_path: None,
+        })
+        .with_workers(workers);
+
+        let mut task = LoungeTask::new("mcp:cursor", "agent-lounge-os", "echo hello");
+        task.target_agent = Some("grok-tester".into());
+
+        // nc=None → delegasyon denemesi NATS olmadan Local'a düşmez; has_worker + route
+        // yolu handle_task üzerinden hata verir (delegasyon NATS ister).
+        let err = dispatcher.handle_task(task).await.unwrap_err();
+        assert!(
+            err.to_string().contains("delegasyon") || err.to_string().contains("worker"),
+            "unexpected: {err}"
+        );
+        assert_eq!(
+            worker_tasks_subject("grok-tester").as_deref(),
+            Some("lounge.tasks.grok-tester")
+        );
+        assert!(dispatcher.workers().is_online("grok-tester"));
+    }
+
+    #[tokio::test]
+    async fn offline_registered_worker_rejects_route() {
+        use crate::kernel::worker_registry::WorkerRegistration;
+
+        let workers = WorkerRegistry::new();
+        workers
+            .apply_registration(WorkerRegistration {
+                bot_id: "grok-tester".into(),
+                name: "Grok-Tester".into(),
+                capabilities: vec!["echo".into()],
+                version: "0.1.0".into(),
+                pid: 1,
+                action: "register".into(),
+                created_at: None,
+            })
+            .unwrap();
+        workers
+            .apply_registration(WorkerRegistration {
+                bot_id: "grok-tester".into(),
+                name: "Grok-Tester".into(),
+                capabilities: vec!["echo".into()],
+                version: "0.1.0".into(),
+                pid: 1,
+                action: "unregister".into(),
+                created_at: None,
+            })
+            .unwrap();
+
+        assert!(!workers.is_online("grok-tester"));
+        assert!(workers.has_worker("grok-tester"));
+        assert!(
+            crate::kernel::worker_registry::route_subject_for(&workers, "grok-tester").is_none()
+        );
     }
 
     #[test]

@@ -20,6 +20,10 @@ macro_rules! schema {
 
 schema!(experience_validator, "experience.schema.json");
 schema!(task_validator, "task.schema.json");
+schema!(
+    worker_registration_validator,
+    "worker_registration.schema.json"
+);
 schema!(mcp_search_validator, "mcp_search_experience.schema.json");
 schema!(mcp_record_validator, "mcp_record_experience.schema.json");
 schema!(mcp_dispatch_validator, "mcp_dispatch_task.schema.json");
@@ -29,6 +33,7 @@ schema!(mcp_status_validator, "mcp_status.schema.json");
 pub enum SchemaKind {
     Experience,
     Task,
+    WorkerRegistration,
     McpSearch,
     McpRecord,
     McpDispatch,
@@ -40,6 +45,7 @@ pub fn validate(kind: SchemaKind, instance: &Value) -> Result<(), String> {
     let validator = match kind {
         SchemaKind::Experience => experience_validator(),
         SchemaKind::Task => task_validator(),
+        SchemaKind::WorkerRegistration => worker_registration_validator(),
         SchemaKind::McpSearch => mcp_search_validator(),
         SchemaKind::McpRecord => mcp_record_validator(),
         SchemaKind::McpDispatch => mcp_dispatch_validator(),
@@ -97,5 +103,32 @@ mod tests {
             "secret_blob": "nope"
         });
         assert!(validate(SchemaKind::Experience, &bad).is_err());
+    }
+
+    #[test]
+    fn accepts_worker_registration() {
+        let good = json!({
+            "bot_id": "grok-tester",
+            "name": "Grok-Tester",
+            "capabilities": ["echo", "ping"],
+            "version": "0.1.0",
+            "pid": 42,
+            "action": "register",
+            "created_at": "2026-09-18T12:00:00.000Z"
+        });
+        validate(SchemaKind::WorkerRegistration, &good).expect("valid worker");
+    }
+
+    #[test]
+    fn rejects_invalid_bot_id() {
+        let bad = json!({
+            "bot_id": "Bad.Bot",
+            "name": "x",
+            "capabilities": [],
+            "version": "1",
+            "pid": 1,
+            "action": "register"
+        });
+        assert!(validate(SchemaKind::WorkerRegistration, &bad).is_err());
     }
 }
