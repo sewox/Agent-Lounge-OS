@@ -114,6 +114,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             .with_decision_cache(gate.cache())
             .with_workers(workers.clone());
             dispatcher.attach_app(app.handle().clone());
+            services::install_destructive_approval_emitter(
+                app.handle().clone(),
+                "nats://127.0.0.1:4222".into(),
+            );
             let workflow = WorkflowEngine::new("nats://127.0.0.1:4222");
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let models = ModelManager::with_nats_url(bus.nats_url());
@@ -266,6 +270,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_ignored_symbols,
             open_in_editor,
             focus_app_for_approval,
+            confirm_destructive,
             trigger_grok_test,
             list_projects,
             list_quotas,
@@ -779,6 +784,12 @@ async fn focus_app_for_approval(
 ) -> Result<(), String> {
     services::focus_app_for_approval(&app, task_id.as_deref());
     Ok(())
+}
+
+/// One-shot confirm for a PolicyGate-blocked destructive command (F3).
+#[tauri::command]
+async fn confirm_destructive(id: String) -> Result<(), String> {
+    kernel::confirm_destructive(&id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

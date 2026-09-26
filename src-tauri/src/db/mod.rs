@@ -11,11 +11,11 @@ mod vector_memory;
 
 pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experience_governance::{
-    ArchiveClock, ExperienceUpdate, FakeClock, SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS,
-    MIGRATION_PLACEHOLDER_CLEANUP_V1, SETTING_EXPERIENCE_TTL_DAYS,
+    migrate_experience_governance, ArchiveClock, ExperienceUpdate, FakeClock, SystemClock,
+    DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_PLACEHOLDER_CLEANUP_V1, SETTING_EXPERIENCE_TTL_DAYS,
 };
 pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,
 };
-pub use experiences::{default_db_path, ExperienceStore};
+pub use experiences::{column_names, default_db_path, ExperienceStore};
 pub use project_index::{accepts_cross_platform_path, normalize_path_str, path_has_windows_drive};

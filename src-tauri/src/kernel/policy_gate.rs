@@ -1,5 +1,6 @@
 //! PolicyGate — destructive operations always require confirmation.
 //! "Never Ask" / auto-approve cannot bypass this class (K6 / AP-06/07).
+//! Matching is argv-token based (flag clusters, aliases), not substring order.
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,10 @@ pub enum DestructiveClass {
     GitResetHard,
     GitPushForce,
     GitClean,
+    GitBranchForceDelete,
+    GitCheckoutOverwrite,
+    GitRestoreOverwrite,
+    GitStashClear,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,121 +69,253 @@ impl PolicyGate {
     }
 }
 
-pub fn classify_destructive(command: &str) -> Option<DestructiveClass> {
-    let lower = command.to_ascii_lowercase();
-    let collapsed: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    // Git (K6) — check before generic patterns
-    if matches_git_reset_hard(&collapsed) {
-        return Some(DestructiveClass::GitResetHard);
+/// Tokenize a command line into program + argv, expanding short-flag clusters (`-xdf` → x,d,f).
+pub fn tokenize_command(command: &str) -> (String, Vec<String>, Vec<char>) {
+    let raw: Vec<String> = command.split_whitespace().map(|t| t.to_string()).collect();
+    if raw.is_empty() {
+        return (String::new(), Vec::new(), Vec::new());
     }
-    if matches_git_push_force(&collapsed) {
-        return Some(DestructiveClass::GitPushForce);
-    }
-    if matches_git_clean(&collapsed) {
-        return Some(DestructiveClass::GitClean);
-    }
-
-    // POSIX
-    if collapsed.contains("rm -rf") || collapsed.contains("rm -fr") || regex_rm_r(&collapsed) {
-        return Some(DestructiveClass::PosixRm);
-    }
-    if collapsed.contains("dd if=") || collapsed.starts_with("dd ") || collapsed.contains(" dd ") {
-        // only if looks like dd command
-        if collapsed.split_whitespace().any(|t| t == "dd") {
-            return Some(DestructiveClass::PosixDd);
+    let program = raw[0].to_ascii_lowercase();
+    // Basename for paths like /usr/bin/rm
+    let program_base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&program)
+        .to_string();
+    let mut args = Vec::new();
+    let mut short_flags = Vec::new();
+    for tok in raw.iter().skip(1) {
+        let lower = tok.to_ascii_lowercase();
+        if lower.starts_with("--") {
+            args.push(lower.trim_start_matches('-').to_string());
+        } else if tok.starts_with('-') && tok.len() > 1 && !tok[1..].starts_with('-') {
+            // Keep original case for single-letter flags (git branch -D vs -d).
+            let orig_body = &tok[1..];
+            let body = orig_body.to_ascii_lowercase();
+            if orig_body.len() == 1 {
+                short_flags.push(orig_body.chars().next().unwrap());
+            } else if body.len() <= 4 && orig_body.chars().all(|c| c.is_ascii_alphabetic()) {
+                // Short cluster: -xdf / -vrf / -R (already handled) / -fr
+                for c in orig_body.chars() {
+                    short_flags.push(c);
+                }
+            } else if body.chars().all(|c| c.is_ascii_alphabetic()) {
+                // Long PowerShell-style: -Recurse / -Force
+                args.push(body);
+            } else {
+                for c in orig_body.chars() {
+                    if c.is_ascii_alphabetic() {
+                        short_flags.push(c);
+                    }
+                }
+            }
+        } else if lower.starts_with('/') && lower.len() == 2 {
+            // Windows style /s /q /f
+            short_flags.push(lower.chars().nth(1).unwrap());
+        } else {
+            args.push(lower);
         }
     }
-    if collapsed.contains("unlink ") || collapsed.starts_with("unlink ") {
+    (program_base, args, short_flags)
+}
+
+fn has_short(flags: &[char], c: char) -> bool {
+    let needle = c.to_ascii_lowercase();
+    flags.iter().any(|f| f.to_ascii_lowercase() == needle)
+}
+
+fn has_short_exact(flags: &[char], c: char) -> bool {
+    flags.contains(&c)
+}
+
+fn has_long(args: &[String], name: &str) -> bool {
+    let needle = name.to_ascii_lowercase();
+    args.iter().any(|a| {
+        a == &needle
+            || a.starts_with(&format!("{needle}="))
+            // PowerShell abbreviations: -Recurse → rec, -r
+            || (needle.len() >= 3 && a.starts_with(&needle[..needle.len().min(3)]))
+            || (needle == "recurse" && (a == "r" || a.starts_with("rec")))
+            || (needle == "force" && (a == "f" || a.starts_with("for")))
+    })
+}
+
+fn is_remove_item_alias(program: &str) -> bool {
+    matches!(
+        program,
+        "remove-item" | "ri" | "rm" | "del" | "erase" | "rd" | "rmdir"
+    )
+}
+
+pub fn classify_destructive(command: &str) -> Option<DestructiveClass> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (program, args, short) = tokenize_command(trimmed);
+    let lower_line = trimmed.to_ascii_lowercase();
+
+    // --- Git ---
+    if program == "git" || (args.first().map(|a| a.as_str()) == Some("git")) {
+        // handle `git ...` when program is git
+    }
+    if program == "git" {
+        if let Some(class) = classify_git(&args, &short) {
+            return Some(class);
+        }
+    }
+
+    // --- POSIX rm ---
+    if program == "rm" {
+        let recursive = has_short(&short, 'r')
+            || has_short_exact(&short, 'R')
+            || has_long(&args, "recursive")
+            || has_long(&args, "recurse");
+        if recursive {
+            return Some(DestructiveClass::PosixRm);
+        }
+    }
+
+    // --- dd / unlink / mkfs ---
+    if program == "dd" {
+        return Some(DestructiveClass::PosixDd);
+    }
+    if program == "unlink" {
         return Some(DestructiveClass::PosixUnlink);
     }
-    if collapsed.contains("mkfs") {
+    if program.starts_with("mkfs") {
         return Some(DestructiveClass::PosixMkfs);
     }
 
-    // Windows
-    if collapsed.contains("del /s") || collapsed.contains("del /s /q") {
-        return Some(DestructiveClass::WindowsDel);
+    // --- Windows cmd del / rd / rmdir ---
+    if program == "del" || program == "erase" {
+        // PowerShell Remove-Item alias vs cmd del /s
+        if has_short(&short, 's') {
+            return Some(DestructiveClass::WindowsDel);
+        }
+        if has_long(&args, "recurse") || has_short(&short, 'r') {
+            return Some(DestructiveClass::WindowsRemoveItem);
+        }
     }
-    if collapsed.contains("rd /s")
-        || collapsed.contains("rmdir /s")
-        || collapsed.contains("rd /s /q")
-        || collapsed.contains("rmdir /s /q")
-    {
-        return Some(DestructiveClass::WindowsRd);
-    }
-    if collapsed.contains("remove-item") && collapsed.contains("-recurse") {
-        return Some(DestructiveClass::WindowsRemoveItem);
-    }
-    if collapsed.split_whitespace().any(|t| t == "format") || collapsed.starts_with("format ") {
-        // avoid matching "format string" in code — look for drive-like
-        if collapsed.contains("format c:")
-            || collapsed.contains("format d:")
-            || collapsed.contains("format /")
-            || collapsed.starts_with("format ")
-        {
-            return Some(DestructiveClass::WindowsFormat);
+    if program == "rd" || program == "rmdir" {
+        if has_short(&short, 's') {
+            return Some(DestructiveClass::WindowsRd);
+        }
+        if has_long(&args, "recurse") || has_short(&short, 'r') {
+            return Some(DestructiveClass::WindowsRemoveItem);
         }
     }
 
-    // DB
-    if collapsed.contains("drop table")
-        || collapsed.contains("drop database")
-        || collapsed.contains("drop schema")
+    // --- PowerShell Remove-Item (+ aliases when -Recurse) ---
+    // POSIX `rm -r` already handled above.
+    let ps_recurse = has_long(&args, "recurse")
+        || has_short(&short, 'r')
+        || args.iter().any(|a| a.starts_with("rec"));
+    if program != "rm"
+        && (program == "remove-item" || (is_remove_item_alias(&program) && ps_recurse))
     {
-        return Some(DestructiveClass::DbDrop);
+        return Some(DestructiveClass::WindowsRemoveItem);
     }
-    if collapsed.contains("truncate ") || collapsed.contains("truncate table") {
-        return Some(DestructiveClass::DbTruncate);
+
+    // --- format ---
+    if program == "format" {
+        return Some(DestructiveClass::WindowsFormat);
     }
-    if is_unconditional_delete(&collapsed) {
-        return Some(DestructiveClass::DbDelete);
-    }
-    if collapsed.contains("migrate down") || collapsed.contains("migration down") {
-        return Some(DestructiveClass::DbMigrateDown);
+
+    // --- SQL / DB (statement-oriented, not free text) ---
+    if let Some(class) = classify_sql(&lower_line, &program, &args) {
+        return Some(class);
     }
 
     None
 }
 
-fn regex_rm_r(s: &str) -> bool {
-    // rm -r /path or rm -r path (space after -r)
-    s.contains("rm -r ") || s.contains("rm -r\t")
-}
-
-fn matches_git_reset_hard(s: &str) -> bool {
-    s.contains("git reset --hard")
-        || (s.contains("reset") && s.contains("--hard") && s.contains("git"))
-}
-
-fn matches_git_push_force(s: &str) -> bool {
-    if !s.contains("git") || !s.contains("push") {
-        return false;
+fn classify_git(args: &[String], short: &[char]) -> Option<DestructiveClass> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "reset" if args.iter().any(|a| a == "hard") || has_long(args, "hard") => {
+            Some(DestructiveClass::GitResetHard)
+        }
+        "push" => {
+            let force = has_long(args, "force")
+                || has_long(args, "force-with-lease")
+                || has_short(short, 'f')
+                || args.iter().any(|a| a == "f")
+                // force refspec: +main / +refs/heads/main
+                || args.iter().any(|a| a.starts_with('+'));
+            if force {
+                Some(DestructiveClass::GitPushForce)
+            } else {
+                None
+            }
+        }
+        "clean" => {
+            // -fd, -xdf, -ffd, -df, -f -d, -f alone, etc.
+            let has_f = has_short(short, 'f') || args.iter().any(|a| a == "force");
+            let has_d =
+                has_short(short, 'd') || args.iter().any(|a| a == "d" || a == "directories");
+            let has_x = has_short(short, 'x');
+            if has_f || has_d || has_x || !short.is_empty() {
+                // any clean with destructive-ish flags; plain `git clean` interactive is milder
+                // but plan lists `git clean -f` as destructive
+                if has_f || has_d || has_x {
+                    return Some(DestructiveClass::GitClean);
+                }
+            }
+            None
+        }
+        "branch" if has_short_exact(short, 'D') || args.iter().any(|a| a == "D") => {
+            Some(DestructiveClass::GitBranchForceDelete)
+        }
+        "checkout" if args.iter().any(|a| a == ".") => Some(DestructiveClass::GitCheckoutOverwrite),
+        "restore" if args.iter().any(|a| a == ".") => Some(DestructiveClass::GitRestoreOverwrite),
+        "stash" if args.get(1).map(|s| s.as_str()) == Some("clear") => {
+            Some(DestructiveClass::GitStashClear)
+        }
+        _ => None,
     }
-    s.contains("--force-with-lease")
-        || s.contains("--force")
-        || s.split_whitespace().any(|t| t == "-f")
 }
 
-fn matches_git_clean(s: &str) -> bool {
-    s.contains("git clean -fd")
-        || s.contains("git clean -fdx")
-        || (s.contains("git clean")
-            && (s.contains("-fd") || s.contains("-fdx") || s.contains("-dff")))
-}
+fn classify_sql(lower_line: &str, program: &str, _args: &[String]) -> Option<DestructiveClass> {
+    // Free-text "truncate the string" / echo wrappers must NOT match.
+    if matches!(program, "echo" | "printf" | "cat" | "true" | "false") {
+        return None;
+    }
+    let tokens: Vec<&str> = lower_line.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
 
-fn is_unconditional_delete(s: &str) -> bool {
-    // DELETE FROM t  without WHERE
-    let trimmed = s.trim();
-    if !trimmed.contains("delete from") && !trimmed.starts_with("delete ") {
-        return false;
+    if let Some(i) = tokens.iter().position(|t| *t == "drop") {
+        if let Some(next) = tokens.get(i + 1) {
+            if matches!(*next, "table" | "database" | "schema" | "index") {
+                return Some(DestructiveClass::DbDrop);
+            }
+        }
     }
-    if trimmed.contains("delete from") {
-        let after = trimmed.split("delete from").nth(1).unwrap_or("");
-        // if no where clause in the statement
-        return !after.contains(" where ");
+
+    // TRUNCATE TABLE … or the truncate(1) binary — never prose.
+    if tokens.len() >= 2 && tokens[0] == "truncate" && tokens[1] == "table" {
+        return Some(DestructiveClass::DbTruncate);
     }
-    false
+    if program == "truncate" {
+        return Some(DestructiveClass::DbTruncate);
+    }
+
+    if let Some(i) = tokens.iter().position(|t| *t == "delete") {
+        if tokens.get(i + 1) == Some(&"from") {
+            let after = &tokens[i + 2..];
+            if !after.contains(&"where") {
+                return Some(DestructiveClass::DbDelete);
+            }
+        }
+    }
+
+    if lower_line.contains("migrate down") || lower_line.contains("migration down") {
+        return Some(DestructiveClass::DbMigrateDown);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -190,14 +327,23 @@ mod tests {
         match d {
             PolicyDecision::RequireConfirmation {
                 never_ask_bypasses, ..
-            } => assert!(!never_ask_bypasses),
+            } => assert!(!never_ask_bypasses, "{cmd}"),
             other => panic!("expected RequireConfirmation for {cmd:?}, got {other:?}"),
         }
+    }
+
+    fn assert_allow(cmd: &str) {
+        let d = PolicyGate::evaluate(cmd, ActionSource::Agent).unwrap();
+        assert!(
+            matches!(d, PolicyDecision::Allow),
+            "expected Allow for {cmd:?}, got {d:?}"
+        );
     }
 
     #[test]
     fn table_pattern_x_source_x_never_ask() {
         let patterns = [
+            // baseline
             "rm -rf ./data",
             "rm -r ./tmp",
             "dd if=/dev/zero of=/dev/sda",
@@ -218,6 +364,34 @@ mod tests {
             "git push --force-with-lease",
             "git clean -fd",
             "git clean -fdx",
+            // F4 bypasses — Windows flag order
+            "del /q /s x",
+            "del /f /s /q x",
+            "rd /q /s build",
+            "rmdir /q /s build",
+            // PowerShell
+            "Remove-Item -r x",
+            "Remove-Item x -Rec",
+            "ri -Recurse x",
+            "rm -Recurse x",
+            "del -Recurse x",
+            // POSIX flag clusters / long flags
+            "rm -rv x",
+            "rm -vrf x",
+            "rm --recursive x",
+            "rm -R -v x",
+            // git
+            "git clean -xdf",
+            "git clean -f -d",
+            "git clean -ffd",
+            "git clean -df",
+            "git clean -f",
+            "git push origin +main",
+            // K6 additions
+            "git branch -D stale",
+            "git checkout -- .",
+            "git restore .",
+            "git stash clear",
         ];
         for p in patterns {
             for src in [ActionSource::Agent, ActionSource::User] {
@@ -229,9 +403,26 @@ mod tests {
 
     #[test]
     fn safe_commands_allowed() {
-        for cmd in ["ls -la", "cargo test", "git status", "git push origin main"] {
-            let d = PolicyGate::evaluate(cmd, ActionSource::Agent).unwrap();
-            assert!(matches!(d, PolicyDecision::Allow), "{cmd}");
+        for cmd in [
+            "ls -la",
+            "ls -r",
+            "cargo test",
+            "cargo fmt",
+            "git status",
+            "git push origin main",
+            "echo \"truncate the string\"",
+            "echo truncate the string",
+        ] {
+            assert_allow(cmd);
         }
+    }
+
+    #[test]
+    fn tokenize_expands_short_flag_clusters() {
+        let (prog, _args, flags) = tokenize_command("rm -vrf /tmp/x");
+        assert_eq!(prog, "rm");
+        assert!(flags.contains(&'v'));
+        assert!(flags.contains(&'r'));
+        assert!(flags.contains(&'f'));
     }
 }

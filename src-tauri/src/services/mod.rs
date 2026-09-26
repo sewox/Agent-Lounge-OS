@@ -26,8 +26,9 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use approval_notify::{
-    emit_approval_pending, emit_approval_resolved, focus_app_for_approval, ApprovalPendingPayload,
-    APPROVAL_BANNER_FOCUS_EVENT, APPROVAL_PENDING_EVENT, APPROVAL_RESOLVED_EVENT,
+    emit_approval_pending, emit_approval_resolved, focus_app_for_approval,
+    install_destructive_approval_emitter, ApprovalPendingPayload, APPROVAL_BANNER_FOCUS_EVENT,
+    APPROVAL_PENDING_EVENT, APPROVAL_PENDING_NATS, APPROVAL_RESOLVED_EVENT,
 };
 pub use auto_archive::spawn_auto_archive;
 pub use graph_ui::{
@@ -44,7 +45,7 @@ pub use ollama::{
     chat_json, embed_model, embed_text, parse_llm_json, private_env, OllamaConfig, OllamaService,
     DEFAULT_EMBED_MODEL,
 };
-pub use open_editor::open_in_editor as open_path_in_editor;
+pub use open_editor::{open_in_editor as open_path_in_editor, windows_opener_argv};
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
     lounge_laya_dir, lounge_ollama_endpoint, nats_monitor_endpoint, system_ollama_endpoint,

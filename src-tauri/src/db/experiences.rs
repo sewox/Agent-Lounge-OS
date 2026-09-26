@@ -45,6 +45,31 @@ impl ExperienceStore {
         migrate_schema(&conn)
     }
 
+    /// Integration-test helper: list columns for a table.
+    pub fn table_columns(&self, table: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        column_names(&conn, table)
+    }
+
+    /// Integration-test helper: run arbitrary SQL then re-apply governance migrate.
+    pub fn exec_sql_and_migrate_governance(&self, sql: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        if !sql.trim().is_empty() {
+            conn.execute_batch(sql)?;
+        }
+        super::experience_governance::migrate_experience_governance(&conn)
+    }
+
+    /// Integration-test helper: `(status, archived_at)` for an experience id.
+    pub fn conn_query_status_for_tests(&self, id: &str) -> Result<(String, Option<String>)> {
+        let conn = self.conn.lock().expect("experience db lock");
+        Ok(conn.query_row(
+            "SELECT status, archived_at FROM experiences WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?)
+    }
+
     pub async fn insert(&self, experience: &LoungeExperience) -> Result<()> {
         let record = ExperienceRecord::from_lounge(experience, experience.adr_summary.clone());
         self.insert_record(record).await
@@ -760,7 +785,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     Ok(found.is_some())
 }
 
-pub(crate) fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
+pub fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     let mut names = Vec::new();
