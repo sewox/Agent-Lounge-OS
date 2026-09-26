@@ -3,7 +3,8 @@ import path from "node:path";
 
 const PORT = Number(process.env.PLAYWRIGHT_PORT || 4173);
 const BASE = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${PORT}`;
-const OUT_DIR = path.join("docs", "qa", "baseline-2026-09-26");
+/** Ignored output dir — not committed under docs/. Uploaded as CI artifact. */
+const QA_OUT = path.join("test-results", "qa-baseline");
 
 export default defineConfig({
   testDir: "./e2e/tests",
@@ -13,9 +14,10 @@ export default defineConfig({
   workers: 1,
   timeout: 90_000,
   expect: { timeout: 10_000 },
+  outputDir: path.join("test-results", "playwright-output"),
   reporter: [
     ["list"],
-    ["json", { outputFile: path.join(OUT_DIR, "playwright-report.json") }],
+    ["json", { outputFile: path.join(QA_OUT, "playwright-report.json") }],
     ["html", { open: "never", outputFolder: "playwright-report" }],
   ],
   use: {

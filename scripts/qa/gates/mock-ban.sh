@@ -4,15 +4,25 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
+# shellcheck source=scripts/qa/gates/_search.sh
+source "$(dirname "$0")/_search.sh"
+
+if ! qa_search_init; then
+  exit 2
+fi
+if ! qa_search_selftest; then
+  exit 1
+fi
 
 PATTERN='MOCK_HEALTH|MOCK_NODES'
-# Live UI paths that still reference mocks (known until PR-2).
-HITS=$(rg -n --glob '!e2e/**' --glob '!docs/**' --glob '!scripts/**' \
-  -g '*.ts' -g '*.tsx' -g '*.js' -g '*.jsx' \
-  "$PATTERN" src || true)
+HITS="$(qa_search_hits "$PATTERN" src || true)"
 
-COUNT=$(printf '%s' "$HITS" | grep -c . || true)
-echo "== mock-ban gate (warning mode) =="
+COUNT=0
+if [[ -n "$HITS" ]]; then
+  COUNT="$(printf '%s\n' "$HITS" | grep -c . || true)"
+fi
+
+echo "== mock-ban gate (warning mode, tool=$qa_search_tool) =="
 if [[ -z "$HITS" ]]; then
   echo "OK: no MOCK_HEALTH / MOCK_NODES references in src/"
   exit 0

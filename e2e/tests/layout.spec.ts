@@ -4,7 +4,8 @@ import path from "node:path";
 import { measureLayout, formatLayoutFailure, type LayoutMetrics } from "../helpers/layout";
 import { openRoute, ROUTES } from "../helpers/nav";
 
-const METRICS_DIR = path.join("docs", "qa", "baseline-2026-09-26");
+/** Ignored output — uploaded as CI artifact `qa-baseline-*`, not committed under docs/. */
+const METRICS_DIR = path.join("test-results", "qa-baseline");
 const SHOT_DIR = path.join(METRICS_DIR, "screenshots");
 
 function appendMetric(m: LayoutMetrics) {

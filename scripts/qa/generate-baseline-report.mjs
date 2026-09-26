@@ -5,9 +5,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = path.resolve("docs/qa/baseline-2026-09-26");
-const REPORT_JSON = path.join(ROOT, "playwright-report.json");
-const METRICS = path.join(ROOT, "layout-metrics.jsonl");
+/** Playwright JSON + layout metrics live under ignored test-results/ (CI artifact). */
+const ARTIFACT_ROOT = path.resolve("test-results", "qa-baseline");
+const REPORT_JSON = path.join(ARTIFACT_ROOT, "playwright-report.json");
+const METRICS = path.join(ARTIFACT_ROOT, "layout-metrics.jsonl");
 const OUT_MD = path.resolve("docs/qa/baseline-2026-09-26.md");
 
 const PR_MAP = [
@@ -180,7 +181,9 @@ lines.push("| Stream 100% heartbeats + Decision: — | Yes — heartbeat events 
 lines.push("| Long live path truncation / chip collisions | Partial — D2/D3 LAYOUT | S2 + LAYOUT |");
 lines.push("| NSScreen menu-bar usable-height clamp | No (OS chrome) | S2 only |");
 lines.push("");
-lines.push("Screenshots: `docs/qa/baseline-2026-09-26/screenshots/` (JPEG). Playwright JSON: `playwright-report.json`. Live: `docs/qa/live-baseline-2026-09-26-mac.md`.");
+lines.push(
+  "Screenshots + Playwright JSON + layout-metrics: CI artifact `qa-baseline-<sha>` (`test-results/qa-baseline/`, not committed). Live report: `docs/qa/live-baseline-2026-09-26-mac.md`.",
+);
 lines.push("");
 
 fs.writeFileSync(OUT_MD, lines.join("\n"));

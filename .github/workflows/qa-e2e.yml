@@ -56,13 +56,13 @@ jobs:
         env:
           CI: "1"
 
-      - name: Upload screenshots + reports
+      - name: Upload Playwright + layout artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qa-baseline-${{ github.sha }}
           path: |
-            docs/qa/baseline-2026-09-26/
+            test-results/qa-baseline/
             playwright-report/
           if-no-files-found: warn
           retention-days: 14
