@@ -901,7 +901,7 @@ function buildCriticalAlerts(input: {
   for (const name of input.degradedNames) {
     rows.push({
       id: `svc:${name}`,
-      kind: "security",
+      kind: "service",
       message: `${name} disconnected`,
     });
   }
@@ -950,7 +950,7 @@ function DaemonRow({
     <div className="space-y-0.5 font-mono text-body">
       <div className="flex items-center justify-between gap-1">
         <div className="flex min-w-0 items-center gap-2">
-          <Pip tone={name === "Memory Bridge" ? "primary" : daemonTone(health)} />
+          <Pip tone={daemonTone(health)} />
           <span className="truncate text-on-surface">{name}</span>
         </div>
         <span className={`tnum shrink-0 ${running ? "text-secondary" : "text-error"}`}>{label}</span>

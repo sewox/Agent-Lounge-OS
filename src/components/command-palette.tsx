@@ -11,12 +11,8 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { useLounge } from "@/components/lounge-provider";
-import {
-  isTauri,
-  MOCK_EXPERIENCES,
-  type AstNode,
-  type LoungeExperience,
-} from "@/lib/lounge";
+import { isTauri, type AstNode, type LoungeExperience } from "@/lib/lounge";
+import { searchBrowserExperiences } from "@/lib/mock/browser-fixtures";
 import { paletteShortcutLabel } from "@/lib/platform";
 
 type PaletteItem = {
@@ -42,18 +38,6 @@ function matchesQuery(hay: string, query: string): boolean {
     return true;
   }
   return hay.toLowerCase().includes(q);
-}
-
-function mockSearchExperiences(query: string, limit = 8): LoungeExperience[] {
-  const q = query.trim().toLowerCase();
-  const rows = !q
-    ? MOCK_EXPERIENCES
-    : MOCK_EXPERIENCES.filter((row) =>
-        `${row.project_id} ${row.adr_summary} ${row.agent} ${row.tags.join(" ")}`
-          .toLowerCase()
-          .includes(q),
-      );
-  return rows.slice(0, limit);
 }
 
 export function CommandPalette() {
@@ -127,7 +111,7 @@ export function CommandPalette() {
     const timer = window.setTimeout(() => {
       void (async () => {
         if (!isTauri()) {
-          setRemoteExperiences(mockSearchExperiences(q));
+          setRemoteExperiences(searchBrowserExperiences(q));
           // Browser harness: search in-provider projects/experiences only — no fake map nodes.
           setRemoteNodes([]);
           setSearching(false);
@@ -185,7 +169,7 @@ export function CommandPalette() {
       return remoteExperiences;
     }
     if (!isTauri()) {
-      return mockSearchExperiences(query);
+      return searchBrowserExperiences(query);
     }
     const q = query.trim().toLowerCase();
     return experiences

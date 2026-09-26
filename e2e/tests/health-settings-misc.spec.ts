@@ -21,6 +21,21 @@ test.describe("HM — health / map empty states", () => {
     expect(!/EchoMind/.test(text) && /No data found|Index Workspace/i.test(text)).toBeTruthy();
   });
 
+  test("HM-06 · Tauri reject: no fake Claude % / Amber in bell", async ({ page }) => {
+    await openRoute(page, "/dashboard", "reject");
+    await page.waitForTimeout(400);
+    const main = await page.locator("main").innerText();
+    expect(main).not.toMatch(/Claude\s*7\d%/i);
+    expect(main).not.toMatch(/Claude\s*5\d%/i);
+    expect(main).toMatch(/Kota verisi alınamadı/i);
+    await page.getByRole("button", { name: "Alert history" }).click();
+    const history = page.locator('[data-qa="alert-history"]');
+    await expect(history).toBeVisible();
+    const historyText = await history.innerText();
+    expect(historyText).not.toMatch(/Amber/i);
+    expect(historyText).not.toMatch(/Claude\s*\d+%/i);
+  });
+
   test("HM-03 · Full DB shows live health rows", async ({ page }) => {
     await openRoute(page, "/health", "full");
     await expect(page.getByText("Agent-Lounge-OS").first()).toBeVisible();

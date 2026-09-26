@@ -17,7 +17,11 @@ function readUaPlatform(): string {
   return navigator.platform || navigator.userAgent || "";
 }
 
-/** Best-effort OS family for UI labels (browser + Tauri webview). */
+/**
+ * Best-effort OS family for UI labels (browser + Tauri webview).
+ * Unknown platforms (ChromeOS, Android, other) fall back to `"linux"` —
+ * fine for shortcut/label copy; not used for packaging or path semantics.
+ */
 export function detectPlatform(): LoungePlatform {
   const raw = readUaPlatform().toLowerCase();
   if (raw.includes("mac") || raw.includes("iphone") || raw.includes("ipad")) {
