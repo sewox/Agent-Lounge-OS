@@ -1,0 +1,386 @@
+{
+  "base": "http://localhost:3000",
+  "capturedAt": "2026-09-26T14:38:26.488Z",
+  "mock": [
+    {
+      "label": "mock",
+      "route": "onboarding",
+      "viewport": "1280x800",
+      "file": "mock__onboarding__1280x800.png",
+      "path": "/onboarding"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard",
+      "viewport": "1280x800",
+      "file": "mock__dashboard__1280x800.png",
+      "path": "/dashboard"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard-palette",
+      "viewport": "1280x800",
+      "file": "mock__dashboard-palette__1280x800.png",
+      "path": "/dashboard"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard-selected",
+      "viewport": "1280x800",
+      "file": "mock__dashboard-selected__1280x800.png",
+      "path": "/dashboard"
+    },
+    {
+      "label": "mock",
+      "route": "stream",
+      "viewport": "1280x800",
+      "file": "mock__stream__1280x800.png",
+      "path": "/stream"
+    },
+    {
+      "label": "mock",
+      "route": "vault",
+      "viewport": "1280x800",
+      "file": "mock__vault__1280x800.png",
+      "path": "/vault"
+    },
+    {
+      "label": "mock",
+      "route": "vault-palette",
+      "viewport": "1280x800",
+      "file": "mock__vault-palette__1280x800.png",
+      "path": "/vault"
+    },
+    {
+      "label": "mock",
+      "route": "vault-selected",
+      "viewport": "1280x800",
+      "file": "mock__vault-selected__1280x800.png",
+      "path": "/vault"
+    },
+    {
+      "label": "mock",
+      "route": "health",
+      "viewport": "1280x800",
+      "file": "mock__health__1280x800.png",
+      "path": "/health"
+    },
+    {
+      "label": "mock",
+      "route": "fleet",
+      "viewport": "1280x800",
+      "file": "mock__fleet__1280x800.png",
+      "path": "/fleet"
+    },
+    {
+      "label": "mock",
+      "route": "telemetry",
+      "viewport": "1280x800",
+      "file": "mock__telemetry__1280x800.png",
+      "path": "/telemetry"
+    },
+    {
+      "label": "mock",
+      "route": "quotas",
+      "viewport": "1280x800",
+      "file": "mock__quotas__1280x800.png",
+      "path": "/quotas"
+    },
+    {
+      "label": "mock",
+      "route": "settings",
+      "viewport": "1280x800",
+      "file": "mock__settings__1280x800.png",
+      "path": "/settings"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard-routing-banner",
+      "viewport": "1280x800",
+      "file": "mock__dashboard-routing-banner__1280x800.png",
+      "path": "/dashboard?demo=routing-banner"
+    },
+    {
+      "label": "mock",
+      "route": "onboarding",
+      "viewport": "1536x960",
+      "file": "mock__onboarding__1536x960.png",
+      "path": "/onboarding"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard",
+      "viewport": "1536x960",
+      "file": "mock__dashboard__1536x960.png",
+      "path": "/dashboard"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard-palette",
+      "viewport": "1536x960",
+      "file": "mock__dashboard-palette__1536x960.png",
+      "path": "/dashboard"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard-selected",
+      "viewport": "1536x960",
+      "file": "mock__dashboard-selected__1536x960.png",
+      "path": "/dashboard"
+    },
+    {
+      "label": "mock",
+      "route": "stream",
+      "viewport": "1536x960",
+      "file": "mock__stream__1536x960.png",
+      "path": "/stream"
+    },
+    {
+      "label": "mock",
+      "route": "vault",
+      "viewport": "1536x960",
+      "file": "mock__vault__1536x960.png",
+      "path": "/vault"
+    },
+    {
+      "label": "mock",
+      "route": "vault-palette",
+      "viewport": "1536x960",
+      "file": "mock__vault-palette__1536x960.png",
+      "path": "/vault"
+    },
+    {
+      "label": "mock",
+      "route": "vault-selected",
+      "viewport": "1536x960",
+      "file": "mock__vault-selected__1536x960.png",
+      "path": "/vault"
+    },
+    {
+      "label": "mock",
+      "route": "health",
+      "viewport": "1536x960",
+      "file": "mock__health__1536x960.png",
+      "path": "/health"
+    },
+    {
+      "label": "mock",
+      "route": "fleet",
+      "viewport": "1536x960",
+      "file": "mock__fleet__1536x960.png",
+      "path": "/fleet"
+    },
+    {
+      "label": "mock",
+      "route": "telemetry",
+      "viewport": "1536x960",
+      "file": "mock__telemetry__1536x960.png",
+      "path": "/telemetry"
+    },
+    {
+      "label": "mock",
+      "route": "quotas",
+      "viewport": "1536x960",
+      "file": "mock__quotas__1536x960.png",
+      "path": "/quotas"
+    },
+    {
+      "label": "mock",
+      "route": "settings",
+      "viewport": "1536x960",
+      "file": "mock__settings__1536x960.png",
+      "path": "/settings"
+    },
+    {
+      "label": "mock",
+      "route": "dashboard-routing-banner",
+      "viewport": "1536x960",
+      "file": "mock__dashboard-routing-banner__1536x960.png",
+      "path": "/dashboard?demo=routing-banner"
+    }
+  ],
+  "empty": [
+    {
+      "label": "empty",
+      "route": "onboarding",
+      "viewport": "1280x800",
+      "file": "empty__onboarding__1280x800.png",
+      "path": "/onboarding?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "dashboard",
+      "viewport": "1280x800",
+      "file": "empty__dashboard__1280x800.png",
+      "path": "/dashboard?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "dashboard-palette",
+      "viewport": "1280x800",
+      "file": "empty__dashboard-palette__1280x800.png",
+      "path": "/dashboard?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "dashboard-selected",
+      "viewport": "1280x800",
+      "file": "empty__dashboard-selected__1280x800.png",
+      "path": "/dashboard?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "stream",
+      "viewport": "1280x800",
+      "file": "empty__stream__1280x800.png",
+      "path": "/stream?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "vault",
+      "viewport": "1280x800",
+      "file": "empty__vault__1280x800.png",
+      "path": "/vault?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "vault-palette",
+      "viewport": "1280x800",
+      "file": "empty__vault-palette__1280x800.png",
+      "path": "/vault?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "vault-selected",
+      "viewport": "1280x800",
+      "file": "empty__vault-selected__1280x800.png",
+      "path": "/vault?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "health",
+      "viewport": "1280x800",
+      "file": "empty__health__1280x800.png",
+      "path": "/health?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "fleet",
+      "viewport": "1280x800",
+      "file": "empty__fleet__1280x800.png",
+      "path": "/fleet?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "telemetry",
+      "viewport": "1280x800",
+      "file": "empty__telemetry__1280x800.png",
+      "path": "/telemetry?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "quotas",
+      "viewport": "1280x800",
+      "file": "empty__quotas__1280x800.png",
+      "path": "/quotas?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "settings",
+      "viewport": "1280x800",
+      "file": "empty__settings__1280x800.png",
+      "path": "/settings?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "onboarding",
+      "viewport": "1536x960",
+      "file": "empty__onboarding__1536x960.png",
+      "path": "/onboarding?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "dashboard",
+      "viewport": "1536x960",
+      "file": "empty__dashboard__1536x960.png",
+      "path": "/dashboard?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "dashboard-palette",
+      "viewport": "1536x960",
+      "file": "empty__dashboard-palette__1536x960.png",
+      "path": "/dashboard?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "dashboard-selected",
+      "viewport": "1536x960",
+      "file": "empty__dashboard-selected__1536x960.png",
+      "path": "/dashboard?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "stream",
+      "viewport": "1536x960",
+      "file": "empty__stream__1536x960.png",
+      "path": "/stream?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "vault",
+      "viewport": "1536x960",
+      "file": "empty__vault__1536x960.png",
+      "path": "/vault?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "vault-palette",
+      "viewport": "1536x960",
+      "file": "empty__vault-palette__1536x960.png",
+      "path": "/vault?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "vault-selected",
+      "viewport": "1536x960",
+      "file": "empty__vault-selected__1536x960.png",
+      "path": "/vault?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "health",
+      "viewport": "1536x960",
+      "file": "empty__health__1536x960.png",
+      "path": "/health?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "fleet",
+      "viewport": "1536x960",
+      "file": "empty__fleet__1536x960.png",
+      "path": "/fleet?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "telemetry",
+      "viewport": "1536x960",
+      "file": "empty__telemetry__1536x960.png",
+      "path": "/telemetry?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "quotas",
+      "viewport": "1536x960",
+      "file": "empty__quotas__1536x960.png",
+      "path": "/quotas?demo=empty"
+    },
+    {
+      "label": "empty",
+      "route": "settings",
+      "viewport": "1536x960",
+      "file": "empty__settings__1536x960.png",
+      "path": "/settings?demo=empty"
+    }
+  ]
+}
