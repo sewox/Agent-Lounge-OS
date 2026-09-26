@@ -95,13 +95,15 @@ lines.push(
 );
 lines.push(`| Layout metrics rows | ${metrics.length} (route × viewport) |`);
 lines.push(`| Layout violations | ${layoutViolations.length} |`);
-lines.push("| CI | `qa-e2e.yml` non-blocking (`continue-on-error`) |");
+lines.push(
+  "| CI | `qa-e2e.yml` non-blocking; §10.2 `qa-cross-platform.yml`; S2-Linux `linux-bundle.yml` (`agent-lounge-linux`) |",
+);
 lines.push("");
 lines.push("## Verdict");
 lines.push("");
 lines.push(
   unexpectedFail === 0
-    ? "Suite exit green for PR-0 harness (expected-fail cases intentionally failing until PR-1…5)."
+    ? "Suite exit green for PR-0 harness (expected-fail cases intentionally failing until PR-1…5). L1–L6 hardened for live S2 findings (narrow panels, sparse interiors, New Node overlap)."
     : `Harness has ${unexpectedFail} unexpected failures — investigate before relying on CI signal.`,
 );
 lines.push("");
@@ -150,16 +152,35 @@ if (!blockerExpected.length) lines.push("_None._");
 lines.push("");
 lines.push("## Untestable / plan corrections from PR-0");
 lines.push("");
-lines.push("- **GR-*** / **SH-06** / **DS-03** / **ST-04**: require live Tauri + OS dialogs / Graph child process (S2 Mac only).");
+lines.push("- **GR-*** / **SH-06** / **DS-03** / **ST-04**: require live Tauri + OS dialogs / Graph child process (S2; Mac scripts Mac-specific; Win/Linux checklists under `scripts/qa/windows|linux/`).");
+lines.push("- **AP-10**: native OS notification (Tauri plugin) on macOS/Windows/Linux — S2 live checklists (§10.2).");
 lines.push("- **AP-03** `?demo=routing-banner` only works when `isTauri()===false`; harness uses `browser` fixture.");
-lines.push("- **X-01** is TR/EN i18n (O1 decided): dictionary + Settings switch + persistence; expected-fail until PR-2.");
-lines.push("- **O2–O6** add EX-05/EX-13, archive-search S3, DS-03 Editor pref, AP-06/AP-07 destructive gate — harness cases expected-fail until PR-1…5.");
-lines.push("- **FL-01/02** live NATS heartbeat needs real workers (S3); S1 only does page-render smoke.");
-lines.push("- **Empty fixture + `/onboarding`**: client error boundary (“This page couldn't load”) under IPC mock — OB-01 uses full fixture + deselect; empty-onboarding still flaky.");
-lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** implemented in product this PR (`data-qa` hooks only).");
-lines.push("- Gemini’s `toHaveJSProperty('clientWidth', …)` is invalid in Playwright; L1–L6 use `boundingBox` / `getBoundingClientRect` as planned.");
+lines.push("- **X-01** is TR/EN i18n (O1); **X-02** dotted-İ / `lang=tr` (live G2) — expected-fail until PR-2.");
+lines.push("- **O2–O6** / §10.1–10.2: EX-05/EX-13/EX-14/EX-15, AP-06…10, SR-02, PATH-01, SH-04b — expected-fail until PR-1…5.");
+lines.push("- **FL-01/02** live NATS heartbeat needs real workers (S3); S1 page-render smoke + SR-02 default filter contract.");
+lines.push("- **Empty fixture + `/onboarding`**: client error boundary under IPC mock — OB-01 uses full fixture + deselect.");
+lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** in product this PR (`data-qa` hooks only).");
+lines.push("- Gemini’s `toHaveJSProperty('clientWidth', …)` is invalid in Playwright; L1–L6 use `getBoundingClientRect`.");
+lines.push("- **§10.2 CI**: Playwright on Linux (`qa-e2e.yml`); Win/macOS `cargo test`+build (`qa-cross-platform.yml`); Linux AppImage/deb (`linux-bundle.yml`) — all non-blocking.");
 lines.push("");
-lines.push("Screenshots: `docs/qa/baseline-2026-09-26/screenshots/` (JPEG). Playwright JSON: `playwright-report.json`.");
+lines.push("## Live vs automated (S2 Mac 716f42c → harness)");
+lines.push("");
+lines.push("Source: [`docs/qa/live-baseline-2026-09-26-mac.md`](./live-baseline-2026-09-26-mac.md).");
+lines.push("");
+lines.push("| Live finding | Automated catch? | Case / metric |");
+lines.push("|--------------|------------------|---------------|");
+lines.push("| Single-panel Health/Fleet/Telemetry/Quotas/Settings ~30–63% width (G4) | Yes — L1 & L4 narrow single panel | `*-LAYOUT` |");
+lines.push("| Panel frame full height, rows end ~15–30% | Yes — L2 sparse interior | `*-LAYOUT`, EX-LAYOUT |");
+lines.push("| D3 /quotas horizontal overflow | Yes — L5 main/panel scrollWidth | `QUOTAS-LAYOUT` @ D3 |");
+lines.push("| + New Node overlaps AL-OS CORE (G1) | Yes — L5 newNodeOverlap | SH-08b, `*-LAYOUT` L5 |");
+lines.push("| `lang=tr` → TİME / SEMANTİC (G2) | Yes | **X-02** |");
+lines.push("| Vault 400/800 vs bridge 2286/7958 | Yes — fixture mirrors mismatch | **EX-14** |");
+lines.push("| Experience Log raw markdown + TR errors | Yes | **EX-15** |");
+lines.push("| Stream 100% heartbeats + Decision: — | Yes — heartbeat events in fixture | **SR-02** |");
+lines.push("| Long live path truncation / chip collisions | Partial — D2/D3 LAYOUT | S2 + LAYOUT |");
+lines.push("| NSScreen menu-bar usable-height clamp | No (OS chrome) | S2 only |");
+lines.push("");
+lines.push("Screenshots: `docs/qa/baseline-2026-09-26/screenshots/` (JPEG). Playwright JSON: `playwright-report.json`. Live: `docs/qa/live-baseline-2026-09-26-mac.md`.");
 lines.push("");
 
 fs.writeFileSync(OUT_MD, lines.join("\n"));
