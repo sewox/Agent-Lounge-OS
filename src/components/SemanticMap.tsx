@@ -187,8 +187,11 @@ export function SemanticMap({
 
   if (rows.length === 0) {
     return (
-      <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
-        <IndexEmptyState detail="No data found." className="min-h-0 flex-1" />
+      <div className="flex h-full min-h-[12rem] w-full min-w-0 flex-1 flex-col">
+        <IndexEmptyState
+          detail="No data found."
+          className="h-full min-h-[12rem] flex-1 justify-center"
+        />
       </div>
     );
   }

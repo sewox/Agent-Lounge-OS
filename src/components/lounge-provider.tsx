@@ -22,6 +22,7 @@ import {
   pickWorkspaceFolder,
   mockIndexSnapshot,
   loungeMessageToEvent,
+  sortEventsNewestFirst,
   AMBER_THRESHOLD,
   BUS_UI_EVENT,
   DECISION_GATE_EVENT,
@@ -376,7 +377,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       if (current.some((event) => event.id === row.id)) {
         return current;
       }
-      return [row, ...current].slice(0, EVENT_CAP);
+      return sortEventsNewestFirst([row, ...current]).slice(0, EVENT_CAP);
     });
     setDecisionMsgTimes((times) => recordMsgTick(times, message.id));
     const telemetry = parseDecisionTelemetry(message);

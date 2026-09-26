@@ -143,7 +143,39 @@ export type NatsEvent = {
   decisionLabel?: string;
   /** Multi-agent zinciri — örn. `Task A -> Triggered Task B`. */
   chainLabel?: string;
+  /** Epoch ms for newest-first ordering (out-of-order bus arrivals). */
+  createdAtMs?: number;
 };
+
+/** Sort key: createdAtMs, else parse `HH:mm:ss.mmm` / ISO `time`. */
+export function eventSortKey(event: Pick<NatsEvent, "time" | "createdAtMs">): number {
+  if (event.createdAtMs != null && Number.isFinite(event.createdAtMs)) {
+    return event.createdAtMs;
+  }
+  const clock = event.time.match(
+    /^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/,
+  );
+  if (clock) {
+    const hours = Number(clock[1]);
+    const minutes = Number(clock[2]);
+    const seconds = Number(clock[3] ?? 0);
+    const millis = Number((clock[4] ?? "0").padEnd(3, "0").slice(0, 3));
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
+  }
+  const parsed = Date.parse(event.time);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/** Newest first; stable for equal timestamps (preserves relative insert order). */
+export function sortEventsNewestFirst(events: NatsEvent[]): NatsEvent[] {
+  return events
+    .map((event, index) => ({ event, index }))
+    .sort((left, right) => {
+      const diff = eventSortKey(right.event) - eventSortKey(left.event);
+      return diff !== 0 ? diff : left.index - right.index;
+    })
+    .map(({ event }) => event);
+}
 
 export type NatsTone = "task" | "success" | "error";
 
@@ -1167,8 +1199,9 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     state = "queued";
   }
   const created = new Date(message.created_at);
+  const createdAtMs = Number.isNaN(created.getTime()) ? undefined : created.getTime();
   let time = message.created_at;
-  if (!Number.isNaN(created.getTime())) {
+  if (createdAtMs != null) {
     time = `${istanbulClockParts(created, true)}.${String(created.getMilliseconds()).padStart(3, "0")}`;
   }
   const telemetry = parseDecisionTelemetry(message);
@@ -1183,6 +1216,7 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     state,
     decisionLabel: ownMs != null ? formatDecisionStreamLabel(ownMs) : undefined,
     chainLabel: extractWorkflowChainLabel(message.payload),
+    createdAtMs,
   };
 }
 
