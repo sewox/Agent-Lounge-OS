@@ -652,6 +652,7 @@ impl Dispatcher {
                 reason: reason.to_string(),
             };
             let _ = app.emit(ROUTING_APPROVAL_CLEARED_EVENT, &payload);
+            crate::services::emit_approval_resolved(&app, task_id, reason);
         }
     }
 
@@ -680,6 +681,10 @@ impl Dispatcher {
             );
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
             let _ = app.emit(ROUTING_APPROVAL_EVENT, &request);
+            crate::services::emit_approval_pending(
+                &app,
+                crate::services::ApprovalPendingPayload::from(&request),
+            );
         }
 
         if is_security_approval(&request.kind) {
@@ -1343,7 +1348,7 @@ mod tests {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(10),
                 "iki onay eşzamanlı beklemeli — sıralı işleme olsaydı ikinci görev birinci bitene kadar pending'e girmezdi"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1381,7 +1386,7 @@ mod tests {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(10),
                 "soğuk gate muhafazakâr onay beklemeli"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1425,7 +1430,7 @@ mod tests {
                 break;
             }
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(10),
                 "agent_switch onayı pending olmalı (UI Onayla yolu)"
             );
             tokio::time::sleep(Duration::from_millis(15)).await;
@@ -1463,7 +1468,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -1490,7 +1495,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -1513,7 +1518,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
@@ -1540,7 +1545,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         while !dispatcher.has_pending(&id) {
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(10));
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 

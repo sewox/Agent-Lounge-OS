@@ -326,9 +326,9 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
 
-        let mut hits = self
+        let (mut hits, from_archive) = self
             .store
-            .search_experiences(query.clone(), limit.or(Some(24)))
+            .search_experiences_with_archive_fallback(query.clone(), limit.or(Some(24)))
             .await?;
 
         if restrict {
@@ -344,6 +344,10 @@ impl McpServer {
             hits.truncate(cap);
         }
 
+        for row in &hits {
+            let _ = self.store.bump_experience_usage(row.id.clone()).await;
+        }
+
         let experiences: Vec<Value> = hits
             .iter()
             .map(|row| {
@@ -351,6 +355,10 @@ impl McpServer {
                     .as_ref()
                     .map(|pid| row.project_id == *pid)
                     .unwrap_or(false);
+                let mut tags = row.tags.clone();
+                if from_archive && !tags.iter().any(|t| t == "archived") {
+                    tags.push("archived".into());
+                }
                 json!({
                     "id": row.id,
                     "type": row.msg_type,
@@ -359,9 +367,10 @@ impl McpServer {
                     "adr_summary": row.adr_summary,
                     "outcome": row.outcome,
                     "related_task_id": row.related_task_id,
-                    "tags": row.tags,
+                    "tags": tags,
                     "created_at": row.created_at,
                     "same_project": same_project,
+                    "archived": from_archive,
                 })
             })
             .collect();
@@ -371,6 +380,7 @@ impl McpServer {
             "project_id": project,
             "restrict_to_project": restrict,
             "count": experiences.len(),
+            "from_archive": from_archive,
             "experiences": experiences,
         }))
     }
@@ -430,6 +440,10 @@ impl McpServer {
         validate_schema(SchemaKind::Experience, &experience_json).map_err(|e| anyhow!(e))?;
 
         let record = ExperienceRecord::from_lounge(&experience, topic.clone());
+        // O6: MCP rows are auto-approved (active) but unreviewed.
+        let mut record = record;
+        record.status = crate::models::EXPERIENCE_STATUS_ACTIVE.into();
+        record.reviewed = false;
         let id = record.id.clone();
         self.store.insert_record_atomic(record).await?;
 
@@ -998,11 +1012,9 @@ pub fn resolve_nats_url() -> String {
         .unwrap_or_else(default_nats_url)
 }
 
+/// Experience DB / veri kökü — release'te app data (`LOUNGE_DATA_DIR` ezer).
 pub fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::services::data_root()
 }
 
 #[cfg(test)]
@@ -1064,10 +1076,21 @@ mod tests {
         store.save_project_index(graph).await.expect("index");
 
         let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
-        let args = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"lounge_record_experience","arguments":{{"active_file":"{}","context":"pool","decision":"use bb8"}}}}}}"#,
-            file.display()
-        );
+        // serde_json escapes Windows `\` paths; raw format! does not.
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "active_file": file.to_string_lossy(),
+                    "context": "pool",
+                    "decision": "use bb8"
+                }
+            }
+        })
+        .to_string();
         let resp = server
             .handle_line(&args)
             .await
@@ -1099,6 +1122,7 @@ mod tests {
                 tags: vec![],
                 created_at: now_rfc3339(),
                 embedding: Vec::new(),
+                ..Default::default()
             })
             .await
             .expect("seed");
@@ -1197,6 +1221,7 @@ mod tests {
                 tags: vec!["redis".into()],
                 created_at: now_rfc3339(),
                 embedding: Vec::new(),
+                ..Default::default()
             })
             .await
             .expect("seed a");
@@ -1229,10 +1254,19 @@ mod tests {
             .expect("index b");
 
         let mut server = McpServer::new(store, "nats://127.0.0.1:9");
-        let args = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"redis config","active_file":"{}"}}}}}}"#,
-            file_b.display()
-        );
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_search_experience",
+                "arguments": {
+                    "query": "redis config",
+                    "active_file": file_b.to_string_lossy()
+                }
+            }
+        })
+        .to_string();
         let resp = server
             .handle_line(&args)
             .await
@@ -1254,10 +1288,20 @@ mod tests {
             .iter()
             .any(|row| { row["project_id"] == "project-a" && row["same_project"] == false }));
 
-        let restricted = format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"redis config","active_file":"{}","restrict_to_project":true}}}}}}"#,
-            file_b.display()
-        );
+        let restricted = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_search_experience",
+                "arguments": {
+                    "query": "redis config",
+                    "active_file": file_b.to_string_lossy(),
+                    "restrict_to_project": true
+                }
+            }
+        })
+        .to_string();
         let resp2 = server
             .handle_line(&restricted)
             .await

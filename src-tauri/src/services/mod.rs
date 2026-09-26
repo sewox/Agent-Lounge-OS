@@ -1,5 +1,7 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
+pub mod approval_notify;
+pub mod auto_archive;
 pub mod autodiscover;
 pub mod graph_ui;
 pub mod hardware;
@@ -9,6 +11,7 @@ pub mod memory_bridge;
 pub mod model_manager;
 pub mod nats_manager;
 pub mod ollama;
+pub mod open_editor;
 pub mod plugin;
 mod probe;
 pub mod quota_manager;
@@ -22,6 +25,12 @@ use tokio::sync::Mutex;
 
 use crate::models::ServiceReport;
 
+pub use approval_notify::{
+    emit_approval_pending, emit_approval_resolved, focus_app_for_approval,
+    install_destructive_approval_emitter, ApprovalPendingPayload, APPROVAL_BANNER_FOCUS_EVENT,
+    APPROVAL_PENDING_EVENT, APPROVAL_PENDING_NATS, APPROVAL_RESOLVED_EVENT,
+};
+pub use auto_archive::spawn_auto_archive;
 pub use graph_ui::{
     enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
     open_or_focus_graph_window, persist_port, resolve_cbm_project_name, GraphUiState,
@@ -36,10 +45,12 @@ pub use ollama::{
     chat_json, embed_model, embed_text, parse_llm_json, private_env, OllamaConfig, OllamaService,
     DEFAULT_EMBED_MODEL,
 };
+pub use open_editor::{open_in_editor as open_path_in_editor, windows_opener_argv};
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
-    lounge_laya_dir, lounge_ollama_endpoint, nats_monitor_endpoint, system_ollama_endpoint,
-    LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
+    data_root, ensure_data_layout, lounge_laya_dir, lounge_ollama_endpoint, nats_monitor_endpoint,
+    resolve_data_root, resolve_data_root_for_app, system_ollama_endpoint, DataRootEnv,
+    APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,

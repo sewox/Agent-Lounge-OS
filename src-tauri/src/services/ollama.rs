@@ -17,6 +17,7 @@ use super::probe::{
     http_endpoint, lounge_lmr_dir, lounge_ollama_host, lounge_ollama_models_dir,
     lounge_ollama_port, wait_until,
 };
+use crate::kernel::GuardedCommand;
 use crate::models::{PullProgress, ServiceHealth, ServiceId, MODEL_PULL_EVENT};
 
 const SERVICE_NAME: &str = "LMR";
@@ -130,11 +131,13 @@ impl OllamaService {
                 .with_context(|| format!("LMR model dizini oluşturulamadı: {}", dir.display()))?;
         }
 
-        let mut command = Command::new(&binary);
-        command
+        let std_cmd = GuardedCommand::new(&binary)
             .args(&self.config.args)
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
+            .internal_daemon()
+            .into_std_command()
+            .with_context(|| format!("LMR gate başarısız: {}", binary.display()))?;
+        let mut command = Command::from(std_cmd);
+        command.stdin(Stdio::null()).kill_on_drop(true);
         if let Some(dir) = binary.parent() {
             command.current_dir(dir);
         }
@@ -521,12 +524,16 @@ async fn ollama_create_from_gguf(config: &OllamaConfig, model: &str, gguf: &Path
         .await
         .context("Modelfile yazılamadı")?;
 
-    let mut command = Command::new(&binary);
-    command
+    let std_cmd = GuardedCommand::new(&binary)
         .arg("create")
         .arg(model)
         .arg("-f")
         .arg(&modelfile_path)
+        .internal_daemon()
+        .into_std_command()
+        .with_context(|| format!("ollama create gate başarısız: {}", binary.display()))?;
+    let mut command = Command::from(std_cmd);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -697,7 +704,7 @@ pub fn parse_llm_json(raw: &str) -> Result<serde_json::Value> {
 fn apply_no_window(_command: &mut Command) {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // tokio::process::Command exposes creation_flags on Windows directly.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         _command.creation_flags(CREATE_NO_WINDOW);
     }
