@@ -12,7 +12,6 @@ import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjec
 import {
   buildBrowserEfficiencyReport,
   deadSymbolsMatchingSelection,
-  downloadMarkdownFile,
   eventDecisionLabel,
   experiencesMatchingSelection,
   fetchAgentEfficiencyReport,
@@ -26,6 +25,7 @@ import {
   isTauri,
   layaEnginePercentage,
   mergeClaudeQuotaRows,
+  saveMarkdownReport,
   natsEventTone,
   natsToneLabel,
   PAGE_SIZE,
@@ -876,7 +876,7 @@ export function QuotaPanel() {
               <th className="px-2 py-1.5 font-medium">Used / Limit</th>
               <th className="hidden px-2 py-1.5 text-right font-medium md:table-cell">Remaining / Hosts</th>
               <th className="hidden px-2 py-1.5 text-right font-medium lg:table-cell">Reset</th>
-              <th className="w-16 px-2.5 py-1.5 text-right font-medium">State</th>
+              <th className="w-40 min-w-[10rem] px-2.5 py-1.5 text-right font-medium">State</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
@@ -929,10 +929,13 @@ export function QuotaPanel() {
                 <td className={`hidden px-2 py-1.5 text-right lg:table-cell ${row.reset === "LOCAL" ? "font-semibold text-secondary" : "tnum text-outline"}`}>
                   {row.reset}
                 </td>
-                <td className="px-2.5 py-1.5 text-right">
-                  <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-meta ${quotaToneClass(row.tone)}`}>
-                    {row.tone === "live" ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-secondary" /> : null}
-                    {row.label}
+                <td className="w-40 min-w-[10rem] max-w-[14rem] px-2.5 py-1.5 text-right">
+                  <span
+                    title={row.label}
+                    className={`inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-meta ${quotaToneClass(row.tone)}`}
+                  >
+                    {row.tone === "live" ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-secondary" /> : null}
+                    <span className="min-w-0 truncate">{row.label}</span>
                   </span>
                 </td>
               </tr>
@@ -1128,6 +1131,45 @@ export function SettingsPanel() {
   );
 }
 
+type FleetWorkerRow = {
+  id: string;
+  label: string;
+  status: string;
+  endpoint: string;
+  detail: string;
+  heartbeat: string;
+  pid: string;
+  uptime: string;
+  restarts: string;
+  tone: "ok" | "warn" | "down";
+};
+
+function fleetHealthFields(
+  health: { running?: boolean; endpoint?: string; detail?: string | null; error?: string | null; started_by_us?: boolean } | undefined,
+  fallbackEndpoint: string,
+  missingLabel: string,
+): Pick<FleetWorkerRow, "status" | "endpoint" | "detail" | "heartbeat" | "pid" | "uptime" | "restarts" | "tone"> {
+  const running = health?.running === true;
+  const err = (health?.error || "").trim();
+  const detail = (health?.detail || "").trim() || (running ? "ok" : missingLabel);
+  const restartMatch = err.match(/deneme\s+(\d+)\s*\/\s*(\d+)/i);
+  const exhausted = /limiti aşıldı/i.test(err);
+  return {
+    status: running ? "ready" : exhausted ? "restart-limit" : "down",
+    endpoint: health?.endpoint || fallbackEndpoint,
+    detail: err || detail,
+    heartbeat: running ? "live" : "stale",
+    pid: health?.started_by_us ? "supervised" : "—",
+    uptime: running ? "up" : "—",
+    restarts: restartMatch
+      ? `${restartMatch[1]}/${restartMatch[2]}`
+      : exhausted
+        ? "max"
+        : "—",
+    tone: running ? "ok" : "down",
+  };
+}
+
 export function FleetPanel() {
   const { report, model, decisionGate, layaEngine } = useLounge();
   const engineLabel = formatLayaEngineFleetStatus(layaEngine);
@@ -1138,9 +1180,8 @@ export function FleetPanel() {
       : decisionGate?.phase === "ready"
         ? decisionGate.device || "DecisionGate"
         : "DecisionGate kapalı";
-  const [natsWorkers, setNatsWorkers] = useState<
-    { id: string; label: string; status: string; model: string }[]
-  >([]);
+  const [natsWorkers, setNatsWorkers] = useState<FleetWorkerRow[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>("lounge-kernel");
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -1172,7 +1213,13 @@ export function FleetPanel() {
                 id: row.id,
                 label: row.name || row.id,
                 status: online ? "online" : "offline",
-                model: row.endpoint || row.payload?.detail || "nats worker",
+                endpoint: row.endpoint || "nats",
+                detail: row.payload?.detail || "nats worker",
+                heartbeat: online ? "live" : "stale",
+                pid: "—",
+                uptime: online ? "up" : "—",
+                restarts: "—",
+                tone: online ? "ok" : ("down" as const),
               };
             }),
         );
@@ -1188,24 +1235,51 @@ export function FleetPanel() {
     };
   }, []);
 
-  const workers = [
-    { id: "lounge-kernel", label: "lounge-kernel", status: report?.ollama.running ? "ready" : "down", model: model ?? "" },
-    { id: "nats-hub", label: "nats-hub", status: report?.nats.running ? "listening" : "down", model: "lounge.>" },
-    { id: "memory-bridge", label: "memory-bridge", status: report?.memory.running ? "ready" : "missing", model: "cbm cli" },
+  const layaTone: FleetWorkerRow["tone"] =
+    layaEngine?.phase === "failed"
+      ? "down"
+      : layaEngine?.phase === "downloading"
+        ? "warn"
+        : "ok";
+  const workers: FleetWorkerRow[] = [
+    {
+      id: "lounge-kernel",
+      label: "lounge-kernel",
+      ...fleetHealthFields(report?.ollama, "http://127.0.0.1:18790", model || "LMR"),
+      detail:
+        report?.ollama.error ||
+        report?.ollama.detail ||
+        (report?.ollama.running ? model || "LMR ready" : "LMR down"),
+    },
+    {
+      id: "nats-hub",
+      label: "nats-hub",
+      ...fleetHealthFields(report?.nats, "nats://127.0.0.1:4222", "lounge.>"),
+      status: report?.nats.running ? "listening" : "down",
+      detail: report?.nats.error || report?.nats.detail || "lounge.> listening",
+    },
+    {
+      id: "memory-bridge",
+      label: "memory-bridge",
+      ...fleetHealthFields(report?.memory, "http://127.0.0.1:7432", "cbm cli missing"),
+      status: report?.memory.running ? "ready" : "missing",
+    },
     {
       id: "openjev-laya",
       label: "openjev-laya",
       status: engineLabel,
-      model: gateHint,
+      endpoint: layaEngine?.path || "local weights",
+      detail: gateHint,
+      heartbeat: layaEngine?.phase === "ready" ? "live" : "—",
+      pid: "—",
+      uptime: layaEngine?.phase === "ready" ? "up" : "—",
+      restarts: "—",
+      tone: layaTone,
     },
     ...natsWorkers,
   ];
-  const engineTone =
-    layaEngine?.phase === "failed"
-      ? "text-error"
-      : layaEngine?.phase === "downloading"
-        ? "text-on-surface-variant"
-        : "text-secondary";
+  const selected = workers.find((row) => row.id === selectedId) ?? workers[0] ?? null;
+
   return (
     <section
       data-qa="panel"
@@ -1214,39 +1288,111 @@ export function FleetPanel() {
       <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
         <h2 className="font-body text-panel font-semibold tracking-label uppercase">Worker Fleet</h2>
       </div>
-      <div className="min-h-0 w-full flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-body">
-        {workers.map((row) => (
-          <div key={row.id} className="flex w-full items-center justify-between gap-2 px-3 py-2.5">
-            <span className="min-w-0 flex-1 truncate text-on-surface">{row.label}</span>
-            <span className="min-w-0 max-w-[40%] flex-1 truncate text-right text-on-surface-variant">{row.model}</span>
-            <span
-              className={`shrink-0 ${
-                row.id === "openjev-laya"
-                  ? engineTone
-                  : row.status === "down" ||
-                      row.status === "missing" ||
-                      row.status === "offline"
-                    ? "text-error"
-                    : "text-secondary"
-              }`}
-            >
-              {row.status}
-            </span>
-          </div>
-        ))}
-        <div className="space-y-2 px-3 py-4 font-body text-body text-on-surface-variant">
-          <p className="font-semibold text-on-surface">Fleet status</p>
-          <p>
-            Workers report via NATS heartbeat. Offline workers flip within ~45s after the last
-            ping. Use Index Workspace on Health when local graph data is missing.
-          </p>
-          <p className="font-mono text-meta text-outline">
-            lounge.workers.heartbeat · DecisionGate · memory-bridge
-          </p>
-          <p className="font-mono text-meta text-outline">
-            Ensure core daemons show Running in the sidebar before dispatching tasks.
-          </p>
+      <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden lg:flex-row">
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+          <table className="w-full min-w-[36rem] border-collapse text-left font-mono text-body">
+            <thead>
+              <tr className="sticky top-0 border-b border-outline-variant bg-surface-container-low/95 text-meta text-outline uppercase">
+                <th className="px-3 py-2 font-medium">Worker</th>
+                <th className="px-2 py-2 font-medium">Status</th>
+                <th className="hidden px-2 py-2 font-medium sm:table-cell">Heartbeat</th>
+                <th className="hidden px-2 py-2 font-medium md:table-cell">PID</th>
+                <th className="hidden px-2 py-2 font-medium md:table-cell">Uptime</th>
+                <th className="hidden px-2 py-2 font-medium lg:table-cell">Restarts</th>
+                <th className="px-3 py-2 font-medium">Endpoint</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-outline-variant/40">
+              {workers.map((row) => {
+                const active = selected?.id === row.id;
+                return (
+                  <tr
+                    key={row.id}
+                    className={`cursor-pointer ${active ? "bg-surface-container-highest/70" : "hover:bg-surface-container-high/50"}`}
+                    onClick={() => setSelectedId(row.id)}
+                  >
+                    <td className="truncate px-3 py-2.5 font-medium text-on-surface">{row.label}</td>
+                    <td
+                      className={`px-2 py-2.5 ${
+                        row.tone === "down"
+                          ? "text-error"
+                          : row.tone === "warn"
+                            ? "text-on-surface-variant"
+                            : "text-secondary"
+                      }`}
+                    >
+                      {row.status}
+                    </td>
+                    <td className="hidden px-2 py-2.5 text-on-surface-variant sm:table-cell">
+                      {row.heartbeat}
+                    </td>
+                    <td className="hidden px-2 py-2.5 text-on-surface-variant md:table-cell">
+                      {row.pid}
+                    </td>
+                    <td className="hidden px-2 py-2.5 text-on-surface-variant md:table-cell">
+                      {row.uptime}
+                    </td>
+                    <td className="hidden px-2 py-2.5 text-on-surface-variant lg:table-cell">
+                      {row.restarts}
+                    </td>
+                    <td className="truncate px-3 py-2.5 text-on-surface-variant" title={row.endpoint}>
+                      {row.endpoint}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
+        <aside className="flex min-h-[10rem] w-full shrink-0 flex-col border-t border-outline-variant bg-surface-container-low/40 lg:w-72 lg:border-t-0 lg:border-l">
+          <div className="border-b border-outline-variant px-3 py-2 font-body text-meta font-semibold tracking-label text-on-surface uppercase">
+            Worker detail
+          </div>
+          {selected ? (
+            <dl className="min-h-0 flex-1 space-y-2 overflow-auto px-3 py-3 font-mono text-body">
+              <div>
+                <dt className="text-meta text-outline uppercase">Name</dt>
+                <dd className="text-on-surface">{selected.label}</dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">Status</dt>
+                <dd className={selected.tone === "down" ? "text-error" : "text-secondary"}>
+                  {selected.status}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">Heartbeat</dt>
+                <dd className="text-on-surface-variant">{selected.heartbeat}</dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">PID / supervision</dt>
+                <dd className="text-on-surface-variant">{selected.pid}</dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">Uptime</dt>
+                <dd className="text-on-surface-variant">{selected.uptime}</dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">Restart count</dt>
+                <dd className="text-on-surface-variant">{selected.restarts}</dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">Endpoint</dt>
+                <dd className="break-all text-on-surface-variant">{selected.endpoint}</dd>
+              </div>
+              <div>
+                <dt className="text-meta text-outline uppercase">Detail</dt>
+                <dd className="break-words text-on-surface-variant">{selected.detail}</dd>
+              </div>
+            </dl>
+          ) : (
+            <p className="px-3 py-4 font-body text-body text-on-surface-variant">No worker selected</p>
+          )}
+          <div className="mt-auto space-y-1 border-t border-outline-variant px-3 py-2 font-body text-meta text-outline">
+            <p>NATS heartbeat · offline after ~45s</p>
+            <p className="font-mono">lounge.workers.heartbeat</p>
+          </div>
+        </aside>
       </div>
       <div className="flex shrink-0 items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-2 font-body text-meta text-outline">
         <span className="font-body">{workers.length} workers registered</span>
@@ -1279,7 +1425,15 @@ export function TelemetryPanel() {
   const [tauriReport, setTauriReport] = useState<AgentEfficiencyReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+  const [savingMd, setSavingMd] = useState(false);
   const tauriHost = isTauri();
+
+  useEffect(() => {
+    if (!saveToast) return;
+    const id = window.setTimeout(() => setSaveToast(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [saveToast]);
 
   const projectOptions = useMemo(() => {
     const ids = new Set<string>();
@@ -1414,17 +1568,39 @@ export function TelemetryPanel() {
             </select>
             <button
               type="button"
-              disabled={!report}
+              disabled={!report || savingMd}
               onClick={() => {
                 if (!report) return;
                 const stamp = report.generatedAt.slice(0, 10);
-                downloadMarkdownFile(`agent-efficiency-${stamp}.md`, report.markdown);
+                setSavingMd(true);
+                void saveMarkdownReport(`agent-efficiency-${stamp}.md`, report.markdown)
+                  .then((result) => {
+                    if (result.ok) {
+                      setSaveToast(
+                        result.mode === "tauri"
+                          ? `Kaydedildi · ${result.path}`
+                          : `İndirildi · ${result.path}`,
+                      );
+                    } else if (!result.cancelled) {
+                      setSaveToast(`Markdown kaydı başarısız · ${result.error}`);
+                    }
+                  })
+                  .finally(() => setSavingMd(false));
               }}
               className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-meta font-bold tracking-wider text-on-surface uppercase enabled:hover:bg-surface-container disabled:opacity-40"
             >
-              Markdown indir
+              {savingMd ? "Kaydediliyor…" : "Markdown indir"}
             </button>
           </div>
+          {saveToast ? (
+            <p
+              className="w-full px-3 pb-2 font-mono text-meta text-secondary"
+              role="status"
+              data-qa="markdown-save-toast"
+            >
+              {saveToast}
+            </p>
+          ) : null}
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-3 font-mono text-body">
           {loading && !report ? (

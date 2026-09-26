@@ -17,6 +17,7 @@ import {
   QUOTA_CONTINUE_LOCAL_LABEL,
   coreServicesDegraded,
   degradedCoreServiceNames,
+  resolveDegradedRestart,
   isTauri,
   type ApprovalRequest,
   type DecisionGateStatus,
@@ -170,6 +171,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const quotaHold = Boolean(approval && isQuotaApproval(approval.kind));
   const serviceDegraded = coreServicesDegraded(report);
   const degradedNames = degradedCoreServiceNames(report);
+  const degradedRestart = useMemo(() => resolveDegradedRestart(report), [report]);
   const criticalAlerts = useMemo(
     () => buildCriticalAlerts({ quotas, amberAlert, amberTools, approval, degradedNames }),
     [quotas, amberAlert, amberTools, approval, degradedNames],
@@ -316,7 +318,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      {serviceDegraded ? (
+      {serviceDegraded && degradedRestart ? (
         <div
           ref={attachBannerRef}
           className={`${bannerPos} border-b border-error-container bg-error-container/25 py-2 px-4`}
@@ -329,18 +331,33 @@ export function AppShell({ children }: { children: ReactNode }) {
                 Service Degraded ·{" "}
               </span>
               <span className="text-on-surface">
-                {degradedNames.join(", ")} kapalı — otomatik yeniden başlatma deneniyor
+                {degradedRestart.phase.kind === "exhausted"
+                  ? `${degradedRestart.names.join(", ")} kapalı — auto-restart limiti aşıldı (${degradedRestart.phase.max} deneme)`
+                  : degradedRestart.phase.kind === "retrying"
+                    ? `${degradedRestart.names.join(", ")} kapalı — yeniden deneme${
+                        degradedRestart.phase.waitSecs != null
+                          ? ` ${degradedRestart.phase.waitSecs}s`
+                          : ""
+                      } (deneme ${degradedRestart.phase.attempt}/${degradedRestart.phase.max})`
+                    : `${degradedRestart.names.join(", ")} kapalı — otomatik yeniden başlatma deneniyor`}
               </span>
-              {degradedNames.includes("LMR") && report?.ollama.error ? (
-                <span className="ml-2 break-words text-outline">· {report.ollama.error}</span>
-              ) : null}
-              {degradedNames.includes("NATS") && report?.nats.error ? (
-                <span className="ml-2 break-words text-outline">· {report.nats.error}</span>
-              ) : null}
             </div>
-            <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase">
-              auto-restart
-            </span>
+            {degradedRestart.phase.kind === "exhausted" ? (
+              <button
+                type="button"
+                onClick={() => void restartServices()}
+                disabled={restarting}
+                className={`${BANNER_BTN} shrink-0 border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase hover:bg-surface-bright disabled:opacity-60`}
+              >
+                {restarting ? "Restarting…" : "Auto-Restart"}
+              </button>
+            ) : (
+              <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase">
+                {degradedRestart.phase.kind === "retrying"
+                  ? `${degradedRestart.phase.attempt}/${degradedRestart.phase.max}`
+                  : "auto-restart"}
+              </span>
+            )}
           </div>
         </div>
       ) : approval && !securityHold && !quotaHold ? (
@@ -946,25 +963,27 @@ function DaemonRow({
   const label = !checked
     ? "Checking services…"
     : daemonLabel(health, "Disconnected");
+  // Short label keeps "Memory Bridge" readable at 1280; status wraps below.
+  const shortName = name === "Memory Bridge" ? "Memory" : name;
   return (
-    <div className="space-y-0.5 font-mono text-body">
-      <div className="flex items-center justify-between gap-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <Pip tone={daemonTone(health)} />
-          <span className="truncate text-on-surface">{name}</span>
-        </div>
-        <span className={`tnum shrink-0 ${running ? "text-secondary" : "text-error"}`}>{label}</span>
+    <div className="space-y-0.5 font-mono text-body" title={name}>
+      <div className="flex min-w-0 items-center gap-2">
+        <Pip tone={daemonTone(health)} />
+        <span className="min-w-0 truncate text-on-surface">{shortName}</span>
       </div>
-      {checked && !running ? (
-        <button
-          type="button"
-          onClick={onRestart}
-          disabled={restarting}
-          className="ml-4 rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface hover:bg-surface-bright disabled:opacity-60"
-        >
-          {restarting ? "Restarting…" : "Restart Service"}
-        </button>
-      ) : null}
+      <div className="ml-4 space-y-0.5">
+        <div className={`tnum ${running ? "text-secondary" : "text-error"}`}>{label}</div>
+        {checked && !running ? (
+          <button
+            type="button"
+            onClick={onRestart}
+            disabled={restarting}
+            className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface hover:bg-surface-bright disabled:opacity-60"
+          >
+            {restarting ? "Restarting…" : "Restart Service"}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
