@@ -62,7 +62,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
       }
     };
     void load();
-    const timer = window.setInterval(() => void load(), 8_000);
+    const timer = window.setInterval(() => void load(), 30_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

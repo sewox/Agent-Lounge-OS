@@ -3,32 +3,52 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::memory_bridge::{
-    configured_graph_ui_port, probe_ui_config, set_configured_graph_ui_port, MemoryBridge,
-    DEFAULT_GRAPH_UI_PORT, UI_PROBE_TIMEOUT,
+    probe_ui_config, MemoryBridge, DEFAULT_GRAPH_UI_PORT, UI_PROBE_TIMEOUT,
 };
 use super::probe::{tcp_ready, wait_until};
 
 pub const GRAPH_WINDOW_LABEL: &str = "graph-window";
 const ENABLE_READY_DEADLINE: Duration = Duration::from_secs(10);
 const SETTINGS_KEY: &str = "graph_ui_port";
+/// Single-flight join penceresi — lock serbest kalınca bekleyenler taze sonucu alır.
+const STATUS_JOIN_WINDOW: Duration = Duration::from_millis(500);
 
-/// Lounge'un spawn ettiği cbm UI çocuğu (stdin açık tutulur).
-#[derive(Default)]
+/// Lounge'un spawn ettiği cbm UI çocuğu + status single-flight + window port.
 pub struct GraphUiState {
     child: Mutex<Option<Child>>,
+    /// graph-window'un navigation guard'ında kilitli port.
+    window_port: Mutex<Option<u16>>,
+    status_flight: AsyncMutex<StatusFlight>,
+}
+
+struct StatusFlight {
+    last: Option<GraphUiStatus>,
+    finished_at: Option<Instant>,
+}
+
+impl Default for GraphUiState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphUiState {
     pub fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            window_port: Mutex::new(None),
+            status_flight: AsyncMutex::new(StatusFlight {
+                last: None,
+                finished_at: None,
+            }),
         }
     }
 
@@ -58,6 +78,39 @@ impl GraphUiState {
             let _ = prev.wait();
         }
     }
+
+    pub fn window_port(&self) -> Option<u16> {
+        match self.window_port.lock() {
+            Ok(g) => *g,
+            Err(p) => *p.into_inner(),
+        }
+    }
+
+    pub fn set_window_port(&self, port: Option<u16>) {
+        let mut guard = match self.window_port.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = port;
+    }
+
+    /// Single-flight: mutex compute süresince tutulur; bekleyenler taze `last` sonucuna katılır.
+    pub async fn status_single_flight<F, Fut>(&self, compute: F) -> GraphUiStatus
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = GraphUiStatus>,
+    {
+        let mut flight = self.status_flight.lock().await;
+        if let (Some(status), Some(at)) = (flight.last.as_ref(), flight.finished_at) {
+            if at.elapsed() < STATUS_JOIN_WINDOW {
+                return status.clone();
+            }
+        }
+        let status = compute().await;
+        flight.last = Some(status.clone());
+        flight.finished_at = Some(Instant::now());
+        status
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,15 +132,28 @@ pub async fn load_port_from_store(store: &crate::db::ExperienceStore) -> u16 {
     }
 }
 
-pub async fn persist_port(store: &crate::db::ExperienceStore, port: u16) -> Result<()> {
+pub async fn persist_port(
+    store: &crate::db::ExperienceStore,
+    bridge: &MemoryBridge,
+    app: &AppHandle,
+    state: &GraphUiState,
+    port: u16,
+) -> Result<()> {
     if port == 0 {
         bail!("port 0 geçersiz");
     }
-    set_configured_graph_ui_port(port);
+    bridge.set_http_port(port);
     store
         .set_setting(SETTINGS_KEY.into(), port.to_string())
         .await
         .context("graph_ui_port kaydedilemedi")?;
+    // Stale navigation lock: port değiştiyse pencereyi kapat (sonraki open yeniden yaratır).
+    if state.window_port() != Some(port) {
+        if let Some(window) = app.get_webview_window(GRAPH_WINDOW_LABEL) {
+            let _ = window.close();
+        }
+        state.set_window_port(None);
+    }
     Ok(())
 }
 
@@ -96,8 +162,22 @@ pub fn parse_port_setting(raw: &str) -> Option<u16> {
     trimmed.parse::<u16>().ok().filter(|p| *p > 0)
 }
 
-pub async fn graph_ui_status(bridge: &MemoryBridge, project_root: Option<&str>) -> GraphUiStatus {
-    let port = configured_graph_ui_port();
+pub async fn graph_ui_status(
+    state: &GraphUiState,
+    bridge: &MemoryBridge,
+    project_root: Option<&str>,
+) -> GraphUiStatus {
+    let bridge = bridge.clone();
+    let root = project_root.map(str::to_string);
+    state
+        .status_single_flight(
+            || async move { graph_ui_status_inner(&bridge, root.as_deref()).await },
+        )
+        .await
+}
+
+async fn graph_ui_status_inner(bridge: &MemoryBridge, project_root: Option<&str>) -> GraphUiStatus {
+    let port = bridge.http_port();
     let binary_found = bridge.binary_path().is_file();
     if !binary_found {
         return GraphUiStatus {
@@ -112,13 +192,19 @@ pub async fn graph_ui_status(bridge: &MemoryBridge, project_root: Option<&str>) 
     }
 
     let (ui_available, port_conflict, conflict_message) = classify_port(port).await;
-    let cbm_project_name = if let Some(root) = project_root.filter(|s| !s.trim().is_empty()) {
-        match resolve_cbm_project_name(bridge, Path::new(root)).await {
-            Ok(name) => name,
-            Err(err) => {
-                log::debug!("cbm project eşlemesi: {err}");
-                None
+
+    // list_projects yalnızca UI ayaktayken — aksi halde CLI hang yığını.
+    let cbm_project_name = if ui_available {
+        if let Some(root) = project_root.filter(|s| !s.trim().is_empty()) {
+            match resolve_cbm_project_name(bridge, Path::new(root)).await {
+                Ok(name) => name,
+                Err(err) => {
+                    log::debug!("cbm project eşlemesi: {err}");
+                    None
+                }
             }
+        } else {
+            None
         }
     } else {
         None
@@ -176,7 +262,6 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    // macOS / Windows yol karşılaştırması için string normalize
     let a = left.to_string_lossy().trim_end_matches('/').to_lowercase();
     let b = right.to_string_lossy().trim_end_matches('/').to_lowercase();
     a == b
@@ -197,12 +282,22 @@ pub fn navigation_allowed(url: &Url, port: u16) -> bool {
         && url.port_or_known_default() == Some(port)
 }
 
-pub fn open_or_focus_graph_window(app: &AppHandle, port: u16, cbm_project: &str) -> Result<()> {
+pub fn open_or_focus_graph_window(
+    app: &AppHandle,
+    state: &GraphUiState,
+    port: u16,
+    cbm_project: &str,
+) -> Result<()> {
     let url = graph_project_url(port, cbm_project)?;
     if let Some(window) = app.get_webview_window(GRAPH_WINDOW_LABEL) {
-        window.navigate(url).context("graph-window navigate")?;
-        window.set_focus().context("graph-window set_focus")?;
-        return Ok(());
+        if state.window_port() == Some(port) {
+            window.navigate(url).context("graph-window navigate")?;
+            window.set_focus().context("graph-window set_focus")?;
+            return Ok(());
+        }
+        // Port değişti — stale navigation lock; kapat ve yeniden yarat.
+        let _ = window.close();
+        state.set_window_port(None);
     }
 
     let allowed_port = port;
@@ -214,18 +309,27 @@ pub fn open_or_focus_graph_window(app: &AppHandle, port: u16, cbm_project: &str)
         .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
         .build()
         .context("graph-window create")?;
+    state.set_window_port(Some(port));
     Ok(())
 }
 
+/// Main kapanınca graph-window + Lounge child temizliği.
+pub fn on_main_window_closed(app: &AppHandle, state: &GraphUiState) {
+    if let Some(window) = app.get_webview_window(GRAPH_WINDOW_LABEL) {
+        let _ = window.close();
+    }
+    state.set_window_port(None);
+    state.kill_spawned_child();
+}
+
 /// `--ui=true --port=N` spawn; stdin piped (kapanmaz). Hazır olmazsa çocuğu öldürür.
-/// `cbm_project` Some ise graph penceresini açar.
 pub async fn enable_graph_ui(
     app: &AppHandle,
     state: &GraphUiState,
     bridge: &MemoryBridge,
     cbm_project: Option<&str>,
 ) -> Result<()> {
-    let port = configured_graph_ui_port();
+    let port = bridge.http_port();
     let (available, conflict, conflict_msg) = classify_port(port).await;
     if conflict {
         bail!(
@@ -235,7 +339,7 @@ pub async fn enable_graph_ui(
     }
     if available {
         if let Some(name) = cbm_project.filter(|s| !s.is_empty()) {
-            open_or_focus_graph_window(app, port, name)?;
+            open_or_focus_graph_window(app, state, port, name)?;
         }
         return Ok(());
     }
@@ -275,23 +379,17 @@ pub async fn enable_graph_ui(
     }
 
     if let Some(name) = cbm_project.filter(|s| !s.is_empty()) {
-        open_or_focus_graph_window(app, port, name)?;
+        open_or_focus_graph_window(app, state, port, name)?;
     }
     Ok(())
-}
-
-/// Startup / settings: Atomic port senkronu.
-pub fn sync_port(port: u16) {
-    set_configured_graph_ui_port(if port == 0 {
-        DEFAULT_GRAPH_UI_PORT
-    } else {
-        port
-    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::memory_bridge::{MemoryBridgeConfig, TransportMode};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn parses_port_setting_variants() {
@@ -329,5 +427,60 @@ mod tests {
     #[test]
     fn paths_equal_normalizes_trailing_slash() {
         assert!(paths_equal(Path::new("/tmp/foo"), Path::new("/tmp/foo/")));
+    }
+
+    #[tokio::test]
+    async fn status_single_flight_joins_via_arc() {
+        let state = Arc::new(GraphUiState::new());
+        let calls = Arc::new(AtomicU32::new(0));
+
+        let run = |state: Arc<GraphUiState>, calls: Arc<AtomicU32>, port: u16| {
+            tokio::spawn(async move {
+                state
+                    .status_single_flight(|| {
+                        let calls = calls.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            GraphUiStatus {
+                                binary_found: true,
+                                ui_available: false,
+                                project_indexed: false,
+                                cbm_project_name: None,
+                                port,
+                                port_conflict: false,
+                                conflict_message: None,
+                            }
+                        }
+                    })
+                    .await
+            })
+        };
+
+        let t1 = run(state.clone(), calls.clone(), 11);
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let t2 = run(state.clone(), calls.clone(), 22);
+        let a = t1.await.unwrap();
+        let b = t2.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "compute should run once");
+        assert_eq!(a.port, b.port);
+        assert_eq!(a.port, 11);
+    }
+
+    #[tokio::test]
+    async fn status_skips_list_projects_when_ui_down() {
+        let bridge = MemoryBridge::with_config(
+            "/tmp/missing-graph-status",
+            MemoryBridgeConfig {
+                http_port: 1,
+                transport: TransportMode::ForceCli,
+                ..MemoryBridgeConfig::default()
+            },
+        );
+        let state = GraphUiState::new();
+        let status = graph_ui_status(&state, &bridge, Some("/tmp/any")).await;
+        assert!(!status.binary_found);
+        assert!(status.cbm_project_name.is_none());
+        assert!(!status.ui_available);
     }
 }

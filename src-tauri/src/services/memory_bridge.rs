@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -14,25 +14,54 @@ use crate::models::{
     ServiceHealth, ServiceId,
 };
 
-/// CLI fallback hard timeout — cbm daemon açıkken cli hang'ini keser.
-pub const CLI_TIMEOUT: Duration = Duration::from_secs(15);
-const HTTP_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Read-only tool hard timeout (CLI + HTTP).
+pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Index / write tools — large repos must not die at 15s.
+pub const MUTATING_TIMEOUT: Duration = Duration::from_secs(300);
 pub const UI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_GRAPH_UI_PORT: u16 = 9749;
-
-static GRAPH_UI_PORT: AtomicU16 = AtomicU16::new(DEFAULT_GRAPH_UI_PORT);
+/// `list_projects` sonuçları en az bu süre cache'lenir.
+pub const LIST_PROJECTS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Semantic map UI için üst sınır — viewport kilitli listede sayfalama var.
 const SEMANTIC_NODE_LIMIT: u32 = 400;
 const SEMANTIC_CALL_LIMIT: u32 = 800;
 
-pub fn configured_graph_ui_port() -> u16 {
-    GRAPH_UI_PORT.load(Ordering::Relaxed)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportMode {
+    /// Probe `/api/ui-config`; ayaktaysa HTTP `/rpc`, değilse CLI.
+    #[default]
+    Auto,
+    /// Asla HTTP'ye dokunma (test güvenliği).
+    ForceCli,
 }
 
-pub fn set_configured_graph_ui_port(port: u16) {
-    if port > 0 {
-        GRAPH_UI_PORT.store(port, Ordering::Relaxed);
+#[derive(Debug, Clone)]
+pub struct MemoryBridgeConfig {
+    pub http_port: u16,
+    pub transport: TransportMode,
+    pub read_timeout: Duration,
+    pub mutating_timeout: Duration,
+}
+
+impl Default for MemoryBridgeConfig {
+    fn default() -> Self {
+        Self {
+            http_port: DEFAULT_GRAPH_UI_PORT,
+            transport: TransportMode::Auto,
+            read_timeout: READ_TIMEOUT,
+            mutating_timeout: MUTATING_TIMEOUT,
+        }
+    }
+}
+
+impl MemoryBridgeConfig {
+    /// Test / fake-binary yolları — gerçek :9749'a asla vurma.
+    pub fn force_cli() -> Self {
+        Self {
+            transport: TransportMode::ForceCli,
+            ..Self::default()
+        }
     }
 }
 
@@ -42,9 +71,20 @@ pub enum ToolTransport {
     Cli,
 }
 
+struct ListProjectsCache {
+    at: Option<Instant>,
+    rows: Vec<ProjectSummary>,
+}
+
+struct BridgeShared {
+    config: RwLock<MemoryBridgeConfig>,
+    list_cache: tokio::sync::Mutex<ListProjectsCache>,
+}
+
 #[derive(Clone)]
 pub struct MemoryBridge {
     binary: PathBuf,
+    shared: Arc<BridgeShared>,
 }
 
 impl MemoryBridge {
@@ -54,13 +94,58 @@ impl MemoryBridge {
 
     pub fn discover_from(repo_root: impl AsRef<Path>) -> Result<Self> {
         let binary = resolve_binary(repo_root.as_ref())?;
-        Ok(Self { binary })
+        Ok(Self::with_config(binary, MemoryBridgeConfig::default()))
     }
 
+    /// Test stub: ForceCli — process-global port yok, gerçek cbm UI'ye dokunmaz.
     pub fn from_binary(binary: impl Into<PathBuf>) -> Self {
+        Self::with_config(binary, MemoryBridgeConfig::force_cli())
+    }
+
+    pub fn with_config(binary: impl Into<PathBuf>, config: MemoryBridgeConfig) -> Self {
         Self {
             binary: binary.into(),
+            shared: Arc::new(BridgeShared {
+                config: RwLock::new(config),
+                list_cache: tokio::sync::Mutex::new(ListProjectsCache {
+                    at: None,
+                    rows: Vec::new(),
+                }),
+            }),
         }
+    }
+
+    pub fn config(&self) -> MemoryBridgeConfig {
+        self.shared
+            .config
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub fn set_http_port(&self, port: u16) {
+        if port == 0 {
+            return;
+        }
+        let mut guard = self
+            .shared
+            .config
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        guard.http_port = port;
+    }
+
+    pub fn http_port(&self) -> u16 {
+        self.config().http_port
+    }
+
+    pub fn set_transport(&self, transport: TransportMode) {
+        let mut guard = self
+            .shared
+            .config
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        guard.transport = transport;
     }
 
     pub fn binary_path(&self) -> &Path {
@@ -101,6 +186,8 @@ impl MemoryBridge {
                 "json",
             ])
             .await?;
+        // Index başarılı → list_projects cache bayat.
+        self.invalidate_list_cache().await;
         let mut graph = parse_index_graph(&stdout, &repo_path)?;
         // index_repository yalnızca nodes/edges sayımı döner; gerçek CALLS kenarları query_graph'tan.
         if graph.nodes.is_empty() || graph.references.is_empty() {
@@ -215,6 +302,22 @@ impl MemoryBridge {
     }
 
     pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
+        {
+            let cache = self.shared.list_cache.lock().await;
+            if let Some(at) = cache.at {
+                if at.elapsed() < LIST_PROJECTS_CACHE_TTL {
+                    return Ok(cache.rows.clone());
+                }
+            }
+        }
+        let rows = self.list_projects_uncached().await?;
+        let mut cache = self.shared.list_cache.lock().await;
+        cache.at = Some(Instant::now());
+        cache.rows = rows.clone();
+        Ok(rows)
+    }
+
+    pub async fn list_projects_uncached(&self) -> Result<Vec<ProjectSummary>> {
         let stdout = self
             .run_tool(&["list_projects", "--format", "json"])
             .await?;
@@ -222,6 +325,18 @@ impl MemoryBridge {
         let list: ProjectList =
             serde_json::from_value(payload).context("project listesi çözülemedi")?;
         Ok(list.projects)
+    }
+
+    pub async fn invalidate_list_cache(&self) {
+        let mut cache = self.shared.list_cache.lock().await;
+        cache.at = None;
+        cache.rows.clear();
+    }
+
+    /// Test yardımcısı: cache TTL durumunu oku.
+    pub async fn list_projects_cache_age(&self) -> Option<Duration> {
+        let cache = self.shared.list_cache.lock().await;
+        cache.at.map(|at| at.elapsed())
     }
 
     async fn try_cli_dead(&self, repo_path: &Path) -> Result<Option<Vec<DeadSymbol>>> {
@@ -249,22 +364,43 @@ impl MemoryBridge {
         Ok(None)
     }
 
-    /// HTTP `/rpc` ulaşılabilirse onu kullan; değilse CLI (hard timeout).
+    /// HTTP `/rpc` (Auto + UI up) veya CLI. Mutating tool'da timeout sonrası CLI yok.
     pub async fn run_tool(&self, tool_args: &[&str]) -> Result<String> {
-        match select_tool_transport(configured_graph_ui_port()).await {
-            ToolTransport::HttpRpc => match self.run_http_rpc(tool_args).await {
+        let tool_name = tool_args.first().copied().unwrap_or("");
+        let cfg = self.config();
+        let timeout = tool_timeout_for(&cfg, tool_name);
+        let mutating = is_mutating_tool(tool_name);
+
+        match self.select_transport().await {
+            ToolTransport::HttpRpc => match self.run_http_rpc(tool_args, timeout).await {
                 Ok(out) => Ok(out),
+                Err(err) if should_fallback_to_cli(mutating, &err) => {
+                    log::warn!("HTTP /rpc bağlantı yok, CLI fallback: {err}");
+                    self.run_cli_with_timeout(tool_args, timeout).await
+                }
+                Err(err) if !mutating => {
+                    log::warn!("HTTP /rpc başarısız, CLI fallback (read): {err}");
+                    self.run_cli_with_timeout(tool_args, timeout).await
+                }
                 Err(err) => {
-                    log::warn!("HTTP /rpc başarısız, CLI fallback: {err}");
-                    self.run_cli_with_timeout(tool_args, CLI_TIMEOUT).await
+                    // Mutating: timeout / partial failure — ikinci kez indexleme yok.
+                    Err(err)
                 }
             },
-            ToolTransport::Cli => self.run_cli_with_timeout(tool_args, CLI_TIMEOUT).await,
+            ToolTransport::Cli => self.run_cli_with_timeout(tool_args, timeout).await,
         }
     }
 
-    async fn run_http_rpc(&self, tool_args: &[&str]) -> Result<String> {
-        let port = configured_graph_ui_port();
+    pub async fn select_transport(&self) -> ToolTransport {
+        let cfg = self.config();
+        match cfg.transport {
+            TransportMode::ForceCli => ToolTransport::Cli,
+            TransportMode::Auto => select_tool_transport(cfg.http_port).await,
+        }
+    }
+
+    async fn run_http_rpc(&self, tool_args: &[&str], timeout: Duration) -> Result<String> {
+        let port = self.http_port();
         let (name, arguments) = tool_args_to_rpc(tool_args)?;
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -277,7 +413,7 @@ impl MemoryBridge {
         });
         let url = format!("http://127.0.0.1:{port}/rpc");
         let client = reqwest::Client::builder()
-            .timeout(HTTP_RPC_TIMEOUT)
+            .timeout(timeout)
             .build()
             .context("reqwest client")?;
         let response = client
@@ -285,7 +421,7 @@ impl MemoryBridge {
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("POST {url}"))?;
+            .map_err(|err| classify_reqwest_err(err, &url))?;
         if !response.status().is_success() {
             bail!("HTTP /rpc status {}", response.status());
         }
@@ -293,7 +429,11 @@ impl MemoryBridge {
         extract_rpc_tool_text(&payload)
     }
 
-    async fn run_cli_with_timeout(&self, tool_args: &[&str], timeout: Duration) -> Result<String> {
+    pub async fn run_cli_with_timeout(
+        &self,
+        tool_args: &[&str],
+        timeout: Duration,
+    ) -> Result<String> {
         if !self.binary.is_file() {
             bail!("codebase-memory-mcp yok: {}", self.binary.display());
         }
@@ -351,6 +491,72 @@ impl MemoryBridge {
         }
 
         Ok(stdout)
+    }
+}
+
+/// Index / yazma araçları — uzun timeout; HTTP timeout sonrası CLI yok.
+pub fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "index_repository"
+            | "index_workspace"
+            | "delete_project"
+            | "remove_project"
+            | "clear_project"
+            | "reindex"
+    )
+}
+
+pub fn tool_timeout_for(config: &MemoryBridgeConfig, tool_name: &str) -> Duration {
+    if is_mutating_tool(tool_name) {
+        config.mutating_timeout
+    } else {
+        config.read_timeout
+    }
+}
+
+/// Mutating tool: yalnızca connection refused / port closed → CLI.
+/// Timeout veya kısmi HTTP hatası → CLI yok.
+pub fn should_fallback_to_cli(mutating: bool, err: &anyhow::Error) -> bool {
+    if !mutating {
+        return true;
+    }
+    is_connection_refused_or_unreachable(err)
+}
+
+pub fn is_connection_refused_or_unreachable(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
+            if re.is_timeout() {
+                return false;
+            }
+            if re.is_connect() {
+                return true;
+            }
+        }
+        let msg = cause.to_string().to_lowercase();
+        if msg.contains("timed out") || msg.contains("timeout") || msg.contains("zaman aşımı") {
+            return false;
+        }
+        if msg.contains("connection refused")
+            || msg.contains("connect error")
+            || msg.contains("dns error")
+            || msg.contains("network unreachable")
+            || msg.contains("connection reset")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn classify_reqwest_err(err: reqwest::Error, url: &str) -> anyhow::Error {
+    if err.is_timeout() {
+        anyhow::anyhow!("HTTP /rpc zaman aşımı ({url}): {err}")
+    } else if err.is_connect() {
+        anyhow::anyhow!("HTTP /rpc connection refused ({url}): {err}")
+    } else {
+        anyhow::anyhow!("POST {url}: {err}")
     }
 }
 
@@ -1336,6 +1542,33 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         assert!(err.contains("-32601"), "{err}");
     }
 
+    #[test]
+    fn tool_timeout_selects_mutating_vs_read() {
+        let cfg = MemoryBridgeConfig::default();
+        assert_eq!(tool_timeout_for(&cfg, "index_repository"), MUTATING_TIMEOUT);
+        assert_eq!(tool_timeout_for(&cfg, "list_projects"), READ_TIMEOUT);
+        assert_eq!(tool_timeout_for(&cfg, "query_graph"), READ_TIMEOUT);
+        assert!(is_mutating_tool("index_repository"));
+        assert!(!is_mutating_tool("list_projects"));
+    }
+
+    #[test]
+    fn mutating_fallback_only_on_connection_refused() {
+        let refused = anyhow::anyhow!("HTTP /rpc connection refused (http://127.0.0.1:1/rpc)");
+        let timed = anyhow::anyhow!("HTTP /rpc zaman aşımı (http://127.0.0.1:9/rpc): timed out");
+        let partial = anyhow::anyhow!("HTTP /rpc status 500");
+        assert!(should_fallback_to_cli(true, &refused));
+        assert!(!should_fallback_to_cli(true, &timed));
+        assert!(!should_fallback_to_cli(true, &partial));
+        assert!(should_fallback_to_cli(false, &timed));
+    }
+
+    #[test]
+    fn from_binary_defaults_to_force_cli() {
+        let bridge = MemoryBridge::from_binary("/tmp/missing-cbm");
+        assert_eq!(bridge.config().transport, TransportMode::ForceCli);
+    }
+
     async fn spawn_fake_cbm_http(projects_text: String) -> u16 {
         use axum::routing::{get, post};
         use axum::{Json, Router};
@@ -1368,7 +1601,35 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        // Kısa settle — bind sonrası accept hazır olsun.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        port
+    }
+
+    async fn spawn_hanging_rpc_http() -> u16 {
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+
+        let app = Router::new()
+            .route(
+                "/api/ui-config",
+                get(|| async { Json(serde_json::json!({"lang": "en"})) }),
+            )
+            .route(
+                "/rpc",
+                post(|_body: String| async {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": { "content": [{ "type": "text", "text": "{}" }] }
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
         tokio::time::sleep(Duration::from_millis(30)).await;
         port
     }
@@ -1388,17 +1649,70 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
     async fn list_projects_prefers_http_rpc_over_cli() {
         let payload = r#"{"projects":[{"name":"http-demo","root_path":"/tmp/http-demo","nodes":1,"edges":0}]}"#;
         let port = spawn_fake_cbm_http(payload.into()).await;
-        let prev = configured_graph_ui_port();
-        set_configured_graph_ui_port(port);
-
-        // CLI çağrılırsa patlasın diye olmayan binary.
-        let bridge = MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp-for-http-test");
+        let bridge = MemoryBridge::with_config(
+            "/tmp/missing-codebase-memory-mcp-for-http-test",
+            MemoryBridgeConfig {
+                http_port: port,
+                transport: TransportMode::Auto,
+                ..MemoryBridgeConfig::default()
+            },
+        );
         let projects = bridge.list_projects().await.expect("http list_projects");
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "http-demo");
         assert_eq!(projects[0].root_path.as_deref(), Some("/tmp/http-demo"));
+    }
 
-        set_configured_graph_ui_port(prev);
+    #[tokio::test]
+    async fn list_projects_cache_avoids_second_fetch() {
+        let payload = r#"{"projects":[{"name":"cached","root_path":"/tmp/c"}]}"#;
+        let port = spawn_fake_cbm_http(payload.into()).await;
+        let bridge = MemoryBridge::with_config(
+            "/tmp/missing-for-cache-test",
+            MemoryBridgeConfig {
+                http_port: port,
+                transport: TransportMode::Auto,
+                ..MemoryBridgeConfig::default()
+            },
+        );
+        let first = bridge.list_projects().await.unwrap();
+        assert!(bridge.list_projects_cache_age().await.is_some());
+        let second = bridge.list_projects().await.unwrap();
+        assert_eq!(first, second);
+        assert!(bridge.list_projects_cache_age().await.unwrap() < LIST_PROJECTS_CACHE_TTL);
+    }
+
+    #[tokio::test]
+    async fn mutating_http_timeout_does_not_fallback_to_cli() {
+        let port = spawn_hanging_rpc_http().await;
+        let bridge = MemoryBridge::with_config(
+            "/tmp/should-never-run-cli-on-index-timeout",
+            MemoryBridgeConfig {
+                http_port: port,
+                transport: TransportMode::Auto,
+                read_timeout: Duration::from_millis(200),
+                mutating_timeout: Duration::from_millis(250),
+            },
+        );
+        let err = bridge
+            .run_tool(&[
+                "index_repository",
+                "--repo-path",
+                "/tmp/x",
+                "--format",
+                "json",
+            ])
+            .await
+            .expect_err("timeout");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("zaman aşımı") || msg.to_lowercase().contains("timeout"),
+            "unexpected: {msg}"
+        );
+        assert!(
+            !msg.contains("yok:"),
+            "CLI fallback happened unexpectedly: {msg}"
+        );
     }
 
     #[cfg(unix)]
@@ -1420,10 +1734,6 @@ echo '{"projects":[]}'
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).unwrap();
 
-        let prev = configured_graph_ui_port();
-        // Kapalı porta zorla — CLI yolu.
-        set_configured_graph_ui_port(1);
-
         let bridge = MemoryBridge::from_binary(&script);
         let started = std::time::Instant::now();
         let err = bridge
@@ -1440,7 +1750,6 @@ echo '{"projects":[]}'
             started.elapsed()
         );
 
-        set_configured_graph_ui_port(prev);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

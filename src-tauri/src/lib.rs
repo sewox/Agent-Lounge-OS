@@ -23,13 +23,13 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys,
-    enable_graph_ui, graph_ui_status, load_port_from_store, open_or_focus_graph_window,
-    persist_port, record_dead_snapshot, record_whisper_injection, spawn_event_pump,
-    spawn_quota_pump, spawn_supervisor, sync_port, AgentEfficiencyReport, EfficiencyReportQuery,
-    GraphUiState, GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
-    SharedServices,
+    enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
+    open_or_focus_graph_window, persist_port, record_dead_snapshot, record_whisper_injection,
+    spawn_event_pump, spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport,
+    EfficiencyReportQuery, GraphUiState, GraphUiStatus, LayaEngineStatus, MemoryBridge,
+    ModelManager, ServiceManager, SharedServices, GRAPH_WINDOW_LABEL,
 };
-use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
@@ -91,11 +91,11 @@ pub fn run_with_start_route(start_route: &'static str) {
                 .map_err(|err| err.to_string())?;
             open_main_window(app, start_route)?;
             let model = default_model_lock();
-            let services = ServiceManager::shared();
             let memory = MemoryBridge::discover().unwrap_or_else(|err| {
                 log::warn!("{err}");
                 MemoryBridge::from_binary("codebase-memory-mcp")
             });
+            let services = ServiceManager::shared_with_memory(memory.clone());
             let graph_ui = GraphUiState::new();
             let (decision_tx, mut decision_rx) = tokio::sync::mpsc::channel(64);
             let gate = DecisionGate::new(decision_tx);
@@ -138,13 +138,14 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(store.clone());
             app.manage(bus.clone());
             app.manage(graph_ui);
-            app.manage(memory);
+            app.manage(memory.clone());
 
-            // Graph UI port — settings'ten yükle (varsayılan 9749).
+            // Graph UI port — settings'ten MemoryBridge config'e yükle (process-global yok).
             let port_store = store.clone();
+            let port_bridge = memory.clone();
             tauri::async_runtime::spawn(async move {
                 let port = load_port_from_store(&port_store).await;
-                sync_port(port);
+                port_bridge.set_http_port(port);
                 log::info!("graph UI port={port}");
             });
 
@@ -273,12 +274,25 @@ pub fn run_with_start_route(start_route: &'static str) {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
+        .run(|app_handle, event| match &event {
+            RunEvent::WindowEvent { label, event, .. } if label == "main" => {
+                if matches!(
+                    event,
+                    WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+                ) {
+                    if let Some(state) = app_handle.try_state::<GraphUiState>() {
+                        on_main_window_closed(app_handle, state.inner());
+                    } else if let Some(window) = app_handle.get_webview_window(GRAPH_WINDOW_LABEL) {
+                        let _ = window.close();
+                    }
+                }
+            }
+            RunEvent::Exit | RunEvent::ExitRequested { .. } => {
                 if let Some(state) = app_handle.try_state::<GraphUiState>() {
                     state.kill_spawned_child();
                 }
             }
+            _ => {}
         });
 }
 
@@ -871,26 +885,28 @@ async fn list_connected_tools(
 #[tauri::command]
 async fn get_graph_ui_status(
     services: tauri::State<'_, SharedServices>,
+    graph: tauri::State<'_, GraphUiState>,
     project_root: Option<String>,
 ) -> Result<GraphUiStatus, String> {
     let bridge = {
         let manager = services.lock().await;
         manager.memory().clone()
     };
-    Ok(graph_ui_status(&bridge, project_root.as_deref()).await)
+    Ok(graph_ui_status(graph.inner(), &bridge, project_root.as_deref()).await)
 }
 
 #[tauri::command]
 async fn open_graph_ui(
     app: tauri::AppHandle,
     services: tauri::State<'_, SharedServices>,
+    graph: tauri::State<'_, GraphUiState>,
     project_root: Option<String>,
 ) -> Result<(), String> {
     let bridge = {
         let manager = services.lock().await;
         manager.memory().clone()
     };
-    let status = graph_ui_status(&bridge, project_root.as_deref()).await;
+    let status = graph_ui_status(graph.inner(), &bridge, project_root.as_deref()).await;
     if !status.binary_found {
         return Err("codebase-memory-mcp bulunamadı".into());
     }
@@ -900,7 +916,8 @@ async fn open_graph_ui(
     let Some(name) = status.cbm_project_name else {
         return Err("Index workspace first".into());
     };
-    open_or_focus_graph_window(&app, status.port, &name).map_err(|err| err.to_string())
+    open_or_focus_graph_window(&app, graph.inner(), status.port, &name)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -914,7 +931,7 @@ async fn enable_graph_ui_cmd(
         let manager = services.lock().await;
         manager.memory().clone()
     };
-    let status = graph_ui_status(&bridge, project_root.as_deref()).await;
+    let status = graph_ui_status(graph.inner(), &bridge, project_root.as_deref()).await;
     if !status.binary_found {
         return Err("codebase-memory-mcp bulunamadı".into());
     }
@@ -934,19 +951,32 @@ async fn enable_graph_ui_cmd(
 }
 
 #[tauri::command]
-async fn get_graph_ui_port(store: tauri::State<'_, ExperienceStore>) -> Result<u16, String> {
-    Ok(load_port_from_store(store.inner()).await)
+async fn get_graph_ui_port(
+    store: tauri::State<'_, ExperienceStore>,
+    services: tauri::State<'_, SharedServices>,
+) -> Result<u16, String> {
+    let from_store = load_port_from_store(store.inner()).await;
+    let manager = services.lock().await;
+    let live = manager.memory().http_port();
+    Ok(if live > 0 { live } else { from_store })
 }
 
 #[tauri::command]
 async fn set_graph_ui_port(
+    app: tauri::AppHandle,
     store: tauri::State<'_, ExperienceStore>,
+    services: tauri::State<'_, SharedServices>,
+    graph: tauri::State<'_, GraphUiState>,
     port: u16,
 ) -> Result<u16, String> {
     if port == 0 {
         return Err("port 0 geçersiz".into());
     }
-    persist_port(store.inner(), port)
+    let bridge = {
+        let manager = services.lock().await;
+        manager.memory().clone()
+    };
+    persist_port(store.inner(), &bridge, &app, graph.inner(), port)
         .await
         .map_err(|err| err.to_string())?;
     Ok(port)
