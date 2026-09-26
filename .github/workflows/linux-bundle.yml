@@ -75,8 +75,8 @@ jobs:
         run: bash src-tauri/scripts/prepare-sidecar.sh --stub
 
       - name: Build Tauri Linux bundles (deb + AppImage)
-        # Tauri CLI `--ci` reads env CI and only accepts true/false (not "1").
-        run: npm run tauri -- build -- --bundles deb appimage --ci true
+        # Pass --bundles to the Tauri CLI (not cargo). Avoid a second `--`.
+        run: npm run tauri -- build --bundles deb,appimage
         env:
           CI: "true"
 

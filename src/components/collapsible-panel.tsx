@@ -77,7 +77,7 @@ export function CollapsiblePanel({
 
   return (
     <section
-      className={`flex min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container ${className}`}
+      className={`flex w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container ${className}`}
       data-qa="panel"
       data-panel-id={id}
       data-collapsed={collapsed ? "true" : "false"}

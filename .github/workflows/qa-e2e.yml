@@ -24,8 +24,10 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - name: Mock-ban (warning mode)
+      - name: Mock-ban (strict)
         run: bash scripts/qa/gates/mock-ban.sh
+        env:
+          QA_MOCK_BAN_STRICT: "1"
       - name: Small-font grep
         run: bash scripts/qa/gates/small-font.sh
 

@@ -32,12 +32,6 @@ test.describe("*-LAYOUT L1–L6 every route × viewport", () => {
       });
 
       const fail = formatLayoutFailure(metrics);
-      // Baseline: many routes violate L1–L6 today (PR-2 fixes). Mark expected-fail when any L* fails.
-      if (fail !== "ok") {
-        testInfo.annotations.push({ type: "expected-fail", description: fail });
-        test.fail(true, fail);
-      }
-
       expect(metrics.l1_pass, `L1: ${fail}`).toBe(true);
       expect(metrics.l2_pass, `L2: ${fail}`).toBe(true);
       expect(metrics.l3_pass, `L3: ${fail}`).toBe(true);

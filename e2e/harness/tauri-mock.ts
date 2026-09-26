@@ -198,6 +198,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             mcp_servers: d.mcp_servers ?? [],
             tools: Array.isArray(d.tools) ? d.tools : [],
             sources: Array.isArray(d.sources) ? d.sources : [],
+            system_tools: Array.isArray(d.system_tools) ? d.system_tools : [],
           };
         }
         case "list_connected_tools":

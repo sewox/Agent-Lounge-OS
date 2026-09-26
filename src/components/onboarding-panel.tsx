@@ -61,7 +61,8 @@ function systemToolsAsDiscovered(report: DiscoveryReport): DiscoveredTool[] {
   if (report.tools.some((tool) => tool.kind === "system")) {
     return report.tools.filter((tool) => tool.kind === "system");
   }
-  return report.system_tools.map((tool) => ({
+  const systemTools = report.system_tools ?? [];
+  return systemTools.map((tool) => ({
     id: tool.id,
     name: tool.name,
     kind: "system",
@@ -389,7 +390,7 @@ export function OnboardingPanel() {
   }
 
   return (
-    <section data-qa="panel" className="mx-auto max-w-4xl space-y-3">
+    <section data-qa="panel" className="mx-auto w-full max-w-none space-y-3 px-0">
       <div className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low p-3">
           <div className="min-w-0">
@@ -485,9 +486,10 @@ export function OnboardingPanel() {
 function ScanningSystem() {
   return (
     <section
+      data-qa="panel"
       role="status"
       aria-live="polite"
-      className="flex min-h-[calc(100vh-96px)] flex-col items-center justify-center gap-4"
+      className="flex min-h-[calc(100vh-96px)] w-full flex-col items-center justify-center gap-4"
     >
       <BrandMark size={56} className="rounded-md" />
       <div className="font-mono text-xs font-bold tracking-[0.28em] text-on-surface uppercase">

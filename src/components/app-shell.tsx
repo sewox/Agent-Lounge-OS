@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
@@ -17,8 +17,14 @@ import {
   QUOTA_CONTINUE_LOCAL_LABEL,
   coreServicesDegraded,
   degradedCoreServiceNames,
+  isTauri,
+  type ApprovalRequest,
   type DecisionGateStatus,
+  type ServiceHealth,
+  type ToolQuota,
 } from "@/lib/lounge";
+import { paletteShortcutLabel } from "@/lib/platform";
+import { invoke } from "@tauri-apps/api/core";
 
 const BANNER_BTN =
   "min-h-8 rounded px-2.5 py-1.5 font-body text-body pointer-events-auto";
@@ -89,7 +95,50 @@ export function AppShell({ children }: { children: ReactNode }) {
   const onboarding = pathname === "/onboarding";
   const [layaDismissed, setLayaDismissed] = useState(false);
   const [approvalSecsLeft, setApprovalSecsLeft] = useState<number | null>(null);
+  const [alertOpen, setAlertOpen] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [daemonsChecked, setDaemonsChecked] = useState(false);
+  const shortcutLabel = paletteShortcutLabel();
+  const alertRef = useRef<HTMLDivElement | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => setDaemonsChecked(true), 400);
+    return () => window.clearTimeout(id);
+  }, []);
+
+  useEffect(() => {
+    if (!alertOpen) return;
+    const onDoc = (event: MouseEvent) => {
+      if (alertRef.current && !alertRef.current.contains(event.target as Node)) {
+        setAlertOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAlertOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [alertOpen]);
+
+  const restartServices = useCallback(async () => {
+    if (restarting) return;
+    setRestarting(true);
+    try {
+      if (isTauri()) {
+        await invoke("ensure_services");
+      }
+    } catch {
+      // Supervisor will keep retrying; UI already shows Disconnected.
+    } finally {
+      setRestarting(false);
+    }
+  }, [restarting]);
+
   useEffect(() => {
     if (layaPhase.current !== decisionGate?.phase) {
       layaPhase.current = decisionGate?.phase;
@@ -121,6 +170,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const quotaHold = Boolean(approval && isQuotaApproval(approval.kind));
   const serviceDegraded = coreServicesDegraded(report);
   const degradedNames = degradedCoreServiceNames(report);
+  const criticalAlerts = useMemo(
+    () => buildCriticalAlerts({ quotas, amberAlert, amberTools, approval, degradedNames }),
+    [quotas, amberAlert, amberTools, approval, degradedNames],
+  );
   const statusBanner =
     serviceDegraded ||
     (approval && !securityHold && !quotaHold) ||
@@ -503,7 +556,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 aria-label="Open command palette"
               >
                 <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant hover:border-primary hover:text-primary">
-                  ⌘K
+                  {shortcutLabel}
                 </kbd>
               </button>
             </label>
@@ -564,13 +617,6 @@ export function AppShell({ children }: { children: ReactNode }) {
               <div className="tnum hidden shrink-0 text-body text-on-surface-variant 2xl:block">{clock} UTC+3</div>
               <button
                 type="button"
-                className="hidden items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-high px-2.5 py-1 text-xs font-medium text-on-surface hover:bg-surface-bright 2xl:flex"
-              >
-                <Icon name="tune" />
-                Quick Filter
-              </button>
-              <button
-                type="button"
                 onClick={() => void indexWorkspace()}
                 disabled={indexing}
                 className="flex shrink-0 items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
@@ -580,9 +626,45 @@ export function AppShell({ children }: { children: ReactNode }) {
               </button>
             </>
           )}
-          <span className="shrink-0 rounded-lg p-1 text-on-surface-variant" title={`kernel · ${kernel}`}>
-            <Icon name="bell" className="h-[15px] w-[15px]" />
-          </span>
+          <div className="relative shrink-0" ref={alertRef}>
+            <button
+              type="button"
+              className="rounded-lg p-1 text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
+              title="Alert history · critical security/quota"
+              aria-label="Alert history"
+              aria-expanded={alertOpen}
+              aria-haspopup="dialog"
+              onClick={() => setAlertOpen((open) => !open)}
+            >
+              <Icon name="bell" className="h-[15px] w-[15px]" />
+            </button>
+            {alertOpen ? (
+              <div
+                data-qa="alert-history"
+                role="dialog"
+                aria-label="Alert history"
+                className="absolute top-full right-0 z-50 mt-1 w-72 rounded-lg border border-outline-variant bg-surface-container shadow-lg"
+              >
+                <div className="border-b border-outline-variant px-3 py-2 font-body text-meta font-semibold tracking-label text-on-surface uppercase">
+                  Alert history
+                </div>
+                {criticalAlerts.length === 0 ? (
+                  <p className="px-3 py-4 font-body text-body text-on-surface-variant">Uyarı yok</p>
+                ) : (
+                  <ul className="max-h-64 divide-y divide-outline-variant/40 overflow-auto py-1">
+                    {criticalAlerts.map((alert) => (
+                      <li key={alert.id} className="px-3 py-2">
+                        <div className="font-mono text-meta font-semibold tracking-wider text-error-dim uppercase">
+                          {alert.kind}
+                        </div>
+                        <div className="mt-0.5 font-body text-body text-on-surface">{alert.message}</div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -592,11 +674,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         className="fixed top-12 bottom-0 left-0 z-30 flex w-[var(--sidebar-w)] flex-col justify-between overflow-y-auto border-r border-outline-variant bg-surface-container-low px-2 py-3"
       >
         <div className="space-y-4">
-          <div className="flex items-center justify-between border-b border-outline-variant/60 px-2 pb-2">
+          <div className="border-b border-outline-variant/60 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-2">
               <BrandMark size={20} />
-              <div>
-                <div className="whitespace-nowrap font-headline text-panel font-black tracking-label text-on-surface uppercase">
+              <div className="min-w-0">
+                <div className="truncate font-headline text-panel font-black tracking-label text-on-surface uppercase">
                   AL-OS CORE
                 </div>
                 <div className="font-mono text-meta text-on-surface-variant">
@@ -604,12 +686,6 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </div>
               </div>
             </div>
-            <button
-              type="button"
-              className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta font-medium text-primary hover:bg-surface-bright"
-            >
-              + New Node
-            </button>
           </div>
           <nav className="space-y-0.5 font-label text-body">
             {NAV.map((item) => {
@@ -650,20 +726,21 @@ export function AppShell({ children }: { children: ReactNode }) {
           ) : null}
           <div className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-lowest/60 p-2">
             <div className="mb-1 font-mono text-meta tracking-wider text-outline uppercase">Active daemons</div>
-            {[
-              { name: "LMR", health: report?.ollama, fallback: "—" },
-              { name: "NATS", health: report?.nats, fallback: "—" },
-              { name: "Memory Bridge", health: report?.memory, fallback: "—" },
-            ].map((daemon) => (
-              <div key={daemon.name} className="flex items-center justify-between font-mono text-body">
-                <div className="flex items-center gap-2">
-                  <Pip tone={daemon.name === "Memory Bridge" ? "primary" : daemonTone(daemon.health)} />
-                  <span className="text-on-surface">{daemon.name}</span>
-                </div>
-                <span className={`tnum ${daemon.health?.running ? "text-secondary" : "text-error"}`}>
-                  {daemonLabel(daemon.health, daemon.fallback)}
-                </span>
-              </div>
+            {(
+              [
+                { name: "LMR", health: report?.ollama },
+                { name: "NATS", health: report?.nats },
+                { name: "Memory Bridge", health: report?.memory },
+              ] as { name: string; health: ServiceHealth | undefined }[]
+            ).map((daemon) => (
+              <DaemonRow
+                key={daemon.name}
+                name={daemon.name}
+                health={daemon.health}
+                checked={daemonsChecked}
+                onRestart={() => void restartServices()}
+                restarting={restarting}
+              />
             ))}
             <div
               className="flex items-center justify-between font-mono text-body"
@@ -694,16 +771,6 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {layaDaemonLabel(decisionGate, decisionTelemetry?.latency_ms)}
               </span>
             </div>
-          </div>
-          <div className="flex items-center justify-between border-t border-outline-variant/40 px-2 pt-1 font-body text-xs text-on-surface-variant">
-            <span className="flex items-center gap-1">
-              <Icon name="book" />
-              Docs
-            </span>
-            <span className="flex items-center gap-1">
-              <Icon name="key" />
-              API Keys
-            </span>
           </div>
         </div>
       </aside>
@@ -788,19 +855,114 @@ function layaDaemonLabel(
   latencyMs?: number | null,
 ): string {
   if (!status) {
-    return "—";
+    return "Disconnected";
   }
   if (status.phase === "ready") {
     if (latencyMs != null && Number.isFinite(latencyMs)) {
       return `${latencyMs.toFixed(1)}ms`;
     }
-    return status.device || "ready";
+    return status.device || "Running";
   }
   if (status.phase === "loading") {
-    return "yükleniyor";
+    return "Checking…";
   }
   if (status.phase === "available") {
     return "önerildi";
   }
-  return "kapalı";
+  return "Disconnected";
+}
+
+type AlertRow = { id: string; kind: string; message: string };
+
+function buildCriticalAlerts(input: {
+  quotas: ToolQuota[];
+  amberAlert: boolean;
+  amberTools: string[];
+  approval: ApprovalRequest | null;
+  degradedNames: string[];
+}): AlertRow[] {
+  const rows: AlertRow[] = [];
+  if (input.approval && isSecurityApproval(input.approval.kind)) {
+    rows.push({
+      id: `sec:${input.approval.task_id}`,
+      kind: "security",
+      message: input.approval.summary || input.approval.reason,
+    });
+  }
+  if (input.approval && isQuotaApproval(input.approval.kind)) {
+    rows.push({
+      id: `quota-approval:${input.approval.task_id}`,
+      kind: "quota",
+      message: input.approval.summary || input.approval.reason,
+    });
+  }
+  for (const name of input.degradedNames) {
+    rows.push({
+      id: `svc:${name}`,
+      kind: "security",
+      message: `${name} disconnected`,
+    });
+  }
+  const criticalQuotas = input.quotas.filter(
+    (row) =>
+      row.exhausted ||
+      row.tone === "amber" ||
+      row.tone === "warn" ||
+      (row.percent != null && row.percent >= 80),
+  );
+  for (const row of criticalQuotas) {
+    rows.push({
+      id: `q:${row.id}`,
+      kind: "quota",
+      message: `${row.tool} · ${row.label}${row.percent != null ? ` · ${Math.round(row.percent)}%` : ""}`,
+    });
+  }
+  if (rows.length === 0 && input.amberAlert) {
+    rows.push({
+      id: "amber",
+      kind: "quota",
+      message: `Amber alert · ${input.amberTools.join(", ") || "quota"}`,
+    });
+  }
+  return rows.slice(0, 5);
+}
+
+function DaemonRow({
+  name,
+  health,
+  checked,
+  onRestart,
+  restarting,
+}: {
+  name: string;
+  health: ServiceHealth | undefined;
+  checked: boolean;
+  onRestart: () => void;
+  restarting: boolean;
+}) {
+  const running = health?.running === true;
+  const label = !checked
+    ? "Checking services…"
+    : daemonLabel(health, "Disconnected");
+  return (
+    <div className="space-y-0.5 font-mono text-body">
+      <div className="flex items-center justify-between gap-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <Pip tone={name === "Memory Bridge" ? "primary" : daemonTone(health)} />
+          <span className="truncate text-on-surface">{name}</span>
+        </div>
+        <span className={`tnum shrink-0 ${running ? "text-secondary" : "text-error"}`}>{label}</span>
+      </div>
+      {checked && !running ? (
+        <button
+          type="button"
+          onClick={onRestart}
+          disabled={restarting}
+          className="ml-4 rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface hover:bg-surface-bright disabled:opacity-60"
+        >
+          {restarting ? "Restarting…" : "Restart Service"}
+        </button>
+      ) : null}
+    </div>
+  );
 }

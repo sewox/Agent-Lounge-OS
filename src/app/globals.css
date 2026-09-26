@@ -114,3 +114,10 @@ body {
   background: #003ea8;
   color: #b4c5ff;
 }
+
+/* L1–L6: panels consume the content column (sidebar excluded). */
+main [data-qa="panel"] {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
