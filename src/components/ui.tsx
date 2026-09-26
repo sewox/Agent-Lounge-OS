@@ -124,21 +124,21 @@ export function Kpi({
   live?: boolean;
 }) {
   return (
-    <div className="flex flex-col justify-between rounded-lg border border-outline-variant bg-surface-container p-2.5">
+    <div className="flex flex-col justify-between rounded-lg border border-outline-variant bg-surface-container p-3">
       <div className="flex items-center justify-between text-on-surface-variant">
-        <span className="font-mono text-[11px] tracking-wider uppercase">{label}</span>
+        <span className="font-body text-meta tracking-label uppercase">{label}</span>
       </div>
-      <div className="mt-1 flex items-baseline justify-between">
+      <div className="mt-1 flex items-baseline justify-between gap-2">
         <div
           key={value}
           data-live={live || undefined}
-          className={`kpi-tick tnum font-mono text-xl font-bold tracking-tight ${valueClass}`}
+          className={`kpi-tick tnum font-mono text-kpi font-bold tracking-tight ${valueClass}`}
         >
           {value}
         </div>
         {badge}
       </div>
-      <div className="mt-1 font-mono text-[10px] text-outline">{hint}</div>
+      <div className="mt-1 font-body text-meta leading-normal text-outline">{hint}</div>
     </div>
   );
 }
@@ -157,16 +157,16 @@ export function Pager({
   const totalPages = Math.max(1, pages);
   const safe = Math.min(Math.max(0, page), totalPages - 1);
   return (
-    <div className="flex items-center gap-2 font-mono text-[10px]" suppressHydrationWarning>
+    <div className="flex items-center gap-2 font-body text-meta" suppressHydrationWarning>
       <button
         type="button"
         disabled={safe <= 0}
         onClick={() => onPage(Math.max(0, safe - 1))}
-        className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+        className="min-h-8 rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
       >
         Prev
       </button>
-      <span className="tnum text-on-surface-variant">
+      <span className="tnum font-mono text-on-surface-variant">
         {safe + 1}/{totalPages}
         <span className="ml-1 text-outline">· {total}</span>
       </span>
@@ -174,7 +174,7 @@ export function Pager({
         type="button"
         disabled={safe >= totalPages - 1}
         onClick={() => onPage(Math.min(totalPages - 1, safe + 1))}
-        className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+        className="min-h-8 rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
       >
         Next
       </button>

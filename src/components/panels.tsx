@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { SemanticMap } from "@/components/SemanticMap";
+import { useUiScale } from "@/components/ui-scale-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
   buildBrowserEfficiencyReport,
@@ -35,6 +36,7 @@ import {
   type QuotaKind,
   type SemanticMapSelection,
 } from "@/lib/lounge";
+import { selectCriticalQuotas, type UiScale } from "@/lib/ui-prefs";
 
 type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
@@ -85,13 +87,13 @@ export function OverviewKpis() {
         <div
           role="status"
           aria-live="polite"
-          className="flex items-center gap-2 rounded-lg border border-outline-variant bg-surface-container px-3 py-2 font-mono text-[11px] text-on-surface"
+          className="flex items-center gap-2 rounded-lg border border-outline-variant bg-surface-container px-3 py-2 font-body text-body text-on-surface"
         >
           <span
             className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-transparent border-t-primary"
             aria-hidden
           />
-          <span className="font-bold tracking-wider uppercase">Scanning...</span>
+          <span className="font-semibold tracking-label uppercase">Scanning...</span>
           <span className="text-outline">Index Workspace</span>
         </div>
       ) : null}
@@ -109,7 +111,7 @@ export function OverviewKpis() {
           latencyLive ? (
             <LatencySparkline values={decisionLatencyHistory} />
           ) : (
-            <span className="font-mono text-[10px] text-on-surface-variant">
+            <span className="font-mono text-meta text-on-surface-variant">
               {decisionGate?.phase === "ready" ? "idle" : "cold"}
             </span>
           )
@@ -122,7 +124,7 @@ export function OverviewKpis() {
         hint="NATS / 60s"
         badge={
           <span
-            className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+            className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-body text-meta font-medium ${
               msgLive
                 ? "border-primary/30 bg-surface-container-high text-primary"
                 : "border-outline-variant bg-surface-container-high text-on-surface-variant"
@@ -136,13 +138,13 @@ export function OverviewKpis() {
         label="INDEXED FILES"
         value={indexedFiles.toLocaleString("tr-TR")}
         hint={lastIndex?.project ? `${lastIndex.project} · memory_bridge` : "memory_bridge"}
-        badge={<span className="font-mono text-[10px] text-on-surface-variant">{projects.length} repos</span>}
+        badge={<span className="font-mono text-meta text-on-surface-variant">{projects.length} repos</span>}
       />
       <Kpi
         label="EXPERIENCES"
         value={String(experiences.length)}
         hint="vault persistence: sqlite"
-        badge={<span className="font-mono text-[10px] text-secondary">synced</span>}
+        badge={<span className="font-body text-meta text-secondary">synced</span>}
       />
       <Kpi
         label="DEAD SYMBOLS"
@@ -150,7 +152,7 @@ export function OverviewKpis() {
         hint="unreachable fn/struct refs"
         valueClass="text-error"
         badge={
-          <span className="flex items-center gap-0.5 rounded border border-error-container bg-error-container/40 px-1.5 py-0.5 font-mono text-[10px] font-medium text-error-dim">
+          <span className="flex items-center gap-0.5 rounded border border-error-container bg-error-container/40 px-1.5 py-0.5 font-body text-meta font-medium text-error-dim">
             ▼ amber alert
           </span>
         }
@@ -170,7 +172,7 @@ function DecisionStreamChip({
   return (
     <span
       key={label}
-      className={`kpi-tick shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] font-medium tnum ${
+      className={`kpi-tick shrink-0 rounded border px-1.5 py-0.5 font-mono text-meta font-medium tnum ${
         live
           ? "border-primary/30 bg-primary-container/20 text-primary"
           : "border-primary/25 bg-surface-container-high text-primary"
@@ -181,7 +183,7 @@ function DecisionStreamChip({
   );
 }
 
-export function EventStreamPanel() {
+export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
   const { events, query, probeBus, decisionTelemetry } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
   const [probing, setProbing] = useState(false);
@@ -210,24 +212,32 @@ export function EventStreamPanel() {
   const safePage = Math.min(page, pages - 1);
   const visible = pageSlice(filtered, safePage);
 
+  const shell = embedded
+    ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-container"
+    : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
+
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section className={shell}>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2.5">
           <Pip live tone="primary" />
-          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">NATS EVENT STREAM</h2>
-          <span className="rounded bg-surface-container-high px-1 font-mono text-[10px] text-outline">topic: lounge.&gt;</span>
-          <span className="rounded border border-primary/30 bg-primary-container/20 px-1.5 py-0.5 font-mono text-[10px] text-primary">
+          {embedded ? null : (
+            <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+              NATS EVENT STREAM
+            </h2>
+          )}
+          <span className="rounded bg-surface-container-high px-1 font-mono text-meta text-outline">topic: lounge.&gt;</span>
+          <span className="rounded border border-primary/30 bg-primary-container/20 px-1.5 py-0.5 font-body text-meta text-primary">
             bus live
           </span>
           {decisionLive ? <DecisionStreamChip label={liveDecisionLabel} live /> : null}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5 rounded border border-outline-variant/60 bg-surface-container-high px-2 py-0.5">
-            <span className="font-mono text-[10px] text-on-surface-variant">buffered:</span>
-            <span className="tnum font-mono text-[10px] font-semibold text-primary">{events.length}</span>
+            <span className="font-body text-meta text-on-surface-variant">buffered:</span>
+            <span className="tnum font-mono text-meta font-semibold text-primary">{events.length}</span>
           </div>
-          <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-[10px]">
+          <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-body text-meta">
             {(["all", "task", "exp"] as const).map((key) => (
               <button
                 key={key}
@@ -236,7 +246,7 @@ export function EventStreamPanel() {
                   setSubjectFilter(key);
                   setPage(0);
                 }}
-                className={`rounded px-2 py-0.5 ${subjectFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
+                className={`min-h-8 rounded px-2.5 py-1 ${subjectFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
                 {key === "all" ? "all" : key === "task" ? "task.*" : "exp.*"}
               </button>
@@ -245,9 +255,9 @@ export function EventStreamPanel() {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full border-collapse text-left font-mono text-[11px]">
+        <table className="w-full border-collapse text-left font-body text-body">
           <thead className="sticky top-0 z-10">
-            <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 text-[10px] text-outline uppercase">
+            <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 font-body text-meta tracking-label text-outline uppercase">
               <th className="w-[90px] px-2.5 py-1.5 font-medium">Time</th>
               <th className="px-2 py-1.5 font-medium">Subject</th>
               <th className="px-2 py-1.5 font-medium">Route</th>
@@ -270,17 +280,17 @@ export function EventStreamPanel() {
                         : "bg-secondary-container/10 hover:bg-secondary-container/20"
                   }
                 >
-                  <td className="tnum px-2.5 py-1.5 text-on-surface-variant">{event.time}</td>
+                  <td className="tnum px-2.5 py-1.5 font-mono text-on-surface-variant">{event.time}</td>
                   <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                      <span className="min-w-0 truncate">{event.subject}</span>
+                      <span className="min-w-0 break-words font-mono">{event.subject}</span>
                       <DecisionStreamChip
                         label={eventDecisionLabel(event, decisionLive ? latencyMs : null)}
                         live={selected || Boolean(event.decisionLabel)}
                       />
                       {event.chainLabel ? (
                         <span
-                          className="max-w-full truncate rounded border border-secondary/40 bg-secondary-container/30 px-1.5 py-0.5 font-mono text-[10px] font-medium text-secondary underline decoration-secondary/50 underline-offset-2"
+                          className="max-w-full break-words rounded border border-secondary/40 bg-secondary-container/30 px-1.5 py-0.5 font-mono text-meta font-medium text-secondary underline decoration-secondary/50 underline-offset-2"
                           title={event.chainLabel}
                           data-workflow-chain={event.chainLabel}
                         >
@@ -289,12 +299,12 @@ export function EventStreamPanel() {
                       ) : null}
                     </div>
                   </td>
-                  <td className="px-2 py-1.5 text-on-surface-variant">
+                  <td className="px-2 py-1.5 font-mono text-on-surface-variant">
                     {event.from} <span className="text-outline">→</span> {event.to}
                   </td>
-                  <td className="tnum px-2.5 py-1.5 text-right text-on-surface-variant">{event.payload}</td>
+                  <td className="tnum px-2.5 py-1.5 text-right font-mono text-on-surface-variant">{event.payload}</td>
                   <td className="px-2.5 py-1.5 text-right">
-                    <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] uppercase ${eventToneClass(tone)}`}>
+                    <span className={`rounded border px-1.5 py-0.5 font-body text-meta tracking-label uppercase ${eventToneClass(tone)}`}>
                       {natsToneLabel(tone)}
                     </span>
                   </td>
@@ -303,7 +313,7 @@ export function EventStreamPanel() {
             })}
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-2.5 py-6 text-center font-mono text-[11px] text-outline">
+                <td colSpan={5} className="px-2.5 py-6 text-center font-body text-body text-outline">
                   Bus dinleniyor — henüz lounge.&gt; mesajı yok
                 </td>
               </tr>
@@ -311,11 +321,11 @@ export function EventStreamPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-body text-meta text-outline">
         <span>
           {visible.length}/{filtered.length} · {PAGE_SIZE}/sayfa · {events.length} buffered
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Pager page={safePage} pages={pages} total={filtered.length} onPage={setPage} />
           <button
             type="button"
@@ -323,7 +333,7 @@ export function EventStreamPanel() {
               setProbing(true);
               void probeBus().finally(() => setProbing(false));
             }}
-            className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 font-medium text-on-surface hover:bg-surface-bright"
+            className="min-h-8 rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 font-medium text-on-surface hover:bg-surface-bright"
           >
             {probing ? "Probing…" : "Probe bus"}
           </button>
@@ -335,7 +345,7 @@ export function EventStreamPanel() {
   );
 }
 
-export function VaultPanel() {
+export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const {
     experiences,
     projects,
@@ -389,18 +399,24 @@ export function VaultPanel() {
   const repoCount =
     semanticMap.projects.length || projects.length || (experiences.length ? 1 : 0);
 
+  const shell = embedded
+    ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-container"
+    : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
+
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section className={shell}>
       <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="tree" />
           </span>
-          <h3 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
-            SEMANTIC MAP + EXPERIENCES
-          </h3>
+          {embedded ? null : (
+            <h3 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+              SEMANTIC MAP + EXPERIENCES
+            </h3>
+          )}
         </div>
-        <span className="font-mono text-[10px] text-outline">
+        <span className="font-body text-meta text-outline">
           {whispered.size > 0 ? (
             <span className="text-primary">whisper · live</span>
           ) : (
@@ -430,18 +446,18 @@ export function VaultPanel() {
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
-              <div className="flex items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
+              <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
                 <span>Dead Symbols</span>
                 <span className={deadForNode.length > 0 ? "text-error" : "text-outline"}>
                   {deadForNode.length > 0 ? `${deadForNode.length} uyarı` : "temiz"}
                 </span>
               </div>
               {deadForNode.length === 0 ? (
-                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-2 text-center font-mono text-[10px] text-on-surface-variant">
+                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-2 text-center font-mono text-meta text-on-surface-variant">
                   Bu düğüm için dead symbol yok · {selected.name}
                 </div>
               ) : (
-                <div className="max-h-24 space-y-1 overflow-auto font-mono text-[10px]">
+                <div className="max-h-24 space-y-1 overflow-auto font-mono text-meta">
                   {deadForNode.slice(0, 8).map((symbol) => (
                     <div
                       key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
@@ -449,7 +465,7 @@ export function VaultPanel() {
                     >
                       <div className="min-w-0">
                         <div className="truncate font-medium text-error">{symbol.name}</div>
-                        <div className="truncate text-[9px] text-on-surface-variant">
+                        <div className="truncate text-meta text-on-surface-variant">
                           {symbol.detail ||
                             (symbol.file
                               ? `${pathBasename(symbol.file) || symbol.file}${
@@ -458,7 +474,7 @@ export function VaultPanel() {
                               : symbol.kind)}
                         </div>
                       </div>
-                      <span className="shrink-0 rounded border border-error/40 px-1 text-[9px] text-error uppercase">
+                      <span className="shrink-0 rounded border border-error/40 px-1 text-meta text-error uppercase">
                         {symbol.kind || "dead"}
                       </span>
                     </div>
@@ -467,7 +483,7 @@ export function VaultPanel() {
               )}
             </div>
           ) : null}
-          <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-[10px] font-semibold tracking-wider text-outline uppercase">
+          <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
             <span>Experience Log</span>
             <span
               className={
@@ -481,9 +497,9 @@ export function VaultPanel() {
                   : "Synced"}
             </span>
           </div>
-          <div className="min-h-0 flex-1 space-y-2 overflow-auto font-mono text-[10.5px]">
+          <div className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body">
             {logVisible.length === 0 ? (
-              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-[10px] text-on-surface-variant">
+              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
                 {selected
                   ? `Bu düğüm için experience yok · ${selected.name}`
                   : "Experience kaydı yok"}
@@ -502,17 +518,17 @@ export function VaultPanel() {
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="tnum text-on-surface-variant">
+                      <span className="tnum font-mono text-meta text-on-surface-variant">
                         {formatExperienceTime(item.created_at)}
                       </span>
                       <span className="flex items-center gap-1">
                         {isWhisper ? (
-                          <span className="rounded border border-primary/50 px-1 text-[9px] text-primary">
+                          <span className="rounded border border-primary/50 px-1 text-meta text-primary">
                             WHISPER
                           </span>
                         ) : null}
                         <span
-                          className={`rounded border px-1 text-[9px] ${outcomeClass(item.outcome)}`}
+                          className={`rounded border px-1 text-meta ${outcomeClass(item.outcome)}`}
                         >
                           {item.outcome === "success"
                             ? "Success"
@@ -522,10 +538,10 @@ export function VaultPanel() {
                         </span>
                       </span>
                     </div>
-                    <div className="truncate text-[11px] font-medium text-on-surface">
+                    <div className="break-words font-mono text-body font-medium text-on-surface">
                       {item.project_id}
                     </div>
-                    <div className="line-clamp-2 font-body text-[10px] leading-tight text-outline">
+                    <div className="line-clamp-3 font-body text-body leading-normal text-outline">
                       “{item.adr_summary}”
                     </div>
                     {isWhisper ? (
@@ -540,7 +556,7 @@ export function VaultPanel() {
                               setMarkedUseful((prev) => new Set(prev).add(item.id));
                             })();
                           }}
-                          className="rounded border border-primary/40 px-1.5 py-0.5 font-mono text-[9px] text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
+                          className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
                           aria-label="Bu fısıltıyı faydalı olarak işaretle"
                         >
                           {alreadyUseful ? "Faydalı ✓" : "Faydalı"}
@@ -554,7 +570,7 @@ export function VaultPanel() {
           </div>
         </div>
       </div>
-      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline">
         <span>codebase-memory-mcp · {repoCount} repos</span>
         <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
@@ -603,20 +619,20 @@ export function HealthPanel() {
           <span className="text-primary">
             <Icon name="rule" />
           </span>
-          <h3 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+          <h3 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
             PROJECT HEALTH: INDEXING + DEAD CODE
           </h3>
         </div>
-        <span className="font-mono text-[10px] text-outline">memory_bridge</span>
+        <span className="font-mono text-meta text-outline">memory_bridge</span>
       </div>
-      <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-[11px]">
+      <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-body">
         {visible.map((repo) => (
           <div key={repo.name} className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-high/40 p-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-on-surface">{repo.name}</span>
                 <span
-                  className={`rounded px-1 font-mono text-[9px] ${
+                  className={`rounded px-1 font-mono text-meta ${
                     repo.indexed === 100
                       ? "bg-secondary-container/50 text-secondary-dim"
                       : "bg-surface-container-highest text-tertiary"
@@ -625,7 +641,7 @@ export function HealthPanel() {
                   {repo.indexed}% indexed
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-[10px] text-on-surface-variant">
+              <div className="flex items-center gap-2 text-meta text-on-surface-variant">
                 <span>sync: {repo.sync}</span>
                 <span className="font-medium text-error">{repo.dead} dead symbols</span>
               </div>
@@ -636,7 +652,7 @@ export function HealthPanel() {
                 style={{ width: `${repo.indexed}%` }}
               />
             </div>
-            <div className="flex items-center justify-between pt-0.5 text-[10px] text-outline">
+            <div className="flex items-center justify-between pt-0.5 text-meta text-outline">
               <span>
                 {repo.files} files · {repo.nodes} AST nodes
               </span>
@@ -656,6 +672,72 @@ export function HealthPanel() {
         <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
       </div>
     </section>
+  );
+}
+
+export function QuotaMiniCard() {
+  const { quotas, amberAlert, amberTools } = useLounge();
+  const critical = useMemo(() => selectCriticalQuotas(quotas, 3), [quotas]);
+
+  return (
+    <div className="space-y-2 p-2.5" data-testid="quota-mini-card">
+      {amberAlert ? (
+        <div className="rounded border border-error-container bg-error-container/20 px-2.5 py-1.5 font-body text-meta text-error-dim">
+          Amber Alert · {amberTools.join(", ") || "quota"}
+        </div>
+      ) : null}
+      {critical.length === 0 ? (
+        <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-4 text-center font-body text-body text-outline">
+          Kota verisi yok
+        </div>
+      ) : (
+        critical.map((row) => (
+          <div
+            key={row.id}
+            data-quota-id={row.id}
+            className={`space-y-1.5 rounded border px-2.5 py-2 ${
+              row.tone === "warn" || row.tone === "amber" || row.exhausted
+                ? "border-error-container/60 bg-error-container/10"
+                : "border-outline-variant/50 bg-surface-container-high/50"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate font-body text-body font-semibold text-on-surface">
+                {row.tool}
+              </span>
+              <span
+                className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-body text-meta tracking-label uppercase ${quotaToneClass(row.tone)}`}
+              >
+                {row.label}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="tnum shrink-0 font-mono text-meta text-on-surface-variant">
+                {row.percent === null ? row.used : `${Math.round(row.percent)}%`}
+              </span>
+              {row.percent !== null ? (
+                <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-container-highest">
+                  <div
+                    className={`h-1.5 rounded-full ${quotaBarClass(row.percent)}`}
+                    style={{ width: `${Math.min(100, Math.max(0, row.percent))}%` }}
+                  />
+                </div>
+              ) : (
+                <span className="min-w-0 truncate font-mono text-meta text-outline">{row.remaining}</span>
+              )}
+            </div>
+          </div>
+        ))
+      )}
+      <div className="pt-1 text-right">
+        <Link
+          href="/quotas"
+          className="font-body text-meta font-medium text-primary hover:underline"
+        >
+          /quotas sayfasında tüm liste
+        </Link>
+      </div>
+    </div>
   );
 }
 
@@ -687,20 +769,20 @@ export function QuotaPanel() {
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex min-w-0 items-center gap-2.5">
           <Pip live tone="ok" />
-          <h2 className="truncate font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+          <h2 className="truncate font-body text-panel font-semibold tracking-label text-on-surface uppercase">
             CONNECTED AI + BOT QUOTAS
           </h2>
           {amberAlert ? (
-            <span className="rounded border border-error-container bg-error-container/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-error-dim uppercase">
+            <span className="rounded border border-error-container bg-error-container/20 px-1.5 py-0.5 font-mono text-meta font-semibold text-error-dim uppercase">
               Amber Alert · {amberTools.join(", ") || "quota"}
             </span>
           ) : (
-            <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
+            <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant">
               30s probes
             </span>
           )}
         </div>
-        <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-[10px]">
+        <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-meta">
           {(["all", "subscription", "api", "plugin", "local"] as const).map((key) => {
             return (
               <button
@@ -719,9 +801,9 @@ export function QuotaPanel() {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full min-w-[720px] border-collapse text-left font-mono text-[11px]">
+        <table className="w-full min-w-[720px] border-collapse text-left font-mono text-body">
           <thead>
-            <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
+            <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-meta text-outline uppercase">
               <th className="px-2.5 py-1.5 font-medium">Tool</th>
               <th className="w-14 px-2 py-1.5 font-medium">Kind</th>
               <th className="w-16 px-2 py-1.5 font-medium">Unit</th>
@@ -766,7 +848,7 @@ export function QuotaPanel() {
                       {row.remaining.split(" · ").filter(Boolean).map((host) => (
                         <span
                           key={host}
-                          className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[9px] text-on-surface-variant"
+                          className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant"
                         >
                           {host}
                         </span>
@@ -780,7 +862,7 @@ export function QuotaPanel() {
                   {row.reset}
                 </td>
                 <td className="px-2.5 py-1.5 text-right">
-                  <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[9px] ${quotaToneClass(row.tone)}`}>
+                  <span className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-meta ${quotaToneClass(row.tone)}`}>
                     {row.tone === "live" ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-secondary" /> : null}
                     {row.label}
                   </span>
@@ -789,7 +871,7 @@ export function QuotaPanel() {
             ))}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-2.5 py-6 text-center font-mono text-[11px] text-outline">
+                <td colSpan={7} className="px-2.5 py-6 text-center font-mono text-body text-outline">
                   0 tools
                 </td>
               </tr>
@@ -797,7 +879,7 @@ export function QuotaPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[10px] text-outline">
+      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline">
         <span>abonelik: yerel plan · API keys · plugins · LMR sysinfo</span>
         <div className="flex items-center gap-3">
           <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
@@ -819,22 +901,57 @@ const QUOTA_ACTIONS: { id: QuotaExhaustedAction; title: string; hint: string }[]
 
 export function SettingsPanel() {
   const { policy, savePolicy, model } = useLounge();
+  const { scale, setScale, scales } = useUiScale();
+
+  const scaleLabel = (value: UiScale) => `${Math.round(value * 100)}%`;
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
       <div className="space-y-3">
       <div className="rounded-lg border border-outline-variant bg-surface-container">
+        <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+            UI ölçeği / UI scale
+          </h2>
+          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
+            Kök font boyutunu (rem) ölçekler. Kısayollar: Cmd/Ctrl + büyüt, Cmd/Ctrl − küçült,
+            Cmd/Ctrl 0 → %100.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2 p-3" role="radiogroup" aria-label="UI ölçeği">
+          {scales.map((value) => {
+            const selected = scale === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => setScale(value)}
+                className={`min-h-8 rounded border px-3 py-1.5 font-body text-body ${
+                  selected
+                    ? "border-primary bg-primary-container/25 font-semibold text-primary"
+                    : "border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright"
+                }`}
+              >
+                {scaleLabel(value)}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
           <div>
-            <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Bağlı araçlar</h2>
-            <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+            <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">Bağlı araçlar</h2>
+            <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
               Claude Desktop, Cursor uygulaması + plugin’leri, Antigravity, LMR ve Ollama yeniden taranır;
               seçim connected_tools tablosuna yazılır.
             </p>
           </div>
           <Link
             href="/onboarding"
-            className="rounded bg-primary-container px-2.5 py-1 font-mono text-[11px] font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+            className="min-h-8 rounded bg-primary-container px-2.5 py-1.5 font-body text-body font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
           >
             Yeniden tara
           </Link>
@@ -842,13 +959,13 @@ export function SettingsPanel() {
       </div>
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
-          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">Routing Policy</h2>
-          <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">Routing Policy</h2>
+          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
             Ajanlar arası otomatik geçiş kilitli. Dispatcher her görev öncesi bu politikayı ve kotaları kontrol eder.
           </p>
         </div>
         <div className="space-y-4 p-3">
-          <label className="flex items-center justify-between rounded border border-outline-variant bg-surface-container-high px-3 py-2 font-mono text-[11px]">
+          <label className="flex items-center justify-between rounded border border-outline-variant bg-surface-container-high px-3 py-2 font-body text-body">
             <span>Ajan geçişinde kullanıcı onayı</span>
             <input type="checkbox" checked disabled className="accent-primary" />
           </label>
@@ -866,34 +983,34 @@ export function SettingsPanel() {
                       : "border-outline-variant bg-surface-container-high hover:bg-surface-bright"
                   }`}
                 >
-                  <div className="font-mono text-[11px] font-semibold text-on-surface">{action.title}</div>
-                  <div className="mt-1 font-body text-[10px] text-outline">{action.hint}</div>
+                  <div className="font-body text-body font-semibold text-on-surface">{action.title}</div>
+                  <div className="mt-1 font-body text-meta leading-normal text-outline">{action.hint}</div>
                 </button>
               );
             })}
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
-            <label className="space-y-1 font-mono text-[10px] text-on-surface-variant">
+            <label className="space-y-1 font-body text-meta text-on-surface-variant">
               Yerel fallback ajan
               <input
                 value={policy.local_fallback_agent}
                 onChange={(event) => void savePolicy({ ...policy, local_fallback_agent: event.target.value })}
-                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1 text-[11px] text-on-surface"
+                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-body text-on-surface"
               />
             </label>
-            <label className="space-y-1 font-mono text-[10px] text-on-surface-variant">
+            <label className="space-y-1 font-body text-meta text-on-surface-variant">
               Yerel fallback model
               <input
                 value={policy.local_fallback_model || model}
                 onChange={(event) => void savePolicy({ ...policy, local_fallback_model: event.target.value })}
-                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1 text-[11px] text-on-surface"
+                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-body text-on-surface"
               />
             </label>
           </div>
           <div className="overflow-hidden rounded border border-outline-variant">
-            <table className="w-full text-left font-mono text-[11px]">
+            <table className="w-full text-left font-body text-body">
               <thead>
-                <tr className="border-b border-outline-variant bg-surface-container-low text-[10px] text-outline uppercase">
+                <tr className="border-b border-outline-variant bg-surface-container-low text-meta tracking-label text-outline uppercase">
                   <th className="px-2.5 py-1.5">Ajan</th>
                   <th className="px-2 py-1.5">Tetik</th>
                   <th className="px-2.5 py-1.5 text-right">Enabled</th>
@@ -1010,9 +1127,9 @@ export function FleetPanel() {
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
       <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
-        <h2 className="font-mono text-xs font-bold tracking-wider uppercase">Worker Fleet</h2>
+        <h2 className="font-body text-panel font-semibold tracking-label uppercase">Worker Fleet</h2>
       </div>
-      <div className="min-h-0 flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-[11px]">
+      <div className="min-h-0 flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-body">
         {workers.map((row) => (
           <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2">
             <span className="text-on-surface">{row.label}</span>
@@ -1127,8 +1244,8 @@ export function TelemetryPanel() {
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
-        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-          <div className="text-[10px] tracking-wider text-outline uppercase">Laya Decision</div>
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
+          <div className="text-meta tracking-wider text-outline uppercase">Laya Decision</div>
           <div
             key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
             className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
@@ -1140,17 +1257,17 @@ export function TelemetryPanel() {
             {latencyLive ? (
               <LatencySparkline values={decisionLatencyHistory} />
             ) : (
-              <span className="text-[10px] text-on-surface-variant">
+              <span className="text-meta text-on-surface-variant">
                 {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
               </span>
             )}
           </div>
-          <div className="mt-auto pt-4 text-[10px] text-outline">
+          <div className="mt-auto pt-4 text-meta text-outline">
             lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
           </div>
         </div>
-        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-[11px]">
-          <div className="text-[10px] tracking-wider text-outline uppercase">MSG / MIN</div>
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
+          <div className="text-meta tracking-wider text-outline uppercase">MSG / MIN</div>
           <div
             key={decisionMsgPerMin}
             className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
@@ -1158,7 +1275,7 @@ export function TelemetryPanel() {
             {decisionMsgPerMin}
           </div>
           <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
-          <div className="mt-auto pt-4 text-[10px] text-outline">
+          <div className="mt-auto pt-4 text-meta text-outline">
             NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
           </div>
         </div>
@@ -1166,12 +1283,12 @@ export function TelemetryPanel() {
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
-          <h2 className="font-mono text-xs font-bold tracking-wider uppercase">
+          <h2 className="font-body text-panel font-semibold tracking-label uppercase">
             Agent Efficiency Report
           </h2>
-          <span className="text-[10px] text-outline">Ajan Verimlilik Raporu</span>
+          <span className="text-meta text-outline">Ajan Verimlilik Raporu</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 font-mono text-[10px] text-on-surface-variant">
+            <label className="flex items-center gap-1.5 font-mono text-meta text-on-surface-variant">
               <input
                 type="checkbox"
                 checked={weekly}
@@ -1183,7 +1300,7 @@ export function TelemetryPanel() {
             <select
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
-              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-[10px] text-on-surface"
+              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-meta text-on-surface"
               aria-label="Proje filtresi"
             >
               <option value="">Tüm projeler</option>
@@ -1201,53 +1318,53 @@ export function TelemetryPanel() {
                 const stamp = report.generatedAt.slice(0, 10);
                 downloadMarkdownFile(`agent-efficiency-${stamp}.md`, report.markdown);
               }}
-              className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[10px] font-bold tracking-wider text-on-surface uppercase enabled:hover:bg-surface-container disabled:opacity-40"
+              className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-meta font-bold tracking-wider text-on-surface uppercase enabled:hover:bg-surface-container disabled:opacity-40"
             >
               Markdown indir
             </button>
           </div>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto p-3 font-mono text-[11px]">
+        <div className="min-h-0 flex-1 overflow-auto p-3 font-mono text-body">
           {loading && !report ? (
             <p className="text-on-surface-variant">Rapor yükleniyor…</p>
           ) : null}
           {error ? (
-            <p className="mb-2 text-[10px] text-error">Tauri rapor hatası · mock gösteriliyor: {error}</p>
+            <p className="mb-2 text-meta text-error">Tauri rapor hatası · mock gösteriliyor: {error}</p>
           ) : null}
           {report ? (
             <div className="space-y-4">
-              <p className="text-[10px] text-outline">
+              <p className="text-meta text-outline">
                 {report.scopeLabel}
                 {isTauri() ? "" : " · tarayıcı"}
                 {loading ? " · yenileniyor…" : ""}
               </p>
               <div className="grid gap-2 sm:grid-cols-3">
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
-                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                  <div className="text-meta tracking-wider text-outline uppercase">
                     Toplam failure
                   </div>
                   <div className="tnum mt-1 text-xl font-bold text-on-surface">
                     {report.totalFailures}
                   </div>
-                  <div className="text-[10px] text-on-surface-variant">ajan × hata/failure</div>
+                  <div className="text-meta text-on-surface-variant">ajan × hata/failure</div>
                 </div>
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
-                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                  <div className="text-meta tracking-wider text-outline uppercase">
                     Cross-Project
                   </div>
                   <div className="tnum mt-1 text-xl font-bold text-on-surface">
                     {report.crossProjectExperienceHits}
                   </div>
-                  <div className="text-[10px] text-on-surface-variant">
+                  <div className="text-meta text-on-surface-variant">
                     {report.crossProjectWhisperEvents} fısıltı olayı
                   </div>
                 </div>
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
-                  <div className="text-[10px] tracking-wider text-outline uppercase">
+                  <div className="text-meta tracking-wider text-outline uppercase">
                     Dead cleanup
                   </div>
                   <div className="tnum mt-1 text-xl font-bold text-on-surface">{rateLabel}</div>
-                  <div className="text-[10px] text-on-surface-variant">
+                  <div className="text-meta text-on-surface-variant">
                     kalan {report.dead.remaining}
                     {report.dead.cleaned != null ? ` · temizlenen ${report.dead.cleaned}` : ""}
                   </div>
@@ -1255,7 +1372,7 @@ export function TelemetryPanel() {
               </div>
 
               <div>
-                <h3 className="mb-1.5 text-[10px] font-bold tracking-wider text-outline uppercase">
+                <h3 className="mb-1.5 text-meta font-bold tracking-wider text-outline uppercase">
                   Ajan başına hata / failure
                 </h3>
                 {report.failuresByAgent.length === 0 ? (
@@ -1263,7 +1380,7 @@ export function TelemetryPanel() {
                 ) : (
                   <table className="w-full text-left">
                     <thead>
-                      <tr className="text-[10px] text-outline">
+                      <tr className="text-meta text-outline">
                         <th className="py-1 font-normal">Ajan</th>
                         <th className="py-1 text-right font-normal">Sayı</th>
                       </tr>
@@ -1282,7 +1399,7 @@ export function TelemetryPanel() {
                 )}
               </div>
 
-              <div className="text-[10px] text-on-surface-variant">
+              <div className="text-meta text-on-surface-variant">
                 <div className="mb-1 font-bold tracking-wider text-outline uppercase">Kaynak</div>
                 <ul className="list-inside list-disc space-y-0.5">
                   {report.sourceNotes.map((note) => (

@@ -396,7 +396,7 @@ export function OnboardingPanel() {
             <h1 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
               İlk açılış · Sistem keşfi
             </h1>
-            <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+            <p className="mt-1 font-body text-body text-on-surface-variant">
               Yerel AI uygulamaları, plugin’ler, LMR modelleri ve sistem CLI taranır. Seçtiklerin
               Lounge’a bağlanır; MCP env değerleri kaydedilmez.
             </p>
@@ -405,7 +405,7 @@ export function OnboardingPanel() {
             type="button"
             onClick={() => void scan()}
             disabled={scanning}
-            className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-[11px] text-on-surface hover:bg-surface-bright disabled:opacity-50"
+            className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-body text-on-surface hover:bg-surface-bright disabled:opacity-50"
           >
             {scanning ? "Scanning…" : "Yeniden tara"}
           </button>
@@ -414,7 +414,7 @@ export function OnboardingPanel() {
       </div>
 
       {error ? (
-        <div className="rounded border border-error-container bg-error-container/20 px-3 py-2 font-mono text-[11px] text-error-dim">
+        <div className="rounded border border-error-container bg-error-container/20 px-3 py-2 font-mono text-body text-error-dim">
           {error}
         </div>
       ) : null}
@@ -466,7 +466,7 @@ export function OnboardingPanel() {
       />
 
       <div className="flex items-center justify-between rounded-lg border border-outline-variant bg-surface-container px-3 py-2">
-        <div className="font-mono text-[11px] text-on-surface-variant">
+        <div className="font-mono text-body text-on-surface-variant">
           {selected.size} seçildi
         </div>
         <button
@@ -493,7 +493,7 @@ function ScanningSystem() {
       <div className="font-mono text-xs font-bold tracking-[0.28em] text-on-surface uppercase">
         Scanning System...
       </div>
-      <div className="font-mono text-[10px] text-outline">
+      <div className="font-mono text-meta text-outline">
         LMR :18790 · abonelik uygulamaları · plugin · PATH
       </div>
     </section>
@@ -502,14 +502,14 @@ function ScanningSystem() {
 
 function SourceTable({ sources }: { sources: DiscoverySource[] }) {
   return (
-    <table className="w-full table-fixed text-left font-mono text-[11px]">
+    <table className="w-full table-fixed text-left font-mono text-body">
       <colgroup>
         <col className="w-[24%]" />
         <col className="w-[44%]" />
         <col className="w-[32%]" />
       </colgroup>
       <thead>
-        <tr className="border-b border-outline-variant bg-surface-container-low/80 text-[10px] text-outline uppercase">
+        <tr className="border-b border-outline-variant bg-surface-container-low/80 text-meta text-outline uppercase">
           <th className="px-3 py-1.5 font-medium">Kaynak</th>
           <th className="px-2 py-1.5 font-medium">Konum</th>
           <th className="px-3 py-1.5 font-medium">Durum</th>
@@ -553,7 +553,7 @@ function SourceTable({ sources }: { sources: DiscoverySource[] }) {
                         href={install.href}
                         target="_blank"
                         rel="noreferrer"
-                        className="shrink-0 text-[10px] text-primary hover:underline"
+                        className="shrink-0 text-meta text-primary hover:underline"
                       >
                         {install.label}
                       </a>
@@ -575,7 +575,7 @@ function InstallLink({ label, href }: { label: string; href: string }) {
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-primary hover:underline"
+      className="mt-1 inline-flex items-center gap-1 font-mono text-meta text-primary hover:underline"
     >
       <Icon name="warn" className="h-3 w-3 text-error" />
       {label}
@@ -593,13 +593,13 @@ function LayaEngineBlock({ status }: { status: LayaEngineStatus | null }) {
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             OpenJev Laya
           </h2>
-          <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+          <p className="mt-1 font-body text-body text-on-surface-variant">
             convaiinnovations/laya ağırlıkları uygulama dizinine indirilir; DecisionGate yalnızca
             doğrulanmış yerel dosyaları yükler.
           </p>
         </div>
         <span
-          className={`shrink-0 font-mono text-[11px] ${
+          className={`shrink-0 font-mono text-body ${
             status?.phase === "failed"
               ? "text-error"
               : status?.phase === "ready"
@@ -612,7 +612,7 @@ function LayaEngineBlock({ status }: { status: LayaEngineStatus | null }) {
       </div>
       {downloading || status?.phase === "failed" ? (
         <div className="px-3 py-2">
-          <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-on-surface-variant">
+          <div className="flex items-center justify-between gap-2 font-mono text-meta text-on-surface-variant">
             <span className="truncate">{status?.error ?? status?.message ?? "hazırlanıyor"}</span>
             <span>{percent != null ? `${percent}%` : downloading ? "…" : ""}</span>
           </div>
@@ -662,7 +662,7 @@ function HfCatalogBlock({
           <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             Hugging Face · LMR
           </h2>
-          <p className="mt-1 font-body text-[11px] text-on-surface-variant">
+          <p className="mt-1 font-body text-body text-on-surface-variant">
             {device?.summary ?? "Cihaz profili okunuyor…"}
           </p>
         </div>
@@ -670,14 +670,14 @@ function HfCatalogBlock({
           type="button"
           onClick={onPull}
           disabled={pulling || pending === 0}
-          className="shrink-0 rounded bg-primary-container px-2 py-1 font-mono text-[11px] font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
+          className="shrink-0 rounded bg-primary-container px-2 py-1 font-mono text-body font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
         >
           {pulling ? "Çekiliyor…" : "LMR’ye çek"}
         </button>
       </div>
       {pulling || progress ? (
         <div className="border-b border-outline-variant px-3 py-2">
-          <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-on-surface-variant">
+          <div className="flex items-center justify-between gap-2 font-mono text-meta text-on-surface-variant">
             <span className="truncate">{progress?.status ?? "hazırlanıyor"}</span>
             <span>{percent != null ? `${percent}%` : pulling ? "…" : ""}</span>
           </div>
@@ -690,7 +690,7 @@ function HfCatalogBlock({
         </div>
       ) : null}
       {offers.length === 0 ? (
-        <div className="px-3 py-4 font-mono text-[11px] text-outline">
+        <div className="px-3 py-4 font-mono text-body text-outline">
           Bu cihaz için önerilen GGUF bulunamadı.
         </div>
       ) : (
@@ -714,13 +714,13 @@ function HfCatalogBlock({
                     className="mt-0.5 accent-primary"
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                    <div className="flex items-center justify-between gap-2 font-mono text-body">
                       <span className="font-semibold text-on-surface">{offer.name}</span>
                       <span className="shrink-0 text-outline">
                         {offer.params} · ~{offer.estimated_ram_gb.toFixed(1)} GB
                       </span>
                     </div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 font-mono text-[10px] text-on-surface-variant">
+                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 font-mono text-meta text-on-surface-variant">
                       <span>{org}</span>
                       {offer.recommended ? (
                         <span className="rounded border border-secondary-container bg-secondary-container/40 px-1 text-secondary-dim">
@@ -739,7 +739,7 @@ function HfCatalogBlock({
                       ) : null}
                     </div>
                     {offer.disabled_reason ? (
-                      <div className="mt-0.5 font-body text-[10px] text-outline">
+                      <div className="mt-0.5 font-body text-meta text-outline">
                         {offer.disabled_reason}
                       </div>
                     ) : null}
@@ -782,7 +782,7 @@ function ToolGroup({
           <button
             type="button"
             onClick={onSelectAll}
-            className="font-mono text-[10px] text-primary hover:underline"
+            className="font-mono text-meta text-primary hover:underline"
           >
             Grubu seç
           </button>
@@ -792,7 +792,7 @@ function ToolGroup({
         <div className="flex items-start gap-2 px-3 py-4">
           <Icon name="warn" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-error" />
           <div>
-            <div className="font-mono text-[11px] text-outline">{emptyHint}</div>
+            <div className="font-mono text-body text-outline">{emptyHint}</div>
             {missing ? <InstallLink {...missing} /> : null}
           </div>
         </div>
@@ -816,7 +816,7 @@ function ToolGroup({
                     className="mt-0.5 accent-primary"
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                    <div className="flex items-center justify-between gap-2 font-mono text-body">
                       <span className="flex items-center gap-1.5 font-semibold text-on-surface">
                         {!tool.available ? <Icon name="warn" className="h-3 w-3 text-error" /> : null}
                         {tool.name}
@@ -825,13 +825,13 @@ function ToolGroup({
                         {hostLabelsFor(tool)}
                       </span>
                     </div>
-                    <div className="mt-0.5 truncate font-mono text-[10px] text-on-surface-variant">
+                    <div className="mt-0.5 truncate font-mono text-meta text-on-surface-variant">
                       {tool.command
                         ? `${tool.command} ${tool.args.join(" ")}`.trim()
                         : (tool.endpoint ?? tool.origin_path ?? tool.id)}
                     </div>
                     {tool.detail ? (
-                      <div className="mt-0.5 font-body text-[10px] text-outline">{tool.detail}</div>
+                      <div className="mt-0.5 font-body text-meta text-outline">{tool.detail}</div>
                     ) : null}
                     {install && tool.source !== "lmr" ? <InstallLink {...install} /> : null}
                   </div>

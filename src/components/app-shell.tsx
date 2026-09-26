@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
@@ -19,6 +19,9 @@ import {
   degradedCoreServiceNames,
   type DecisionGateStatus,
 } from "@/lib/lounge";
+
+const BANNER_BTN =
+  "min-h-8 rounded px-2.5 py-1.5 font-body text-body pointer-events-auto";
 
 export type NavId =
   | "dashboard"
@@ -125,7 +128,40 @@ export function AppShell({ children }: { children: ReactNode }) {
     indexNotice ||
     layaBanner ||
     Boolean(approvalError);
-  const bannerOffset = Boolean(statusBanner);
+  const bannerRef = useRef<HTMLDivElement | null>(null);
+  const [bannerHeight, setBannerHeight] = useState(0);
+  const attachBannerRef = useCallback((node: HTMLDivElement | null) => {
+    bannerRef.current = node;
+  }, []);
+
+  const degradedKey = degradedNames.join(",");
+  useEffect(() => {
+    if (!statusBanner) {
+      const clearId = window.setTimeout(() => setBannerHeight(0), 0);
+      return () => window.clearTimeout(clearId);
+    }
+    const el = bannerRef.current;
+    if (!el) {
+      return;
+    }
+    const measure = () => setBannerHeight(el.getBoundingClientRect().height);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [
+    statusBanner,
+    serviceDegraded,
+    approval,
+    indexing,
+    indexNotice,
+    approvalError,
+    layaBanner,
+    decisionGate,
+    countdownLabel,
+    degradedKey,
+  ]);
+
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-[55] pointer-events-auto"
     : "fixed top-12 right-0 left-[var(--sidebar-w)] z-[55] pointer-events-auto";
@@ -141,7 +177,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           data-approval-chrome="security"
         >
           <div className="relative z-[61] w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg pointer-events-auto">
-            <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-error-dim uppercase">
+            <p className="font-body text-meta font-bold tracking-label text-error-dim uppercase">
               Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} ·
               PENDING_APPROVAL{countdownLabel}
             </p>
@@ -151,15 +187,15 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               {SECURITY_OVERLAY_PROMPT}
             </h2>
-            <p className="mt-2 truncate font-mono text-[11px] text-outline">
-              {approval.from_agent} · {approval.summary}
+            <p className="mt-2 whitespace-normal break-words font-body text-body leading-normal text-outline">
+              <span className="font-mono">{approval.from_agent}</span> · {approval.summary}
             </p>
-            <div className="relative z-[62] mt-5 flex items-center justify-end gap-2 pointer-events-auto">
+            <div className="relative z-[62] mt-5 flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
               <button
                 type="button"
                 data-task-id={approval.task_id}
                 onClick={() => void resolveApproval("deny", approval.task_id)}
-                className="rounded border border-error bg-error-container px-3 py-1.5 font-mono text-[11px] text-on-error-container"
+                className={`${BANNER_BTN} border border-error bg-error-container text-on-error-container`}
               >
                 Reddet
               </button>
@@ -167,7 +203,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 type="button"
                 data-task-id={approval.task_id}
                 onClick={() => void resolveApproval("approve", approval.task_id)}
-                className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
+                className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
               >
                 Onayla
               </button>
@@ -185,7 +221,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           data-approval-chrome="quota"
         >
           <div className="relative z-[61] w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg pointer-events-auto">
-            <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-tertiary uppercase">
+            <p className="font-body text-meta font-bold tracking-label text-tertiary uppercase">
               Quota Alert · QUOTA_BLOCKED{countdownLabel}
             </p>
             <h2
@@ -194,16 +230,21 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               {QUOTA_ALERT_PROMPT}
             </h2>
-            <p className="mt-2 font-mono text-[11px] text-outline">
-              {approval.from_agent} → {approval.to_agent} · {approval.summary}
+            <p className="mt-2 whitespace-normal break-words font-body text-body leading-normal text-outline">
+              <span className="font-mono">
+                {approval.from_agent} → {approval.to_agent}
+              </span>{" "}
+              · {approval.summary}
             </p>
-            <p className="mt-1 font-mono text-[10px] text-outline/80">{approval.reason}</p>
+            <p className="mt-1 whitespace-normal break-words font-body text-meta leading-normal text-outline">
+              {approval.reason}
+            </p>
             <div className="relative z-[62] mt-5 flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
               <button
                 type="button"
                 data-task-id={approval.task_id}
                 onClick={() => void resolveApproval("deny", approval.task_id)}
-                className="rounded border border-outline-variant bg-surface-container px-3 py-1.5 font-mono text-[11px] text-on-surface"
+                className={`${BANNER_BTN} border border-outline-variant bg-surface-container text-on-surface`}
               >
                 Kapat
               </button>
@@ -212,7 +253,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   type="button"
                   data-task-id={approval.task_id}
                   onClick={() => void resolveApproval("approve_local", approval.task_id)}
-                  className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
+                  className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
                 >
                   {QUOTA_CONTINUE_LOCAL_LABEL}
                 </button>
@@ -224,54 +265,55 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {serviceDegraded ? (
         <div
+          ref={attachBannerRef}
           className={`${bannerPos} border-b border-error-container bg-error-container/25 py-2 px-4`}
           role="status"
           aria-live="polite"
         >
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
-            <div className="min-w-0 truncate text-on-surface">
-              <span className="font-bold tracking-wider text-error-dim uppercase">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-body text-body">
+            <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
+              <span className="font-semibold tracking-label text-error-dim uppercase">
                 Service Degraded ·{" "}
               </span>
               <span className="text-on-surface">
                 {degradedNames.join(", ")} kapalı — otomatik yeniden başlatma deneniyor
               </span>
               {degradedNames.includes("LMR") && report?.ollama.error ? (
-                <span className="ml-2 truncate text-outline" title={report.ollama.error}>
-                  · {report.ollama.error}
-                </span>
+                <span className="ml-2 break-words text-outline">· {report.ollama.error}</span>
               ) : null}
               {degradedNames.includes("NATS") && report?.nats.error ? (
-                <span className="ml-2 truncate text-outline" title={report.nats.error}>
-                  · {report.nats.error}
-                </span>
+                <span className="ml-2 break-words text-outline">· {report.nats.error}</span>
               ) : null}
             </div>
-            <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-[10px] tracking-wider text-error-dim uppercase">
+            <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase">
               auto-restart
             </span>
           </div>
         </div>
       ) : approval && !securityHold && !quotaHold ? (
         <div
+          ref={attachBannerRef}
           className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
           data-approval-chrome="routing"
         >
-          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
-            <div className="min-w-0 truncate text-on-surface">
-              <span className="font-bold uppercase text-error-dim">
+          <div className="flex min-w-0 flex-wrap items-start justify-between gap-2 px-4 font-body text-body">
+            <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
+              <span className="font-semibold tracking-label text-error-dim uppercase">
                 Routing onayı{countdownLabel} ·{" "}
               </span>
-              {approval.from_agent} → {approval.to_agent} · {approval.summary}
-              <span className="ml-2 text-outline">{approval.reason}</span>
+              <span className="font-mono">
+                {approval.from_agent} → {approval.to_agent}
+              </span>{" "}
+              · {approval.summary}
+              <span className="ml-2 break-words text-outline">{approval.reason}</span>
             </div>
-            <div className="relative z-[56] flex shrink-0 items-center gap-1.5 pointer-events-auto">
+            <div className="relative z-[56] flex shrink-0 flex-wrap items-center gap-1.5 pointer-events-auto">
               {approval.kind === "agent_switch" ? (
                 <button
                   type="button"
                   data-task-id={approval.task_id}
                   onClick={() => void resolveApproval("approve_local", approval.task_id)}
-                  className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
+                  className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
                 >
                   Yerel modele geç
                 </button>
@@ -280,7 +322,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 type="button"
                 data-task-id={approval.task_id}
                 onClick={() => void resolveApproval("approve", approval.task_id)}
-                className="rounded bg-primary-container px-2 py-1 font-semibold text-on-primary-container"
+                className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
               >
                 Onayla
               </button>
@@ -288,7 +330,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 type="button"
                 data-task-id={approval.task_id}
                 onClick={() => void resolveApproval("deny", approval.task_id)}
-                className="rounded border border-error bg-error-container px-2 py-1 text-on-error-container"
+                className={`${BANNER_BTN} border border-error bg-error-container text-on-error-container`}
               >
                 Reddet
               </button>
@@ -296,18 +338,24 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       ) : indexing ? (
-        <div className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}>
-          <div className="flex min-w-0 items-center gap-2 px-4 font-mono text-[11px] text-on-surface">
+        <div
+          ref={attachBannerRef}
+          className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
+        >
+          <div className="flex min-w-0 flex-wrap items-center gap-2 px-4 font-body text-body text-on-surface">
             <span
               className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-transparent border-t-primary"
               aria-hidden
             />
-            <span className="shrink-0 font-bold tracking-wider uppercase">Scanning...</span>
-            <span className="truncate text-outline">memory_bridge · index_workspace</span>
+            <span className="shrink-0 font-semibold tracking-label uppercase">Scanning...</span>
+            <span className="whitespace-normal break-words text-outline">
+              memory_bridge · index_workspace
+            </span>
           </div>
         </div>
       ) : indexNotice ? (
         <div
+          ref={attachBannerRef}
           className={`${bannerPos} border-b py-2 px-4 ${
             indexNotice.tone === "error"
               ? "border-error-container bg-error-container/20"
@@ -315,7 +363,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           }`}
         >
           <div
-            className={`truncate px-4 font-mono text-[11px] font-semibold ${
+            className={`whitespace-normal break-words px-4 font-body text-body font-semibold leading-normal ${
               indexNotice.tone === "error" ? "text-error-dim" : "text-secondary-dim"
             }`}
           >
@@ -324,15 +372,17 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : approvalError ? (
         <div
+          ref={attachBannerRef}
           className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
           role="status"
         >
-          <div className="truncate px-4 font-mono text-[11px] font-semibold text-error-dim">
+          <div className="whitespace-normal break-words px-4 font-body text-body font-semibold leading-normal text-error-dim">
             {approvalError}
           </div>
         </div>
       ) : layaBanner && decisionGate ? (
         <div
+          ref={attachBannerRef}
           className={`${bannerPos} border-b py-2 px-4 ${
             decisionGate.phase === "failed"
               ? "border-error-container bg-error-container"
@@ -341,13 +391,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                 : "border-outline-variant bg-surface-container-low"
           }`}
         >
-          <div className="flex min-w-0 items-center justify-between gap-3 px-4 font-mono text-[11px]">
-            <div
-              className="min-w-0 truncate"
-              title={decisionGate.detail ? `${decisionGate.message} · ${decisionGate.detail}` : decisionGate.message}
-            >
+          <div className="flex min-w-0 flex-wrap items-start justify-between gap-3 px-4 font-body text-body">
+            <div className="min-w-0 flex-1 whitespace-normal break-words leading-normal">
               <span
-                className={`font-bold tracking-wider uppercase ${
+                className={`font-semibold tracking-label uppercase ${
                   decisionGate.phase === "failed" ? "text-on-error-container" : "text-on-surface"
                 }`}
               >
@@ -355,38 +402,39 @@ export function AppShell({ children }: { children: ReactNode }) {
               </span>
               <span className={decisionGate.phase === "failed" ? "text-on-error-container" : "text-on-surface"}>
                 {decisionGate.message}
+                {decisionGate.detail ? ` · ${decisionGate.detail}` : ""}
               </span>
             </div>
             {decisionGate.phase === "available" ? (
-              <div className="flex shrink-0 items-center gap-1.5">
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => void enableLaya()}
-                  className="rounded bg-primary-container px-2 py-1 font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+                  className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed`}
                 >
                   Laya&apos;ya geç
                 </button>
                 <button
                   type="button"
                   onClick={() => void declineLaya()}
-                  className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
+                  className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
                 >
                   Şimdilik LMR
                 </button>
               </div>
             ) : decisionGate.phase === "failed" ? (
-              <div className="flex shrink-0 items-center gap-1.5">
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => void enableLaya()}
-                  className="rounded bg-primary-container px-2 py-1 font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
+                  className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed`}
                 >
                   Yeniden dene
                 </button>
                 <button
                   type="button"
                   onClick={() => setLayaDismissed(true)}
-                  className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
+                  className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
                 >
                   Gizle
                 </button>
@@ -395,7 +443,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <button
                 type="button"
                 onClick={() => setLayaDismissed(true)}
-                className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
+                className={`${BANNER_BTN} shrink-0 border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
               >
                 Gizle
               </button>
@@ -408,14 +456,14 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
           <div className="flex min-w-0 items-center gap-2 border-r border-outline-variant pr-2">
             <BrandMark size={22} />
-            <span className="truncate font-headline font-mono text-xs font-bold tracking-tight uppercase">
+            <span className="truncate font-headline text-panel font-bold tracking-tight uppercase">
               Agent Lounge OS
             </span>
-            <span className="hidden shrink-0 rounded border border-outline-variant bg-surface-container-high px-1 py-0.5 font-mono text-[9px] text-primary uppercase 2xl:inline">
+            <span className="hidden shrink-0 rounded border border-outline-variant bg-surface-container-high px-1 py-0.5 font-body text-meta tracking-label text-primary uppercase 2xl:inline">
               KERNEL
             </span>
           </div>
-          <div className="hidden min-w-0 items-center gap-1.5 overflow-hidden font-mono text-xs text-on-surface-variant 2xl:flex">
+          <div className="hidden min-w-0 items-center gap-1.5 overflow-hidden font-body text-body text-on-surface-variant 2xl:flex">
             {onboarding ? (
               <span>Overview</span>
             ) : (
@@ -427,7 +475,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span className="truncate font-medium text-on-surface">{crumb}</span>
           </div>
           {onboarding ? (
-            <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-on-surface-variant">
+            <p className="min-w-0 flex-1 truncate font-body text-body text-on-surface-variant">
               Yerel araçları tarayıp Lounge’a bağlayın
             </p>
           ) : (
@@ -444,7 +492,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                     setOpenCommandPalette(true);
                   }
                 }}
-                className="w-full min-w-0 rounded-lg border border-outline-variant bg-surface-container-low py-1 pr-12 pl-8 font-body text-xs text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
+                className="w-full min-w-0 rounded-lg border border-outline-variant bg-surface-container-low py-1.5 pr-12 pl-8 font-body text-body text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
                 placeholder="Filter subjects, repos, experiences"
               />
               <button
@@ -454,7 +502,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 title="Command Palette"
                 aria-label="Open command palette"
               >
-                <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant hover:border-primary hover:text-primary">
+                <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant hover:border-primary hover:text-primary">
                   ⌘K
                 </kbd>
               </button>
@@ -473,7 +521,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onChange={(next) => void applyModel(next)}
               />
               <div
-                className={`hidden items-center gap-1 rounded border px-2 py-0.5 font-mono text-[11px] 2xl:flex ${
+                className={`hidden items-center gap-1 rounded border px-2 py-0.5 font-mono text-body 2xl:flex ${
                   serviceDegraded
                     ? "border-error-container bg-error-container/20 text-error-dim"
                     : report?.nats.running
@@ -502,7 +550,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                     ? `AMBER ${Math.round(warnQuota?.percent ?? 80)}% ${amberTools[0] ?? warnQuota?.id ?? ""}`.trim()
                     : "Kota normal"
                 }
-                className={`flex min-w-0 max-w-[7.5rem] items-center gap-1 rounded border px-2 py-0.5 font-mono text-[11px] xl:max-w-[14rem] ${
+                className={`flex min-w-0 max-w-[7.5rem] items-center gap-1 rounded border px-2 py-0.5 font-mono text-body xl:max-w-[14rem] ${
                   amberAlert
                     ? "border-error-container bg-error-container/20 text-error-dim"
                     : "border-outline-variant bg-surface-container-high text-on-surface-variant"
@@ -513,7 +561,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   {amberAlert ? `AMBER ${Math.round(warnQuota?.percent ?? 80)}%` : "QUOTA OK"}
                 </span>
               </Link>
-              <div className="tnum hidden shrink-0 text-[11px] text-on-surface-variant 2xl:block">{clock} UTC+3</div>
+              <div className="tnum hidden shrink-0 text-body text-on-surface-variant 2xl:block">{clock} UTC+3</div>
               <button
                 type="button"
                 className="hidden items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-high px-2.5 py-1 text-xs font-medium text-on-surface hover:bg-surface-bright 2xl:flex"
@@ -545,22 +593,22 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div className="flex min-w-0 items-center gap-2">
               <BrandMark size={20} />
               <div>
-                <div className="whitespace-nowrap font-headline text-xs font-black tracking-wider text-on-surface uppercase">
+                <div className="whitespace-nowrap font-headline text-panel font-black tracking-label text-on-surface uppercase">
                   AL-OS CORE
                 </div>
-                <div className="font-mono text-[10px] text-on-surface-variant">
+                <div className="font-mono text-meta text-on-surface-variant">
                   v0.1.0 · {serviceDegraded ? "degraded" : kernel}
                 </div>
               </div>
             </div>
             <button
               type="button"
-              className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] font-medium text-primary hover:bg-surface-bright"
+              className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta font-medium text-primary hover:bg-surface-bright"
             >
               + New Node
             </button>
           </div>
-          <nav className="space-y-0.5 font-label text-xs">
+          <nav className="space-y-0.5 font-label text-body">
             {NAV.map((item) => {
               const active =
                 pathname === item.href || (item.id === "dashboard" && pathname === "/");
@@ -568,7 +616,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <Link
                   key={item.id}
                   href={item.href}
-                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-1.5 text-left text-xs ${
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body ${
                     active
                       ? "border-l-2 border-primary bg-surface-container-highest text-primary"
                       : "text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
@@ -588,7 +636,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="space-y-3 border-t border-outline-variant/60 pt-3 pb-10">
           {serviceDegraded ? (
             <div
-              className="rounded border border-error-container/70 bg-error-container/15 px-2 py-1.5 font-mono text-[10px] text-error-dim"
+              className="rounded border border-error-container/70 bg-error-container/15 px-2 py-1.5 font-mono text-meta text-error-dim"
               role="status"
             >
               <div className="font-bold tracking-wider uppercase">Service Degraded</div>
@@ -598,13 +646,13 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           ) : null}
           <div className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-lowest/60 p-2">
-            <div className="mb-1 font-mono text-[10px] tracking-wider text-outline uppercase">Active daemons</div>
+            <div className="mb-1 font-mono text-meta tracking-wider text-outline uppercase">Active daemons</div>
             {[
               { name: "LMR", health: report?.ollama, fallback: "—" },
               { name: "NATS", health: report?.nats, fallback: "—" },
               { name: "Memory Bridge", health: report?.memory, fallback: "—" },
             ].map((daemon) => (
-              <div key={daemon.name} className="flex items-center justify-between font-mono text-[11px]">
+              <div key={daemon.name} className="flex items-center justify-between font-mono text-body">
                 <div className="flex items-center gap-2">
                   <Pip tone={daemon.name === "Memory Bridge" ? "primary" : daemonTone(daemon.health)} />
                   <span className="text-on-surface">{daemon.name}</span>
@@ -615,7 +663,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </div>
             ))}
             <div
-              className="flex items-center justify-between font-mono text-[11px]"
+              className="flex items-center justify-between font-mono text-body"
               title={decisionGate?.message ?? "OpenJev Laya"}
             >
               <div className="flex min-w-0 items-center gap-2">
@@ -658,8 +706,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       </aside>
       )}
 
-      <main className={`mt-12 flex h-[calc(100vh-3rem)] min-h-0 min-w-0 flex-col gap-3 overflow-hidden bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[var(--sidebar-w)]"} ${bannerOffset ? "pt-14" : ""}`}>
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+      <main
+        className={`mt-12 flex h-[calc(100vh-3rem)] min-h-0 min-w-0 flex-col gap-3 overflow-x-hidden overflow-y-auto bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[var(--sidebar-w)]"}`}
+        style={bannerHeight > 0 ? { paddingTop: `calc(0.875rem + ${bannerHeight}px)` } : undefined}
+      >
+        <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">{children}</div>
       </main>
     </div>
   );
@@ -703,7 +754,7 @@ function ModelSelect({
 
   return (
     <label
-      className="flex min-w-0 max-w-[11rem] items-center gap-1.5 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 font-mono text-[11px] text-on-surface-variant xl:max-w-[18rem]"
+      className="flex min-w-0 max-w-[11rem] items-center gap-1.5 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 font-mono text-body text-on-surface-variant xl:max-w-[18rem]"
       title={selected || label}
     >
       <span
