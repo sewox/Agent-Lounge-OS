@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,10 +14,33 @@ use crate::models::{
     ServiceHealth, ServiceId,
 };
 
-const CLI_TIMEOUT: Duration = Duration::from_secs(120);
+/// CLI fallback hard timeout — cbm daemon açıkken cli hang'ini keser.
+pub const CLI_TIMEOUT: Duration = Duration::from_secs(15);
+const HTTP_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+pub const UI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+pub const DEFAULT_GRAPH_UI_PORT: u16 = 9749;
+
+static GRAPH_UI_PORT: AtomicU16 = AtomicU16::new(DEFAULT_GRAPH_UI_PORT);
+
 /// Semantic map UI için üst sınır — viewport kilitli listede sayfalama var.
 const SEMANTIC_NODE_LIMIT: u32 = 400;
 const SEMANTIC_CALL_LIMIT: u32 = 800;
+
+pub fn configured_graph_ui_port() -> u16 {
+    GRAPH_UI_PORT.load(Ordering::Relaxed)
+}
+
+pub fn set_configured_graph_ui_port(port: u16) {
+    if port > 0 {
+        GRAPH_UI_PORT.store(port, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolTransport {
+    HttpRpc,
+    Cli,
+}
 
 #[derive(Clone)]
 pub struct MemoryBridge {
@@ -68,7 +91,7 @@ impl MemoryBridge {
             .with_context(|| format!("repo_path çözümlenemedi: {trimmed}"))?;
         let repo = repo_path.to_str().context("repo_path UTF-8 değil")?;
         let stdout = self
-            .run_cli(&[
+            .run_tool(&[
                 "index_repository",
                 "--repo-path",
                 repo,
@@ -155,7 +178,7 @@ impl MemoryBridge {
 
     async fn query_graph_json(&self, project: &str, query: &str) -> Result<Value> {
         let stdout = self
-            .run_cli(&[
+            .run_tool(&[
                 "query_graph",
                 "--project",
                 project,
@@ -192,7 +215,9 @@ impl MemoryBridge {
     }
 
     pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
-        let stdout = self.run_cli(&["list_projects", "--format", "json"]).await?;
+        let stdout = self
+            .run_tool(&["list_projects", "--format", "json"])
+            .await?;
         let payload = parse_cli_json(&stdout)?;
         let list: ProjectList =
             serde_json::from_value(payload).context("project listesi çözülemedi")?;
@@ -206,7 +231,7 @@ impl MemoryBridge {
         };
         for tool in ["get_dead_symbols", "dead_symbols"] {
             match self
-                .run_cli(&[tool, "--repo-path", repo, "--format", "json"])
+                .run_tool(&[tool, "--repo-path", repo, "--format", "json"])
                 .await
             {
                 Ok(stdout) => {
@@ -224,7 +249,51 @@ impl MemoryBridge {
         Ok(None)
     }
 
-    async fn run_cli(&self, tool_args: &[&str]) -> Result<String> {
+    /// HTTP `/rpc` ulaşılabilirse onu kullan; değilse CLI (hard timeout).
+    pub async fn run_tool(&self, tool_args: &[&str]) -> Result<String> {
+        match select_tool_transport(configured_graph_ui_port()).await {
+            ToolTransport::HttpRpc => match self.run_http_rpc(tool_args).await {
+                Ok(out) => Ok(out),
+                Err(err) => {
+                    log::warn!("HTTP /rpc başarısız, CLI fallback: {err}");
+                    self.run_cli_with_timeout(tool_args, CLI_TIMEOUT).await
+                }
+            },
+            ToolTransport::Cli => self.run_cli_with_timeout(tool_args, CLI_TIMEOUT).await,
+        }
+    }
+
+    async fn run_http_rpc(&self, tool_args: &[&str]) -> Result<String> {
+        let port = configured_graph_ui_port();
+        let (name, arguments) = tool_args_to_rpc(tool_args)?;
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/rpc");
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_RPC_TIMEOUT)
+            .build()
+            .context("reqwest client")?;
+        let response = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        if !response.status().is_success() {
+            bail!("HTTP /rpc status {}", response.status());
+        }
+        let payload: Value = response.json().await.context("HTTP /rpc JSON")?;
+        extract_rpc_tool_text(&payload)
+    }
+
+    async fn run_cli_with_timeout(&self, tool_args: &[&str], timeout: Duration) -> Result<String> {
         if !self.binary.is_file() {
             bail!("codebase-memory-mcp yok: {}", self.binary.display());
         }
@@ -255,14 +324,14 @@ impl MemoryBridge {
             child.wait_with_output().context("wait_with_output")
         });
 
-        let output = match tokio::time::timeout(CLI_TIMEOUT, wait).await {
+        let output = match tokio::time::timeout(timeout, wait).await {
             Ok(join) => join.context("codebase-memory-mcp join")??,
             Err(_) => {
                 let child_pid = pid.load(Ordering::SeqCst);
                 if child_pid != 0 {
                     kill_pid(child_pid);
                 }
-                bail!("codebase-memory-mcp zaman aşımı");
+                bail!("codebase-memory-mcp zaman aşımı ({timeout:?})");
             }
         };
 
@@ -283,6 +352,90 @@ impl MemoryBridge {
 
         Ok(stdout)
     }
+}
+
+/// `GET /api/ui-config` → 200 + JSON ise Graph UI ayakta.
+pub async fn probe_ui_config(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/api/ui-config");
+    let Ok(client) = reqwest::Client::builder().timeout(UI_PROBE_TIMEOUT).build() else {
+        return false;
+    };
+    let Ok(response) = client.get(&url).send().await else {
+        return false;
+    };
+    if !response.status().is_success() {
+        return false;
+    }
+    response.json::<Value>().await.is_ok()
+}
+
+pub async fn select_tool_transport(port: u16) -> ToolTransport {
+    if probe_ui_config(port).await {
+        ToolTransport::HttpRpc
+    } else {
+        ToolTransport::Cli
+    }
+}
+
+/// CLI argümanlarını JSON-RPC `tools/call` params'a çevirir (`--format` atlanır).
+pub fn tool_args_to_rpc(tool_args: &[&str]) -> Result<(String, Value)> {
+    let Some((name, rest)) = tool_args.split_first() else {
+        bail!("tool adı yok");
+    };
+    if name.trim().is_empty() {
+        bail!("tool adı boş");
+    }
+    let mut map = serde_json::Map::new();
+    let mut idx = 0;
+    while idx < rest.len() {
+        let token = rest[idx];
+        let Some(flag) = token.strip_prefix("--") else {
+            idx += 1;
+            continue;
+        };
+        if flag == "format" {
+            idx += if idx + 1 < rest.len() && !rest[idx + 1].starts_with("--") {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        let key = flag.replace('-', "_");
+        if idx + 1 < rest.len() && !rest[idx + 1].starts_with("--") {
+            map.insert(key, Value::String(rest[idx + 1].to_string()));
+            idx += 2;
+        } else {
+            map.insert(key, Value::Bool(true));
+            idx += 1;
+        }
+    }
+    Ok(((*name).to_string(), Value::Object(map)))
+}
+
+/// JSON-RPC tools/call yanıtından `result.content[0].text` (veya hata) çıkarır.
+pub fn extract_rpc_tool_text(payload: &Value) -> Result<String> {
+    if let Some(err) = payload.get("error") {
+        let message = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("rpc error");
+        let code = err.get("code").and_then(Value::as_i64);
+        bail!(
+            "JSON-RPC error{}: {message}",
+            code.map(|c| format!(" ({c})")).unwrap_or_default()
+        );
+    }
+    if let Some(text) = payload
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+    {
+        return Ok(text.to_string());
+    }
+    if let Some(result) = payload.get("result") {
+        return serde_json::to_string(result).context("rpc result serialize");
+    }
+    bail!("JSON-RPC yanıtında result yok");
 }
 
 fn kill_pid(pid: u32) {
@@ -1134,5 +1287,160 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
             !map.projects.is_empty() || snapshot.nodes > 0,
             "indeks sonrası harita/sayı boş"
         );
+    }
+
+    #[test]
+    fn tool_args_to_rpc_skips_format_and_snake_cases() {
+        let (name, args) = tool_args_to_rpc(&[
+            "index_repository",
+            "--repo-path",
+            "/tmp/x",
+            "--mode",
+            "fast",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert_eq!(name, "index_repository");
+        assert_eq!(args["repo_path"], "/tmp/x");
+        assert_eq!(args["mode"], "fast");
+        assert!(args.get("format").is_none());
+    }
+
+    #[test]
+    fn extract_rpc_tool_text_decodes_content_json_string() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "{\"projects\":[{\"name\":\"demo\",\"root_path\":\"/tmp/demo\"}]}"
+                }]
+            }
+        });
+        let text = extract_rpc_tool_text(&payload).unwrap();
+        let inner: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(inner["projects"][0]["name"], "demo");
+    }
+
+    #[test]
+    fn extract_rpc_tool_text_surfaces_error_objects() {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32601, "message": "Method not found"}
+        });
+        let err = extract_rpc_tool_text(&payload).unwrap_err().to_string();
+        assert!(err.contains("Method not found"), "{err}");
+        assert!(err.contains("-32601"), "{err}");
+    }
+
+    async fn spawn_fake_cbm_http(projects_text: String) -> u16 {
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use std::sync::Arc;
+
+        let text = Arc::new(projects_text);
+        let text_rpc = text.clone();
+        let app = Router::new()
+            .route(
+                "/api/ui-config",
+                get(|| async { Json(serde_json::json!({"lang": "en"})) }),
+            )
+            .route(
+                "/rpc",
+                post(move |_body: String| {
+                    let text_rpc = text_rpc.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "content": [{ "type": "text", "text": *text_rpc }]
+                            }
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        // Kısa settle — bind sonrası accept hazır olsun.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        port
+    }
+
+    #[tokio::test]
+    async fn transport_selects_http_when_ui_config_up() {
+        let port = spawn_fake_cbm_http(r#"{"projects":[]}"#.into()).await;
+        assert_eq!(select_tool_transport(port).await, ToolTransport::HttpRpc);
+        assert_eq!(
+            select_tool_transport(1).await,
+            ToolTransport::Cli,
+            "kapalı port CLI"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_projects_prefers_http_rpc_over_cli() {
+        let payload = r#"{"projects":[{"name":"http-demo","root_path":"/tmp/http-demo","nodes":1,"edges":0}]}"#;
+        let port = spawn_fake_cbm_http(payload.into()).await;
+        let prev = configured_graph_ui_port();
+        set_configured_graph_ui_port(port);
+
+        // CLI çağrılırsa patlasın diye olmayan binary.
+        let bridge = MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp-for-http-test");
+        let projects = bridge.list_projects().await.expect("http list_projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "http-demo");
+        assert_eq!(projects[0].root_path.as_deref(), Some("/tmp/http-demo"));
+
+        set_configured_graph_ui_port(prev);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_hard_timeout_kills_sleeping_child() {
+        let dir = std::env::temp_dir().join(format!("lounge-cbm-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("codebase-memory-mcp");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+sleep 30
+echo '{"projects":[]}'
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let prev = configured_graph_ui_port();
+        // Kapalı porta zorla — CLI yolu.
+        set_configured_graph_ui_port(1);
+
+        let bridge = MemoryBridge::from_binary(&script);
+        let started = std::time::Instant::now();
+        let err = bridge
+            .run_cli_with_timeout(
+                &["list_projects", "--format", "json"],
+                Duration::from_millis(400),
+            )
+            .await
+            .expect_err("timeout bekleniyor");
+        assert!(err.to_string().contains("zaman aşımı"), "unexpected: {err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout çok uzun sürdü: {:?}",
+            started.elapsed()
+        );
+
+        set_configured_graph_ui_port(prev);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

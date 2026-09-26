@@ -1,6 +1,7 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
 pub mod autodiscover;
+pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
 pub mod lmr_runtime;
@@ -21,7 +22,15 @@ use tokio::sync::Mutex;
 
 use crate::models::ServiceReport;
 
-pub use memory_bridge::MemoryBridge;
+pub use graph_ui::{
+    enable_graph_ui, graph_ui_status, load_port_from_store, open_or_focus_graph_window,
+    persist_port, resolve_cbm_project_name, sync_port, GraphUiState, GraphUiStatus,
+    GRAPH_WINDOW_LABEL,
+};
+pub use memory_bridge::{
+    configured_graph_ui_port, probe_ui_config, set_configured_graph_ui_port, MemoryBridge,
+    DEFAULT_GRAPH_UI_PORT,
+};
 pub use model_manager::{LayaEnginePhase, LayaEngineStatus, ModelManager, LAYA_ENGINE_EVENT};
 pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};
 pub use ollama::{

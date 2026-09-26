@@ -23,11 +23,13 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys,
-    record_dead_snapshot, record_whisper_injection, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, LayaEngineStatus, MemoryBridge,
-    ModelManager, ServiceManager, SharedServices,
+    enable_graph_ui, graph_ui_status, load_port_from_store, open_or_focus_graph_window,
+    persist_port, record_dead_snapshot, record_whisper_injection, spawn_event_pump,
+    spawn_quota_pump, spawn_supervisor, sync_port, AgentEfficiencyReport, EfficiencyReportQuery,
+    GraphUiState, GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
+    SharedServices,
 };
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
@@ -94,6 +96,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 log::warn!("{err}");
                 MemoryBridge::from_binary("codebase-memory-mcp")
             });
+            let graph_ui = GraphUiState::new();
             let (decision_tx, mut decision_rx) = tokio::sync::mpsc::channel(64);
             let gate = DecisionGate::new(decision_tx);
             gate.attach_bias_store(store.clone());
@@ -102,7 +105,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 "nats://127.0.0.1:4222",
                 services::lounge_ollama_endpoint(),
                 model,
-                memory,
+                memory.clone(),
                 store.clone(),
                 workspace,
             )
@@ -134,6 +137,16 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(models);
             app.manage(store.clone());
             app.manage(bus.clone());
+            app.manage(graph_ui);
+            app.manage(memory);
+
+            // Graph UI port — settings'ten yükle (varsayılan 9749).
+            let port_store = store.clone();
+            tauri::async_runtime::spawn(async move {
+                let port = load_port_from_store(&port_store).await;
+                sync_port(port);
+                log::info!("graph UI port={port}");
+            });
 
             // MCP HTTP — Cursor/Claude stdio shim buraya proxy eder (dashboard sync).
             let mcp_store = store.clone();
@@ -251,10 +264,22 @@ pub fn run_with_start_route(start_route: &'static str) {
             save_connected_tools,
             save_selected_tools,
             list_connected_tools,
-            agent_efficiency_report
+            agent_efficiency_report,
+            get_graph_ui_status,
+            open_graph_ui,
+            enable_graph_ui_cmd,
+            get_graph_ui_port,
+            set_graph_ui_port
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
+                if let Some(state) = app_handle.try_state::<GraphUiState>() {
+                    state.kill_spawned_child();
+                }
+            }
+        });
 }
 
 #[tauri::command]
@@ -841,6 +866,90 @@ async fn list_connected_tools(
         .list_connected_tools()
         .await
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_graph_ui_status(
+    services: tauri::State<'_, SharedServices>,
+    project_root: Option<String>,
+) -> Result<GraphUiStatus, String> {
+    let bridge = {
+        let manager = services.lock().await;
+        manager.memory().clone()
+    };
+    Ok(graph_ui_status(&bridge, project_root.as_deref()).await)
+}
+
+#[tauri::command]
+async fn open_graph_ui(
+    app: tauri::AppHandle,
+    services: tauri::State<'_, SharedServices>,
+    project_root: Option<String>,
+) -> Result<(), String> {
+    let bridge = {
+        let manager = services.lock().await;
+        manager.memory().clone()
+    };
+    let status = graph_ui_status(&bridge, project_root.as_deref()).await;
+    if !status.binary_found {
+        return Err("codebase-memory-mcp bulunamadı".into());
+    }
+    if !status.ui_available {
+        return Err("Graph UI kapalı — önce Enable Graph UI".into());
+    }
+    let Some(name) = status.cbm_project_name else {
+        return Err("Index workspace first".into());
+    };
+    open_or_focus_graph_window(&app, status.port, &name).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn enable_graph_ui_cmd(
+    app: tauri::AppHandle,
+    services: tauri::State<'_, SharedServices>,
+    graph: tauri::State<'_, GraphUiState>,
+    project_root: Option<String>,
+) -> Result<(), String> {
+    let bridge = {
+        let manager = services.lock().await;
+        manager.memory().clone()
+    };
+    let status = graph_ui_status(&bridge, project_root.as_deref()).await;
+    if !status.binary_found {
+        return Err("codebase-memory-mcp bulunamadı".into());
+    }
+    if status.port_conflict {
+        return Err(status
+            .conflict_message
+            .unwrap_or_else(|| format!("Port {} meşgul", status.port)));
+    }
+    enable_graph_ui(
+        &app,
+        graph.inner(),
+        &bridge,
+        status.cbm_project_name.as_deref(),
+    )
+    .await
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_graph_ui_port(store: tauri::State<'_, ExperienceStore>) -> Result<u16, String> {
+    Ok(load_port_from_store(store.inner()).await)
+}
+
+#[tauri::command]
+async fn set_graph_ui_port(
+    store: tauri::State<'_, ExperienceStore>,
+    port: u16,
+) -> Result<u16, String> {
+    if port == 0 {
+        return Err("port 0 geçersiz".into());
+    }
+    persist_port(store.inner(), port)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(port)
 }
 
 fn workspace_root() -> PathBuf {
