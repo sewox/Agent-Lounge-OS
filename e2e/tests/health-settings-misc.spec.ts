@@ -133,20 +133,30 @@ test.describe("AP / CP / misc", () => {
     expect(await approve.count()).toBeGreaterThan(0);
   });
 
-  test("AP-06 · Destructive ops always require confirmation UI [expected-fail until PR-1/5]", async ({
+  test("AP-06 · Destructive ops always require confirmation UI (POSIX + Windows) [expected-fail until PR-1/5]", async ({
     page,
   }, testInfo) => {
-    // O4: DB drop/truncate/delete/migrate-down, rm -rf, reset → always confirm, even Never Ask.
+    // O4 / §10.2: DB drop/truncate/delete/migrate-down, rm -rf, reset,
+    // and Windows del /s, rd /s, Remove-Item -Recurse, format → always confirm.
     testInfo.annotations.push({
       type: "expected-fail",
-      description: "destructive-operation gate missing (O4)",
+      description: "destructive-operation gate missing (O4 / §10.2)",
     });
     test.fail(true, "Destructive confirmation gate not implemented");
     await openRoute(page, "/settings", "full");
     const gate = page.getByText(
-      /destructive|yıkıcı|always confirm|her zaman onay|Never Ask.*cannot|atlanamaz/i,
+      /destructive|yıkıcı|always confirm|her zaman onay|Never Ask.*cannot|atlanamaz|del \/s|Remove-Item|rm -rf/i,
     );
     expect(await gate.count(), "destructive gate copy / control").toBeGreaterThan(0);
+    // Contract surface for detector patterns (documented until backend ships).
+    const patterns = [
+      "rm -rf",
+      "del /s",
+      "rd /s",
+      "Remove-Item -Recurse",
+      "format",
+    ];
+    expect(patterns.length).toBe(5);
   });
 
   test("AP-07 · Never Ask cannot skip destructive confirmation [expected-fail until PR-1/5]", async ({
@@ -154,22 +164,23 @@ test.describe("AP / CP / misc", () => {
   }, testInfo) => {
     testInfo.annotations.push({
       type: "expected-fail",
-      description: "Never Ask still bypasses destructive ops (O4)",
+      description: "Never Ask still bypasses destructive ops (O4 / §10.2)",
     });
     test.fail(true, "Destructive ops not forced through DecisionGate");
     await openRoute(page, "/dashboard?demo=destructive-reset", "browser");
     const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog"));
     expect(await dialog.count(), "destructive confirm alertdialog").toBeGreaterThan(0);
-    await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil/i);
+    await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil|Remove-Item|del \/s/i);
   });
 
-  test("AP-08 · Pending approval plays alert sound (spy) + repeats until decided [expected-fail until PR-1/5]", async ({
+  test("AP-08 · Pending approval plays alert sound (HTML Audio / rodio; wav/mp3/ogg) [expected-fail until PR-1/5]", async ({
     page,
   }, testInfo) => {
-    // §10.1: sound on routing/security/quota/destructive pending; works when hidden; default 60s repeat.
+    // §10.1 / §10.2: webview HTMLAudioElement or Rust rodio; bundled wav/mp3/ogg;
+    // plays when hidden; default 60s repeat until decision.
     testInfo.annotations.push({
       type: "expected-fail",
-      description: "Approval alert sound missing (§10.1)",
+      description: "Approval alert sound missing (§10.1 / §10.2)",
     });
     test.fail(true, "Approval alert audio not implemented");
     await page.addInitScript(() => {
@@ -193,7 +204,9 @@ test.describe("AP / CP / misc", () => {
     await page.waitForTimeout(500);
     const plays = await page.evaluate(() => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__ ?? []);
     expect(plays.length, "audio play spy should see ≥1 alert while approval pending").toBeGreaterThan(0);
-    // Decision stops further repeats (interval default 60s — we only assert stop hook exists / no play after resolve).
+    const bundled = /\.(wav|mp3|ogg)(\?|$)/i;
+    const srcOk = (plays as { src: string }[]).some((p) => !p.src || bundled.test(p.src));
+    expect(srcOk, "bundled alert should be wav/mp3/ogg (or empty until asset wired)").toBeTruthy();
     const decide = page.getByRole("button", { name: /Onayla|Approve|Reddet|Deny/i }).first();
     if (await decide.count()) {
       await decide.click();
@@ -204,12 +217,12 @@ test.describe("AP / CP / misc", () => {
     }
   });
 
-  test("AP-09 · Settings sound options (on/off, built-ins, upload, volume, interval, Dinle) [expected-fail until PR-5]", async ({
+  test("AP-09 · Settings sound options (on/off, built-ins, wav/mp3/ogg/aiff, volume, interval, Dinle) [expected-fail until PR-5]", async ({
     page,
   }, testInfo) => {
     testInfo.annotations.push({
       type: "expected-fail",
-      description: "Approval sound Settings UI missing (§10.1)",
+      description: "Approval sound Settings UI missing (§10.1 / §10.2)",
     });
     test.fail(true, "Sound prefs UI not in Settings");
     await openRoute(page, "/settings", "full");
@@ -218,7 +231,7 @@ test.describe("AP / CP / misc", () => {
     });
     expect(await section.count(), "sound settings section").toBeGreaterThan(0);
     await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play/i })).toBeVisible();
-    await expect(page.getByText(/wav|mp3|aiff|upload|yükle/i).first()).toBeVisible();
+    await expect(page.getByText(/wav|mp3|ogg|aiff|upload|yükle/i).first()).toBeVisible();
     await expect(page.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
     // Persist + immediate effect: toggle off, reload, still off.
     const toggle = section.getByRole("switch").or(section.locator('input[type="checkbox"]')).first();
@@ -236,18 +249,44 @@ test.describe("AP / CP / misc", () => {
     }
   });
 
-  test("AP-10 · macOS notification on pending approval (manual S2) [expected-fail / manual]", async ({
+  test("AP-10 · Native OS notification (macOS/Windows/Linux) on pending approval [expected-fail / manual]", async ({
     page,
   }, testInfo) => {
+    // §10.1 / §10.2: Tauri notification plugin on all three OSes; click focuses app + banner.
     testInfo.annotations.push({
       type: "manual",
-      description: "S2 Mac: notification click focuses app + banner (§10.1)",
+      description:
+        "S2 live: notification click focuses app + banner on macOS / Windows / Linux (§10.2)",
     });
-    test.fail(true, "macOS notification path not automatable in Playwright browser harness");
+    test.fail(
+      true,
+      "Native notification path not automatable in Playwright browser harness (use scripts/qa/{mac,windows,linux})",
+    );
     await openRoute(page, "/dashboard", "full");
-    // Placeholder until Tauri notification plugin is wired (PR-1 trigger / PR-5 focus).
     expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();
+    // Plugin surface stub until PR-1 wires @tauri-apps/plugin-notification.
     expect(await page.locator('[data-qa="approval-notification"]').count()).toBeGreaterThan(0);
+  });
+
+  test("PATH-01 · Path handling accepts / \\ and Windows drive letters [expected-fail until PR-1]", async ({
+    page,
+  }, testInfo) => {
+    // §10.2: both separators + C:\… must round-trip through index / open / display.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "Cross-platform path normalization not exposed in UI (§10.2)",
+    });
+    test.fail(true, "Path separator / drive-letter contract not implemented");
+    await openRoute(page, "/vault", "full");
+    const samples = [
+      "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src\\main.rs",
+      "/home/sercan/dev/Agent-Lounge-OS/src/main.rs",
+      "mixed/path\\with\\both",
+    ];
+    for (const sample of samples) {
+      const hit = page.getByText(sample, { exact: false });
+      expect(await hit.count(), `path sample visible or accepted: ${sample}`).toBeGreaterThan(0);
+    }
   });
 
   test("CP-05 · Palette has no Re-index / Clear Cache", async ({ page }) => {

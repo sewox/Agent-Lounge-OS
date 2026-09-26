@@ -41,7 +41,7 @@ Süreç: bu plan, ardından testler (baseline koşusu), ardından sonuçlara gö
 | K5 | Referanslar | `last_ref` (dosya:satır) **P0**. Bridge, bu veriyi codebase-memory-mcp'den çekecek şekilde güncellenecek. |
 | K6 | Ignore listesi | `/health` sayfasında yeni bir sekme olacak. |
 | K7 | New Node | **Kaldırılacak.** "Add Project" / "Connect Worker" gibi işlevsel butonlar ileride yalnızca ilgili sayfada (`/health`, `/fleet`) olabilir. |
-| K8 | Header chrome | Docs ve API Keys kaldırılacak. **Quick Filter kaldırılacak** (işi zaten ⌘K'da). **Bell**, son 5 kritik güvenlik/quota uyarısını gösteren bir "Alert History"ye bağlanacak. |
+| K8 | Header chrome | Docs ve API Keys kaldırılacak. **Quick Filter kaldırılacak** (işi zaten Ctrl+K / ⌘K'da). **Bell**, son 5 kritik güvenlik/quota uyarısını gösteren bir "Alert History"ye bağlanacak. |
 | K9 | MOCK politikası | `MOCK_HEALTH` ve `MOCK_NODES` "tamamen yasak". Boş durumda empty state gösterilecek: Health/Map için "No data found. [Index Workspace Now]". Daemon listesinde "Checking services…" sonrası "Disconnected" (kırmızı) ve "Restart Service". |
 | K10 | Komut paleti | Yalnızca navigasyon ve arama. "Re-index" ya da "Clear Cache" eklenmeyecek; Re-index güvenlik nedeniyle sadece `/health` butonlarında kalacak. Arama sonuçları okunabilir uzunlukta olacak. |
 | K11 | Otomasyon | Hibrit yaklaşım, "ONAYLANDI". Playwright yalnızca browser modunda çalışacak. Mac'te manuel checklist artı script'li ekran görüntüsü ve `QA_Report.md`. Pencereyi ekranlar arasında taşıma işi koordinatör ajanda. |
@@ -123,7 +123,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | SH-01 | 8 nav linki | Her link doğru route'a gider; aktif link vurgulanır | A, B |
 | SH-02 | Ölü chrome | `+ New Node`, Quick Filter, Docs, API Keys DOM'da yok. Handler'ı olmayan hiçbir `button` / `[role=button]` kalmaz (e2e'de "her buton tıklanınca bir etki üretir" taraması) | A, B |
 | SH-03 | Bell | Tıklanınca son 5 kritik security/quota uyarısını listeleyen popover açılır. Uyarı yoksa "Uyarı yok" empty state gösterilir | A, M |
-| SH-04 | Header arama / ⌘K | ⌘K ve arama kutusu paleti açar, Esc kapatır | A |
+| SH-04 | Header arama / kısayol | Win/Linux **Ctrl+K**, macOS **⌘K** ve arama kutusu paleti açar; UI etiketi platforma uyarlanır; Esc kapatır (bkz. §10.2) | A |
 | SH-05 | Model select | Tauri'de `set_kernel_model` çağrılır ve seçim yeniden açılışta korunur. Browser'da açıklayıcı disabled durum gösterilir | A, M |
 | SH-06 | Index Workspace | Klasör seçilir, `index_workspace` çağrılır. Dead listesi ve Map dolar, KPI gerçek sayıyı gösterir | M, B |
 | SH-07 | Daemon satırları | "Checking services…" sonrası ya "Running" ya da "Disconnected" (kırmızı) ve "Restart Service" gösterilir. Açıklamasız `—` kalmaz | A, M |
@@ -154,7 +154,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | EX-06 | Yanlış işaretle | Kayıt Deprecated'a çekilir ve whisper/aramada öne çıkmaz | A |
 | EX-07 | Migration | Eski DB açıldığında mevcut tüm kayıtlar Approved olur, veri kaybı olmaz. Kayıt sayısı migration öncesi ve sonrası aynı | S3, B |
 | EX-08 | Liste limiti | 12 limiti kalkar: infinite scroll ya da en az 50 kayıt ve toplam sayı görünür | A |
-| EX-09 | Palette'ten odak | ⌘K'da seçilen tecrübe doğrudan detay drawer'ında açılır (kesik görünüm yok) | A, B |
+| EX-09 | Palette'ten odak | Ctrl+K / ⌘K'da seçilen tecrübe doğrudan detay drawer'ında açılır (kesik görünüm yok) | A, B |
 | EX-10 | MCP yüzeyi | MCP'de update/delete tool'u **yok**; ajan sadece create ve search yapabilir | S3 |
 | EX-11 | SemanticMap | Ağaç seçimi ve pager regresyonsuz çalışır. Uzun isimlerde tooltip var (V6) | A |
 | EX-12 | Graph UI butonu | Tauri'de Enable/Open görünür ve çalışır. Browser'da açıklayıcı bir placeholder gösterilir, header boş görünmez (V11) | M |
@@ -166,7 +166,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 |----|------|---------------|--------|
 | DS-01 | Tüm liste | 8 limiti kalkar. Virtual list ya da infinite scroll ile tümü görünür, toplam sayı gösterilir | A, B |
 | DS-02 | Detay | Satıra tıklanınca name, kind, file:line, detail, project ve `last_ref` görünür | A, B |
-| DS-03 | Editörde aç | OPEN_IN_EDITOR ilgili dosyayı doğru satırda açar (editör tercihi Sercan'dan bekleniyor, bkz. O3) | M, B |
+| DS-03 | Editörde aç | OPEN_IN_EDITOR ilgili dosyayı doğru satırda açar: macOS `open` · Windows `start` · Linux `xdg-open` (veya Tauri opener); Settings Editor override (bkz. O3 / §10.2) | M, B |
 | DS-04 | Yolu kopyala | Pano içeriği `file:line` olur | A |
 | DS-05 | Ignore | Sembol listeden anında kalkar, KPI 1 azalır, `ignored_symbols`'a yazılır. Reload ve yeniden index sonrası da gizli kalır | A, S3, B |
 | DS-06 | Ignore listesi | `/health` → "Ignore List" sekmesinde görünür ve oradan geri alınabilir | A |
@@ -215,13 +215,13 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | AP-03 | Routing approve / deny / local | `?demo=routing-banner` ile 3 aksiyonun her biri doğru payload'ı üretir | A |
 | AP-04 | Laya enable / decline / hide | `enable_decision_gate` / `decline_decision_gate` / local dismiss çalışır, reload sonrası tutarlı | A, M |
 | AP-05 | Erişilebilirlik ve yerleşim | `role="alertdialog"`, focus trap ve Esc davranışı. Banner dikey ekranda içeriği taşırmaz | A |
-| AP-06 | Yıkıcı işlem onayı | DB drop/truncate/delete/migrate-down, `rm -rf`, reset her zaman onay ister | A, S3, B |
+| AP-06 | Yıkıcı işlem onayı | DB drop/truncate/delete/migrate-down, `rm -rf`, reset **ve** Windows (`del /s`, `rd /s`, `Remove-Item -Recurse`, `format`) her zaman onay ister (bkz. §10.2) | A, S3, B |
 | AP-07 | Never Ask atlayamaz | "Never Ask" açıkken bile yıkıcı işlem onayını atlayamaz | A, S3, B |
 | AP-08 | Onay sesi | Bekleyen onayda ses; arka plan/gizli pencerede de; varsayılan 60 sn tekrar; karar sonrası durur (bkz. §10.1) | A, M, B |
-| AP-09 | Ses ayarları | Settings: aç/kapa, yerleşik sesler, özel wav/mp3/aiff, volume, aralık, Dinle; kalıcı + anında (bkz. §10.1) | A, B |
-| AP-10 | macOS bildirimi | Bekleyen onayda sistem bildirimi; tıklanınca app + banner odak (bkz. §10.1) | M, B |
+| AP-09 | Ses ayarları | Settings: aç/kapa, yerleşik sesler, özel wav/mp3/ogg/aiff, volume, aralık, Dinle; kalıcı + anında (bkz. §10.1 / §10.2) | A, B |
+| AP-10 | OS bildirimi | Bekleyen onayda Tauri notification (macOS/Windows/Linux); tıklanınca app + banner odak (bkz. §10.1 / §10.2) | M, B |
 
-### 5.9 Komut paleti (⌘K)
+### 5.9 Komut paleti (Ctrl+K / ⌘K)
 
 | ID | Test | Kabul kriteri | Etiket |
 |----|------|---------------|--------|
@@ -308,21 +308,38 @@ Not: Gemini "NATS heartbeat iyileştirmesi"ni PR-1'e koymuştu. Fleet test'leri 
 |---|-------|--------------|
 | O1 | UI'da **Türkçe / İngilizce seçimi** olacak (i18n) | X-01 "tek dil" yerine: tüm string'ler i18n sözlüğünden gelir, TR/EN geçişi Settings'te, seçim kalıcı; hardcoded string yok. PR-2'ye i18n altyapısı eklenir |
 | O2 | Kalıcı silme yok, **arşiv**. Ajan aktif tecrübelerde sonuç bulamazsa **arşive de bakar** | EX-03 aynen. Yeni S3 case: `lounge_search_experience` aktifte sonuç yoksa arşivden döner ve sonucu "archived" diye işaretler (PR-1) |
-| O3 | "Editörde aç" **sistem varsayılan editörü** ile; kullanıcı Settings'ten başka editör seçebilir | DS-03: varsayılan `open` ile açılır; Settings'e "Editor" seçimi (Varsayılan / VS Code / Cursor / özel komut) eklenir (PR-4/PR-5) |
-| O4 | Veritabanı vb. **yıkıcı işlemlerde kullanıcıya sorulmalı ve teyit alınmalı** | Yeni özellik: destructive-operation gate. DB drop/truncate/delete/migrate-down, `rm -rf`, reset gibi işlemler DecisionGate'te her zaman onay ister, "Never Ask" ile bile atlanamaz. Yeni case'ler AP-06/AP-07 (PR-1 backend + PR-5 UI) |
+| O3 | "Editörde aç" **sistem varsayılan editörü** ile; kullanıcı Settings'ten başka editör seçebilir | DS-03: macOS `open` · Windows `start` · Linux `xdg-open` (veya Tauri opener); Settings'e "Editor" seçimi (Varsayılan / VS Code / Cursor / özel komut) eklenir (PR-4/PR-5). Bkz. §10.2 |
+| O4 | Veritabanı vb. **yıkıcı işlemlerde kullanıcıya sorulmalı ve teyit alınmalı** | Yeni özellik: destructive-operation gate. POSIX (`rm -rf`, …) **ve** Windows (`del /s`, `rd /s`, `Remove-Item -Recurse`, `format`) + DB drop/truncate/delete/migrate-down/reset DecisionGate'te her zaman onay ister, "Never Ask" ile bile atlanamaz. AP-06/AP-07 (PR-1 + PR-5). Bkz. §10.2 |
 | O5 | **TTL + kullanım sayısı** ile otomatik arşiv | Şemaya `use_count`, `last_used_at`; TTL ve eşik Settings'te ayarlanabilir; arşive giden kayıt geri alınabilir. Yeni case EX-13 (PR-1/PR-3) |
 | O6 | Ajan tecrübeleri **otomatik onaylanır**; incelenmemiş olanların sayısı **rozetle** gösterilir | K2 (Draft) değişti: MCP kaydı doğrudan aktif olur ama `reviewed=false`; sidebar Knowledge Vault'ta rozet = incelenmemiş sayısı; detayı açmak ya da "incelendi" demek rozeti azaltır. EX-05 buna göre güncellenir |
 | O7 | New Node **kaldırılır** | K7 teyit |
 | O8 | Canlı test için ekranlar şu an boş | S2 baseline koşusu 18:21'de başlatıldı |
 
-### 10.1 Onay beklerken ses + macOS bildirimi (Sercan, aynı gün)
+### 10.1 Onay beklerken ses + OS bildirimi (Sercan, aynı gün)
 
-Routing, security, quota ve yıkıcı-işlem onayları beklerken kullanıcıyı kaçırmamak için ses ve sistem bildirimi.
+Routing, security, quota ve yıkıcı-işlem onayları beklerken kullanıcıyı kaçırmamak için ses ve **yerel OS bildirimi** (macOS / Windows / Linux — bkz. §10.2).
 
 | ID | Test | Kabul kriteri | Etiket | PR |
 |----|------|---------------|--------|-----|
-| AP-08 | Onay sesi | Routing / security / quota / destructive onay beklerken ses çalar. Uygulama arka planda veya pencere gizliyken de çalar. Kullanıcı karar verene kadar varsayılan **60 sn** aralıkla tekrar eder; karar sonrası durur. Otomasyon: audio playback spy (`Audio` / `HTMLAudioElement.play`) | A, M, B | Backend tetik PR-1; UI/prefs PR-5 |
-| AP-09 | Ses ayarları | Settings'te: aç/kapa, yerleşik ses seçimi, özel dosya yükleme (wav/mp3/aiff), ses seviyesi, tekrar aralığı, **Dinle** (preview). Seçim kalıcıdır ve anında uygulanır | A, B | PR-5 |
-| AP-10 | macOS bildirimi | Onay beklerken sistem bildirimi gider. Tıklanınca uygulama öne gelir ve ilgili onay banner'ı odaklanır | M, B | Tetik PR-1; odak PR-5 |
+| AP-08 | Onay sesi | Routing / security / quota / destructive onay beklerken ses çalar (webview `HTMLAudioElement` veya Rust `rodio`; paketlenen wav/mp3/ogg). Uygulama arka planda veya pencere gizliyken de çalar. Kullanıcı karar verene kadar varsayılan **60 sn** aralıkla tekrar eder; karar sonrası durur. Otomasyon: audio playback spy | A, M, B | Backend tetik PR-1; UI/prefs PR-5 |
+| AP-09 | Ses ayarları | Settings'te: aç/kapa, yerleşik ses seçimi, özel dosya yükleme (**wav/mp3/ogg/aiff**), ses seviyesi, tekrar aralığı, **Dinle** (preview). Seçim kalıcıdır ve anında uygulanır | A, B | PR-5 |
+| AP-10 | OS bildirimi | Onay beklerken **Tauri notification plugin** ile yerel bildirim (üç OS). Tıklanınca uygulama öne gelir ve ilgili onay banner'ı odaklanır | M, B | Tetik PR-1; odak PR-5 |
 
 Not: Ses, görünürlük API'sine bağlı olmamalı (background/hidden). Tekrar aralığı ve ses dosyası prefs'te saklanır.
+
+### 10.2 Cross-platform ilkesi
+
+Uygulama **macOS, Windows ve Linux** üzerinde çalışır. Platforma özel varsayımlar (yalnızca `open`, yalnızca ⌘K, yalnızca macOS bildirimi) kabul edilmez.
+
+| Alan | İlke |
+|------|------|
+| Bildirim (AP-10) | Tauri **notification** plugin; üç OS'ta yerel bildirim + tıklayınca odak |
+| Ses (AP-08/09) | Webview HTML Audio **veya** Rust `rodio`; paketlenen **wav/mp3/ogg** (+ aiff yükleme opsiyonel) |
+| Editörde aç (DS-03) | macOS `open` · Windows `start` · Linux `xdg-open` — veya Tauri **opener** plugin; Settings override |
+| Yıkıcı komut algılama (AP-06/07) | POSIX (`rm -rf`, …) **ve** Windows (`del /s`, `rd /s`, `Remove-Item -Recurse`, `format`, …) |
+| Yollar | `/` ve `\` ayırıcıları + Windows sürücü harfleri (`C:\…`) doğru işlenir |
+| Palette kısayolu | Windows/Linux **Ctrl+K**, macOS **⌘K**; UI etiketi platforma göre uyarlanır (SH-04) |
+| CI | Linux: ana Playwright runner. Ayrıca `windows-latest` ve `macos-latest` üzerinde en az `cargo test` + frontend/Tauri build — **ayrı non-blocking** workflow (`qa-cross-platform.yml`) |
+| Canlı test (S2) | Mac script'leri Mac'e özel kalır. Windows ve Linux için kısa manuel checklist şablonları `scripts/qa/windows/` ve `scripts/qa/linux/` altında |
+
+Canlı test şablonları: `scripts/qa/mac/QA_Report.md`, `scripts/qa/windows/QA_Report.md`, `scripts/qa/linux/QA_Report.md`.

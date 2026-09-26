@@ -63,6 +63,20 @@ Mark Pass / Fail. Failures are [B] layout blockers per plan §6.
 | /settings | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | |
 | /onboarding | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | |
 
+## Cross-platform checks (§10.2) — Mac live
+
+| ID | Check | Pass? | Notes |
+|----|-------|-------|-------|
+| SH-04 | Palette opens with **⌘K**; UI shows `⌘K` (not Ctrl+K) | ☐ | |
+| DS-03 | Open in editor uses `open` / opener; Settings Editor override | ☐ | |
+| AP-08 | Approval alert sound (HTML Audio or rodio; wav/mp3/ogg) while pending / background | ☐ | |
+| AP-09 | Settings sound prefs + Dinle; wav/mp3/ogg/aiff upload | ☐ | |
+| AP-10 | **macOS** notification via Tauri plugin; click focuses app + banner | ☐ | |
+| AP-06/07 | Destructive POSIX patterns require confirm (Windows patterns covered on Win checklist) | ☐ | |
+| Paths | Absolute `/Users/…` paths behave | ☐ | |
+
+Windows / Linux live templates: `scripts/qa/windows/QA_Report.md`, `scripts/qa/linux/QA_Report.md`.
+
 ## Functional smoke (manual)
 
 | ID | Check | Pass? | Notes |
@@ -70,12 +84,9 @@ Mark Pass / Fail. Failures are [B] layout blockers per plan §6.
 | SH-06 | Index Workspace folder picker → index | ☐ | |
 | GR-01 | Graph UI Enable/Open | ☐ | |
 | GR-03 | Main close kills graph child process | ☐ | |
-| DS-03 | OPEN_IN_EDITOR (system default / Settings Editor) | ☐ | |
+| DS-03 | OPEN_IN_EDITOR (`open` / Settings Editor) | ☐ | |
 | ST-04 | Graph port recreate | ☐ | |
 | EX-* | Experience CRUD (after PR-1/3) | ☐ | |
-| AP-08 | Approval alert sound while pending (also background/hidden); stops after decision | ☐ | |
-| AP-09 | Settings sound prefs (on/off, built-in, upload, volume, interval, Dinle) | ☐ | |
-| AP-10 | macOS notification while approval pending; click focuses app + banner | ☐ | |
 
 ## Deep-link / route automation note
 

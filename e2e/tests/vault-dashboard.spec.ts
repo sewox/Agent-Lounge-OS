@@ -210,22 +210,24 @@ test.describe("DS — dead symbols", () => {
     expect(await page.getByText(/last_ref/i).count()).toBeGreaterThan(0);
   });
 
-  test("DS-03 · Open in system default editor + Settings Editor preference [expected-fail until PR-4/5]", async ({
+  test("DS-03 · Open in editor (open / start / xdg-open or opener) + Settings Editor [expected-fail until PR-4/5]", async ({
     page,
   }, testInfo) => {
-    // O3: open via system default; Settings → Editor (Default / VS Code / Cursor / custom).
+    // O3 / §10.2: macOS `open`, Windows `start`, Linux `xdg-open`, or Tauri opener plugin.
     testInfo.annotations.push({
       type: "expected-fail",
-      description: "open_in_editor + Settings Editor missing (O3)",
+      description: "open_in_editor + Settings Editor missing (O3 / §10.2)",
     });
     test.fail(true, "Editor open / Settings Editor preference missing");
     await openRoute(page, "/settings", "full");
-    const editorPref = page.getByText(/Editor|Editör|VS Code|Cursor|system default|sistem varsayılan/i);
+    const editorPref = page.getByText(
+      /Editor|Editör|VS Code|Cursor|system default|sistem varsayılan|xdg-open|opener/i,
+    );
     expect(await editorPref.count(), "Settings Editor selection").toBeGreaterThan(0);
     await openRoute(page, "/vault", "full");
-    expect(await page.getByRole("button", { name: /Open in Editor|Editörde aç|OPEN_IN_EDITOR/i }).count()).toBeGreaterThan(
-      0,
-    );
+    expect(
+      await page.getByRole("button", { name: /Open in Editor|Editörde aç|OPEN_IN_EDITOR/i }).count(),
+    ).toBeGreaterThan(0);
   });
 
   test("DS-04 · Copy path [expected-fail until PR-4]", async ({ page }, testInfo) => {

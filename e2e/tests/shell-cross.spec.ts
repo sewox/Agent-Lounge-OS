@@ -48,7 +48,8 @@ test.describe("SH — global shell", () => {
     expect(await popover.count(), "alert history popover missing").toBeGreaterThan(0);
   });
 
-  test("SH-04 · ⌘K / Ctrl+K opens and Esc closes command palette", async ({ page }) => {
+  test("SH-04 · Ctrl+K / ⌘K opens and Esc closes command palette", async ({ page }) => {
+    // §10.2: Win/Linux Ctrl+K, macOS ⌘K — both meta+ctrl handlers already accept either.
     await openRoute(page, "/dashboard", "full");
     await page.keyboard.press("Control+k");
     const dialog = page.getByRole("dialog");
@@ -57,6 +58,28 @@ test.describe("SH — global shell", () => {
     await dialog.locator("input").first().focus();
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0, { timeout: 5_000 });
+  });
+
+  test("SH-04b · Palette shortcut UI label adapts (Ctrl+K on Win/Linux, ⌘K on macOS) [expected-fail until PR-2]", async ({
+    page,
+  }, testInfo) => {
+    // Header <kbd> currently hardcodes ⌘K; §10.2 requires platform-adaptive label.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "kbd hardcodes ⌘K on all platforms (§10.2)",
+    });
+    test.fail(true, "Shortcut label does not adapt to platform");
+    await openRoute(page, "/dashboard", "full");
+    const kbd = page.locator("header kbd").filter({ hasText: /K/ });
+    await expect(kbd.first()).toBeVisible();
+    const label = (await kbd.first().innerText()).trim();
+    // Playwright CI runs on Linux → expect Ctrl+K (macOS live uses ⌘K via S2 checklist).
+    const expectMac = process.platform === "darwin";
+    if (expectMac) {
+      expect(label).toMatch(/⌘\s*K|Cmd\+K|Command\+K/i);
+    } else {
+      expect(label).toMatch(/Ctrl\+K|Control\+K/i);
+    }
   });
 
   test("SH-05 · Model select calls set_kernel_model", async ({ page }) => {
