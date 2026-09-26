@@ -6,6 +6,9 @@
     "failed": "lounge.task.failed",
     "resume": "lounge.task.resume"
   },
+  "tasks": {
+    "inbox_prefix": "lounge.tasks."
+  },
   "alert": {
     "security": "lounge.alert.security",
     "quota": "lounge.alert.quota"
@@ -25,6 +28,11 @@
     "heartbeat": "lounge.agent.heartbeat",
     "status": "lounge.agent.status",
     "prompt": "lounge.agent.prompt"
+  },
+  "workers": {
+    "register": "lounge.workers.register",
+    "unregister": "lounge.workers.unregister",
+    "heartbeat": "lounge.workers.heartbeat"
   },
   "context": {
     "whisper": "lounge.context.whisper"

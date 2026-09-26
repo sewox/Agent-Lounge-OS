@@ -1,0 +1,4 @@
+nats-py>=2.7.0,<3
+jsonschema>=4.22,<5
+pytest>=8.0,<9
+pytest-asyncio>=0.24,<1

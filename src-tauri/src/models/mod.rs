@@ -22,12 +22,13 @@ pub use policy::{
     RouteIntent, RoutingPolicy, RoutingVote, KERNEL_AGENT,
 };
 pub use protocol::{
-    default_ollama_model, now_rfc3339, AnalysisDecision, CodeSnippet, ExperienceContext,
-    ExperienceHit, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
-    SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority, AGENT_PROMPT, ALERT_QUOTA,
-    ALERT_SECURITY, CONTEXT_WHISPER, DEFAULT_OLLAMA_MODEL, EXPERIENCE_REPORTED, INFRA_STATUS,
-    TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED, TASK_RESUME, TELEMETRY_DECISION,
-    TEST_COMPLETED, TEST_REQUESTED,
+    default_ollama_model, now_rfc3339, worker_tasks_subject, AnalysisDecision, CodeSnippet,
+    ExperienceContext, ExperienceHit, ExperienceOutcome, ExperienceRecord, LoungeExperience,
+    LoungeTask, SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority, AGENT_HEARTBEAT,
+    AGENT_PROMPT, AGENT_STATUS, ALERT_QUOTA, ALERT_SECURITY, CONTEXT_WHISPER, DEFAULT_OLLAMA_MODEL,
+    EXPERIENCE_REPORTED, INFRA_STATUS, TASKS_INBOX_PREFIX, TASK_ASSIGNED, TASK_COMPLETED,
+    TASK_FAILED, TASK_REQUESTED, TASK_RESUME, TELEMETRY_DECISION, TEST_COMPLETED, TEST_REQUESTED,
+    WORKERS_HEARTBEAT, WORKERS_REGISTER, WORKERS_UNREGISTER,
 };
 pub use quota::{
     NatsUiEvent, QuotaState, QuotaVerdict, ToolQuota, AMBER_THRESHOLD, LIMIT_POLICY_PERCENT,

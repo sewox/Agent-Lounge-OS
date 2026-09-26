@@ -11,7 +11,7 @@ use db::ExperienceStore;
 use infra::BusManager;
 use kernel::{
     default_model_lock, inject_knowledge_hit, DecisionGate, DecisionGatePhase, DecisionGateStatus,
-    Dispatcher, InferMeter, LoungeTelemetry, WorkflowEngine, DECISION_GATE_EVENT,
+    Dispatcher, InferMeter, LoungeTelemetry, WorkerRegistry, WorkflowEngine, DECISION_GATE_EVENT,
 };
 use lounge_protocol::LoungeMessage;
 use models::{
@@ -97,6 +97,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             let (decision_tx, mut decision_rx) = tokio::sync::mpsc::channel(64);
             let gate = DecisionGate::new(decision_tx);
             gate.attach_bias_store(store.clone());
+            let workers = WorkerRegistry::with_store(store.clone());
             let dispatcher = Dispatcher::new(
                 "nats://127.0.0.1:4222",
                 services::lounge_ollama_endpoint(),
@@ -105,7 +106,8 @@ pub fn run_with_start_route(start_route: &'static str) {
                 store.clone(),
                 workspace,
             )
-            .with_decision_cache(gate.cache());
+            .with_decision_cache(gate.cache())
+            .with_workers(workers.clone());
             dispatcher.attach_app(app.handle().clone());
             let workflow = WorkflowEngine::new("nats://127.0.0.1:4222");
             let bus = BusManager::new("nats://127.0.0.1:4222");
@@ -123,9 +125,11 @@ pub fn run_with_start_route(start_route: &'static str) {
             let watch_app = app.handle().clone();
             let retrieve_store = store.clone();
             let retrieve_bus = bus.clone();
+            let registry_listen = workers.clone();
 
             app.manage(services.clone());
             app.manage(dispatcher.clone());
+            app.manage(workers);
             app.manage(gate);
             app.manage(models);
             app.manage(store.clone());
@@ -134,8 +138,11 @@ pub fn run_with_start_route(start_route: &'static str) {
             // MCP HTTP — Cursor/Claude stdio shim buraya proxy eder (dashboard sync).
             let mcp_store = store.clone();
             let mcp_nats = bus.nats_url().to_string();
+            let mcp_workers = registry_listen.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(err) = bridge::mcp_http::serve(mcp_store, mcp_nats).await {
+                if let Err(err) =
+                    bridge::mcp_http::serve(mcp_store, mcp_nats, Some(mcp_workers)).await
+                {
                     log::warn!("MCP HTTP durdu: {err}");
                 }
             });
@@ -195,6 +202,11 @@ pub fn run_with_start_route(start_route: &'static str) {
                 tauri::async_runtime::spawn(async move {
                     if let Err(err) = workflow_listen.listen().await {
                         log::error!("workflow_engine durdu: {err}");
+                    }
+                });
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = registry_listen.listen("nats://127.0.0.1:4222").await {
+                        log::error!("worker_registry durdu: {err}");
                     }
                 });
                 if let Err(err) = dispatcher.listen().await {

@@ -87,9 +87,27 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
+  workers:
+    name: Workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install worker deps
+        run: pip install -r workers/requirements.txt
+
+      - name: Pytest
+        run: pytest workers/tests -q
+        working-directory: ${{ github.workspace }}
+
   ci:
     name: CI
-    needs: [frontend, rust]
+    needs: [frontend, rust, workers]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -97,3 +115,4 @@ jobs:
         run: |
           test "${{ needs.frontend.result }}" = "success"
           test "${{ needs.rust.result }}" = "success"
+          test "${{ needs.workers.result }}" = "success"

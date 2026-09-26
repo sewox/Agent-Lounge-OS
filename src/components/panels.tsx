@@ -939,15 +939,67 @@ export function FleetPanel() {
       : decisionGate?.phase === "ready"
         ? decisionGate.device || "DecisionGate"
         : "DecisionGate kapalı";
+  const [natsWorkers, setNatsWorkers] = useState<
+    { id: string; label: string; status: string; model: string }[]
+  >([]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const rows = await invoke<
+          {
+            id: string;
+            name: string;
+            kind: string;
+            is_active: boolean;
+            enabled: boolean;
+            payload: { available?: boolean; detail?: string };
+            endpoint?: string | null;
+          }[]
+        >("list_connected_tools");
+        if (cancelled) return;
+        setNatsWorkers(
+          rows
+            .filter((row) => row.kind === "worker")
+            .map((row) => {
+              const online =
+                row.is_active &&
+                row.enabled &&
+                (row.payload?.available ?? false);
+              return {
+                id: row.id,
+                label: row.name || row.id,
+                status: online ? "online" : "offline",
+                model: row.endpoint || row.payload?.detail || "nats worker",
+              };
+            }),
+        );
+      } catch {
+        if (!cancelled) setNatsWorkers([]);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 8_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const workers = [
-    { id: "lounge-kernel", status: report?.ollama.running ? "ready" : "down", model },
-    { id: "nats-hub", status: report?.nats.running ? "listening" : "down", model: "lounge.>" },
-    { id: "memory-bridge", status: report?.memory.running ? "ready" : "missing", model: "cbm cli" },
+    { id: "lounge-kernel", label: "lounge-kernel", status: report?.ollama.running ? "ready" : "down", model: model ?? "" },
+    { id: "nats-hub", label: "nats-hub", status: report?.nats.running ? "listening" : "down", model: "lounge.>" },
+    { id: "memory-bridge", label: "memory-bridge", status: report?.memory.running ? "ready" : "missing", model: "cbm cli" },
     {
       id: "openjev-laya",
+      label: "openjev-laya",
       status: engineLabel,
       model: gateHint,
     },
+    ...natsWorkers,
   ];
   const engineTone =
     layaEngine?.phase === "failed"
@@ -963,13 +1015,15 @@ export function FleetPanel() {
       <div className="min-h-0 flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-[11px]">
         {workers.map((row) => (
           <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2">
-            <span className="text-on-surface">{row.id}</span>
+            <span className="text-on-surface">{row.label}</span>
             <span className="min-w-0 truncate text-on-surface-variant">{row.model}</span>
             <span
               className={
                 row.id === "openjev-laya"
                   ? engineTone
-                  : row.status === "down" || row.status === "missing"
+                  : row.status === "down" ||
+                      row.status === "missing" ||
+                      row.status === "offline"
                     ? "text-error"
                     : "text-secondary"
               }

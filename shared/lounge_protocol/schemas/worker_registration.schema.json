@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/worker_registration.schema.json",
+  "title": "WorkerRegistration",
+  "description": "Dış NATS worker kaydı / heartbeat / kayıt silme gövdesi. bot_id lounge.tasks.<bot_id> konusu için kullanılır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bot_id", "name", "capabilities", "version", "pid", "action"],
+  "properties": {
+    "bot_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pid": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "action": {
+      "type": "string",
+      "enum": ["register", "heartbeat", "unregister"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

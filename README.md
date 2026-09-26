@@ -17,6 +17,7 @@
 | **Inference** | Candle + Laya (`DecisionGate`) — isteğe bağlı LMR (`127.0.0.1:18790`) |
 | **Hafıza** | `memory_bridge` → codebase-memory-mcp · experience store |
 | **MCP** | `lounge-mcp` stdio sunucusu — Cursor / Claude Desktop |
+| **Workers** | Python NATS bot şablonu (`workers/`) — onaylı görevler `lounge.tasks.<bot>` |
 | **Lisans / hedef** | Local-first · tek binary masaüstü kabuğu |
 
 ---

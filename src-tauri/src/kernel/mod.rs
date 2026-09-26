@@ -5,6 +5,7 @@ pub mod dispatcher;
 pub mod laya;
 pub mod memory_prompt;
 pub mod policy_manager;
+pub mod worker_registry;
 pub mod workflow_engine;
 
 pub use decision_engine::{
@@ -14,4 +15,8 @@ pub use decision_engine::{
 pub use dispatcher::{default_model_lock, Dispatcher};
 pub use memory_prompt::{build_knowledge_whisper, inject_knowledge_hit, whisper_publish_subjects};
 pub use policy_manager::{ALERT_SECURITY, PENDING_APPROVAL, TASK_CANCEL, TASK_RESUME};
+pub use worker_registry::{
+    route_subject_for, workers_status_json, RegisteredWorker, WorkerRegistration, WorkerRegistry,
+    HEARTBEAT_TTL,
+};
 pub use workflow_engine::WorkflowEngine;
