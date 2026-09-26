@@ -41,6 +41,12 @@ import {
   mergeWhisperedExperiences,
   pruneMsgWindow,
   recordMsgTick,
+  formatApprovalClearReason,
+  isQuotaApproval,
+  isSecurityApproval,
+  ROUTING_APPROVAL_CLEARED_EVENT,
+  ROUTING_APPROVAL_EVENT,
+  type ApprovalCleared,
   type ApprovalRequest,
   type DeadSymbol,
   type DecisionGateStatus,
@@ -94,6 +100,7 @@ type LoungeContextValue = {
   indexNotice: IndexNotice | null;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
+  approvalError: string | null;
   decisionGate: DecisionGateStatus | null;
   layaEngine: LayaEngineStatus | null;
   decisionTelemetry: LoungeTelemetry | null;
@@ -105,7 +112,7 @@ type LoungeContextValue = {
   indexWorkspace: () => Promise<void>;
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
-  resolveApproval: (vote: RoutingVote) => Promise<void>;
+  resolveApproval: (vote: RoutingVote, taskId?: string) => Promise<void>;
   /** Context Whisper satırını açıkça "faydalı" olarak işaretle (Feedback Loop). */
   markWhisperUseful: (experienceId: string, projectId?: string) => Promise<void>;
   ingestBusMessage: (message: LoungeMessage) => void;
@@ -145,6 +152,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const approvalRef = useRef<ApprovalRequest | null>(null);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
   const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
@@ -488,15 +497,65 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }, WHISPER_FOCUS_MS);
   }, []);
 
-  const resolveApproval = useCallback(async (vote: RoutingVote) => {
-    if (!approval) {
+  useEffect(() => {
+    approvalRef.current = approval;
+  }, [approval]);
+
+  const syncPendingApprovals = useCallback(async () => {
+    if (!isTauri()) {
       return;
     }
-    if (isTauri()) {
-      await invoke("resolve_routing", { taskId: approval.task_id, vote });
+    try {
+      const pending = await invoke<ApprovalRequest[]>("pending_approvals");
+      if (pending.length === 0) {
+        return;
+      }
+      // Tek banner: güvenlik/kota overlay'i öncelikli, aksi halde ilk bekleyen.
+      const preferred =
+        pending.find((row) => isSecurityApproval(row.kind)) ??
+        pending.find((row) => isQuotaApproval(row.kind)) ??
+        pending[0];
+      if (!preferred?.task_id) {
+        return;
+      }
+      setApproval((current) => {
+        if (current?.task_id === preferred.task_id) {
+          return current;
+        }
+        return preferred;
+      });
+      setApprovalError(null);
+    } catch {
+      /* komut henüz bağlı olmayabilir */
     }
-    setApproval(null);
-  }, [approval]);
+  }, []);
+
+  const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
+    const current = approvalRef.current;
+    const id = (taskId ?? current?.task_id ?? "").trim();
+    if (!id) {
+      setApprovalError("Bekleyen onay yok");
+      return;
+    }
+    setApprovalError(null);
+    try {
+      if (isTauri()) {
+        // camelCase: Tauri varsayılan rename_all=camelCase → Rust task_id
+        await invoke("resolve_routing", { taskId: id, vote });
+      }
+      setApproval((prev) => (prev?.task_id === id ? null : prev));
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      const missing =
+        text.toLowerCase().includes("bekleyen") || text.toLowerCase().includes("yok");
+      if (missing) {
+        setApproval((prev) => (prev?.task_id === id ? null : prev));
+        setApprovalError("Bekleyen onay kalmamış — banner kapatıldı");
+      } else {
+        setApprovalError(text || "Onay işlenemedi");
+      }
+    }
+  }, []);
 
   const markWhisperUseful = useCallback(async (experienceId: string, projectId?: string) => {
     if (!experienceId.trim()) {
@@ -510,6 +569,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       });
     }
   }, []);
+
+  useEffect(() => {
+    if (!approvalError) {
+      return;
+    }
+    const id = window.setTimeout(() => setApprovalError(null), 6000);
+    return () => window.clearTimeout(id);
+  }, [approvalError]);
 
   useEffect(() => {
     return () => {
@@ -619,24 +686,51 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           }),
         );
         unlisteners.push(
-          await listen<ApprovalRequest>("lounge://routing-approval", (event) => {
+          await listen<ApprovalRequest>(ROUTING_APPROVAL_EVENT, (event) => {
             if (!cancelled) {
+              setApprovalError(null);
               setApproval(event.payload);
             }
           }),
         );
+        unlisteners.push(
+          await listen<ApprovalCleared>(ROUTING_APPROVAL_CLEARED_EVENT, (event) => {
+            if (cancelled) {
+              return;
+            }
+            setApproval((current) => {
+              if (!current || current.task_id === event.payload.task_id) {
+                return null;
+              }
+              return current;
+            });
+            setApprovalError(formatApprovalClearReason(event.payload.reason));
+          }),
+        );
+        // Hipotez (a): listener kurulana kadar kaçan event veya state kaybı → backend snapshot.
+        if (!cancelled) {
+          await syncPendingApprovals();
+        }
       } catch (error) {
         console.error(error);
       }
     })();
 
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        void syncPendingApprovals();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
       unlisteners.forEach((fn) => {
         void fn();
       });
     };
-  }, [ingestBusMessage, syncInstalledModels]);
+  }, [ingestBusMessage, syncInstalledModels, syncPendingApprovals]);
 
   const decisionMsgPerMin = decisionMsgTimes.length;
 
@@ -669,6 +763,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexNotice,
       policy,
       approval,
+      approvalError,
       decisionGate,
       layaEngine,
       decisionTelemetry,
@@ -710,6 +805,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexNotice,
       policy,
       approval,
+      approvalError,
       decisionGate,
       layaEngine,
       decisionTelemetry,

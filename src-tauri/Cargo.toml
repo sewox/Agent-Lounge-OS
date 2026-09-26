@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Yerel ajan orkestrasyon katmanı — Lounge Kernel"
 edition = "2021"
 rust-version = "1.77.2"
+default-run = "agent-lounge-os"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

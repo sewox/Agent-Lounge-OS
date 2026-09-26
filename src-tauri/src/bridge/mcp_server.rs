@@ -23,7 +23,7 @@ use crate::db::ExperienceStore;
 use crate::kernel::worker_registry::{workers_status_json, WorkerRegistry};
 use crate::models::{
     host_display_name, now_rfc3339, DiscoveredTool, ExperienceOutcome, ExperienceRecord,
-    LoungeExperience, LoungeTask, TASK_REQUESTED,
+    LoungeExperience, LoungeTask, EXPERIENCE_REPORTED, TASK_REQUESTED,
 };
 use crate::services::nats_manager::default_nats_url;
 use crate::services::{lounge_ollama_endpoint, system_ollama_endpoint};
@@ -38,13 +38,39 @@ pub const DEFAULT_PROTOCOL_VERSION: &str = "2025-03-26";
 const SERVER_NAME: &str = "agent-lounge-os";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Debug, Clone)]
+pub struct ClientCtx {
+    pub name: String,
+    pub version: String,
+    pub initialized: bool,
+}
+
+impl Default for ClientCtx {
+    fn default() -> Self {
+        Self {
+            name: "mcp-client".into(),
+            version: "0".into(),
+            initialized: false,
+        }
+    }
+}
+
+impl ClientCtx {
+    pub fn label(&self) -> Value {
+        json!({
+            "name": self.name,
+            "version": self.version,
+            "initialized": self.initialized,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct McpServer {
     store: ExperienceStore,
     nats_url: String,
-    client_name: String,
-    client_version: String,
-    initialized: bool,
+    /// Embedded stdio / tek istemci yolu.
+    client: ClientCtx,
     workers: Option<WorkerRegistry>,
 }
 
@@ -85,9 +111,7 @@ impl McpServer {
         Self {
             store,
             nats_url: nats_url.into(),
-            client_name: "mcp-client".into(),
-            client_version: "0".into(),
-            initialized: false,
+            client: ClientCtx::default(),
             workers: None,
         }
     }
@@ -98,21 +122,29 @@ impl McpServer {
     }
 
     pub fn with_client(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
-        self.client_name = name.into();
-        self.client_version = version.into();
+        self.client.name = name.into();
+        self.client.version = version.into();
         self
     }
 
     pub fn client_label(&self) -> Value {
-        json!({
-            "name": self.client_name,
-            "version": self.client_version,
-            "initialized": self.initialized,
-        })
+        self.client.label()
     }
 
-    /// Tek satırlık JSON-RPC isteğini işle; yanıt satırı (veya None = notification).
+    /// Tek satırlık JSON-RPC (embedded stdio — tek istemci durumu).
     pub async fn handle_line(&mut self, line: &str) -> Result<Option<String>> {
+        let mut client = self.client.clone();
+        let out = self.handle_line_for(line, &mut client).await?;
+        self.client = client;
+        Ok(out)
+    }
+
+    /// İstek başına istemci kimliği (HTTP oturum / shim).
+    pub async fn handle_line_for(
+        &mut self,
+        line: &str,
+        client: &mut ClientCtx,
+    ) -> Result<Option<String>> {
         let line = line.trim();
         if line.is_empty() {
             return Ok(None);
@@ -130,22 +162,31 @@ impl McpServer {
 
         // Bildirimler (id yok): yanıt yok.
         if req.id.is_none() {
-            self.handle_notification(&req.method, &req.params).await?;
+            self.handle_notification(&req.method, &req.params, client)
+                .await?;
             return Ok(None);
         }
         let id = req.id.clone().unwrap_or(Value::Null);
 
-        match self.dispatch(req.method.as_str(), &req.params).await {
+        match self
+            .dispatch(req.method.as_str(), &req.params, client)
+            .await
+        {
             Ok(result) => Ok(Some(ok_response(id, result))),
             Err(err) => Ok(Some(error_response(id, -32000, &err.to_string(), None))),
         }
     }
 
-    async fn handle_notification(&mut self, method: &str, _params: &Value) -> Result<()> {
+    async fn handle_notification(
+        &mut self,
+        method: &str,
+        _params: &Value,
+        client: &mut ClientCtx,
+    ) -> Result<()> {
         match method {
             "notifications/initialized" | "initialized" => {
-                self.initialized = true;
-                if let Err(err) = self.record_connecting_client().await {
+                client.initialized = true;
+                if let Err(err) = self.record_connecting_client(client).await {
                     eprintln!("[lounge-mcp] client kaydı: {err}");
                 }
             }
@@ -155,30 +196,32 @@ impl McpServer {
         Ok(())
     }
 
-    async fn dispatch(&mut self, method: &str, params: &Value) -> Result<Value> {
+    async fn dispatch(
+        &mut self,
+        method: &str,
+        params: &Value,
+        client: &mut ClientCtx,
+    ) -> Result<Value> {
         match method {
-            "initialize" => self.initialize(params).await,
+            "initialize" => self.initialize(params, client).await,
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tool_defs() })),
-            "tools/call" => self.tools_call(params).await,
+            "tools/call" => self.tools_call(params, client).await,
             "resources/list" => Ok(json!({ "resources": [] })),
             "prompts/list" => Ok(json!({ "prompts": [] })),
             other => Err(anyhow!("method bulunamadı: {other}")),
         }
     }
 
-    async fn initialize(&mut self, params: &Value) -> Result<Value> {
-        let client = params.get("clientInfo").cloned().unwrap_or(json!({}));
-        let name = client
+    async fn initialize(&mut self, params: &Value, client: &mut ClientCtx) -> Result<Value> {
+        let info = params.get("clientInfo").cloned().unwrap_or(json!({}));
+        let name = info
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("mcp-client");
-        let version = client
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0");
-        self.client_name = name.to_string();
-        self.client_version = version.to_string();
+        let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("0");
+        client.name = name.to_string();
+        client.version = version.to_string();
 
         let requested = params
             .get("protocolVersion")
@@ -191,7 +234,7 @@ impl McpServer {
         };
 
         // Erken kayıt: bazı istemciler initialized bildirimini atlayabilir.
-        if let Err(err) = self.record_connecting_client().await {
+        if let Err(err) = self.record_connecting_client(client).await {
             eprintln!("[lounge-mcp] client kaydı (initialize): {err}");
         }
 
@@ -209,22 +252,19 @@ impl McpServer {
         }))
     }
 
-    async fn record_connecting_client(&self) -> Result<()> {
-        let host = normalize_client_host(&self.client_name);
+    async fn record_connecting_client(&self, client: &ClientCtx) -> Result<()> {
+        let host = normalize_client_host(&client.name);
         let display = host_display_name(&host);
         let mut tool = DiscoveredTool::host_app(&host, &display);
-        tool.detail = Some(format!(
-            "MCP · {}@{}",
-            self.client_name, self.client_version
-        ));
-        tool.origin_path = Some(format!("mcp://{}", self.client_name));
+        tool.detail = Some(format!("MCP · {}@{}", client.name, client.version));
+        tool.origin_path = Some(format!("mcp://{}", client.name));
         tool.endpoint = Some(default_mcp_http_url());
         tool.available = true;
         self.store.upsert_connected_tool(tool).await?;
         Ok(())
     }
 
-    async fn tools_call(&self, params: &Value) -> Result<Value> {
+    async fn tools_call(&self, params: &Value, client: &ClientCtx) -> Result<Value> {
         let name = params
             .get("name")
             .and_then(|v| v.as_str())
@@ -248,16 +288,18 @@ impl McpServer {
                 Err(err) => (json!({ "error": err.to_string() }), true),
             },
             "lounge_record_experience" | "lounge_record_decision" => {
-                match self.tool_record(&args).await {
+                match self.tool_record(&args, client).await {
                     Ok(v) => (v, false),
                     Err(err) => (json!({ "error": err.to_string() }), true),
                 }
             }
-            "lounge_ask_agent" | "lounge_dispatch_task" => match self.tool_dispatch(&args).await {
-                Ok(v) => (v, false),
-                Err(err) => (json!({ "error": err.to_string() }), true),
-            },
-            "lounge_status" => match self.tool_status(&args).await {
+            "lounge_ask_agent" | "lounge_dispatch_task" => {
+                match self.tool_dispatch(&args, client).await {
+                    Ok(v) => (v, false),
+                    Err(err) => (json!({ "error": err.to_string() }), true),
+                }
+            }
+            "lounge_status" => match self.tool_status(&args, client).await {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
             },
@@ -275,6 +317,10 @@ impl McpServer {
             .ok_or_else(|| anyhow!("query gerekli"))?
             .to_string();
         let project = self.resolve_project_arg(args).await?;
+        let restrict = args
+            .get("restrict_to_project")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -282,21 +328,54 @@ impl McpServer {
 
         let mut hits = self
             .store
-            .search_experiences(query.clone(), limit.or(Some(12)))
+            .search_experiences(query.clone(), limit.or(Some(24)))
             .await?;
-        if let Some(ref project_id) = project {
-            hits.retain(|row| row.project_id == *project_id);
+
+        if restrict {
+            if let Some(ref project_id) = project {
+                hits.retain(|row| row.project_id == *project_id);
+            }
+        } else if let Some(ref project_id) = project {
+            // Aynı proje önce; diğer projeler sonra (katı filtre değil).
+            hits.sort_by_key(|row| if row.project_id == *project_id { 0 } else { 1 });
         }
+
+        if let Some(cap) = limit.or(Some(12)) {
+            hits.truncate(cap);
+        }
+
+        let experiences: Vec<Value> = hits
+            .iter()
+            .map(|row| {
+                let same_project = project
+                    .as_ref()
+                    .map(|pid| row.project_id == *pid)
+                    .unwrap_or(false);
+                json!({
+                    "id": row.id,
+                    "type": row.msg_type,
+                    "agent": row.agent,
+                    "project_id": row.project_id,
+                    "adr_summary": row.adr_summary,
+                    "outcome": row.outcome,
+                    "related_task_id": row.related_task_id,
+                    "tags": row.tags,
+                    "created_at": row.created_at,
+                    "same_project": same_project,
+                })
+            })
+            .collect();
 
         Ok(json!({
             "query": query,
             "project_id": project,
-            "count": hits.len(),
-            "experiences": hits,
+            "restrict_to_project": restrict,
+            "count": experiences.len(),
+            "experiences": experiences,
         }))
     }
 
-    async fn tool_record(&self, args: &Value) -> Result<Value> {
+    async fn tool_record(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
         validate_schema(SchemaKind::McpRecord, args).map_err(|e| anyhow!(e))?;
         let project = self
             .resolve_project_arg(args)
@@ -323,7 +402,7 @@ impl McpServer {
         let outcome = parse_outcome(arg_str(args, "outcome").unwrap_or("success"));
         let agent = arg_str(args, "agent")
             .map(str::to_string)
-            .unwrap_or_else(|| self.client_name.clone());
+            .unwrap_or_else(|| client.name.clone());
 
         let topic = if context.is_empty() {
             decision.clone()
@@ -354,6 +433,11 @@ impl McpServer {
         let id = record.id.clone();
         self.store.insert_record_atomic(record).await?;
 
+        // Dashboard sayacı / event pump: lounge.experience.reported
+        if let Err(err) = self.publish_experience_reported(&experience).await {
+            eprintln!("[lounge-mcp] experience.reported yayınlanamadı: {err}");
+        }
+
         Ok(json!({
             "id": id,
             "project_id": project,
@@ -361,10 +445,31 @@ impl McpServer {
             "topic": topic,
             "recorded": true,
             "atomic": true,
+            "event": EXPERIENCE_REPORTED,
         }))
     }
 
-    async fn tool_dispatch(&self, args: &Value) -> Result<Value> {
+    async fn publish_experience_reported(&self, experience: &LoungeExperience) -> Result<()> {
+        if !probe_tcp_host_port(&self.nats_url) {
+            return Ok(());
+        }
+        let url = self.nats_url.clone();
+        let subject = EXPERIENCE_REPORTED.to_string();
+        let bytes = serde_json::to_vec(experience)?;
+        tokio::task::spawn_blocking(move || {
+            #[allow(deprecated)]
+            let nc = nats::connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
+            nc.publish(&subject, bytes)
+                .map_err(|e| anyhow!("NATS publish: {e}"))?;
+            nc.flush().map_err(|e| anyhow!("NATS flush: {e}"))?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("experience.reported join")??;
+        Ok(())
+    }
+
+    async fn tool_dispatch(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
         // target_agent + task zorunlu; agent/summary alias'larını şema öncesi normalize et.
         let mut normalized = args.clone();
         if let Some(obj) = normalized.as_object_mut() {
@@ -392,7 +497,7 @@ impl McpServer {
             .await?
             .unwrap_or_else(|| "agent-lounge-os".into());
 
-        let source = format!("mcp:{}", normalize_client_host(&self.client_name));
+        let source = format!("mcp:{}", normalize_client_host(&client.name));
         let mut task = LoungeTask::new(source, project.clone(), task_text.clone());
         task.target_agent = Some(target.clone());
         if let Some(repo) =
@@ -439,11 +544,12 @@ impl McpServer {
             "target_agent": target,
             "project_id": project,
             "summary": task_text,
+            "source_agent": task.source_agent,
             "note": "Görev NATS'a yazıldı. Kernel DecisionGate / security (PENDING_APPROVAL) / quota uygular; UI yoksa onay bekleyen işler kalabilir."
         }))
     }
 
-    async fn tool_status(&self, args: &Value) -> Result<Value> {
+    async fn tool_status(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
         let args = if args.is_null() {
             json!({})
         } else {
@@ -525,7 +631,7 @@ impl McpServer {
                 "version": SERVER_VERSION,
                 "http": default_mcp_http_url(),
                 "http_reachable": http_up,
-                "client": self.client_label(),
+                "client": client.label(),
             },
             "security_boundary": {
                 "filesystem_writes": false,
@@ -799,12 +905,17 @@ pub async fn run_stdio_embedded(store: ExperienceStore, nats_url: impl Into<Stri
 }
 
 /// Claude Desktop / Cursor stdio → Kernel `POST /mcp` köprüsü.
+/// Her süreç kendi `Mcp-Session-Id` değerini taşır; initialize'daki clientInfo
+/// sonraki isteklere `X-Lounge-Client-Name` ile de eklenir (kimlik karışması yok).
 pub async fn run_stdio_http_proxy() -> Result<()> {
     let base = default_mcp_http_url();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
         .context("HTTP client")?;
+    let session_id = Uuid::new_v4().to_string();
+    let mut client_name: Option<String> = None;
+    let mut client_version: Option<String> = None;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let locked = stdin.lock();
@@ -814,10 +925,31 @@ pub async fn run_stdio_http_proxy() -> Result<()> {
         if line.is_empty() {
             continue;
         }
+        // initialize gövdesinden clientInfo yakala (oturum başı).
+        if let Ok(val) = serde_json::from_str::<Value>(&line) {
+            if val.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+                if let Some(info) = val.pointer("/params/clientInfo") {
+                    if let Some(name) = info.get("name").and_then(|v| v.as_str()) {
+                        client_name = Some(name.to_string());
+                    }
+                    if let Some(ver) = info.get("version").and_then(|v| v.as_str()) {
+                        client_version = Some(ver.to_string());
+                    }
+                }
+            }
+        }
         let url = format!("{base}/mcp");
-        let response = client
+        let mut req = client
             .post(&url)
             .header("content-type", "application/json")
+            .header("mcp-session-id", &session_id);
+        if let Some(ref name) = client_name {
+            req = req.header("x-lounge-client-name", name);
+        }
+        if let Some(ref ver) = client_version {
+            req = req.header("x-lounge-client-version", ver);
+        }
+        let response = req
             .body(line.clone())
             .send()
             .await
@@ -1045,5 +1177,174 @@ mod tests {
 
         let connected = store.list_connected_tools().await.unwrap();
         assert!(connected.iter().any(|c| c.id == "app:claude_desktop"));
+    }
+
+    #[tokio::test]
+    async fn cross_project_search_ranks_but_does_not_hard_filter() {
+        use crate::models::{AstNode, IndexGraph};
+        let store = ExperienceStore::memory().expect("db");
+
+        store
+            .insert_record(ExperienceRecord {
+                id: Uuid::new_v4().to_string(),
+                project_id: "project-a".into(),
+                agent_id: "cursor".into(),
+                topic: "redis config port conflict".into(),
+                solution_summary: "6379 çakıştı, 6380 kullanıldı".into(),
+                adr_record: "6379 çakıştı, 6380 kullanıldı".into(),
+                outcome: ExperienceOutcome::Success,
+                related_task_id: None,
+                tags: vec!["redis".into()],
+                created_at: now_rfc3339(),
+                embedding: Vec::new(),
+            })
+            .await
+            .expect("seed a");
+
+        let root_b = std::env::temp_dir().join(format!("lounge-proj-b-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root_b).unwrap();
+        let file_b = root_b.join("src/app.rs");
+        std::fs::create_dir_all(file_b.parent().unwrap()).unwrap();
+        std::fs::write(&file_b, "fn main() {}").unwrap();
+        store
+            .save_project_index(IndexGraph {
+                project: "project-b".into(),
+                repo_path: root_b.to_string_lossy().into_owned(),
+                status: None,
+                node_count: 1,
+                edge_count: 0,
+                files: Some(1),
+                nodes: vec![AstNode {
+                    id: "main".into(),
+                    name: "main".into(),
+                    kind: "fn".into(),
+                    file: Some(file_b.to_string_lossy().into_owned()),
+                    line: Some(1),
+                    ref_count: 0,
+                }],
+                references: vec![],
+                dead: vec![],
+            })
+            .await
+            .expect("index b");
+
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9");
+        let args = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"redis config","active_file":"{}"}}}}}}"#,
+            file_b.display()
+        );
+        let resp = server
+            .handle_line(&args)
+            .await
+            .expect("handle")
+            .expect("resp");
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true);
+        let body = &val["result"]["structuredContent"];
+        assert_eq!(body["project_id"], "project-b");
+        let experiences = body["experiences"].as_array().unwrap();
+        assert!(
+            experiences.iter().any(|row| {
+                row["project_id"] == "project-a"
+                    && row["adr_summary"].as_str().unwrap_or("").contains("6380")
+            }),
+            "A projesindeki Redis kararı B'den active_file aramasında dönmeli: {body}"
+        );
+        assert!(experiences
+            .iter()
+            .any(|row| { row["project_id"] == "project-a" && row["same_project"] == false }));
+
+        let restricted = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"redis config","active_file":"{}","restrict_to_project":true}}}}}}"#,
+            file_b.display()
+        );
+        let resp2 = server
+            .handle_line(&restricted)
+            .await
+            .expect("handle")
+            .expect("resp");
+        let val2: Value = serde_json::from_str(&resp2).unwrap();
+        let body2 = &val2["result"]["structuredContent"];
+        let experiences2 = body2["experiences"].as_array().unwrap();
+        assert!(experiences2
+            .iter()
+            .all(|row| row["project_id"] == "project-b"));
+
+        let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    #[tokio::test]
+    async fn concurrent_client_contexts_do_not_clobber_source_agent() {
+        let store = ExperienceStore::memory().expect("db");
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9");
+
+        let mut cursor = ClientCtx {
+            name: "Cursor".into(),
+            version: "1".into(),
+            initialized: true,
+        };
+        let mut claude = ClientCtx {
+            name: "Claude Desktop".into(),
+            version: "2".into(),
+            initialized: true,
+        };
+
+        let status_cursor = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lounge_status","arguments":{}}}"#,
+                &mut cursor,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"Claude Desktop","version":"2"}}}"#,
+                &mut claude,
+            )
+            .await
+            .unwrap();
+        let status_cursor_again = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lounge_status","arguments":{}}}"#,
+                &mut cursor,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let v1: Value = serde_json::from_str(&status_cursor).unwrap();
+        let v2: Value = serde_json::from_str(&status_cursor_again).unwrap();
+        assert_eq!(
+            v1["result"]["structuredContent"]["server"]["client"]["name"],
+            "Cursor"
+        );
+        assert_eq!(
+            v2["result"]["structuredContent"]["server"]["client"]["name"],
+            "Cursor"
+        );
+        assert_eq!(cursor.name, "Cursor");
+        assert_eq!(claude.name, "Claude Desktop");
+    }
+
+    #[tokio::test]
+    async fn tool_record_marks_experience_reported_event() {
+        let store = ExperienceStore::memory().expect("db");
+        let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
+        let resp = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lounge_record_experience","arguments":{"project_id":"proj-x","context":"redis","decision":"6380"}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true);
+        assert_eq!(
+            val["result"]["structuredContent"]["event"],
+            EXPERIENCE_REPORTED
+        );
+        let latest = store.latest(5).await.unwrap();
+        assert_eq!(latest.len(), 1);
     }
 }

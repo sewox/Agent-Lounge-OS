@@ -1281,7 +1281,43 @@ export type ApprovalRequest = {
   to_agent: string;
   kind: ApprovalKind;
   reason: string;
+  expires_at?: string | null;
+  timeout_secs?: number | null;
 };
+
+export type ApprovalCleared = {
+  task_id: string;
+  reason: string;
+};
+
+export const ROUTING_APPROVAL_EVENT = "lounge://routing-approval";
+export const ROUTING_APPROVAL_CLEARED_EVENT = "lounge://routing-approval-cleared";
+
+export function approvalRemainingSecs(approval: ApprovalRequest, nowMs = Date.now()): number | null {
+  if (approval.expires_at) {
+    const ends = Date.parse(approval.expires_at);
+    if (!Number.isNaN(ends)) {
+      return Math.max(0, Math.ceil((ends - nowMs) / 1000));
+    }
+  }
+  if (typeof approval.timeout_secs === "number" && approval.timeout_secs > 0) {
+    return approval.timeout_secs;
+  }
+  return null;
+}
+
+export function formatApprovalClearReason(reason: string): string {
+  switch (reason) {
+    case "timeout":
+      return "Onay süresi doldu — banner kapatıldı";
+    case "failed":
+      return "Görev başarısız oldu — onay iptal edildi";
+    case "channel_closed":
+      return "Onay kanalı kapandı";
+    default:
+      return `Onay temizlendi (${reason})`;
+  }
+}
 
 export function isSecurityApproval(kind: ApprovalKind | string | undefined): boolean {
   return kind === "security_critical" || kind === "security_risky";

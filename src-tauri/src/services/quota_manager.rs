@@ -451,6 +451,8 @@ impl QuotaAlertPayload {
             to_agent: self.to_agent.clone(),
             kind: self.kind.clone(),
             reason: self.reason.clone(),
+            expires_at: None,
+            timeout_secs: None,
         }
     }
 }
@@ -494,6 +496,8 @@ pub fn quota_approval_request(
         to_agent: normalize_lmr_agent(local_fallback_agent),
         kind: ApprovalKind::QuotaLocalFallback,
         reason: format!("{reason} · hedef={blocked_agent} → LMR"),
+        expires_at: None,
+        timeout_secs: None,
     }
 }
 
@@ -1526,6 +1530,8 @@ mod tests {
             to_agent: "lmr".into(),
             kind: ApprovalKind::QuotaLocalFallback,
             reason: "Cursor kotası".into(),
+            expires_at: None,
+            timeout_secs: None,
         };
         let verdict = QuotaVerdict::Block {
             reason: "Cursor kotası Limit Policy'yi aştı (92% ≥ 90%)".into(),

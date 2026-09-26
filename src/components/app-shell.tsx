@@ -11,6 +11,7 @@ import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 import {
   isSecurityApproval,
   isQuotaApproval,
+  approvalRemainingSecs,
   SECURITY_OVERLAY_PROMPT,
   QUOTA_ALERT_PROMPT,
   QUOTA_CONTINUE_LOCAL_LABEL,
@@ -68,6 +69,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     amberAlert,
     amberTools,
     approval,
+    approvalError,
     decisionGate,
     layaEngine,
     decisionTelemetry,
@@ -83,6 +85,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
   const onboarding = pathname === "/onboarding";
   const [layaDismissed, setLayaDismissed] = useState(false);
+  const [approvalSecsLeft, setApprovalSecsLeft] = useState<number | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
   useEffect(() => {
     if (layaPhase.current !== decisionGate?.phase) {
@@ -90,6 +93,21 @@ export function AppShell({ children }: { children: ReactNode }) {
       setLayaDismissed(false);
     }
   }, [decisionGate?.phase]);
+  useEffect(() => {
+    if (!approval) {
+      const clearId = window.setTimeout(() => setApprovalSecsLeft(null), 0);
+      return () => window.clearTimeout(clearId);
+    }
+    const tick = () => setApprovalSecsLeft(approvalRemainingSecs(approval));
+    const bootId = window.setTimeout(tick, 0);
+    const intervalId = window.setInterval(tick, 1000);
+    return () => {
+      window.clearTimeout(bootId);
+      window.clearInterval(intervalId);
+    };
+  }, [approval]);
+  const countdownLabel =
+    approvalSecsLeft != null ? ` · ${approvalSecsLeft}s` : "";
   const layaBanner =
     decisionGate?.phase === "available" ||
     (Boolean(decisionGate) &&
@@ -105,25 +123,27 @@ export function AppShell({ children }: { children: ReactNode }) {
     (approval && !securityHold && !quotaHold) ||
     indexing ||
     indexNotice ||
-    layaBanner;
+    layaBanner ||
+    Boolean(approvalError);
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding
-    ? "fixed inset-x-0 top-12 z-50"
-    : "fixed top-12 right-0 left-[var(--sidebar-w)] z-50";
+    ? "fixed inset-x-0 top-12 z-[55] pointer-events-auto"
+    : "fixed top-12 right-0 left-[var(--sidebar-w)] z-[55] pointer-events-auto";
 
   return (
     <div className="flex h-screen overflow-hidden bg-surface text-on-surface">
       {securityHold && approval ? (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm pointer-events-auto"
           role="alertdialog"
           aria-modal="true"
           aria-labelledby="security-overlay-title"
+          data-approval-chrome="security"
         >
-          <div className="w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg">
+          <div className="relative z-[61] w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg pointer-events-auto">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-error-dim uppercase">
               Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} ·
-              PENDING_APPROVAL
+              PENDING_APPROVAL{countdownLabel}
             </p>
             <h2
               id="security-overlay-title"
@@ -134,17 +154,19 @@ export function AppShell({ children }: { children: ReactNode }) {
             <p className="mt-2 truncate font-mono text-[11px] text-outline">
               {approval.from_agent} · {approval.summary}
             </p>
-            <div className="mt-5 flex items-center justify-end gap-2">
+            <div className="relative z-[62] mt-5 flex items-center justify-end gap-2 pointer-events-auto">
               <button
                 type="button"
-                onClick={() => void resolveApproval("deny")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("deny", approval.task_id)}
                 className="rounded border border-error bg-error-container px-3 py-1.5 font-mono text-[11px] text-on-error-container"
               >
                 Reddet
               </button>
               <button
                 type="button"
-                onClick={() => void resolveApproval("approve")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("approve", approval.task_id)}
                 className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
               >
                 Onayla
@@ -156,14 +178,15 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {quotaHold && approval ? (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm pointer-events-auto"
           role="alertdialog"
           aria-modal="true"
           aria-labelledby="quota-overlay-title"
+          data-approval-chrome="quota"
         >
-          <div className="w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg">
+          <div className="relative z-[61] w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg pointer-events-auto">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-tertiary uppercase">
-              Quota Alert · QUOTA_BLOCKED
+              Quota Alert · QUOTA_BLOCKED{countdownLabel}
             </p>
             <h2
               id="quota-overlay-title"
@@ -175,10 +198,11 @@ export function AppShell({ children }: { children: ReactNode }) {
               {approval.from_agent} → {approval.to_agent} · {approval.summary}
             </p>
             <p className="mt-1 font-mono text-[10px] text-outline/80">{approval.reason}</p>
-            <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+            <div className="relative z-[62] mt-5 flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
               <button
                 type="button"
-                onClick={() => void resolveApproval("deny")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("deny", approval.task_id)}
                 className="rounded border border-outline-variant bg-surface-container px-3 py-1.5 font-mono text-[11px] text-on-surface"
               >
                 Kapat
@@ -186,7 +210,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               {approval.kind === "quota_local_fallback" ? (
                 <button
                   type="button"
-                  onClick={() => void resolveApproval("approve_local")}
+                  data-task-id={approval.task_id}
+                  onClick={() => void resolveApproval("approve_local", approval.task_id)}
                   className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
                 >
                   {QUOTA_CONTINUE_LOCAL_LABEL}
@@ -228,18 +253,24 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       ) : approval && !securityHold && !quotaHold ? (
-        <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
+        <div
+          className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
+          data-approval-chrome="routing"
+        >
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="min-w-0 truncate text-on-surface">
-              <span className="font-bold uppercase text-error-dim">Routing onayı · </span>
+              <span className="font-bold uppercase text-error-dim">
+                Routing onayı{countdownLabel} ·{" "}
+              </span>
               {approval.from_agent} → {approval.to_agent} · {approval.summary}
               <span className="ml-2 text-outline">{approval.reason}</span>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="relative z-[56] flex shrink-0 items-center gap-1.5 pointer-events-auto">
               {approval.kind === "agent_switch" ? (
                 <button
                   type="button"
-                  onClick={() => void resolveApproval("approve_local")}
+                  data-task-id={approval.task_id}
+                  onClick={() => void resolveApproval("approve_local", approval.task_id)}
                   className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
                 >
                   Yerel modele geç
@@ -247,14 +278,16 @@ export function AppShell({ children }: { children: ReactNode }) {
               ) : null}
               <button
                 type="button"
-                onClick={() => void resolveApproval("approve")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("approve", approval.task_id)}
                 className="rounded bg-primary-container px-2 py-1 font-semibold text-on-primary-container"
               >
                 Onayla
               </button>
               <button
                 type="button"
-                onClick={() => void resolveApproval("deny")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("deny", approval.task_id)}
                 className="rounded border border-error bg-error-container px-2 py-1 text-on-error-container"
               >
                 Reddet
@@ -287,6 +320,15 @@ export function AppShell({ children }: { children: ReactNode }) {
             }`}
           >
             {indexNotice.text}
+          </div>
+        </div>
+      ) : approvalError ? (
+        <div
+          className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
+          role="status"
+        >
+          <div className="truncate px-4 font-mono text-[11px] font-semibold text-error-dim">
+            {approvalError}
           </div>
         </div>
       ) : layaBanner && decisionGate ? (

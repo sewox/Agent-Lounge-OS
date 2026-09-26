@@ -243,6 +243,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_routing_policy,
             set_routing_policy,
             resolve_routing,
+            pending_approvals,
             record_whisper_feedback,
             probe_bus,
             discover_system,
@@ -444,6 +445,9 @@ async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &Mod
         .unwrap_or(0);
     if !kernel::decision_engine::ram_is_sufficient(available) {
         gate.fail_load(&kernel::decision_engine::format_ram_blocked(available));
+        if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+            dispatcher.set_gate_ready(false);
+        }
         emit_decision_gate(app, &gate.status());
         return;
     }
@@ -454,14 +458,32 @@ async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &Mod
             .clone()
             .unwrap_or_else(|| "Laya ağırlıkları yok".into());
         gate.fail_load(&detail);
+        if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+            dispatcher.set_gate_ready(false);
+        }
         emit_decision_gate(app, &gate.status());
         return;
     }
     let dir = PathBuf::from(&engine.path);
     match tokio::task::spawn_blocking(move || kernel::decision_engine::load_session(&dir)).await {
-        Ok(Ok(session)) => gate.install(session),
-        Ok(Err(err)) => gate.fail_load(&err.to_string()),
-        Err(err) => gate.fail_load(&err.to_string()),
+        Ok(Ok(session)) => {
+            gate.install(session);
+            if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+                dispatcher.set_gate_ready(true);
+            }
+        }
+        Ok(Err(err)) => {
+            gate.fail_load(&err.to_string());
+            if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+                dispatcher.set_gate_ready(false);
+            }
+        }
+        Err(err) => {
+            gate.fail_load(&err.to_string());
+            if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+                dispatcher.set_gate_ready(false);
+            }
+        }
     }
     emit_decision_gate(app, &gate.status());
 }
@@ -710,15 +732,25 @@ async fn set_routing_policy(
 }
 
 #[tauri::command]
-async fn resolve_routing(
+fn resolve_routing(
     state: tauri::State<'_, Dispatcher>,
     task_id: String,
     vote: RoutingVote,
 ) -> Result<(), String> {
+    // Senkron komut: async runtime'daki await_approval ile tokio::Mutex üzerinden
+    // kilitlenmeden oneshot'a hemen ulaşır (Grand Test hata #8).
+    log::info!("resolve_routing task_id={task_id} vote={vote:?}");
     state
         .resolve_vote(task_id, vote)
-        .await
         .map_err(|err| err.to_string())
+}
+
+/// Bekleyen onayları UI'ye verir (listener yarışı / sayfa dönüşü rehydrate — Madde 8 hipotez a).
+#[tauri::command]
+fn pending_approvals(
+    state: tauri::State<'_, Dispatcher>,
+) -> Result<Vec<crate::models::ApprovalRequest>, String> {
+    Ok(state.pending_approvals())
 }
 
 /// Context Whisper tecrübesini kullanıcı "faydalı" bulduğunda Feedback Loop kaydı.
