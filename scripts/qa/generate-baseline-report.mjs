@@ -157,7 +157,7 @@ lines.push("- **GR-*** / **SH-06** / **DS-03** / **ST-04**: require live Tauri +
 lines.push("- **AP-10**: native OS notification (Tauri plugin) on macOS/Windows/Linux — S2 live checklists (§10.2).");
 lines.push("- **AP-03** `?demo=routing-banner` only works when `isTauri()===false`; harness uses `browser` fixture.");
 lines.push("- **X-01** is TR/EN i18n (O1); **X-02** dotted-İ / `lang=tr` (live G2) — expected-fail until PR-2.");
-lines.push("- **O2–O6** / §10.1–10.2: EX-05/EX-13/EX-14/EX-15, AP-06…10, SR-02, PATH-01, SH-04b — expected-fail until PR-1…5.");
+lines.push("- **O2–O6** / §10.1–10.2: EX-05/EX-13/EX-15, AP-06…10, SR-02, SH-04b — expected-fail until PR-2…5. **EX-14 + PATH-01 flipped to pass in PR-1.**");
 lines.push("- **FL-01/02** live NATS heartbeat needs real workers (S3); S1 page-render smoke + SR-02 default filter contract.");
 lines.push("- **Empty fixture + `/onboarding`**: client error boundary under IPC mock — OB-01 uses full fixture + deselect.");
 lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** in product this PR (`data-qa` hooks only).");
