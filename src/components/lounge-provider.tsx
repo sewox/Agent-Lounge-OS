@@ -530,6 +530,33 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Browser-only demo: ?demo=routing-banner shows a long wrap-friendly approval for UI QA.
+  useEffect(() => {
+    if (isTauri() || typeof window === "undefined") {
+      return;
+    }
+    const demo = new URLSearchParams(window.location.search).get("demo");
+    if (demo !== "routing-banner") {
+      return;
+    }
+    const expires = new Date(Date.now() + 90_000).toISOString();
+    const timer = window.setTimeout(() => {
+      setApproval({
+        task_id: "demo-routing-task",
+        summary:
+          "Uzun routing özeti: Claude → LMR geçişi için kullanıcı onayı bekleniyor; mesajın tamamı kesilmeden görünmeli ve satır kırılmalı.",
+        from_agent: "claude-desktop",
+        to_agent: "lmr-local",
+        kind: "agent_switch",
+        reason:
+          "Kota eşiği aşıldı · otomatik ajan geçişi kilitli · reason metni de wrap olmalı, ellipsis yok.",
+        expires_at: expires,
+        timeout_secs: 90,
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
     const current = approvalRef.current;
     const id = (taskId ?? current?.task_id ?? "").trim();

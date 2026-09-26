@@ -217,7 +217,7 @@ export function SemanticMap({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="mb-2 flex shrink-0 items-center justify-between text-[10px] font-semibold tracking-wider text-outline uppercase">
+      <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
         <span>Indexed Files</span>
         <span className="text-on-surface-variant">
           {fileTotal > 0
@@ -225,7 +225,7 @@ export function SemanticMap({
             : `${edgeTotal} edges · ${repoCount} repos`}
         </span>
       </div>
-      <div className="min-h-0 flex-1 space-y-1 overflow-auto font-mono text-[11px]">
+      <div className="min-h-0 flex-1 space-y-1 overflow-auto font-body text-body">
         {visible.map((row) => {
           const isActive = active === selectionKey(row.selection);
           const pad =
@@ -239,7 +239,7 @@ export function SemanticMap({
               key={row.key}
               type="button"
               onClick={() => onSelect(isActive ? null : row.selection)}
-              className={`flex w-full items-center justify-between gap-2 rounded px-1.5 py-1 text-left transition-colors ${pad} ${
+              className={`flex w-full items-center justify-between gap-2 rounded px-1.5 py-1.5 text-left transition-colors ${pad} ${
                 isActive
                   ? "bg-primary-container/25 text-primary"
                   : "text-on-surface hover:bg-surface-container-high/80"
@@ -249,23 +249,23 @@ export function SemanticMap({
                 {row.kind === "project" ? (
                   <Icon name="folder" className="h-3 w-3 shrink-0" />
                 ) : row.kind === "ref" ? (
-                  <span className="shrink-0 text-[9px] text-outline">↳</span>
+                  <span className="shrink-0 text-meta text-outline">↳</span>
                 ) : (
                   <Icon name="tree" className="h-3 w-3 shrink-0 text-on-surface-variant" />
                 )}
-                <span className="truncate font-medium">{row.label}</span>
+                <span className="truncate font-medium font-mono">{row.label}</span>
               </span>
-              <span className="shrink-0 text-[10px] text-outline">{row.meta}</span>
+              <span className="shrink-0 font-mono text-meta text-outline">{row.meta}</span>
             </button>
           );
         })}
         {rows.length === 0 ? (
-          <div className="px-1 py-3 text-[10px] text-on-surface-variant">
+          <div className="px-1 py-3 text-meta text-on-surface-variant">
             Indeks yok · memory_bridge bekleniyor
           </div>
         ) : null}
       </div>
-      <div className="mt-1.5 flex shrink-0 items-center justify-between border-t border-outline-variant/40 pt-1.5 font-mono text-[10px] text-outline">
+      <div className="mt-1.5 flex shrink-0 items-center justify-between border-t border-outline-variant/40 pt-1.5 font-body text-meta text-outline">
         <span>{selected ? `seçili: ${selected.name}` : `${rows.length} düğüm / ref`}</span>
         <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
       </div>

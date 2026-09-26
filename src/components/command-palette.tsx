@@ -401,7 +401,7 @@ export function CommandPalette() {
     >
       <div className="flex w-full max-w-xl flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
         <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2.5">
-          <span className="font-mono text-[10px] tracking-wider text-primary uppercase">⌘K</span>
+          <span className="font-mono text-meta tracking-wider text-primary uppercase">⌘K</span>
           <input
             ref={inputRef}
             value={query}
@@ -416,15 +416,15 @@ export function CommandPalette() {
             aria-controls="command-palette-list"
           />
           {searching ? (
-            <span className="font-mono text-[10px] text-outline">…</span>
+            <span className="font-mono text-meta text-outline">…</span>
           ) : mockMode ? (
-            <span className="rounded border border-outline-variant px-1.5 py-0.5 font-mono text-[9px] text-on-surface-variant uppercase">
+            <span className="rounded border border-outline-variant px-1.5 py-0.5 font-mono text-meta text-on-surface-variant uppercase">
               mock
             </span>
           ) : (
-            <span className="font-mono text-[10px] text-outline">sqlite</span>
+            <span className="font-mono text-meta text-outline">sqlite</span>
           )}
-          <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-[10px] text-on-surface-variant">
+          <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant">
             esc
           </kbd>
         </div>
@@ -435,7 +435,7 @@ export function CommandPalette() {
           className="max-h-[min(22rem,50vh)] overflow-auto py-1"
         >
           {items.length === 0 ? (
-            <div className="px-3 py-6 text-center font-mono text-[11px] text-on-surface-variant">
+            <div className="px-3 py-6 text-center font-mono text-body text-on-surface-variant">
               Sonuç yok
             </div>
           ) : (
@@ -446,7 +446,7 @@ export function CommandPalette() {
               return (
                 <div key={item.id}>
                   {showGroup ? (
-                    <div className="px-3 pt-2 pb-1 font-mono text-[9px] tracking-wider text-outline uppercase">
+                    <div className="px-3 pt-2 pb-1 font-mono text-meta tracking-wider text-outline uppercase">
                       {item.group}
                     </div>
                   ) : null}
@@ -471,12 +471,12 @@ export function CommandPalette() {
                       <div className="truncate font-mono text-[12px] font-medium text-on-surface">
                         {item.title}
                       </div>
-                      <div className="truncate font-mono text-[10px] text-outline">
+                      <div className="truncate font-mono text-meta text-outline">
                         {item.subtitle}
                       </div>
                     </div>
                     {item.hint ? (
-                      <span className="shrink-0 font-mono text-[9px] text-primary uppercase">
+                      <span className="shrink-0 font-mono text-meta text-primary uppercase">
                         {item.hint}
                       </span>
                     ) : null}
@@ -488,11 +488,11 @@ export function CommandPalette() {
         </div>
 
         {status ? (
-          <div className="border-t border-outline-variant bg-surface-container-low px-3 py-2 font-mono text-[10px] text-error">
+          <div className="border-t border-outline-variant bg-surface-container-low px-3 py-2 font-mono text-meta text-error">
             {status}
           </div>
         ) : (
-          <div className="border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-[9px] text-outline">
+          <div className="border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline">
             ↑↓ seç · ↵ çalıştır · experience_store + memory_bridge
             {mockMode ? " · browser mock verisi" : ""}
           </div>

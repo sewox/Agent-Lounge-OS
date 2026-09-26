@@ -13,8 +13,10 @@
   --color-surface-container-lowest: #000000;
   --color-on-surface: #dfe5f8;
   --color-on-surface-variant: #a5abbc;
-  --color-outline: #6f7586;
-  --color-outline-variant: #424857;
+  /* ≥4.5:1 on surface-container #161a23 (~5.0:1) and surface #0c0e13 (~5.6:1) */
+  --color-outline: #8b93a5;
+  /* Borders lightened for legibility (~2.6:1 on #161a23) */
+  --color-outline-variant: #5c6474;
   --color-primary: #b4c5ff;
   --color-primary-dim: #a0b6ff;
   --color-primary-container: #003ea8;
@@ -35,9 +37,24 @@
   --font-headline: var(--font-geist-sans);
   --font-label: var(--font-public-sans);
   --font-mono: var(--font-jetbrains);
+  /* Typography scale (rem-based; scales with root font-size / UI scale) */
+  --text-meta: 0.75rem;
+  --text-meta--line-height: 1.5;
+  --text-body: 0.8125rem;
+  --text-body--line-height: 1.5;
+  --text-panel: 0.875rem;
+  --text-panel--line-height: 1.4;
+  --text-kpi: 1.75rem;
+  --text-kpi--line-height: 1.15;
+  --tracking-label: 0.05em;
   --radius-DEFAULT: 0.125rem;
   --radius-lg: 0.25rem;
   --radius-xl: 0.5rem;
+}
+
+html {
+  /* 16px × --ui-scale; UiScaleProvider overrides via inline style */
+  font-size: calc(16px * var(--ui-scale, 1));
 }
 
 html,
@@ -51,10 +68,19 @@ body {
 :root {
   --sidebar-w: 13.75rem;
   --header-h: 3rem;
+  --ui-scale: 1;
+  --banner-h: 0px;
+  --panel-min-h: 18.75rem; /* 300px at 100% */
+  --panel-max-h: 31.25rem; /* 500px at 100% */
+  --stream-min-h: 30rem; /* ~480px — fits ≥10 event rows with chips */
 }
 
 .tnum {
   font-variant-numeric: tabular-nums;
+}
+
+.tracking-label {
+  letter-spacing: var(--tracking-label);
 }
 
 @keyframes kpi-tick {
@@ -71,8 +97,8 @@ body {
 }
 
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -80,7 +106,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #424857;
+  background: #5c6474;
   border-radius: 2px;
 }
 

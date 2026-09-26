@@ -3,6 +3,7 @@ import { Geist, IBM_Plex_Sans, JetBrains_Mono, Public_Sans } from "next/font/goo
 import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import { LoungeProvider } from "@/components/lounge-provider";
+import { UiScaleProvider } from "@/components/ui-scale-provider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -44,10 +45,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${ibmPlex.variable} ${jetbrains.variable} ${publicSans.variable} h-full antialiased`}
     >
       <body className="h-full overflow-hidden bg-surface text-on-surface font-body">
-        <LoungeProvider>
-          <AppShell>{children}</AppShell>
-          <CommandPalette />
-        </LoungeProvider>
+        <UiScaleProvider>
+          <LoungeProvider>
+            <AppShell>{children}</AppShell>
+            <CommandPalette />
+          </LoungeProvider>
+        </UiScaleProvider>
       </body>
     </html>
   );
