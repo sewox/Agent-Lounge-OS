@@ -128,6 +128,28 @@ test.describe("EX — vault experiences", () => {
     expect(await page.getByRole("button", { name: /Pin/i }).count()).toBeGreaterThan(0);
   });
 
+  test("EX-05 · Agent experiences auto-approved with reviewed=false + unreviewed badge [expected-fail until PR-1/3]", async ({
+    page,
+  }, testInfo) => {
+    // O6: MCP records are active (not Draft) but reviewed=false; sidebar badge = unreviewed count.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "reviewed flag + vault badge missing (O6)",
+    });
+    test.fail(true, "reviewed=false + unreviewed badge not implemented");
+    await openRoute(page, "/vault", "full");
+    const badge = page.locator(
+      '[data-qa="sidebar"] [data-qa="unreviewed-count"], [data-qa="sidebar"] a[href="/vault"] [data-qa="badge"]',
+    );
+    expect(await badge.count(), "unreviewed badge on Knowledge Vault nav").toBeGreaterThan(0);
+    const badgeText = ((await badge.first().textContent()) || "").trim();
+    expect(Number(badgeText)).toBeGreaterThan(0);
+    // Opening detail / mark reviewed should decrease badge (UI not present yet).
+    expect(await page.getByRole("button", { name: /İncelendi|Reviewed|Mark reviewed/i }).count()).toBeGreaterThan(
+      0,
+    );
+  });
+
   test("EX-08 · List limit > 12 [expected-fail until PR-3]", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "expected-fail", description: "list_experiences limit 12" });
     await openRoute(page, "/vault", "full");
@@ -138,6 +160,19 @@ test.describe("EX — vault experiences", () => {
       test.fail(true, `Only ${count} experiences visible (limit 12)`);
     }
     expect(count).toBeGreaterThan(12);
+  });
+
+  test("EX-13 · TTL + use_count auto-archive [expected-fail until PR-1/3]", async ({ page }, testInfo) => {
+    // O5: use_count / last_used_at + Settings TTL/threshold; archived rows recoverable.
+    testInfo.annotations.push({ type: "expected-fail", description: "TTL auto-archive missing (O5)" });
+    test.fail(true, "use_count/TTL auto-archive not implemented");
+    await openRoute(page, "/settings", "full");
+    const ttl = page.getByText(/TTL|use_count|auto-?archive|otomatik arşiv/i);
+    expect(await ttl.count(), "Settings TTL / use_count controls").toBeGreaterThan(0);
+    await openRoute(page, "/vault", "full");
+    expect(await page.getByRole("button", { name: /Show Archived|Arşivlenenleri göster/i }).count()).toBeGreaterThan(
+      0,
+    );
   });
 
   test("EX-LAYOUT · Semantic Map + Experiences fill ≥85% [expected-fail — Sercan half-panel]", async ({
@@ -173,6 +208,24 @@ test.describe("DS — dead symbols", () => {
     test.fail(true, "No detail panel");
     await openRoute(page, "/vault", "full");
     expect(await page.getByText(/last_ref/i).count()).toBeGreaterThan(0);
+  });
+
+  test("DS-03 · Open in system default editor + Settings Editor preference [expected-fail until PR-4/5]", async ({
+    page,
+  }, testInfo) => {
+    // O3: open via system default; Settings → Editor (Default / VS Code / Cursor / custom).
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "open_in_editor + Settings Editor missing (O3)",
+    });
+    test.fail(true, "Editor open / Settings Editor preference missing");
+    await openRoute(page, "/settings", "full");
+    const editorPref = page.getByText(/Editor|Editör|VS Code|Cursor|system default|sistem varsayılan/i);
+    expect(await editorPref.count(), "Settings Editor selection").toBeGreaterThan(0);
+    await openRoute(page, "/vault", "full");
+    expect(await page.getByRole("button", { name: /Open in Editor|Editörde aç|OPEN_IN_EDITOR/i }).count()).toBeGreaterThan(
+      0,
+    );
   });
 
   test("DS-04 · Copy path [expected-fail until PR-4]", async ({ page }, testInfo) => {

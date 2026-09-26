@@ -133,6 +133,36 @@ test.describe("AP / CP / misc", () => {
     expect(await approve.count()).toBeGreaterThan(0);
   });
 
+  test("AP-06 · Destructive ops always require confirmation UI [expected-fail until PR-1/5]", async ({
+    page,
+  }, testInfo) => {
+    // O4: DB drop/truncate/delete/migrate-down, rm -rf, reset → always confirm, even Never Ask.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "destructive-operation gate missing (O4)",
+    });
+    test.fail(true, "Destructive confirmation gate not implemented");
+    await openRoute(page, "/settings", "full");
+    const gate = page.getByText(
+      /destructive|yıkıcı|always confirm|her zaman onay|Never Ask.*cannot|atlanamaz/i,
+    );
+    expect(await gate.count(), "destructive gate copy / control").toBeGreaterThan(0);
+  });
+
+  test("AP-07 · Never Ask cannot skip destructive confirmation [expected-fail until PR-1/5]", async ({
+    page,
+  }, testInfo) => {
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "Never Ask still bypasses destructive ops (O4)",
+    });
+    test.fail(true, "Destructive ops not forced through DecisionGate");
+    await openRoute(page, "/dashboard?demo=destructive-reset", "browser");
+    const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog"));
+    expect(await dialog.count(), "destructive confirm alertdialog").toBeGreaterThan(0);
+    await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil/i);
+  });
+
   test("CP-05 · Palette has no Re-index / Clear Cache", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     await page.keyboard.press("Control+k");

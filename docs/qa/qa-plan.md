@@ -296,3 +296,16 @@ Not: Gemini "NATS heartbeat iyileştirmesi"ni PR-1'e koymuştu. Fleet test'leri 
 1. Sercan O1–O8'i yanıtlar.
 2. PR-0 (QA harness + baseline koşusu) açılır; ürün kodu değişmez.
 3. Baseline sonuçları (beklenen fail listesi) ile bu plan güncellenir ve geliştirme planına (PR-1…PR-5) dönüştürülür.
+
+## 10. Sercan'ın kararları (26 Eylül 2026, 18:21)
+
+| # | Karar | Plana etkisi |
+|---|-------|--------------|
+| O1 | UI'da **Türkçe / İngilizce seçimi** olacak (i18n) | X-01 "tek dil" yerine: tüm string'ler i18n sözlüğünden gelir, TR/EN geçişi Settings'te, seçim kalıcı; hardcoded string yok. PR-2'ye i18n altyapısı eklenir |
+| O2 | Kalıcı silme yok, **arşiv**. Ajan aktif tecrübelerde sonuç bulamazsa **arşive de bakar** | EX-03 aynen. Yeni S3 case: `lounge_search_experience` aktifte sonuç yoksa arşivden döner ve sonucu "archived" diye işaretler (PR-1) |
+| O3 | "Editörde aç" **sistem varsayılan editörü** ile; kullanıcı Settings'ten başka editör seçebilir | DS-03: varsayılan `open` ile açılır; Settings'e "Editor" seçimi (Varsayılan / VS Code / Cursor / özel komut) eklenir (PR-4/PR-5) |
+| O4 | Veritabanı vb. **yıkıcı işlemlerde kullanıcıya sorulmalı ve teyit alınmalı** | Yeni özellik: destructive-operation gate. DB drop/truncate/delete/migrate-down, `rm -rf`, reset gibi işlemler DecisionGate'te her zaman onay ister, "Never Ask" ile bile atlanamaz. Yeni case'ler AP-06/AP-07 (PR-1 backend + PR-5 UI) |
+| O5 | **TTL + kullanım sayısı** ile otomatik arşiv | Şemaya `use_count`, `last_used_at`; TTL ve eşik Settings'te ayarlanabilir; arşive giden kayıt geri alınabilir. Yeni case EX-13 (PR-1/PR-3) |
+| O6 | Ajan tecrübeleri **otomatik onaylanır**; incelenmemiş olanların sayısı **rozetle** gösterilir | K2 (Draft) değişti: MCP kaydı doğrudan aktif olur ama `reviewed=false`; sidebar Knowledge Vault'ta rozet = incelenmemiş sayısı; detayı açmak ya da "incelendi" demek rozeti azaltır. EX-05 buna göre güncellenir |
+| O7 | New Node **kaldırılır** | K7 teyit |
+| O8 | Canlı test için ekranlar şu an boş | S2 baseline koşusu 18:21'de başlatıldı |

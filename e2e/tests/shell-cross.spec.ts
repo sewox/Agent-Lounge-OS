@@ -184,17 +184,28 @@ test.describe("X — cross-cutting", () => {
     expect(result.dead, `scanned=${result.scanned} dead=${result.dead.join("|")}`).toEqual([]);
   });
 
-  test("X-01 · language consistency (no mixed TR/EN hard requirement yet — O1 open)", async ({ page }) => {
+  test("X-01 · TR/EN i18n dictionary + Settings switch + persistence [expected-fail until PR-2]", async ({
+    page,
+  }, testInfo) => {
+    // O1: strings from i18n dict; Settings language switch; choice persists; no hardcoded mix.
+    testInfo.annotations.push({ type: "expected-fail", description: "i18n not implemented (O1 → PR-2)" });
+    test.fail(true, "TR/EN i18n infrastructure missing");
+    await openRoute(page, "/settings", "full");
+    const langSwitch = page
+      .getByRole("radiogroup", { name: /Language|Dil/i })
+      .or(page.locator('[data-qa="locale-switch"]'))
+      .or(page.getByRole("button", { name: /English|Türkçe|Turkish/i }));
+    expect(await langSwitch.count(), "Settings language switch missing").toBeGreaterThan(0);
+    await langSwitch.getByText(/English|EN/i).first().click();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(400);
+    const stored = await page.evaluate(() => localStorage.getItem("lounge.locale") || localStorage.getItem("locale"));
+    expect(stored).toMatch(/en/i);
+    // Hardcoded mixed TR/EN chrome must be gone once dictionary is wired.
     await openRoute(page, "/dashboard", "full");
     const text = await page.locator("main").innerText();
-    const hasTr = /kapalı|sayfa|düğüm|TEMİZ|Kaydet|Tüm kotalar/i.test(text);
-    const hasEn = /Dashboard|Experience|Index Workspace|Dead Symbols/i.test(text);
-    // Document mixed language as baseline finding; do not hard-fail until O1.
-    test.info().annotations.push({
-      type: "note",
-      description: `mixed TR=${hasTr} EN=${hasEn} (O1 undecided)`,
-    });
-    expect(hasTr || hasEn).toBeTruthy();
+    const mixed = /kapalı|düğüm|TEMİZ|Kaydet/i.test(text) && /Dashboard|Index Workspace/i.test(text);
+    expect(mixed, "hardcoded mixed TR/EN strings").toBe(false);
   });
 
   test("X-02 · min font gate delegated to S4 grep (smoke DOM check)", async ({ page }) => {
