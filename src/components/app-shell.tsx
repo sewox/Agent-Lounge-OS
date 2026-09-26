@@ -156,14 +156,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div className="mt-5 flex items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => void resolveApproval("deny")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("deny", approval.task_id)}
                 className="rounded border border-error bg-error-container px-3 py-1.5 font-mono text-[11px] text-on-error-container"
               >
                 Reddet
               </button>
               <button
                 type="button"
-                onClick={() => void resolveApproval("approve")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("approve", approval.task_id)}
                 className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
               >
                 Onayla
@@ -197,7 +199,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => void resolveApproval("deny")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("deny", approval.task_id)}
                 className="rounded border border-outline-variant bg-surface-container px-3 py-1.5 font-mono text-[11px] text-on-surface"
               >
                 Kapat
@@ -205,7 +208,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               {approval.kind === "quota_local_fallback" ? (
                 <button
                   type="button"
-                  onClick={() => void resolveApproval("approve_local")}
+                  data-task-id={approval.task_id}
+                  onClick={() => void resolveApproval("approve_local", approval.task_id)}
                   className="rounded bg-primary-container px-3 py-1.5 font-mono text-[11px] font-semibold text-on-primary-container"
                 >
                   {QUOTA_CONTINUE_LOCAL_LABEL}
@@ -260,7 +264,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               {approval.kind === "agent_switch" ? (
                 <button
                   type="button"
-                  onClick={() => void resolveApproval("approve_local")}
+                  data-task-id={approval.task_id}
+                  onClick={() => void resolveApproval("approve_local", approval.task_id)}
                   className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 text-on-surface hover:bg-surface-bright"
                 >
                   Yerel modele geç
@@ -268,14 +273,16 @@ export function AppShell({ children }: { children: ReactNode }) {
               ) : null}
               <button
                 type="button"
-                onClick={() => void resolveApproval("approve")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("approve", approval.task_id)}
                 className="rounded bg-primary-container px-2 py-1 font-semibold text-on-primary-container"
               >
                 Onayla
               </button>
               <button
                 type="button"
-                onClick={() => void resolveApproval("deny")}
+                data-task-id={approval.task_id}
+                onClick={() => void resolveApproval("deny", approval.task_id)}
                 className="rounded border border-error bg-error-container px-2 py-1 text-on-error-container"
               >
                 Reddet

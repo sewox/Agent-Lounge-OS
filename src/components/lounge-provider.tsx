@@ -110,7 +110,7 @@ type LoungeContextValue = {
   indexWorkspace: () => Promise<void>;
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
-  resolveApproval: (vote: RoutingVote) => Promise<void>;
+  resolveApproval: (vote: RoutingVote, taskId?: string) => Promise<void>;
   /** Context Whisper satırını açıkça "faydalı" olarak işaretle (Feedback Loop). */
   markWhisperUseful: (experienceId: string, projectId?: string) => Promise<void>;
   ingestBusMessage: (message: LoungeMessage) => void;
@@ -151,6 +151,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const approvalRef = useRef<ApprovalRequest | null>(null);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
   const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
@@ -494,27 +495,36 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }, WHISPER_FOCUS_MS);
   }, []);
 
-  const resolveApproval = useCallback(async (vote: RoutingVote) => {
-    if (!approval) {
+  useEffect(() => {
+    approvalRef.current = approval;
+  }, [approval]);
+
+  const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
+    const current = approvalRef.current;
+    const id = (taskId ?? current?.task_id ?? "").trim();
+    if (!id) {
+      setApprovalError("Bekleyen onay yok");
       return;
     }
     setApprovalError(null);
     try {
       if (isTauri()) {
-        await invoke("resolve_routing", { taskId: approval.task_id, vote });
+        // camelCase: Tauri varsayılan rename_all=camelCase → Rust task_id
+        await invoke("resolve_routing", { taskId: id, vote });
       }
-      setApproval(null);
+      setApproval((prev) => (prev?.task_id === id ? null : prev));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      const missing = text.toLowerCase().includes("bekleyen") || text.toLowerCase().includes("yok");
+      const missing =
+        text.toLowerCase().includes("bekleyen") || text.toLowerCase().includes("yok");
       if (missing) {
-        setApproval(null);
+        setApproval((prev) => (prev?.task_id === id ? null : prev));
         setApprovalError("Bekleyen onay kalmamış — banner kapatıldı");
       } else {
         setApprovalError(text || "Onay işlenemedi");
       }
     }
-  }, [approval]);
+  }, []);
 
   const markWhisperUseful = useCallback(async (experienceId: string, projectId?: string) => {
     if (!experienceId.trim()) {

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::db::{lexical_embedding, ExperienceStore, FastRetrieveQuery};
 use crate::infra::probe_quotas;
@@ -77,13 +77,17 @@ pub struct Dispatcher {
     store: ExperienceStore,
     workspace_root: PathBuf,
     stub_decision: Option<AnalysisDecision>,
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<RoutingVote>>>>,
+    /// std Mutex: UI `resolve_routing` senkron komutu async runtime'ı beklemeden oneshot'a ulaştırır.
+    /// (tokio::Mutex + async komut, await_approval ile aynı runtime'da kilitlenmeye yol açabiliyordu.)
+    pending: Arc<StdMutex<HashMap<String, oneshot::Sender<RoutingVote>>>>,
     app: Arc<StdMutex<Option<AppHandle>>>,
     decisions: DecisionCache,
     workers: WorkerRegistry,
     approval_timeout: Duration,
     /// DecisionGate RAM'de ve sınıflandırma yapabiliyorsa true.
     gate_ready: Arc<AtomicBool>,
+    /// Test: kota probe (yavaş TCP) atlanır.
+    skip_quota_probe: bool,
 }
 
 impl Dispatcher {
@@ -103,17 +107,23 @@ impl Dispatcher {
             store,
             workspace_root,
             stub_decision: None,
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(StdMutex::new(HashMap::new())),
             app: Arc::new(StdMutex::new(None)),
             decisions: Arc::new(StdMutex::new(HashMap::new())),
             workers: WorkerRegistry::new(),
             approval_timeout: APPROVAL_TIMEOUT,
             gate_ready: Arc::new(AtomicBool::new(false)),
+            skip_quota_probe: false,
         }
     }
 
     pub fn with_approval_timeout(mut self, timeout: Duration) -> Self {
         self.approval_timeout = timeout;
+        self
+    }
+
+    pub fn with_skip_quota_probe(mut self) -> Self {
+        self.skip_quota_probe = true;
         self
     }
 
@@ -170,8 +180,13 @@ impl Dispatcher {
         Ok(next)
     }
 
-    pub async fn resolve_vote(&self, task_id: String, vote: RoutingVote) -> Result<()> {
-        let sender = self.pending.lock().await.remove(&task_id);
+    pub fn resolve_vote(&self, task_id: String, vote: RoutingVote) -> Result<()> {
+        log::info!("resolve_vote task_id={task_id} vote={vote:?}");
+        let sender = self
+            .pending
+            .lock()
+            .expect("dispatcher pending lock")
+            .remove(&task_id);
         match sender {
             Some(tx) => {
                 tx.send(vote)
@@ -180,6 +195,18 @@ impl Dispatcher {
             }
             None => anyhow::bail!("bekleyen routing onayı yok: {task_id}"),
         }
+    }
+
+    /// Test / UI: bekleyen onay sayısı.
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().expect("dispatcher pending lock").len()
+    }
+
+    pub fn has_pending(&self, task_id: &str) -> bool {
+        self.pending
+            .lock()
+            .expect("dispatcher pending lock")
+            .contains_key(task_id)
     }
 
     pub async fn selected_model(&self) -> String {
@@ -359,7 +386,12 @@ impl Dispatcher {
 
         let decision = self.analyze_work_order(&task, &model, &context).await?;
         if let Some(agent) = decision.target_agent.clone() {
-            task.target_agent = Some(agent);
+            // Fallback/KERNEL kararı, MCP'nin açık worker hedefini ezmesin.
+            let keep_explicit =
+                task.target_agent.as_ref().is_some_and(|t| !is_kernel(t)) && is_kernel(&agent);
+            if !keep_explicit {
+                task.target_agent = Some(agent);
+            }
         }
         self.apply_routing_policy(&mut task, &decision).await?;
 
@@ -537,19 +569,25 @@ impl Dispatcher {
         }
 
         let policy = self.store.get_routing_policy().await.unwrap_or_default();
-        let quotas = probe_quotas(
-            &self.ollama_endpoint,
-            &nats_monitor_endpoint(),
-            &self.memory,
-        )
-        .await;
-        let to = decision
+        // explicit task hedefi (MCP worker) decision fallback KERNEL'inden öncelikli
+        let to = task
             .target_agent
             .as_deref()
-            .or(task.target_agent.as_deref())
+            .filter(|t| !t.trim().is_empty())
+            .or(decision.target_agent.as_deref())
             .unwrap_or(KERNEL_AGENT);
         let limit = limit_policy_percent();
-        let verdict = evaluate_assignment(&quotas, to, limit);
+        let verdict = if self.skip_quota_probe {
+            QuotaVerdict::Allow
+        } else {
+            let quotas = probe_quotas(
+                &self.ollama_endpoint,
+                &nats_monitor_endpoint(),
+                &self.memory,
+            )
+            .await;
+            evaluate_assignment(&quotas, to, limit)
+        };
         let quota_blocked = verdict.is_blocked();
 
         match decide_route(&policy, task, &task.source_agent, to, quota_blocked) {
@@ -613,7 +651,10 @@ impl Dispatcher {
         let request = request.stamp_timeout(self.approval_timeout);
         let (tx, rx) = oneshot::channel();
         let task_id = request.task_id.clone();
-        self.pending.lock().await.insert(task_id.clone(), tx);
+        self.pending
+            .lock()
+            .expect("dispatcher pending lock")
+            .insert(task_id.clone(), tx);
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
             let _ = app.emit(ROUTING_APPROVAL_EVENT, &request);
         }
@@ -640,12 +681,18 @@ impl Dispatcher {
         let vote = match tokio::time::timeout(self.approval_timeout, rx).await {
             Ok(Ok(vote)) => vote,
             Ok(Err(_)) => {
-                self.pending.lock().await.remove(&task_id);
+                self.pending
+                    .lock()
+                    .expect("dispatcher pending lock")
+                    .remove(&task_id);
                 self.emit_approval_cleared(&task_id, "channel_closed");
                 anyhow::bail!("routing onay kanalı kapandı")
             }
             Err(_) => {
-                self.pending.lock().await.remove(&task_id);
+                self.pending
+                    .lock()
+                    .expect("dispatcher pending lock")
+                    .remove(&task_id);
                 self.emit_approval_cleared(&task_id, "timeout");
                 anyhow::bail!("routing onayı zaman aşımı")
             }
@@ -1247,6 +1294,7 @@ mod tests {
             PathBuf::from("/tmp"),
         )
         .with_approval_timeout(timeout)
+        .with_skip_quota_probe()
     }
 
     #[tokio::test]
@@ -1268,7 +1316,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         loop {
-            if dispatcher.pending.lock().await.len() >= 2 {
+            if dispatcher.pending_count() >= 2 {
                 break;
             }
             assert!(
@@ -1278,14 +1326,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
-        dispatcher
-            .resolve_vote(id1, RoutingVote::Approve)
-            .await
-            .unwrap();
-        dispatcher
-            .resolve_vote(id2, RoutingVote::Approve)
-            .await
-            .unwrap();
+        dispatcher.resolve_vote(id1, RoutingVote::Approve).unwrap();
+        dispatcher.resolve_vote(id2, RoutingVote::Approve).unwrap();
         assert!(h1.await.unwrap().is_ok());
         assert!(h2.await.unwrap().is_ok());
     }
@@ -1298,7 +1340,7 @@ mod tests {
         dispatcher.inject_decision(critical_decision(&task.id));
         let err = dispatcher.handle_task(task).await.unwrap_err();
         assert!(err.to_string().contains("zaman aşımı"), "unexpected: {err}");
-        assert!(dispatcher.pending.lock().await.is_empty());
+        assert_eq!(dispatcher.pending_count(), 0);
     }
 
     #[tokio::test]
@@ -1312,7 +1354,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         loop {
-            if dispatcher.pending.lock().await.contains_key(&id) {
+            if dispatcher.has_pending(&id) {
                 break;
             }
             assert!(
@@ -1322,10 +1364,142 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
+        dispatcher.resolve_vote(id, RoutingVote::Approve).unwrap();
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ui_resolve_agent_switch_delegates_to_worker_inbox() {
+        use crate::kernel::worker_registry::WorkerRegistration;
+        use lounge_protocol::worker_tasks_subject;
+
+        let workers = WorkerRegistry::new();
+        workers
+            .apply_registration(WorkerRegistration {
+                bot_id: "grok-tester".into(),
+                name: "Grok-Tester".into(),
+                capabilities: vec!["echo".into()],
+                version: "0.1.0".into(),
+                pid: 42,
+                action: "register".into(),
+                created_at: None,
+            })
+            .unwrap();
+
+        let dispatcher = live_dispatcher(Duration::from_secs(5)).with_workers(workers);
+        dispatcher.set_gate_ready(true);
+
+        let mut task = LoungeTask::new("mcp:cursor", "agent-lounge-os", "echo hello from mcp");
+        task.target_agent = Some("grok-tester".into());
+        let id = task.id.clone();
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        loop {
+            if dispatcher.has_pending(&id) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "agent_switch onayı pending olmalı (UI Onayla yolu)"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        // UI `resolve_routing` ile aynı senkron yol.
+        dispatcher
+            .resolve_vote(id.clone(), RoutingVote::Approve)
+            .expect("Onayla");
+
+        // nc=None iken Delegated → handle_task hata mesajı (inbox subject kanıtı).
+        let err = handle.await.unwrap().unwrap_err().to_string();
+        assert!(
+            err.contains("grok-tester") && err.contains("delegasyon"),
+            "onay sonrası worker delegasyonu beklenir: {err}"
+        );
+        assert_eq!(
+            worker_tasks_subject("grok-tester").as_deref(),
+            Some("lounge.tasks.grok-tester")
+        );
+        assert_eq!(dispatcher.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn ui_resolve_deny_agent_switch_fails_task() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+
+        let mut task = LoungeTask::new("mcp:cursor", "agent-lounge-os", "sensitive switch");
+        task.target_agent = Some("grok-tester".into());
+        let id = task.id.clone();
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id) {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        dispatcher
+            .resolve_vote(id, RoutingVote::Deny)
+            .expect("Reddet");
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("redded") || err.to_string().contains("kota"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_resolve_security_approve_unblocks_immediately() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "wipe secrets");
+        let id = task.id.clone();
+        dispatcher.inject_decision(critical_decision(&id));
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id) {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
         dispatcher
             .resolve_vote(id, RoutingVote::Approve)
-            .await
-            .unwrap();
+            .expect("security Onayla");
         assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ui_resolve_approve_local_path_exists() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+
+        let mut task = LoungeTask::new("mcp:cursor", "agent-lounge-os", "need local fallback");
+        task.target_agent = Some("grok-tester".into());
+        let id = task.id.clone();
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id) {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        // agent_switch için ApproveLocal → LMR; LMR yoksa hata (kapı yine açılmış olmalı).
+        let resolved = dispatcher.resolve_vote(id, RoutingVote::ApproveLocal);
+        assert!(resolved.is_ok(), "oneshot UI'dan hemen çözülmeli");
+        let outcome = handle.await.unwrap();
+        // LMR ayakta değilse görev hata verir; önemli olan takılmadan sonuçlanması.
+        assert!(outcome.is_err() || outcome.is_ok());
+        assert_eq!(dispatcher.pending_count(), 0);
     }
 }

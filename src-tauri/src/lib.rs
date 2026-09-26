@@ -731,14 +731,16 @@ async fn set_routing_policy(
 }
 
 #[tauri::command]
-async fn resolve_routing(
+fn resolve_routing(
     state: tauri::State<'_, Dispatcher>,
     task_id: String,
     vote: RoutingVote,
 ) -> Result<(), String> {
+    // Senkron komut: async runtime'daki await_approval ile tokio::Mutex üzerinden
+    // kilitlenmeden oneshot'a hemen ulaşır (Grand Test hata #8).
+    log::info!("resolve_routing task_id={task_id} vote={vote:?}");
     state
         .resolve_vote(task_id, vote)
-        .await
         .map_err(|err| err.to_string())
 }
 
