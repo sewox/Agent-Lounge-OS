@@ -21,7 +21,10 @@ fn experience_crud_commands_scaffolding() {
         "pin_experience",
         "mark_experience_reviewed",
     ];
-    assert!(!planned.is_empty(), "PR-1 must implement experience commands");
+    assert!(
+        !planned.is_empty(),
+        "PR-1 must implement experience commands"
+    );
 }
 
 /// O6: MCP create writes active experience with reviewed=false (not Draft).
