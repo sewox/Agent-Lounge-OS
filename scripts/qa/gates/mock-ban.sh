@@ -22,18 +22,19 @@ if [[ -n "$HITS" ]]; then
   COUNT="$(printf '%s\n' "$HITS" | grep -c . || true)"
 fi
 
-echo "== mock-ban gate (warning mode, tool=$qa_search_tool) =="
+echo "== mock-ban gate (strict=${QA_MOCK_BAN_STRICT:-0}, tool=$qa_search_tool) =="
 if [[ -z "$HITS" ]]; then
   echo "OK: no MOCK_HEALTH / MOCK_NODES references in src/"
   exit 0
 fi
 
-echo "WARN: found $COUNT line(s) with MOCK_HEALTH / MOCK_NODES in live code paths:"
+echo "FAIL: found $COUNT line(s) with MOCK_HEALTH / MOCK_NODES in live code paths:"
 echo "$HITS"
 echo
-echo "Policy (K9/K12): Tauri/live mode must not fall back to MOCK_*. PR-2 converts this gate to fail."
+echo "Policy (K9/K12): Tauri/live mode must not fall back to MOCK_*."
 
 if [[ "${QA_MOCK_BAN_STRICT:-0}" == "1" ]]; then
   exit 1
 fi
+echo "(warning mode — set QA_MOCK_BAN_STRICT=1 to fail)"
 exit 0

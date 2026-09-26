@@ -849,7 +849,7 @@ export function pathBasename(path: string | null | undefined): string | null {
   return path.split(/[/\\]/).filter(Boolean).at(-1) ?? null;
 }
 
-/** Canlı dead sayımı: deadSymbols → map.dead → lastIndex.dead; indeks yoksa mock toplamı. */
+/** Canlı dead sayımı: deadSymbols → map.dead → lastIndex.dead; indeks yoksa 0 (KPI "—" UI'da). */
 export function resolveDeadSymbolCount(input: {
   deadSymbols: DeadSymbol[];
   semanticMap: SemanticMap;
@@ -861,11 +861,94 @@ export function resolveDeadSymbolCount(input: {
     input.projects.length > 0 ||
     input.semanticMap.projects.length > 0;
   if (!hasIndex) {
-    return MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
+    return 0;
   }
   const fromList = input.deadSymbols.length;
   const fromMap = input.semanticMap.projects.reduce((sum, row) => sum + row.dead.length, 0);
   return fromList || fromMap || input.lastIndex?.dead || 0;
+}
+
+/** True when there is no indexed project / map data to show. */
+export function hasIndexedWorkspace(input: {
+  lastIndex: IndexSnapshot | null;
+  projects: ProjectSummary[];
+  semanticMap: SemanticMap;
+}): boolean {
+  return (
+    Boolean(input.lastIndex) ||
+    input.projects.length > 0 ||
+    input.semanticMap.projects.length > 0
+  );
+}
+
+/**
+ * K9 UI: Claude Desktop + Claude CLI are one subscription account.
+ * Compatible with PR-1 merged backend rows (single card) and legacy dual rows.
+ */
+export function mergeClaudeQuotaRows(quotas: ToolQuota[]): ToolQuota[] {
+  const claudeRows = quotas.filter((row) => {
+    const host = (row.host_id || "").toLowerCase();
+    const tool = row.tool.toLowerCase();
+    const id = row.id.toLowerCase();
+    return (
+      host === "claude_desktop" ||
+      host === "claude_cli" ||
+      host === "claude" ||
+      id.includes("claude_desktop") ||
+      id.includes("claude_cli") ||
+      ((tool.includes("claude desktop") || tool.includes("claude cli")) &&
+        (row.access_mode || row.kind) === "subscription")
+    );
+  });
+  if (claudeRows.length <= 1) {
+    // Already merged (or single) — normalize label when it's a Claude subscription.
+    return quotas.map((row) => {
+      const host = (row.host_id || "").toLowerCase();
+      const tool = row.tool.toLowerCase();
+      if (
+        (host === "claude" || host.startsWith("claude") || tool.includes("claude")) &&
+        (row.access_mode || row.kind) === "subscription" &&
+        !tool.includes("plugin")
+      ) {
+        return { ...row, tool: "Claude", host_id: row.host_id || "claude" };
+      }
+      return row;
+    });
+  }
+
+  const subscription = claudeRows.filter(
+    (row) => (row.access_mode || row.kind) === "subscription",
+  );
+  const primary = subscription[0] ?? claudeRows[0]!;
+  const mergedIds = new Set(claudeRows.map((row) => row.id));
+  const worstTone = claudeRows.reduce<ToolQuota["tone"]>((tone, row) => {
+    if (row.tone === "amber" || row.exhausted) return "amber";
+    if (row.tone === "warn" && tone !== "amber") return "warn";
+    return tone;
+  }, primary.tone);
+  const maxPercent = claudeRows.reduce<number | null>((max, row) => {
+    if (row.percent == null) return max;
+    if (max == null) return row.percent;
+    return Math.max(max, row.percent);
+  }, null);
+
+  const merged: ToolQuota = {
+    ...primary,
+    id: primary.id.startsWith("app:claude") ? "app:claude" : primary.id,
+    tool: "Claude",
+    host_id: "claude",
+    tone: worstTone,
+    percent: maxPercent,
+    label: worstTone === "amber" || worstTone === "warn" ? primary.label : primary.label,
+    exhausted: claudeRows.some((row) => row.exhausted),
+  };
+
+  return [merged, ...quotas.filter((row) => !mergedIds.has(row.id))];
+}
+
+/** Heartbeat / bus ping subjects — hidden by default in Event Stream (SR-02). */
+export function isHeartbeatSubject(subject: string): boolean {
+  return /heartbeat/i.test(subject);
 }
 
 /**
@@ -1039,22 +1122,6 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
   };
 }
 
-export type SemanticNode = {
-  name: string;
-  edges: number;
-  modules: string[];
-};
-
-export type ProjectHealthRow = {
-  name: string;
-  indexed: number;
-  files: string;
-  nodes: string;
-  stale: number;
-  dead: number;
-  sync: string;
-};
-
 export const MOCK_EVENTS: NatsEvent[] = [
   { id: "d1", time: "14:09:29.004", subject: "lounge.telemetry.decision", from: "decision_engine", to: "bus", payload: "0.2kb", state: "ok", decisionLabel: "Decision: 4ms" },
   { id: "1", time: "14:09:18.441", subject: "lounge.task.requested", from: "kernel", to: "dispatcher", payload: "1.2kb", state: "queued" },
@@ -1070,12 +1137,6 @@ export const MOCK_EVENTS: NatsEvent[] = [
   { id: "10", time: "14:09:26.115", subject: "lounge.experience.commit", from: "vault", to: "storage", payload: "4.2kb", state: "ok" },
   { id: "11", time: "14:09:27.802", subject: "lounge.task.assigned", from: "dispatcher", to: "ollama", payload: "0.5kb", state: "ok" },
   { id: "12", time: "14:09:28.190", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "2.9kb", state: "ok" },
-];
-
-export const MOCK_NODES: SemanticNode[] = [
-  { name: "Agent-Lounge-OS", edges: 42, modules: ["kernel.rs", "dispatcher.rs", "memory_bridge.rs"] },
-  { name: "EchoMind", edges: 118, modules: ["ollama_client.py", "embeddings.py"] },
-  { name: "codebase-memory-mcp", edges: 87, modules: ["indexer.ts", "server.ts"] },
 ];
 
 export const MOCK_EXPERIENCES: LoungeExperience[] = [
@@ -1119,12 +1180,6 @@ export const MOCK_EXPERIENCES: LoungeExperience[] = [
     tags: [],
     created_at: "2026-09-18T08:18:00.000Z",
   },
-];
-
-export const MOCK_HEALTH: ProjectHealthRow[] = [
-  { name: "Agent-Lounge-OS", indexed: 100, files: "9,421", nodes: "4,810", stale: 0, dead: 12, sync: "14:09" },
-  { name: "EchoMind", indexed: 86, files: "4,120", nodes: "1,940", stale: 3, dead: 41, sync: "13:44" },
-  { name: "codebase-memory-mcp", indexed: 100, files: "4,861", nodes: "2,210", stale: 0, dead: 74, sync: "09:12" },
 ];
 
 export type QuotaKind = AccessMode;

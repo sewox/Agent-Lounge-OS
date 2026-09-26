@@ -14,10 +14,10 @@ import { useLounge } from "@/components/lounge-provider";
 import {
   isTauri,
   MOCK_EXPERIENCES,
-  MOCK_NODES,
   type AstNode,
   type LoungeExperience,
 } from "@/lib/lounge";
+import { paletteShortcutLabel } from "@/lib/platform";
 
 type PaletteItem = {
   id: string;
@@ -56,37 +56,6 @@ function mockSearchExperiences(query: string, limit = 8): LoungeExperience[] {
   return rows.slice(0, limit);
 }
 
-function mockSearchNodes(query: string, limit = 6): AstNode[] {
-  const q = query.trim().toLowerCase();
-  const rows = MOCK_NODES.flatMap((node) => {
-    const projectHit = !q || node.name.toLowerCase().includes(q);
-    const modules = node.modules.filter((mod) => !q || mod.toLowerCase().includes(q));
-    const out: AstNode[] = [];
-    if (projectHit) {
-      out.push({
-        id: `mock:${node.name}`,
-        name: node.name,
-        kind: "project",
-        file: null,
-        line: null,
-        ref_count: node.edges,
-      });
-    }
-    for (const mod of modules) {
-      out.push({
-        id: `mock:${node.name}:${mod}`,
-        name: mod,
-        kind: "file",
-        file: mod,
-        line: null,
-        ref_count: 1,
-      });
-    }
-    return out;
-  });
-  return rows.slice(0, limit);
-}
-
 export function CommandPalette() {
   const router = useRouter();
   const {
@@ -111,6 +80,7 @@ export function CommandPalette() {
   const [wasOpen, setWasOpen] = useState(openCommandPalette);
   const inputRef = useRef<HTMLInputElement>(null);
   const mockMode = !isTauri();
+  const shortcutLabel = paletteShortcutLabel();
 
   if (wasOpen !== openCommandPalette) {
     setWasOpen(openCommandPalette);
@@ -158,7 +128,8 @@ export function CommandPalette() {
       void (async () => {
         if (!isTauri()) {
           setRemoteExperiences(mockSearchExperiences(q));
-          setRemoteNodes(mockSearchNodes(q));
+          // Browser harness: search in-provider projects/experiences only — no fake map nodes.
+          setRemoteNodes([]);
           setSearching(false);
           return;
         }
@@ -206,14 +177,8 @@ export function CommandPalette() {
         detail: `${row.nodes} nodes · ${row.edges} edges`,
       }));
     }
-    if (mockMode) {
-      return MOCK_NODES.map((row) => ({
-        name: row.name,
-        detail: `${row.edges} edges · mock`,
-      }));
-    }
     return [];
-  }, [mockMode, projects, semanticMap.projects]);
+  }, [projects, semanticMap.projects]);
 
   const experienceRows = useMemo(() => {
     if (remoteExperiences.length > 0) {
@@ -307,19 +272,13 @@ export function CommandPalette() {
       });
     }
 
-    const nodeSource =
-      remoteNodes.length > 0
-        ? remoteNodes
-        : mockMode
-          ? mockSearchNodes(q)
-          : [];
-    for (const node of nodeSource) {
+    for (const node of remoteNodes) {
       if (!matchesQuery(`${node.name} ${node.file ?? ""} ${node.kind}`, q)) {
         continue;
       }
       out.push({
         id: `node:${node.id || node.name}`,
-        group: mockMode ? "Semantic nodes · mock" : "Semantic nodes",
+        group: "Semantic nodes",
         title: node.name,
         subtitle: [node.kind, node.file].filter(Boolean).join(" · ") || "memory_bridge",
         run: () => {
@@ -401,7 +360,7 @@ export function CommandPalette() {
     >
       <div className="flex w-full max-w-xl flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container shadow-[0_24px_80px_rgba(0,0,0,0.55)]">
         <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2.5">
-          <span className="font-mono text-meta tracking-wider text-primary uppercase">⌘K</span>
+          <span className="font-mono text-meta tracking-wider text-primary">{shortcutLabel}</span>
           <input
             ref={inputRef}
             value={query}

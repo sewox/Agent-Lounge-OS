@@ -21,9 +21,11 @@ import {
   formatLayaDecision,
   formatLayaEngineFleetStatus,
   formatLatencyMs,
+  hasIndexedWorkspace,
+  isHeartbeatSubject,
   isTauri,
   layaEnginePercentage,
-  MOCK_HEALTH,
+  mergeClaudeQuotaRows,
   natsEventTone,
   natsToneLabel,
   PAGE_SIZE,
@@ -39,6 +41,7 @@ import {
   type SemanticMapSelection,
 } from "@/lib/lounge";
 import { selectCriticalQuotas, type UiScale } from "@/lib/ui-prefs";
+import { IndexEmptyState } from "@/components/index-empty-state";
 
 type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
@@ -78,13 +81,15 @@ export function OverviewKpis() {
     lastIndex,
     projects,
   });
+  const indexed = hasIndexedWorkspace({ lastIndex, projects, semanticMap });
+  const deadDisplay = indexed ? String(deadCount) : "—";
   const latencyMs = decisionTelemetry?.latency_ms;
   const latencyLive = latencyMs != null && Number.isFinite(latencyMs);
   const latencyValue = latencyLive ? formatLatencyMs(latencyMs) : "—";
   const layaHint = formatLayaDecision(latencyLive ? latencyMs : null);
   const msgLive = decisionMsgPerMin > 0;
   return (
-    <section data-qa="panel" className="shrink-0 space-y-2.5">
+    <section data-qa="panel" className="w-full shrink-0 space-y-2.5">
       {indexing ? (
         <div
           role="status"
@@ -150,13 +155,19 @@ export function OverviewKpis() {
       />
       <Kpi
         label="DEAD SYMBOLS"
-        value={String(deadCount)}
-        hint="unreachable fn/struct refs"
-        valueClass="text-error"
+        value={deadDisplay}
+        hint={indexed ? "unreachable fn/struct refs" : "Index Workspace"}
+        valueClass={indexed && deadCount > 0 ? "text-error" : undefined}
         badge={
-          <span className="flex items-center gap-0.5 rounded border border-error-container bg-error-container/40 px-1.5 py-0.5 font-body text-meta font-medium text-error-dim">
-            ▼ amber alert
-          </span>
+          indexed && deadCount > 0 ? (
+            <span className="flex items-center gap-0.5 rounded border border-error-container bg-error-container/40 px-1.5 py-0.5 font-body text-meta font-medium text-error-dim">
+              ▼ amber alert
+            </span>
+          ) : (
+            <span className="font-mono text-meta text-on-surface-variant">
+              {indexed ? "clean" : "no index"}
+            </span>
+          )
         }
         />
       </div>
@@ -188,14 +199,22 @@ function DecisionStreamChip({
 export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
   const { events, query, probeBus, decisionTelemetry } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
+  const [showHeartbeats, setShowHeartbeats] = useState(false);
   const [probing, setProbing] = useState(false);
   const [page, setPage] = useState(0);
   const latencyMs = decisionTelemetry?.latency_ms;
   const decisionLive = latencyMs != null && Number.isFinite(latencyMs);
   const liveDecisionLabel = formatDecisionStreamLabel(decisionLive ? latencyMs : null);
+  const heartbeatCount = useMemo(
+    () => events.filter((event) => isHeartbeatSubject(event.subject)).length,
+    [events],
+  );
 
   const filtered = useMemo(() => {
     return events.filter((event) => {
+      if (!showHeartbeats && isHeartbeatSubject(event.subject)) {
+        return false;
+      }
       if (subjectFilter === "task" && !event.subject.includes(".task.")) {
         return false;
       }
@@ -208,15 +227,15 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
       const haystack = `${event.subject} ${event.from} ${event.to} ${eventDecisionLabel(event, decisionLive ? latencyMs : null)} ${event.chainLabel ?? ""}`.toLowerCase();
       return haystack.includes(query.trim().toLowerCase());
     });
-  }, [decisionLive, events, latencyMs, query, subjectFilter]);
+  }, [decisionLive, events, latencyMs, query, showHeartbeats, subjectFilter]);
 
   const pages = pageCount(filtered.length);
   const safePage = Math.min(page, pages - 1);
   const visible = pageSlice(filtered, safePage);
 
   const shell = embedded
-    ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-container"
-    : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
+    ? "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface-container"
+    : "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
 
   return (
     <section data-qa={embedded ? undefined : "panel"} className={shell}>
@@ -239,6 +258,22 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
             <span className="font-body text-meta text-on-surface-variant">buffered:</span>
             <span className="tnum font-mono text-meta font-semibold text-primary">{events.length}</span>
           </div>
+          <button
+            type="button"
+            aria-pressed={showHeartbeats}
+            onClick={() => {
+              setShowHeartbeats((value) => !value);
+              setPage(0);
+            }}
+            className={`min-h-8 rounded border px-2.5 py-1 font-body text-meta ${
+              showHeartbeats
+                ? "border-primary bg-primary-container/25 text-primary"
+                : "border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface"
+            }`}
+            title="Heartbeats are debug-level and hidden by default (SR-02)"
+          >
+            {showHeartbeats ? `Heartbeats on (${heartbeatCount})` : `Heartbeats hidden (${heartbeatCount})`}
+          </button>
           <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-body text-meta">
             {(["all", "task", "exp"] as const).map((key) => (
               <button
@@ -271,6 +306,10 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
             {visible.map((event, index) => {
               const selected = safePage === 0 && index === 0 && subjectFilter === "all" && !query;
               const tone = natsEventTone(event.subject, event.state);
+              const decision = eventDecisionLabel(event, decisionLive ? latencyMs : null);
+              const showDecision =
+                Boolean(event.decisionLabel) ||
+                (decisionLive && !isHeartbeatSubject(event.subject) && !decision.includes("—"));
               return (
                 <tr
                   key={event.id}
@@ -286,10 +325,12 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
                   <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <span className="min-w-0 break-words font-mono">{event.subject}</span>
-                      <DecisionStreamChip
-                        label={eventDecisionLabel(event, decisionLive ? latencyMs : null)}
-                        live={selected || Boolean(event.decisionLabel)}
-                      />
+                      {showDecision ? (
+                        <DecisionStreamChip
+                          label={decision}
+                          live={selected || Boolean(event.decisionLabel)}
+                        />
+                      ) : null}
                       {event.chainLabel ? (
                         <span
                           className="max-w-full break-words rounded border border-secondary/40 bg-secondary-container/30 px-1.5 py-0.5 font-mono text-meta font-medium text-secondary underline decoration-secondary/50 underline-offset-2"
@@ -316,7 +357,9 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={5} className="px-2.5 py-6 text-center font-body text-body text-outline">
-                  Bus dinleniyor — henüz lounge.&gt; mesajı yok
+                  {heartbeatCount > 0 && !showHeartbeats
+                    ? "Heartbeats hidden — toggle to show debug traffic"
+                    : "Bus dinleniyor — henüz lounge.> mesajı yok"}
                 </td>
               </tr>
             ) : null}
@@ -402,8 +445,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     semanticMap.projects.length || projects.length || (experiences.length ? 1 : 0);
 
   const shell = embedded
-    ? "flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-surface-container"
-    : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
+    ? "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface-container"
+    : "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
 
   return (
     <section data-qa={embedded ? undefined : "panel"} className={shell}>
@@ -429,10 +472,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <GraphUiButton />
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+      <div className="flex min-h-0 w-full flex-1 flex-col lg:flex-row">
         <div
           data-qa="panel"
-          className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0"
+          className="flex min-h-0 w-full flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 lg:border-r lg:border-b-0"
         >
           <SemanticMap
             semanticMap={semanticMap}
@@ -453,7 +496,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         </div>
         <div
           data-qa="panel"
-          className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body"
+          className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2.5 font-body"
         >
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
@@ -616,7 +659,7 @@ export function HealthPanel() {
         ).length,
         sync: "live",
       }))
-    : MOCK_HEALTH;
+    : [];
 
   const [page, setPage] = useState(0);
   const pages = pageCount(rows.length);
@@ -626,7 +669,7 @@ export function HealthPanel() {
   return (
     <section
       data-qa="panel"
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
@@ -640,47 +683,51 @@ export function HealthPanel() {
         <span className="font-mono text-meta text-outline">memory_bridge</span>
       </div>
       <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-body">
-        {visible.map((repo) => (
-          <div key={repo.name} className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-high/40 p-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-on-surface">{repo.name}</span>
-                <span
-                  className={`rounded px-1 font-mono text-meta ${
-                    repo.indexed === 100
-                      ? "bg-secondary-container/50 text-secondary-dim"
-                      : "bg-surface-container-highest text-tertiary"
-                  }`}
-                >
-                  {repo.indexed}% indexed
+        {rows.length === 0 ? (
+          <IndexEmptyState detail="No data found." className="min-h-full" />
+        ) : (
+          visible.map((repo) => (
+            <div key={repo.name} className="w-full space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-high/40 p-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-on-surface">{repo.name}</span>
+                  <span
+                    className={`rounded px-1 font-mono text-meta ${
+                      repo.indexed === 100
+                        ? "bg-secondary-container/50 text-secondary-dim"
+                        : "bg-surface-container-highest text-tertiary"
+                    }`}
+                  >
+                    {repo.indexed}% indexed
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-meta text-on-surface-variant">
+                  <span>sync: {repo.sync}</span>
+                  <span className="font-medium text-error">{repo.dead} dead symbols</span>
+                </div>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest">
+                <div
+                  className={`h-1.5 rounded-full ${repo.indexed === 100 ? "bg-primary" : "bg-tertiary"}`}
+                  style={{ width: `${repo.indexed}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between pt-0.5 text-meta text-outline">
+                <span>
+                  {repo.files} files · {repo.nodes} AST nodes
+                </span>
+                <span>
+                  stale files:{" "}
+                  {repo.stale > 0 ? (
+                    <strong className="rounded bg-error-container/30 px-1 text-error">{repo.stale}</strong>
+                  ) : (
+                    <strong className="text-on-surface">0</strong>
+                  )}
                 </span>
               </div>
-              <div className="flex items-center gap-2 text-meta text-on-surface-variant">
-                <span>sync: {repo.sync}</span>
-                <span className="font-medium text-error">{repo.dead} dead symbols</span>
-              </div>
             </div>
-            <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest">
-              <div
-                className={`h-1.5 rounded-full ${repo.indexed === 100 ? "bg-primary" : "bg-tertiary"}`}
-                style={{ width: `${repo.indexed}%` }}
-              />
-            </div>
-            <div className="flex items-center justify-between pt-0.5 text-meta text-outline">
-              <span>
-                {repo.files} files · {repo.nodes} AST nodes
-              </span>
-              <span>
-                stale files:{" "}
-                {repo.stale > 0 ? (
-                  <strong className="rounded bg-error-container/30 px-1 text-error">{repo.stale}</strong>
-                ) : (
-                  <strong className="text-on-surface">0</strong>
-                )}
-              </span>
-            </div>
-          </div>
-        ))}
+          ))
+        )}
       </div>
       <div className="flex shrink-0 items-center justify-end border-t border-outline-variant bg-surface-container-low px-3 py-1.5">
         <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
@@ -691,7 +738,8 @@ export function HealthPanel() {
 
 export function QuotaMiniCard() {
   const { quotas, amberAlert, amberTools } = useLounge();
-  const critical = useMemo(() => selectCriticalQuotas(quotas, 3), [quotas]);
+  const displayQuotas = useMemo(() => mergeClaudeQuotaRows(quotas), [quotas]);
+  const critical = useMemo(() => selectCriticalQuotas(displayQuotas, 3), [displayQuotas]);
 
   return (
     <div className="space-y-2 p-2.5" data-testid="quota-mini-card">
@@ -758,8 +806,9 @@ export function QuotaMiniCard() {
 export function QuotaPanel() {
   const { quotas, query, amberAlert, amberTools } = useLounge();
   const [quotaFilter, setQuotaFilter] = useState<QuotaFilter>("all");
+  const displayQuotas = useMemo(() => mergeClaudeQuotaRows(quotas), [quotas]);
   const rows = useMemo(() => {
-    return quotas.filter((row) => {
+    return displayQuotas.filter((row) => {
       const mode = row.access_mode || row.kind;
       if (quotaFilter !== "all" && mode !== quotaFilter) {
         return false;
@@ -771,17 +820,17 @@ export function QuotaPanel() {
         .toLowerCase()
         .includes(query.trim().toLowerCase());
     });
-  }, [quotas, query, quotaFilter]);
+  }, [displayQuotas, query, quotaFilter]);
   const [page, setPage] = useState(0);
   const pages = pageCount(rows.length);
   const safePage = Math.min(page, pages - 1);
   const visible = pageSlice(rows, safePage);
-  const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
+  const nearCap = displayQuotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
 
   return (
     <section
       data-qa="panel"
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex min-w-0 items-center gap-2.5">
@@ -799,7 +848,7 @@ export function QuotaPanel() {
             </span>
           )}
         </div>
-        <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-meta">
+        <div className="flex flex-wrap items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-meta">
           {(["all", "subscription", "api", "plugin", "local"] as const).map((key) => {
             return (
               <button
@@ -817,16 +866,16 @@ export function QuotaPanel() {
           })}
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full min-w-[720px] border-collapse text-left font-mono text-body">
+      <div className="min-h-0 w-full flex-1 overflow-x-auto overflow-y-auto">
+        <table className="w-full min-w-0 border-collapse text-left font-mono text-body table-fixed md:table-auto">
           <thead>
             <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-meta text-outline uppercase">
               <th className="px-2.5 py-1.5 font-medium">Tool</th>
               <th className="w-14 px-2 py-1.5 font-medium">Kind</th>
-              <th className="w-16 px-2 py-1.5 font-medium">Unit</th>
-              <th className="min-w-[160px] px-2 py-1.5 font-medium">Used / Limit</th>
-              <th className="min-w-[160px] px-2 py-1.5 text-right font-medium">Remaining / Hosts</th>
-              <th className="min-w-[140px] px-2 py-1.5 text-right font-medium">Reset</th>
+              <th className="hidden w-16 px-2 py-1.5 font-medium sm:table-cell">Unit</th>
+              <th className="px-2 py-1.5 font-medium">Used / Limit</th>
+              <th className="hidden px-2 py-1.5 text-right font-medium md:table-cell">Remaining / Hosts</th>
+              <th className="hidden px-2 py-1.5 text-right font-medium lg:table-cell">Reset</th>
               <th className="w-16 px-2.5 py-1.5 text-right font-medium">State</th>
             </tr>
           </thead>
@@ -834,32 +883,34 @@ export function QuotaPanel() {
             {visible.map((row) => (
               <tr
                 key={row.id}
+                data-quota-id={row.id}
+                data-quota-tool={row.tool}
                 className={
                   row.tone === "warn" || row.tone === "amber"
                     ? "bg-error-container/10 hover:bg-error-container/20"
                     : "hover:bg-surface-container-high/50"
                 }
               >
-                <td className="px-2.5 py-1.5 font-medium text-on-surface">{row.tool}</td>
+                <td className="truncate px-2.5 py-1.5 font-medium text-on-surface">{row.tool}</td>
                 <td className={`px-2 py-1.5 font-medium ${quotaKindClass(row.access_mode || row.kind)}`}>
                   {(row.access_mode || row.kind).toUpperCase()}
                 </td>
-                <td className={`px-2 py-1.5 ${row.unit === "local" ? "text-secondary" : "text-on-surface-variant"}`}>
+                <td className={`hidden px-2 py-1.5 sm:table-cell ${row.unit === "local" ? "text-secondary" : "text-on-surface-variant"}`}>
                   {row.unit}
                 </td>
                 <td className="px-2 py-1.5">
                   {row.percent === null ? (
                     <span className={row.tone === "live" ? "font-medium text-primary" : "tnum text-outline"}>{row.used}</span>
                   ) : (
-                    <div className="flex items-center gap-2">
-                      <span className="tnum text-on-surface">{row.used}</span>
-                      <div className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-surface-container-highest">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="tnum shrink-0 text-on-surface">{row.used}</span>
+                      <div className="h-1 w-12 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-container-highest sm:w-16 sm:flex-none">
                         <div className={`h-1 rounded-full ${quotaBarClass(row.percent)}`} style={{ width: `${row.percent}%` }} />
                       </div>
                     </div>
                   )}
                 </td>
-                <td className="px-2 py-1.5 text-right">
+                <td className="hidden px-2 py-1.5 text-right md:table-cell">
                   {row.access_mode === "plugin" || row.kind === "plugin" ? (
                     <div className="flex flex-wrap justify-end gap-1">
                       {row.remaining.split(" · ").filter(Boolean).map((host) => (
@@ -875,7 +926,7 @@ export function QuotaPanel() {
                     <span className="tnum text-on-surface-variant">{row.remaining}</span>
                   )}
                 </td>
-                <td className={`px-2 py-1.5 text-right ${row.reset === "LOCAL" ? "font-semibold text-secondary" : "tnum text-outline"}`}>
+                <td className={`hidden px-2 py-1.5 text-right lg:table-cell ${row.reset === "LOCAL" ? "font-semibold text-secondary" : "tnum text-outline"}`}>
                   {row.reset}
                 </td>
                 <td className="px-2.5 py-1.5 text-right">
@@ -896,7 +947,7 @@ export function QuotaPanel() {
           </tbody>
         </table>
       </div>
-      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline">
         <span>abonelik: yerel plan · API keys · plugins · LMR sysinfo</span>
         <div className="flex items-center gap-3">
           <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
@@ -923,8 +974,105 @@ export function SettingsPanel() {
   const scaleLabel = (value: UiScale) => `${Math.round(value * 100)}%`;
 
   return (
-    <section data-qa="panel" className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
-      <div className="space-y-3">
+    <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-auto">
+      <div className="w-full space-y-3">
+      <div className="rounded-lg border border-outline-variant bg-surface-container">
+        <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">Routing Policy</h2>
+          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
+            Ajanlar arası otomatik geçiş kilitli. Dispatcher her görev öncesi bu politikayı ve kotaları kontrol eder.
+          </p>
+        </div>
+        <div className="space-y-3 p-3">
+          <label
+            className="flex items-center justify-between rounded border border-outline-variant bg-surface-container-high px-3 py-2 font-body text-body"
+            title="Always required — cannot be disabled (security)"
+          >
+            <span>Ajan geçişinde kullanıcı onayı (kilitli)</span>
+            <input
+              type="checkbox"
+              checked
+              disabled
+              title="Always required — cannot be disabled (security)"
+              className="accent-primary"
+            />
+          </label>
+          <div className="grid gap-2 md:grid-cols-3">
+            {QUOTA_ACTIONS.map((action) => {
+              const selected = policy.on_quota_exhausted === action.id;
+              return (
+                <button
+                  key={action.id}
+                  type="button"
+                  onClick={() => void savePolicy({ ...policy, on_quota_exhausted: action.id })}
+                  className={`rounded-lg border p-3 text-left ${
+                    selected
+                      ? "border-primary bg-primary-container/20"
+                      : "border-outline-variant bg-surface-container-high hover:bg-surface-bright"
+                  }`}
+                >
+                  <div className="font-body text-body font-semibold text-on-surface">{action.title}</div>
+                  <div className="mt-1 font-body text-meta leading-normal text-outline">{action.hint}</div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <label className="space-y-1 font-body text-meta text-on-surface-variant">
+              Yerel fallback ajan
+              <input
+                value={policy.local_fallback_agent}
+                onChange={(event) => void savePolicy({ ...policy, local_fallback_agent: event.target.value })}
+                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-body text-on-surface"
+              />
+            </label>
+            <label className="space-y-1 font-body text-meta text-on-surface-variant">
+              Yerel fallback model
+              <input
+                value={policy.local_fallback_model || model}
+                onChange={(event) => void savePolicy({ ...policy, local_fallback_model: event.target.value })}
+                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-body text-on-surface"
+              />
+            </label>
+          </div>
+          <div
+            data-qa="routing-table"
+            className="max-h-[min(14rem,40vh)] overflow-auto rounded border border-outline-variant"
+          >
+            <table className="w-full text-left font-body text-body">
+              <thead className="sticky top-0 z-[1]">
+                <tr className="border-b border-outline-variant bg-surface-container-low text-meta tracking-label text-outline uppercase">
+                  <th className="px-2.5 py-1.5">Ajan</th>
+                  <th className="px-2 py-1.5">Tetik</th>
+                  <th className="px-2.5 py-1.5 text-right">Enabled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {policy.triggers.map((trigger, index) => (
+                  <tr key={trigger.agent_id} className="border-b border-outline-variant/40">
+                    <td className="px-2.5 py-1.5 text-on-surface">{trigger.label}</td>
+                    <td className="px-2 py-1.5 text-on-surface-variant">{trigger.when}</td>
+                    <td className="px-2.5 py-1.5 text-right">
+                      <input
+                        type="checkbox"
+                        checked={trigger.enabled}
+                        onChange={(event) => {
+                          const triggers = policy.triggers.map((row, rowIndex) =>
+                            rowIndex === index ? { ...row, enabled: event.target.checked } : row,
+                          );
+                          void savePolicy({ ...policy, triggers });
+                        }}
+                        className="accent-primary"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="font-body text-meta text-outline">Scroll · routing triggers</p>
+        </div>
+      </div>
       <GraphUiSettings />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
@@ -973,90 +1121,6 @@ export function SettingsPanel() {
           >
             Yeniden tara
           </Link>
-        </div>
-      </div>
-      <div className="rounded-lg border border-outline-variant bg-surface-container">
-        <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
-          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">Routing Policy</h2>
-          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
-            Ajanlar arası otomatik geçiş kilitli. Dispatcher her görev öncesi bu politikayı ve kotaları kontrol eder.
-          </p>
-        </div>
-        <div className="space-y-4 p-3">
-          <label className="flex items-center justify-between rounded border border-outline-variant bg-surface-container-high px-3 py-2 font-body text-body">
-            <span>Ajan geçişinde kullanıcı onayı</span>
-            <input type="checkbox" checked disabled className="accent-primary" />
-          </label>
-          <div className="grid gap-2 md:grid-cols-3">
-            {QUOTA_ACTIONS.map((action) => {
-              const selected = policy.on_quota_exhausted === action.id;
-              return (
-                <button
-                  key={action.id}
-                  type="button"
-                  onClick={() => void savePolicy({ ...policy, on_quota_exhausted: action.id })}
-                  className={`rounded-lg border p-3 text-left ${
-                    selected
-                      ? "border-primary bg-primary-container/20"
-                      : "border-outline-variant bg-surface-container-high hover:bg-surface-bright"
-                  }`}
-                >
-                  <div className="font-body text-body font-semibold text-on-surface">{action.title}</div>
-                  <div className="mt-1 font-body text-meta leading-normal text-outline">{action.hint}</div>
-                </button>
-              );
-            })}
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <label className="space-y-1 font-body text-meta text-on-surface-variant">
-              Yerel fallback ajan
-              <input
-                value={policy.local_fallback_agent}
-                onChange={(event) => void savePolicy({ ...policy, local_fallback_agent: event.target.value })}
-                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-body text-on-surface"
-              />
-            </label>
-            <label className="space-y-1 font-body text-meta text-on-surface-variant">
-              Yerel fallback model
-              <input
-                value={policy.local_fallback_model || model}
-                onChange={(event) => void savePolicy({ ...policy, local_fallback_model: event.target.value })}
-                className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-body text-on-surface"
-              />
-            </label>
-          </div>
-          <div className="overflow-hidden rounded border border-outline-variant">
-            <table className="w-full text-left font-body text-body">
-              <thead>
-                <tr className="border-b border-outline-variant bg-surface-container-low text-meta tracking-label text-outline uppercase">
-                  <th className="px-2.5 py-1.5">Ajan</th>
-                  <th className="px-2 py-1.5">Tetik</th>
-                  <th className="px-2.5 py-1.5 text-right">Enabled</th>
-                </tr>
-              </thead>
-              <tbody>
-                {policy.triggers.map((trigger, index) => (
-                  <tr key={trigger.agent_id} className="border-b border-outline-variant/40">
-                    <td className="px-2.5 py-1.5 text-on-surface">{trigger.label}</td>
-                    <td className="px-2 py-1.5 text-on-surface-variant">{trigger.when}</td>
-                    <td className="px-2.5 py-1.5 text-right">
-                      <input
-                        type="checkbox"
-                        checked={trigger.enabled}
-                        onChange={(event) => {
-                          const triggers = policy.triggers.map((row, rowIndex) =>
-                            rowIndex === index ? { ...row, enabled: event.target.checked } : row,
-                          );
-                          void savePolicy({ ...policy, triggers });
-                        }}
-                        className="accent-primary"
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </div>
       </div>
       </div>
@@ -1145,18 +1209,18 @@ export function FleetPanel() {
   return (
     <section
       data-qa="panel"
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
     >
       <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
         <h2 className="font-body text-panel font-semibold tracking-label uppercase">Worker Fleet</h2>
       </div>
-      <div className="min-h-0 flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-body">
+      <div className="min-h-0 w-full flex-1 divide-y divide-outline-variant/40 overflow-auto font-mono text-body">
         {workers.map((row) => (
-          <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2">
-            <span className="text-on-surface">{row.label}</span>
-            <span className="min-w-0 truncate text-on-surface-variant">{row.model}</span>
+          <div key={row.id} className="flex w-full items-center justify-between gap-2 px-3 py-2.5">
+            <span className="min-w-0 flex-1 truncate text-on-surface">{row.label}</span>
+            <span className="min-w-0 max-w-[40%] flex-1 truncate text-right text-on-surface-variant">{row.model}</span>
             <span
-              className={
+              className={`shrink-0 ${
                 row.id === "openjev-laya"
                   ? engineTone
                   : row.status === "down" ||
@@ -1164,12 +1228,25 @@ export function FleetPanel() {
                       row.status === "offline"
                     ? "text-error"
                     : "text-secondary"
-              }
+              }`}
             >
               {row.status}
             </span>
           </div>
         ))}
+        <div className="space-y-2 px-3 py-4 font-body text-body text-on-surface-variant">
+          <p className="font-semibold text-on-surface">Fleet status</p>
+          <p>
+            Workers report via NATS heartbeat. Offline workers flip within ~45s after the last
+            ping. Use Index Workspace on Health when local graph data is missing.
+          </p>
+          <p className="font-mono text-meta text-outline">
+            lounge.workers.heartbeat · DecisionGate · memory-bridge
+          </p>
+          <p className="font-mono text-meta text-outline">
+            Ensure core daemons show Running in the sidebar before dispatching tasks.
+          </p>
+        </div>
       </div>
     </section>
   );
@@ -1263,7 +1340,7 @@ export function TelemetryPanel() {
     report?.dead.rate != null ? `${(report.dead.rate * 100).toFixed(1)}%` : "—";
 
   return (
-    <section data-qa="panel" className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+    <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
           <div className="text-meta tracking-wider text-outline uppercase">Laya Decision</div>

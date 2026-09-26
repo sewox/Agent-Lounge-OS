@@ -35,12 +35,12 @@ export function daemonLabel(health: ServiceHealth | undefined, fallback: string)
     return fallback;
   }
   if (health.running) {
-    return "up";
+    return "Running";
   }
   if (health.error?.includes("Service Degraded")) {
-    return "degraded";
+    return "Disconnected";
   }
-  return "down";
+  return "Disconnected";
 }
 
 export function LatencySparkline({ values }: { values: number[] }) {
