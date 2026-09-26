@@ -215,6 +215,11 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | AP-03 | Routing approve / deny / local | `?demo=routing-banner` ile 3 aksiyonun her biri doğru payload'ı üretir | A |
 | AP-04 | Laya enable / decline / hide | `enable_decision_gate` / `decline_decision_gate` / local dismiss çalışır, reload sonrası tutarlı | A, M |
 | AP-05 | Erişilebilirlik ve yerleşim | `role="alertdialog"`, focus trap ve Esc davranışı. Banner dikey ekranda içeriği taşırmaz | A |
+| AP-06 | Yıkıcı işlem onayı | DB drop/truncate/delete/migrate-down, `rm -rf`, reset her zaman onay ister | A, S3, B |
+| AP-07 | Never Ask atlayamaz | "Never Ask" açıkken bile yıkıcı işlem onayını atlayamaz | A, S3, B |
+| AP-08 | Onay sesi | Bekleyen onayda ses; arka plan/gizli pencerede de; varsayılan 60 sn tekrar; karar sonrası durur (bkz. §10.1) | A, M, B |
+| AP-09 | Ses ayarları | Settings: aç/kapa, yerleşik sesler, özel wav/mp3/aiff, volume, aralık, Dinle; kalıcı + anında (bkz. §10.1) | A, B |
+| AP-10 | macOS bildirimi | Bekleyen onayda sistem bildirimi; tıklanınca app + banner odak (bkz. §10.1) | M, B |
 
 ### 5.9 Komut paleti (⌘K)
 
@@ -269,11 +274,11 @@ Gemini'nin 5 PR'ı temel alındı. Test altyapısını ve baseline koşusunu ba�
 | Sıra | PR | Kapsam | Bağımlılık | Kabul testleri |
 |------|----|--------|------------|----------------|
 | 0 | **PR-0 QA harness** | Playwright kurulumu, IPC mock fixture'ı (dolu/boş), `data-qa` hook'ları, L1–L6 yardımcıları, 4 viewport, screenshot artifact, mock-yasağı grep (başta uyarı modunda), Mac için `screencapture` + ekran taşıma script'i ve `QA_Report.md` şablonu. **Ürün kodu değişmez.** | — | Suite çalışır. Bugünkü durumda beklenen fail'ler (audit ile uyumlu) raporlanır: **baseline koşusu** |
-| 1 | **PR-1 Backend-Core** | Experience şeması (`status`, `is_pinned`, `updated_at`, `original_content`, `archived_at`) ve migration; Tauri `get/update/delete(archive)/pin/approve_experience`; `ignored_symbols` tablosu ve filtresi; dead-symbol → görev komutu (NATS); OPEN_IN_EDITOR komutu; MCP create'in Draft yazması | PR-0 | EX-05, EX-07, EX-10, DS-05 (backend), DS-07 (S3), cargo test |
+| 1 | **PR-1 Backend-Core** | Experience şeması (`status`, `is_pinned`, `updated_at`, `original_content`, `archived_at`, `reviewed`, `use_count`, `last_used_at`) ve migration; Tauri experience komutları; `ignored_symbols`; dead-symbol → görev; OPEN_IN_EDITOR; MCP create → approved+`reviewed=false`; arşiv search fallback; yıkıcı-işlem gate; **onay sesi/bildirim tetikleyicisi** (§10.1) | PR-0 | EX-05, EX-07, EX-10, EX-13 (backend), DS-05/07 (S3), AP-06…08/10 (tetik), cargo test |
 | 2 | **PR-2 Cleanup-Shell** | New Node, Quick Filter, Docs, API Keys kaldırılır; Bell → Alert History; MOCK fallback yerine empty state; KPI düzeltmesi; daemon durumları; **layout doluluğu düzeltmeleri** (Vault yarım panel, Dashboard 1280 fold, dikey stack, Settings tablo); dil birliği (O1 kararından sonra) | PR-0 (PR-1'den bağımsız, paralel gidebilir) | SH-*, DB-01/02/04, HM-01/02/05, ST-01, X-*, tüm *-LAYOUT. Mock grep kapısı burada zorunluya çevrilir |
 | 3 | **PR-3 Vault-Experience** | Detay drawer, edit/archive/pin/approve UI, Show Archived, liste limiti, palette odağı | PR-1, PR-2 | EX-01…EX-09, EX-LAYOUT, CP-02 |
 | 4 | **PR-4 Health-Symbols** | Dead Symbols tam liste, detay, aksiyonlar (aç, kopyala, ignore, ajanla düzelt), Ignore List sekmesi, `last_ref` bridge güncellemesi, Health drill-down | PR-1, PR-2 | DS-*, HM-03/04, DS-LAYOUT |
-| 5 | **PR-5 System-Settings** | Settings onarımları, Graph UI lifecycle doğrulaması, onboarding finalizasyonu, Fleet heartbeat | PR-2 | ST-*, GR-*, OB-*, FL-* |
+| 5 | **PR-5 System-Settings** | Settings onarımları (i18n dili, Editor, **onay sesi prefs + Dinle**, TTL), Graph UI lifecycle, onboarding, Fleet heartbeat; bildirim tıklanınca odak (§10.1 AP-09/10) | PR-2 | ST-*, GR-*, OB-*, FL-*, AP-08/09/10 (UI) |
 | 6 | **Final grand test** | Tüm S1 suite'i, D1–D3'te tam S2 turu, "Proje A'dan Proje B'ye tecrübe aktarımı" demosu (Gemini) | PR-1…5 | Tüm [B] case'ler yeşil, `QA_Report.md` Sercan'a sunulur |
 
 Not: Gemini "NATS heartbeat iyileştirmesi"ni PR-1'e koymuştu. Fleet test'leri (FL-*) PR-5'te olduğu için heartbeat işini PR-5'e taşımayı öneriyorum; bu küçük bir teknik tercih.
@@ -309,3 +314,15 @@ Not: Gemini "NATS heartbeat iyileştirmesi"ni PR-1'e koymuştu. Fleet test'leri 
 | O6 | Ajan tecrübeleri **otomatik onaylanır**; incelenmemiş olanların sayısı **rozetle** gösterilir | K2 (Draft) değişti: MCP kaydı doğrudan aktif olur ama `reviewed=false`; sidebar Knowledge Vault'ta rozet = incelenmemiş sayısı; detayı açmak ya da "incelendi" demek rozeti azaltır. EX-05 buna göre güncellenir |
 | O7 | New Node **kaldırılır** | K7 teyit |
 | O8 | Canlı test için ekranlar şu an boş | S2 baseline koşusu 18:21'de başlatıldı |
+
+### 10.1 Onay beklerken ses + macOS bildirimi (Sercan, aynı gün)
+
+Routing, security, quota ve yıkıcı-işlem onayları beklerken kullanıcıyı kaçırmamak için ses ve sistem bildirimi.
+
+| ID | Test | Kabul kriteri | Etiket | PR |
+|----|------|---------------|--------|-----|
+| AP-08 | Onay sesi | Routing / security / quota / destructive onay beklerken ses çalar. Uygulama arka planda veya pencere gizliyken de çalar. Kullanıcı karar verene kadar varsayılan **60 sn** aralıkla tekrar eder; karar sonrası durur. Otomasyon: audio playback spy (`Audio` / `HTMLAudioElement.play`) | A, M, B | Backend tetik PR-1; UI/prefs PR-5 |
+| AP-09 | Ses ayarları | Settings'te: aç/kapa, yerleşik ses seçimi, özel dosya yükleme (wav/mp3/aiff), ses seviyesi, tekrar aralığı, **Dinle** (preview). Seçim kalıcıdır ve anında uygulanır | A, B | PR-5 |
+| AP-10 | macOS bildirimi | Onay beklerken sistem bildirimi gider. Tıklanınca uygulama öne gelir ve ilgili onay banner'ı odaklanır | M, B | Tetik PR-1; odak PR-5 |
+
+Not: Ses, görünürlük API'sine bağlı olmamalı (background/hidden). Tekrar aralığı ve ses dosyası prefs'te saklanır.

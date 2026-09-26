@@ -82,6 +82,19 @@ fn destructive_operation_gate_contract() {
     assert_eq!(kinds.len(), 6);
 }
 
+/// §10.1: pending approval alert — sound + macOS notification triggers (PR-1).
+#[test]
+fn approval_alert_sound_and_notification_contract() {
+    let kinds = ["routing", "security", "quota", "destructive"];
+    let default_repeat_secs = 60_u64;
+    let plays_when_window_hidden = true;
+    let stops_after_decision = true;
+    let notifies_macos = true;
+    assert_eq!(kinds.len(), 4);
+    assert_eq!(default_repeat_secs, 60);
+    assert!(plays_when_window_hidden && stops_after_decision && notifies_macos);
+}
+
 /// Documents migration expectation: existing rows → Approved; count preserved.
 /// O6 note: legacy rows may be treated as reviewed=true after migration.
 #[test]

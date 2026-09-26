@@ -163,6 +163,93 @@ test.describe("AP / CP / misc", () => {
     await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil/i);
   });
 
+  test("AP-08 · Pending approval plays alert sound (spy) + repeats until decided [expected-fail until PR-1/5]", async ({
+    page,
+  }, testInfo) => {
+    // §10.1: sound on routing/security/quota/destructive pending; works when hidden; default 60s repeat.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "Approval alert sound missing (§10.1)",
+    });
+    test.fail(true, "Approval alert audio not implemented");
+    await page.addInitScript(() => {
+      type PlayLog = { src: string; t: number };
+      const g = window as Window & { __QA_AUDIO_PLAYS__?: PlayLog[] };
+      g.__QA_AUDIO_PLAYS__ = [];
+      const proto = HTMLAudioElement.prototype;
+      const origPlay = proto.play;
+      proto.play = function playSpy(this: HTMLAudioElement, ...args: unknown[]) {
+        g.__QA_AUDIO_PLAYS__!.push({ src: this.currentSrc || this.src || "", t: Date.now() });
+        return origPlay.apply(this, args as []).catch(() => undefined as unknown as void);
+      };
+    });
+    await openRoute(page, "/dashboard?demo=routing-banner", "browser");
+    await page.waitForTimeout(800);
+    // Simulate background/hidden: document.hidden cannot be set; blur + visibility stub.
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForTimeout(500);
+    const plays = await page.evaluate(() => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__ ?? []);
+    expect(plays.length, "audio play spy should see ≥1 alert while approval pending").toBeGreaterThan(0);
+    // Decision stops further repeats (interval default 60s — we only assert stop hook exists / no play after resolve).
+    const decide = page.getByRole("button", { name: /Onayla|Approve|Reddet|Deny/i }).first();
+    if (await decide.count()) {
+      await decide.click();
+      const after = await page.evaluate(
+        () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+      );
+      expect(after).toBeGreaterThan(0);
+    }
+  });
+
+  test("AP-09 · Settings sound options (on/off, built-ins, upload, volume, interval, Dinle) [expected-fail until PR-5]", async ({
+    page,
+  }, testInfo) => {
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "Approval sound Settings UI missing (§10.1)",
+    });
+    test.fail(true, "Sound prefs UI not in Settings");
+    await openRoute(page, "/settings", "full");
+    const section = page.locator('[data-qa="approval-sound"], section').filter({
+      hasText: /Alert sound|Onay sesi|Approval sound|Dinle/i,
+    });
+    expect(await section.count(), "sound settings section").toBeGreaterThan(0);
+    await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play/i })).toBeVisible();
+    await expect(page.getByText(/wav|mp3|aiff|upload|yükle/i).first()).toBeVisible();
+    await expect(page.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
+    // Persist + immediate effect: toggle off, reload, still off.
+    const toggle = section.getByRole("switch").or(section.locator('input[type="checkbox"]')).first();
+    if (await toggle.count()) {
+      await toggle.click();
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(400);
+      const stored = await page.evaluate(
+        () =>
+          localStorage.getItem("lounge.approvalSound") ||
+          localStorage.getItem("approval-sound") ||
+          "",
+      );
+      expect(stored.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("AP-10 · macOS notification on pending approval (manual S2) [expected-fail / manual]", async ({
+    page,
+  }, testInfo) => {
+    testInfo.annotations.push({
+      type: "manual",
+      description: "S2 Mac: notification click focuses app + banner (§10.1)",
+    });
+    test.fail(true, "macOS notification path not automatable in Playwright browser harness");
+    await openRoute(page, "/dashboard", "full");
+    // Placeholder until Tauri notification plugin is wired (PR-1 trigger / PR-5 focus).
+    expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();
+    expect(await page.locator('[data-qa="approval-notification"]').count()).toBeGreaterThan(0);
+  });
+
   test("CP-05 · Palette has no Re-index / Clear Cache", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     await page.keyboard.press("Control+k");

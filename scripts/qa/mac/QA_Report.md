@@ -70,9 +70,12 @@ Mark Pass / Fail. Failures are [B] layout blockers per plan §6.
 | SH-06 | Index Workspace folder picker → index | ☐ | |
 | GR-01 | Graph UI Enable/Open | ☐ | |
 | GR-03 | Main close kills graph child process | ☐ | |
-| DS-03 | OPEN_IN_EDITOR | ☐ | |
+| DS-03 | OPEN_IN_EDITOR (system default / Settings Editor) | ☐ | |
 | ST-04 | Graph port recreate | ☐ | |
 | EX-* | Experience CRUD (after PR-1/3) | ☐ | |
+| AP-08 | Approval alert sound while pending (also background/hidden); stops after decision | ☐ | |
+| AP-09 | Settings sound prefs (on/off, built-in, upload, volume, interval, Dinle) | ☐ | |
+| AP-10 | macOS notification while approval pending; click focuses app + banner | ☐ | |
 
 ## Deep-link / route automation note
 
