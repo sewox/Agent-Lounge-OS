@@ -80,6 +80,8 @@ export function largestEmptyRatio(
 }
 
 export async function measureLayout(page: Page, route: string): Promise<LayoutMetrics> {
+  // Onboarding and some routes may briefly remount; wait for any panel or main.
+  await page.locator("main, [data-qa='panel']").first().waitFor({ state: "attached", timeout: 15_000 }).catch(() => undefined);
   const vp = page.viewportSize()!;
   const measured = await page.evaluate(() => {
     const sidebarEl = document.querySelector('[data-qa="sidebar"]') as HTMLElement | null;

@@ -189,8 +189,17 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         case "open_graph_ui":
           f.graphUiStatus = { ...f.graphUiStatus, running: true, url: `http://127.0.0.1:${f.graphUiPort}` };
           return null;
-        case "get_discovery_report":
-          return f.discovery;
+        case "get_discovery_report": {
+          const d = f.discovery;
+          return {
+            ...d,
+            apps: d.apps ?? [],
+            models: d.models ?? [],
+            mcp_servers: d.mcp_servers ?? [],
+            tools: Array.isArray(d.tools) ? d.tools : [],
+            sources: Array.isArray(d.sources) ? d.sources : [],
+          };
+        }
         case "list_connected_tools":
           return f.connectedTools;
         case "list_recommended_models":
@@ -202,7 +211,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               arch: "aarch64",
               apple_silicon: true,
               metal: true,
-              summary: "fixture device",
+              summary: "16 GB · fixture device",
               recommended_upper: "8B Q4",
             },
             offers: [],

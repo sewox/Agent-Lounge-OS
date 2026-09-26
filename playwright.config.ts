@@ -9,7 +9,7 @@ export default defineConfig({
   testDir: "./e2e/tests",
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  retries: 0,
   workers: 1,
   timeout: 90_000,
   expect: { timeout: 10_000 },
@@ -53,7 +53,7 @@ export default defineConfig({
   ],
   webServer: {
     command: process.env.PLAYWRIGHT_WEB_SERVER
-      || `npx --yes serve out -l ${PORT} --no-port-switching`,
+      || `node scripts/qa/static-server.mjs ${PORT}`,
     url: BASE,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

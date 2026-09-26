@@ -19,77 +19,67 @@ const PR_MAP = [
 ];
 
 function mapPr(title) {
-  const id = (title.match(/^[A-Z0-9*-]+/) || [title])[0];
   for (const row of PR_MAP) {
-    if (row.re.test(id) || row.re.test(title)) return row.pr;
+    if (row.re.test(title)) return row.pr;
   }
   if (/LAYOUT/i.test(title)) return "PR-2 Cleanup-Shell";
   return "—";
 }
 
-function loadSuites(suite, acc = []) {
+function loadTests(suite, acc = []) {
   if (!suite) return acc;
-  if (suite.specs) {
-    for (const spec of suite.specs) {
-      for (const t of spec.tests || []) {
-        for (const r of t.results || []) {
-          acc.push({
-            title: spec.title,
-            project: t.projectName,
-            status: r.status,
-            error: r.error?.message?.split("\n")[0] || "",
-            annotations: (spec.tags || []).concat(
-              (t.annotations || []).map((a) => `${a.type}:${a.description || ""}`),
-            ),
-            expected: (t.annotations || []).some((a) => a.type === "expected-fail")
-              || r.status === "expected"
-              || (spec.title || "").includes("expected-fail"),
-          });
-        }
-      }
+  for (const spec of suite.specs || []) {
+    for (const t of spec.tests || []) {
+      const result = (t.results || [])[0] || {};
+      acc.push({
+        title: spec.title,
+        project: t.projectName,
+        expectedStatus: t.expectedStatus,
+        status: t.status,
+        error: (result.error?.message || "").split("\n")[0].replace(/\x1b\[[0-9;]*m/g, ""),
+        annotations: (t.annotations || []).map((a) => `${a.type}:${a.description || ""}`),
+      });
     }
   }
-  for (const child of suite.suites || []) loadSuites(child, acc);
+  for (const child of suite.suites || []) loadTests(child, acc);
   return acc;
 }
 
 const json = JSON.parse(fs.readFileSync(REPORT_JSON, "utf8"));
 const rows = [];
-for (const suite of json.suites || []) loadSuites(suite, rows);
+for (const suite of json.suites || []) loadTests(suite, rows);
 
 let pass = 0;
-let fail = 0;
 let expectedFail = 0;
+let unexpectedFail = 0;
 let skipped = 0;
 
 for (const r of rows) {
-  if (r.status === "skipped") {
+  if (r.status === "skipped" || r.expectedStatus === "skipped") {
     skipped++;
     continue;
   }
-  if (r.status === "expected" || (r.status === "failed" && r.expected)) {
-    // Playwright: "unexpected" = failed, "expected" = test.fail() that failed as expected
-  }
-  if (r.status === "passed") pass++;
-  else if (r.status === "expected") expectedFail++;
-  else if (r.status === "failed" || r.status === "unexpected" || r.status === "timedOut") {
-    if ((r.title || "").includes("expected-fail") || r.annotations.some((a) => String(a).startsWith("expected-fail"))) {
-      expectedFail++;
-    } else {
-      fail++;
-    }
-  } else if (r.status === "flaky") pass++;
-  else fail++;
+  if (r.status === "expected" && r.expectedStatus === "passed") pass++;
+  else if (r.status === "expected" && r.expectedStatus === "failed") expectedFail++;
+  else if (r.status === "unexpected") unexpectedFail++;
+  else if (r.status === "passed") pass++;
+  else if (r.status === "failed" && r.expectedStatus === "failed") expectedFail++;
+  else unexpectedFail++;
 }
 
 const metrics = fs.existsSync(METRICS)
   ? fs.readFileSync(METRICS, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
   : [];
 
-const blockers = rows.filter((r) => {
-  const isB = /\[B\]|^SH-0[128]|^DB-0[124]|^EX-|^DS-0[125]|^HM-0[1235]|^ST-01|^X-0[34]|LAYOUT/i.test(r.title);
-  const failed = r.status === "failed" || r.status === "unexpected" || r.status === "expected";
-  return isB && failed;
+const layoutViolations = metrics.filter(
+  (m) => !m.l1_pass || !m.l2_pass || !m.l3_pass || !m.l4_pass || !m.l5_pass || m.l6_pass === false,
+);
+
+const blockerExpected = rows.filter((r) => {
+  const isB =
+    /\[B\]|^SH-0[128]|^DB-0[124]|^EX-|^DS-0[125]|^HM-0[1235]|^ST-01|^X-0[34]|LAYOUT/i.test(r.title);
+  const failedAsExpected = r.expectedStatus === "failed" && r.status === "expected";
+  return isB && failedAsExpected;
 });
 
 const lines = [];
@@ -97,66 +87,80 @@ lines.push("# QA Baseline — 2026-09-26 (PR-0)");
 lines.push("");
 lines.push("| Field | Value |");
 lines.push("|-------|-------|");
-lines.push(`| Commit base | \`15e19e9\` (main) |`);
+lines.push("| Commit base | `15e19e9` (main) |");
 lines.push(`| Generated | ${new Date().toISOString()} |`);
-lines.push(`| Suite | Playwright e2e + S4 gates |`);
-lines.push(`| Counts | pass=${pass} · fail=${fail} · expected-fail=${expectedFail} · skipped=${skipped} · total_rows=${rows.length} |`);
+lines.push("| Suite | Playwright e2e (S1) + S4 gates |");
+lines.push(
+  `| Counts | **pass=${pass}** · **expected-fail=${expectedFail}** · **unexpected-fail=${unexpectedFail}** · skipped=${skipped} · total=${rows.length} |`,
+);
+lines.push(`| Layout metrics rows | ${metrics.length} (route × viewport) |`);
+lines.push(`| Layout violations | ${layoutViolations.length} |`);
+lines.push("| CI | `qa-e2e.yml` non-blocking (`continue-on-error`) |");
+lines.push("");
+lines.push("## Verdict");
+lines.push("");
+lines.push(
+  unexpectedFail === 0
+    ? "Suite exit green for PR-0 harness (expected-fail cases intentionally failing until PR-1…5)."
+    : `Harness has ${unexpectedFail} unexpected failures — investigate before relying on CI signal.`,
+);
 lines.push("");
 lines.push("## Per-test results");
 lines.push("");
 lines.push("| ID / title | Project | Status | Failure reason | Maps to |");
 lines.push("|------------|---------|--------|----------------|---------|");
 for (const r of rows) {
-  const status =
-    r.status === "expected"
-      ? "expected-fail"
-      : r.status === "passed"
-        ? "pass"
-        : r.status;
-  const reason = (r.error || "").replace(/\|/g, "\\|").slice(0, 160);
+  let statusLabel = r.status;
+  if (r.status === "expected" && r.expectedStatus === "passed") statusLabel = "pass";
+  else if (r.status === "expected" && r.expectedStatus === "failed") statusLabel = "expected-fail";
+  else if (r.status === "skipped") statusLabel = "skipped";
+  else if (r.status === "unexpected") statusLabel = "FAIL";
+  const reason = (r.error || "").replace(/\|/g, "\\|").slice(0, 140);
   lines.push(
-    `| ${r.title.replace(/\|/g, "\\|")} | ${r.project} | ${status} | ${reason} | ${mapPr(r.title)} |`,
+    `| ${r.title.replace(/\|/g, "\\|")} | ${r.project} | ${statusLabel} | ${reason} | ${mapPr(r.title)} |`,
   );
 }
 
 lines.push("");
 lines.push("## Layout metrics (L1–L6) per route × viewport");
 lines.push("");
-lines.push("| Route | Viewport | L1 ratio | L2 | L3 empty | L4 narrow | L5 | L6 | Violations |");
-lines.push("|-------|----------|----------|----|----------|-----------|----|----|------------|");
+lines.push("| Route | Viewport | L1 ratio | L2 | L3 empty | L4 | L5 | L6 | Violations |");
+lines.push("|-------|----------|----------|----|----------|----|----|----|------------|");
 for (const m of metrics) {
   const v = [];
-  if (!m.l1_pass) v.push("L1");
+  if (!m.l1_pass) v.push(`L1=${(m.l1_widthRatio * 100).toFixed(0)}%`);
   if (!m.l2_pass) v.push("L2");
-  if (!m.l3_pass) v.push("L3");
+  if (!m.l3_pass) v.push(`L3=${(m.l3_largestEmptyRatio * 100).toFixed(0)}%`);
   if (!m.l4_pass) v.push("L4");
   if (!m.l5_pass) v.push("L5");
   if (m.l6_pass === false) v.push("L6");
   lines.push(
-    `| ${m.route} | ${m.viewport.width}×${m.viewport.height} | ${(m.l1_widthRatio * 100).toFixed(1)}% | ${m.l2_pass ? "ok" : "fail"} | ${(m.l3_largestEmptyRatio * 100).toFixed(1)}% | ${m.l4_pass ? "ok" : "fail"} | ${m.l5_pass ? "ok" : "fail"} | ${m.l6_pass == null ? "n/a" : m.l6_pass ? "ok" : "fail"} | ${v.join(",") || "—"} |`,
+    `| ${m.route} | ${m.viewport.width}×${m.viewport.height} | ${(m.l1_widthRatio * 100).toFixed(1)}% | ${m.l2_pass ? "ok" : "fail"} | ${(m.l3_largestEmptyRatio * 100).toFixed(1)}% | ${m.l4_pass ? "ok" : "fail"} | ${m.l5_pass ? "ok" : "fail"} | ${m.l6_pass == null ? "n/a" : m.l6_pass ? "ok" : "fail"} | ${v.join(", ") || "—"} |`,
   );
 }
 
 lines.push("");
-lines.push("## Failing / expected-fail [B] blockers (baseline)");
+lines.push("## Failing blocker [B] cases (expected-fail baseline)");
 lines.push("");
-for (const b of blockers) {
-  lines.push(`- **${b.title}** (${b.project}): ${b.error || b.status} → ${mapPr(b.title)}`);
+for (const b of blockerExpected) {
+  lines.push(`- **${b.title}** (${b.project}): ${(b.error || "expected-fail").slice(0, 120)} → ${mapPr(b.title)}`);
 }
-if (!blockers.length) lines.push("_None parsed — see table above._");
+if (!blockerExpected.length) lines.push("_None._");
 
 lines.push("");
 lines.push("## Untestable / plan corrections from PR-0");
 lines.push("");
-lines.push("- **GR-*** Graph UI lifecycle and **SH-06** Index folder picker require real Tauri + OS dialogs (S2 Mac only).");
-lines.push("- **AP-03** `?demo=routing-banner` only works when `isTauri()===false`; Tauri IPC mock disables the demo path — test uses `browser` fixture.");
-lines.push("- **X-01** language unity blocked on open decision **O1** (mixed TR/EN documented, not hard-fail).");
-lines.push("- **FL-01/02** live heartbeat needs real NATS workers (S3); page render smoke only in S1.");
-lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** implemented in product this PR.");
+lines.push("- **GR-*** / **SH-06** / **DS-03** / **ST-04**: require live Tauri + OS dialogs / Graph child process (S2 Mac only).");
+lines.push("- **AP-03** `?demo=routing-banner` only works when `isTauri()===false`; harness uses `browser` fixture.");
+lines.push("- **X-01** language unity blocked on open decision **O1** (mixed TR/EN noted, not hard-fail).");
+lines.push("- **FL-01/02** live NATS heartbeat needs real workers (S3); S1 only does page-render smoke.");
+lines.push("- **Empty fixture + `/onboarding`**: client error boundary (“This page couldn't load”) under IPC mock — OB-01 uses full fixture + deselect; empty-onboarding still flaky.");
+lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** implemented in product this PR (`data-qa` hooks only).");
+lines.push("- Gemini’s `toHaveJSProperty('clientWidth', …)` is invalid in Playwright; L1–L6 use `boundingBox` / `getBoundingClientRect` as planned.");
 lines.push("");
-lines.push("Screenshots: `docs/qa/baseline-2026-09-26/screenshots/` (JPEG).");
+lines.push("Screenshots: `docs/qa/baseline-2026-09-26/screenshots/` (JPEG). Playwright JSON: `playwright-report.json`.");
 lines.push("");
 
 fs.writeFileSync(OUT_MD, lines.join("\n"));
 console.log("Wrote", OUT_MD);
-console.log({ pass, fail, expectedFail, skipped, metrics: metrics.length });
+console.log({ pass, expectedFail, unexpectedFail, skipped, metrics: metrics.length, layoutViolations: layoutViolations.length });

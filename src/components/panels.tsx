@@ -430,7 +430,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0">
+        <div
+          data-qa="panel"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0"
+        >
           <SemanticMap
             semanticMap={semanticMap}
             projects={projects}
@@ -448,7 +451,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             }}
           />
         </div>
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
+        <div
+          data-qa="panel"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body"
+        >
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
               <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">

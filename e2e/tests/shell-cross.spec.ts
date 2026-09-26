@@ -31,10 +31,11 @@ test.describe("SH — global shell", () => {
     testInfo.annotations.push({ type: "expected-fail", description: "PR-2 removes dead chrome" });
     test.fail(true, "Dead chrome still in DOM until PR-2");
     await openRoute(page, "/dashboard", "full");
-    await expect(page.getByRole("button", { name: "+ New Node" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Quick Filter/i })).toHaveCount(0);
-    await expect(page.getByText("Docs", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("API Keys", { exact: true })).toHaveCount(0);
+    const newNode = await page.getByRole("button", { name: "+ New Node" }).count();
+    const quick = await page.getByRole("button", { name: /Quick Filter/i }).count();
+    const docs = await page.getByText("Docs", { exact: true }).count();
+    const keys = await page.getByText("API Keys", { exact: true }).count();
+    expect(newNode + quick + docs + keys, "dead chrome still present").toBe(0);
   });
 
   test("SH-03 · Bell opens alert history popover [expected-fail until PR-2]", async ({ page }, testInfo) => {
@@ -42,7 +43,9 @@ test.describe("SH — global shell", () => {
     test.fail(true, "Bell has no popover yet");
     await openRoute(page, "/dashboard", "full");
     await page.locator('header [title*="kernel"]').click();
-    await expect(page.getByText(/Uyarı yok|Alert/i)).toBeVisible();
+    // Must open a dedicated alert popover (not ambient AMBER / DEGRADED chrome).
+    const popover = page.locator('[data-qa="alert-history"], [role="dialog"][aria-label*="Alert" i]');
+    expect(await popover.count(), "alert history popover missing").toBeGreaterThan(0);
   });
 
   test("SH-04 · ⌘K / Ctrl+K opens and Esc closes command palette", async ({ page }) => {

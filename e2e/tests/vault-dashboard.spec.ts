@@ -65,11 +65,12 @@ test.describe("DB — dashboard", () => {
     const vaultTitle = page.getByText(/Semantic Map \+ Experiences/i).first();
     await expect(vaultTitle).toBeVisible();
     const box = await vaultTitle.boundingBox();
-    // Title should be within or near first viewport; body may still be cramped (V2).
     expect(box).toBeTruthy();
-    if (box && box.y > 700) {
+    const belowFold = Boolean(box && box.y > 700);
+    if (belowFold) {
       test.fail(true, "Vault panel mostly below fold at 1280x800");
     }
+    expect(belowFold, "vault title should be in first fold").toBe(false);
   });
 
   test("DB-05 · Critical Quotas link to /quotas", async ({ page }) => {
@@ -102,30 +103,29 @@ test.describe("EX — vault experiences", () => {
     testInfo.annotations.push({ type: "expected-fail", description: "No detail drawer; line-clamp-3" });
     test.fail(true, "Experience cards are read-only clamped");
     await openRoute(page, "/vault", "full");
-    await page.getByText(/Agent-Lounge-OS/i).first().click().catch(() => undefined);
-    await page.locator(".line-clamp-3").first().click({ force: true }).catch(() => undefined);
-    await expect(page.getByRole("dialog").or(page.locator("[data-qa=experience-drawer]"))).toBeVisible();
+    const drawer = page.getByRole("dialog").or(page.locator("[data-qa=experience-drawer]"));
+    expect(await drawer.count(), "detail drawer missing").toBeGreaterThan(0);
   });
 
   test("EX-02 · Edit experience [expected-fail until PR-1/3]", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "expected-fail", description: "update_experience missing" });
     test.fail(true, "No edit UI / command");
     await openRoute(page, "/vault", "full");
-    await expect(page.getByRole("button", { name: /Edit|Düzenle/i })).toBeVisible();
+    expect(await page.getByRole("button", { name: /Edit|Düzenle/i }).count()).toBeGreaterThan(0);
   });
 
   test("EX-03 · Soft delete / archive [expected-fail until PR-1/3]", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "expected-fail", description: "archive missing" });
     test.fail(true, "No archive UI");
     await openRoute(page, "/vault", "full");
-    await expect(page.getByRole("button", { name: /Archive|Arşiv/i })).toBeVisible();
+    expect(await page.getByRole("button", { name: /Archive|Arşiv/i }).count()).toBeGreaterThan(0);
   });
 
   test("EX-04 · Pin [expected-fail until PR-1/3]", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "expected-fail", description: "pin missing" });
     test.fail(true, "No pin UI");
     await openRoute(page, "/vault", "full");
-    await expect(page.getByRole("button", { name: /Pin/i })).toBeVisible();
+    expect(await page.getByRole("button", { name: /Pin/i }).count()).toBeGreaterThan(0);
   });
 
   test("EX-08 · List limit > 12 [expected-fail until PR-3]", async ({ page }, testInfo) => {
@@ -172,20 +172,20 @@ test.describe("DS — dead symbols", () => {
     testInfo.annotations.push({ type: "expected-fail", description: "rows are non-interactive divs" });
     test.fail(true, "No detail panel");
     await openRoute(page, "/vault", "full");
-    await expect(page.getByText(/last_ref|file:line/i)).toBeVisible();
+    expect(await page.getByText(/last_ref/i).count()).toBeGreaterThan(0);
   });
 
   test("DS-04 · Copy path [expected-fail until PR-4]", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "expected-fail", description: "no copy action" });
     test.fail(true, "No copy button");
     await openRoute(page, "/vault", "full");
-    await expect(page.getByRole("button", { name: /Copy|Kopyala/i })).toBeVisible();
+    expect(await page.getByRole("button", { name: /Copy|Kopyala/i }).count()).toBeGreaterThan(0);
   });
 
   test("DS-05 · Ignore [expected-fail until PR-1/4]", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "expected-fail", description: "ignore missing" });
     test.fail(true, "No ignore action");
     await openRoute(page, "/vault", "full");
-    await expect(page.getByRole("button", { name: /Ignore|Yoksay/i })).toBeVisible();
+    expect(await page.getByRole("button", { name: /Ignore|Yoksay/i }).count()).toBeGreaterThan(0);
   });
 });

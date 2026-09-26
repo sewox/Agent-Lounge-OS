@@ -17,14 +17,21 @@ export type RouteId = (typeof ROUTES)[number]["id"];
 
 export async function openRoute(
   page: Page,
-  path: string,
+  pathName: string,
   fixture: FixtureName = "full",
   opts?: { waitMs?: number },
 ) {
   await installTauriMock(page, fixture);
   const base = process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:4173";
-  await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  const res = await page.goto(`${base}${pathName}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  if (res && res.status() >= 400) {
+    throw new Error(`goto ${pathName} status ${res.status()}`);
+  }
   await waitForAppReady(page);
+  // Prefer <main>; fall back to onboarding / panel root (SSR always has main, but
+  // some client error boundaries can briefly remount).
+  const ready = page.locator("main, [data-qa='panel'], body");
+  await ready.first().waitFor({ state: "attached", timeout: 15_000 });
   if (opts?.waitMs) {
     await page.waitForTimeout(opts.waitMs);
   }
