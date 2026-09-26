@@ -587,7 +587,10 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       {onboarding ? null : (
-      <aside className="fixed top-12 bottom-0 left-0 z-30 flex w-[var(--sidebar-w)] flex-col justify-between overflow-y-auto border-r border-outline-variant bg-surface-container-low px-2 py-3">
+      <aside
+        data-qa="sidebar"
+        className="fixed top-12 bottom-0 left-0 z-30 flex w-[var(--sidebar-w)] flex-col justify-between overflow-y-auto border-r border-outline-variant bg-surface-container-low px-2 py-3"
+      >
         <div className="space-y-4">
           <div className="flex items-center justify-between border-b border-outline-variant/60 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-2">

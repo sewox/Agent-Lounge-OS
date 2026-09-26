@@ -84,7 +84,7 @@ export function OverviewKpis() {
   const layaHint = formatLayaDecision(latencyLive ? latencyMs : null);
   const msgLive = decisionMsgPerMin > 0;
   return (
-    <section className="shrink-0 space-y-2.5">
+    <section data-qa="panel" className="shrink-0 space-y-2.5">
       {indexing ? (
         <div
           role="status"
@@ -219,7 +219,7 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
     : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
 
   return (
-    <section className={shell}>
+    <section data-qa={embedded ? undefined : "panel"} className={shell}>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex min-w-0 flex-wrap items-center gap-2.5">
           <Pip live tone="primary" />
@@ -406,7 +406,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     : "flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
 
   return (
-    <section className={shell}>
+    <section data-qa={embedded ? undefined : "panel"} className={shell}>
       <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
@@ -430,7 +430,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0">
+        <div
+          data-qa="panel"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0"
+        >
           <SemanticMap
             semanticMap={semanticMap}
             projects={projects}
@@ -448,7 +451,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             }}
           />
         </div>
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body">
+        <div
+          data-qa="panel"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 font-body"
+        >
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
               <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
@@ -618,7 +624,10 @@ export function HealthPanel() {
   const visible = pageSlice(rows, safePage);
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section
+      data-qa="panel"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+    >
       <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
@@ -770,7 +779,10 @@ export function QuotaPanel() {
   const nearCap = quotas.filter((row) => row.percent !== null && (row.percent ?? 0) >= 80).length;
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section
+      data-qa="panel"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+    >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex min-w-0 items-center gap-2.5">
           <Pip live tone="ok" />
@@ -911,7 +923,7 @@ export function SettingsPanel() {
   const scaleLabel = (value: UiScale) => `${Math.round(value * 100)}%`;
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
+    <section data-qa="panel" className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
       <div className="space-y-3">
       <GraphUiSettings />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
@@ -1131,7 +1143,10 @@ export function FleetPanel() {
         ? "text-on-surface-variant"
         : "text-secondary";
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
+    <section
+      data-qa="panel"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+    >
       <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
         <h2 className="font-body text-panel font-semibold tracking-label uppercase">Worker Fleet</h2>
       </div>
@@ -1248,7 +1263,7 @@ export function TelemetryPanel() {
     report?.dead.rate != null ? `${(report.dead.rate * 100).toFixed(1)}%` : "—";
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+    <section data-qa="panel" className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
           <div className="text-meta tracking-wider text-outline uppercase">Laya Decision</div>

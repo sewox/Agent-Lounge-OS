@@ -389,7 +389,7 @@ export function OnboardingPanel() {
   }
 
   return (
-    <section className="mx-auto max-w-4xl space-y-3">
+    <section data-qa="panel" className="mx-auto max-w-4xl space-y-3">
       <div className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low p-3">
           <div className="min-w-0">

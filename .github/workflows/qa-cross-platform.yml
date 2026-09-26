@@ -1,0 +1,81 @@
+# Non-blocking cross-platform cargo + build (PR-0 / §10.2).
+# Linux remains the main Playwright runner (qa-e2e.yml).
+# This workflow keeps the primary CI gate green while we prove
+# windows-latest and macos-latest compile/test paths.
+
+name: QA cross-platform
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: qa-xplat-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust-matrix:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Stage externalBin stub (Unix)
+        if: runner.os != 'Windows'
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Stage externalBin stub (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  frontend-matrix:
+    name: Frontend build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build

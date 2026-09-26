@@ -9,6 +9,9 @@
     "lint": "eslint .",
     "types:check": "next typegen && tsc --noEmit",
     "test:unit": "node --experimental-strip-types --test src/lib/ui-prefs.test.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "node scripts/qa/generate-baseline-report.mjs",
+    "qa:gates": "bash scripts/qa/gates/mock-ban.sh && bash scripts/qa/gates/small-font.sh",
     "ci": "npm run lint && npm run types:check && npm run test:unit && npm run build",
     "tauri": "tauri"
   },
@@ -20,6 +23,7 @@
     "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "@tailwindcss/postcss": "^4",
     "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^26.6.2",

@@ -16,6 +16,14 @@
 *.py[cod]
 .venv-workers/
 .pytest_cache/
+/playwright-report/
+/test-results/
+/blob-report/
+/playwright/.cache/
+# QA Playwright outputs (JSON, screenshots, layout-metrics) — CI artifacts only
+/docs/qa/**/screenshots/
+/docs/qa/**/playwright-report.json
+/docs/qa/**/layout-metrics.jsonl
 
 # next.js
 /.next/

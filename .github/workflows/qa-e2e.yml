@@ -1,0 +1,68 @@
+# Non-blocking Playwright e2e + static QA gates (PR-0).
+# Existing CI gate (Frontend / Rust / Workers) stays green; this workflow
+# is informational until the suite becomes blocking (post PR-2+).
+
+name: QA e2e
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: qa-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static-gates:
+    name: QA static gates
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Mock-ban (warning mode)
+        run: bash scripts/qa/gates/mock-ban.sh
+      - name: Small-font grep
+        run: bash scripts/qa/gates/small-font.sh
+
+  e2e:
+    name: Playwright e2e (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Build static UI
+        run: npm run build
+
+      - name: Run e2e suite
+        run: npm run test:e2e
+        env:
+          CI: "1"
+
+      - name: Upload Playwright + layout artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-baseline-${{ github.sha }}
+          path: |
+            test-results/qa-baseline/
+            playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
