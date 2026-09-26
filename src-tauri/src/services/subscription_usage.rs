@@ -578,6 +578,7 @@ fn claude_oauth_token_from_os_store() -> Option<String> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn read_secret_command(program: &str, args: &[&str]) -> Option<String> {
     let output = GuardedCommand::new(program)
         .args(args)
