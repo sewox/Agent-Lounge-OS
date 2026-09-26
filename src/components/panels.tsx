@@ -737,7 +737,7 @@ export function HealthPanel() {
 }
 
 export function QuotaMiniCard() {
-  const { quotas, amberAlert, amberTools } = useLounge();
+  const { quotas, quotaError, amberAlert, amberTools } = useLounge();
   const displayQuotas = useMemo(() => mergeClaudeQuotaRows(quotas), [quotas]);
   const critical = useMemo(() => selectCriticalQuotas(displayQuotas, 3), [displayQuotas]);
 
@@ -750,7 +750,7 @@ export function QuotaMiniCard() {
       ) : null}
       {critical.length === 0 ? (
         <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-4 text-center font-body text-body text-outline">
-          Kota verisi yok
+          {quotaError ?? "Kota verisi yok"}
         </div>
       ) : (
         critical.map((row) => (
@@ -804,7 +804,7 @@ export function QuotaMiniCard() {
 }
 
 export function QuotaPanel() {
-  const { quotas, query, amberAlert, amberTools } = useLounge();
+  const { quotas, quotaError, query, amberAlert, amberTools } = useLounge();
   const [quotaFilter, setQuotaFilter] = useState<QuotaFilter>("all");
   const displayQuotas = useMemo(() => mergeClaudeQuotaRows(quotas), [quotas]);
   const rows = useMemo(() => {
@@ -940,7 +940,7 @@ export function QuotaPanel() {
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={7} className="px-2.5 py-6 text-center font-mono text-body text-outline">
-                  0 tools
+                  {quotaError ?? "0 tools"}
                 </td>
               </tr>
             ) : null}

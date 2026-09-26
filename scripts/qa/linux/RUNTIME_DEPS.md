@@ -39,7 +39,7 @@ The shell **starts without** host Ollama and without a pre-installed NATS binary
 | **Host Ollama** (`:11434`) | No | Intentionally unused. Do **not** point Lounge at host Ollama. |
 | **Lounge LMR** (`127.0.0.1:18790`, `data/lmr`) | No | Local model runner for inference/quota paths. UI works without it; LMR-backed actions fail soft. |
 | **Laya weights** | No | Optional DecisionGate model under `~/.local/share/AgentLounge/models/laya`. Falls back when missing. |
-| **codebase-memory-mcp** sidecar | Partial | CI bundles may ship a **stub** sidecar. Index / Semantic Map / dead-symbol queries need a real binary staged via `prepare-sidecar.sh`. Layout/shell S2 still valid with stub. |
+| **codebase-memory-mcp** sidecar | Yes (full S2) | `linux-bundle.yml` fetches DeusData `v0.11.0` linux-amd64 into the package. Artifact `agent-lounge-linux` includes a real sidecar (`BUILD_INFO.txt` has size/version). Stub fallback publishes `agent-lounge-linux-ui-only` only. |
 
 ## Recommended for a fuller S2-Linux pass
 

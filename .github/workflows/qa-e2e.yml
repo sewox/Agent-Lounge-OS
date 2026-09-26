@@ -18,19 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  static-gates:
-    name: QA static gates
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - name: Mock-ban (strict)
-        run: bash scripts/qa/gates/mock-ban.sh
-        env:
-          QA_MOCK_BAN_STRICT: "1"
-      - name: Small-font grep
-        run: bash scripts/qa/gates/small-font.sh
-
+  # mock-ban + small-font are required via ci.yml → static-gates (no continue-on-error).
   e2e:
     name: Playwright e2e (non-blocking)
     runs-on: ubuntu-latest

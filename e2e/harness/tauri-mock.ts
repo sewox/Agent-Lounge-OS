@@ -3,7 +3,7 @@ import type { FixtureDataset } from "../fixtures/types";
 import { FULL_FIXTURE } from "../fixtures/full";
 import { EMPTY_FIXTURE } from "../fixtures/empty";
 
-export type FixtureName = "full" | "empty" | "browser";
+export type FixtureName = "full" | "empty" | "browser" | "reject";
 
 declare global {
   interface Window {
@@ -27,11 +27,14 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
     return;
   }
 
-  const fixture = fixtureName === "empty" ? EMPTY_FIXTURE : FULL_FIXTURE;
+  const fixture = fixtureName === "empty" || fixtureName === "reject" ? EMPTY_FIXTURE : FULL_FIXTURE;
+  const rejectQuotaExperience = fixtureName === "reject";
 
-  await page.addInitScript((data: FixtureDataset) => {
+  await page.addInitScript(({ data, rejectQuotaExperience }: { data: FixtureDataset; rejectQuotaExperience: boolean }) => {
     window.__QA_IPC_LOG__ = [];
     window.__QA_FIXTURE__ = data;
+    (window as Window & { __QA_REJECT_QUOTA__?: boolean }).__QA_REJECT_QUOTA__ =
+      rejectQuotaExperience;
 
     type ListenerMap = Map<string, number[]>;
     const listeners: ListenerMap = new Map();
@@ -112,12 +115,21 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       }
 
       const f = window.__QA_FIXTURE__!;
+      const rejectLive = Boolean(
+        (window as Window & { __QA_REJECT_QUOTA__?: boolean }).__QA_REJECT_QUOTA__,
+      );
       switch (cmd) {
         case "list_experiences": {
+          if (rejectLive) {
+            throw new Error("list_experiences unavailable");
+          }
           const limit = typeof args?.limit === "number" ? args.limit : f.experiences.length;
           return f.experiences.slice(0, limit);
         }
         case "search_experiences": {
+          if (rejectLive) {
+            throw new Error("search_experiences unavailable");
+          }
           const q = String(args?.query ?? args?.q ?? "").toLowerCase();
           if (!q) return f.experiences;
           return f.experiences.filter((row) =>
@@ -144,8 +156,14 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return model;
         }
         case "get_quota_state":
+          if (rejectLive) {
+            throw new Error("get_quota_state unavailable");
+          }
           return f.quotaState;
         case "list_quotas":
+          if (rejectLive) {
+            throw new Error("list_quotas unavailable");
+          }
           return f.quotas;
         case "get_routing_policy":
           return f.policy;
@@ -295,7 +313,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: () => undefined,
     };
-  }, fixture);
+  }, { data: fixture, rejectQuotaExperience });
 }
 
 export async function getIpcLog(page: Page) {

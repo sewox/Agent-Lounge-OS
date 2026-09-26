@@ -21,9 +21,6 @@ import {
   isTauri,
   pickWorkspaceFolder,
   mockIndexSnapshot,
-  MOCK_EVENTS,
-  MOCK_EXPERIENCES,
-  MOCK_QUOTAS,
   loungeMessageToEvent,
   AMBER_THRESHOLD,
   BUS_UI_EVENT,
@@ -67,6 +64,11 @@ import {
   type ServiceReport,
   type ToolQuota,
 } from "@/lib/lounge";
+import {
+  browserEvents,
+  browserExperiences,
+  browserQuotas,
+} from "@/lib/mock/browser-fixtures";
 
 const EVENT_CAP = 500;
 
@@ -81,6 +83,8 @@ type LoungeContextValue = {
   whisperedExperienceIds: string[];
   events: NatsEvent[];
   quotas: ToolQuota[];
+  /** Set when Tauri quota IPC fails — UI shows error empty state, never fixtures. */
+  quotaError: string | null;
   amberAlert: boolean;
   amberTools: string[];
   projects: ProjectSummary[];
@@ -129,16 +133,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [kernel, setKernel] = useState("idle");
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
-  const [experiences, setExperiences] = useState<LoungeExperience[]>(MOCK_EXPERIENCES);
+  // Tauri/live: honest empty until IPC fills. Browser harness seeds in boot effect.
+  const [experiences, setExperiences] = useState<LoungeExperience[]>([]);
   const [whisperedExperienceIds, setWhisperedExperienceIds] = useState<string[]>([]);
-  const [events, setEvents] = useState<NatsEvent[]>(MOCK_EVENTS);
-  const [quotas, setQuotas] = useState<ToolQuota[]>(MOCK_QUOTAS);
-  const [amberAlert, setAmberAlert] = useState(
-    MOCK_QUOTAS.some((row) => (row.percent ?? 0) >= AMBER_THRESHOLD),
-  );
-  const [amberTools, setAmberTools] = useState<string[]>(
-    MOCK_QUOTAS.filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD).map((row) => row.id),
-  );
+  const [events, setEvents] = useState<NatsEvent[]>([]);
+  const [quotas, setQuotas] = useState<ToolQuota[]>([]);
+  const [quotaError, setQuotaError] = useState<string | null>(null);
+  const [amberAlert, setAmberAlert] = useState(false);
+  const [amberTools, setAmberTools] = useState<string[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [lastIndex, setLastIndex] = useState<IndexSnapshot | null>(null);
@@ -169,7 +171,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       const rows = await invoke<LoungeExperience[]>("list_experiences", { limit: 12 });
       setExperiences(rows);
     } catch {
-      /* SQLite henüz boş olabilir */
+      /* Live mode: never keep browser fixtures — show empty vault. */
+      setExperiences([]);
     }
     try {
       const map = await invoke<SemanticMap>("get_semantic_map");
@@ -275,17 +278,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         setQuotas(state.quotas);
         setAmberAlert(state.amber_alert);
         setAmberTools(state.amber_tools);
+        setQuotaError(null);
       } catch {
         try {
           const rows = await invoke<ToolQuota[]>("list_quotas");
-          if (rows.length > 0) {
-            setQuotas(rows);
-            const amber = rows.filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD).map((row) => row.id);
-            setAmberAlert(amber.length > 0);
-            setAmberTools(amber);
-          }
+          setQuotas(rows);
+          const amber = rows
+            .filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD)
+            .map((row) => row.id);
+          setAmberAlert(amber.length > 0);
+          setAmberTools(amber);
+          setQuotaError(null);
         } catch {
-          setQuotas(MOCK_QUOTAS);
+          setQuotas([]);
+          setAmberAlert(false);
+          setAmberTools([]);
+          setQuotaError("Kota verisi alınamadı");
         }
       }
       try {
@@ -633,8 +641,23 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setClock(formatClock(new Date()));
       if (isTauri()) {
         setEvents([]);
+        setExperiences([]);
+        setQuotas([]);
+        setAmberAlert(false);
+        setAmberTools([]);
+        setQuotaError(null);
       } else {
+        // Browser harness only — never used as Tauri/live fallback.
         setKernel("browser");
+        setEvents(browserEvents);
+        setExperiences(browserExperiences);
+        setQuotas(browserQuotas);
+        const amber = browserQuotas
+          .filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD)
+          .map((row) => row.id);
+        setAmberAlert(amber.length > 0);
+        setAmberTools(amber);
+        setQuotaError(null);
       }
       void refresh();
     }, 0);
@@ -779,6 +802,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       whisperedExperienceIds,
       events,
       quotas,
+      quotaError,
       amberAlert,
       amberTools,
       projects,
@@ -823,6 +847,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       whisperedExperienceIds,
       events,
       quotas,
+      quotaError,
       amberAlert,
       amberTools,
       projects,

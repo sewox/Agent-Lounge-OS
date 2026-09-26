@@ -1,6 +1,7 @@
 # Non-blocking Linux Tauri bundle for S2-Linux live testing.
-# Builds AppImage + .deb and uploads artifact `agent-lounge-linux`.
-# Bundles are selected via CLI (`--bundles deb appimage`), not tauri.conf targets.
+# Builds AppImage + .deb with the real codebase-memory-mcp sidecar when available.
+# Stub fallback renames the artifact to agent-lounge-linux-ui-only.
+# Bundles are selected via CLI (`--bundles deb,appimage`), not tauri.conf targets.
 # continue-on-error: never blocks required CI.
 
 name: Linux bundle
@@ -11,6 +12,9 @@ on:
   pull_request:
     paths:
       - ".github/workflows/linux-bundle.yml"
+      - "src-tauri/**"
+      - "package.json"
+      - "package-lock.json"
   workflow_dispatch:
 
 concurrency:
@@ -26,6 +30,8 @@ env:
   # AppImage tooling on headless runners without FUSE mounts.
   APPIMAGE_EXTRACT_AND_RUN: "1"
   NO_STRIP: "true"
+  CBM_RELEASE: "v0.11.0"
+  CBM_ASSET: "codebase-memory-mcp-linux-amd64.tar.gz"
 
 jobs:
   linux-bundle:
@@ -71,17 +77,97 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Stage externalBin stub (MCP sidecar)
-        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+      - name: Fetch real codebase-memory-mcp (linux-amd64)
+        id: sidecar
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          URL="https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_RELEASE}/${CBM_ASSET}"
+          mkdir -p bridge
+          TMP="$(mktemp -d)"
+          echo "Downloading $URL"
+          curl -fsSL "$URL" -o "$TMP/mcp.tar.gz"
+          tar -xzf "$TMP/mcp.tar.gz" -C "$TMP"
+          BIN="$(find "$TMP" -type f -name 'codebase-memory-mcp' | head -n1)"
+          if [[ -z "$BIN" || ! -f "$BIN" ]]; then
+            echo "FAIL: binary not found in archive"
+            exit 1
+          fi
+          install -m 755 "$BIN" bridge/codebase-memory-mcp
+          VERSION="$(bridge/codebase-memory-mcp --version 2>&1 | head -n1 || true)"
+          SIZE_B="$(wc -c < bridge/codebase-memory-mcp | tr -d '[:space:]')"
+          if [[ "$SIZE_B" -lt 4096 ]]; then
+            echo "FAIL: staged binary looks like a stub ($SIZE_B bytes)"
+            exit 1
+          fi
+          echo "version<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$VERSION" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "size_bytes=$SIZE_B" >> "$GITHUB_OUTPUT"
+          echo "ok=1" >> "$GITHUB_OUTPUT"
+          echo "sidecar ok: $VERSION ($SIZE_B bytes)"
+
+      - name: Stage externalBin (real or stub fallback)
+        id: stage
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.sidecar.outputs.ok }}" == "1" ]]; then
+            bash src-tauri/scripts/prepare-sidecar.sh
+            echo "mode=real" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=agent-lounge-linux" >> "$GITHUB_OUTPUT"
+          else
+            echo "WARN: real sidecar unavailable — packaging UI-only stub artifact"
+            bash src-tauri/scripts/prepare-sidecar.sh --stub
+            echo "mode=stub" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=agent-lounge-linux-ui-only" >> "$GITHUB_OUTPUT"
+            echo "version=stub" >> "$GITHUB_OUTPUT"
+            echo "size_bytes=$(wc -c < src-tauri/binaries/codebase-memory-mcp-x86_64-unknown-linux-gnu | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build Tauri Linux bundles (deb + AppImage)
-        # Pass --bundles to the Tauri CLI (not cargo). Avoid a second `--`.
-        # beforeBundleCommand re-runs prepare-sidecar; allow the CI stub when the
-        # real MCP binary is not present so .deb / .AppImage still package.
-        run: npm run tauri -- build --bundles deb,appimage
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.stage.outputs.mode }}" == "real" ]]; then
+            # beforeBundleCommand re-runs prepare-sidecar; bridge/ binary must be present (no stub).
+            npm run tauri -- build --bundles deb,appimage
+          else
+            LOUNGE_SIDECAR_ALLOW_STUB=1 npm run tauri -- build --bundles deb,appimage
+          fi
         env:
           CI: "true"
-          LOUNGE_SIDECAR_ALLOW_STUB: "1"
+
+      - name: Verify sidecar inside .deb
+        if: success()
+        run: |
+          set -euo pipefail
+          DEB="$(ls src-tauri/target/release/bundle/deb/*.deb | head -n1)"
+          echo "Inspecting $DEB"
+          dpkg -c "$DEB" | tee /tmp/deb-contents.txt | grep -E 'codebase-memory-mcp' || {
+            echo "FAIL: codebase-memory-mcp not listed in .deb"
+            exit 1
+          }
+          EXTRACT="$(mktemp -d)"
+          dpkg-deb -x "$DEB" "$EXTRACT"
+          SIDECAR="$(find "$EXTRACT" -type f -name 'codebase-memory-mcp' | head -n1)"
+          if [[ -z "$SIDECAR" ]]; then
+            echo "FAIL: codebase-memory-mcp not extracted from .deb"
+            exit 1
+          fi
+          SIZE_B="$(wc -c < "$SIDECAR" | tr -d '[:space:]')"
+          echo "bundled sidecar size=$SIZE_B path=$SIDECAR"
+          if [[ "${{ steps.stage.outputs.mode }}" == "real" ]]; then
+            if [[ "$SIZE_B" -lt 4096 ]]; then
+              echo "FAIL: bundled sidecar is stub-sized"
+              exit 1
+            fi
+            VERSION="$("$SIDECAR" --version 2>&1 | head -n1 || true)"
+            echo "bundled --version: $VERSION"
+            echo "SIDECAR_VERSION=$VERSION" >> "$GITHUB_ENV"
+            echo "SIDECAR_SIZE_BYTES=$SIZE_B" >> "$GITHUB_ENV"
+          else
+            echo "SIDECAR_VERSION=stub" >> "$GITHUB_ENV"
+            echo "SIDECAR_SIZE_BYTES=$SIZE_B" >> "$GITHUB_ENV"
+          fi
 
       - name: Collect artifact files
         if: always()
@@ -106,18 +192,27 @@ jobs:
           fi
           cp scripts/qa/linux/RUNTIME_DEPS.md "$DEST/RUNTIME_DEPS.md"
           cp scripts/qa/linux/README.md "$DEST/README.md"
+          MODE="${{ steps.stage.outputs.mode }}"
+          VER="${SIDECAR_VERSION:-${{ steps.sidecar.outputs.version }}}"
+          SZ="${SIDECAR_SIZE_BYTES:-${{ steps.sidecar.outputs.size_bytes }}}"
           {
             echo "commit=${GITHUB_SHA}"
             echo "ref=${GITHUB_REF}"
             echo "runner=${RUNNER_OS}"
+            echo "sidecar_mode=${MODE:-unknown}"
+            echo "sidecar_version=${VER:-unknown}"
+            echo "sidecar_size_bytes=${SZ:-unknown}"
+            echo "sidecar_triple=x86_64-unknown-linux-gnu"
+            echo "sidecar_release=${CBM_RELEASE}"
           } > "$DEST/BUILD_INFO.txt"
+          cat "$DEST/BUILD_INFO.txt"
           ls -lah "$DEST"
 
-      - name: Upload agent-lounge-linux
+      - name: Upload Linux artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agent-lounge-linux
+          name: ${{ steps.stage.outputs.artifact_name || 'agent-lounge-linux-ui-only' }}
           path: ${{ runner.temp }}/agent-lounge-linux/
           if-no-files-found: warn
           retention-days: 14

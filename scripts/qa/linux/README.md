@@ -22,7 +22,7 @@ Runtime packages and NATS/LMR/Ollama expectations: **[RUNTIME_DEPS.md](./RUNTIME
 ## Quick start
 
 1. Install runtime deps from `RUNTIME_DEPS.md`.
-2. Download `agent-lounge-linux` from Actions (or build locally: `npm ci && bash src-tauri/scripts/prepare-sidecar.sh --stub && npm run tauri -- build -- --bundles deb appimage`).
+2. Download `agent-lounge-linux` from Actions (real MCP sidecar). UI-only stub fallback is named `agent-lounge-linux-ui-only`. Local: stage a real binary with `bash src-tauri/scripts/prepare-sidecar.sh` (or `--stub` for compile-only) then `npm run tauri -- build --bundles deb,appimage`.
 3. Install `.deb` or run AppImage.
 4. Follow **[CHECKLIST.md](./CHECKLIST.md)**; fill **[QA_Report.md](./QA_Report.md)**.
 5. Attach screenshots under a dated folder if filing a UI PR.
