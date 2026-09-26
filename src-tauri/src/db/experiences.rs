@@ -652,9 +652,7 @@ fn map_record_from_parts(
         .ok()
         .flatten()
         .unwrap_or_else(|| crate::models::EXPERIENCE_STATUS_ACTIVE.into());
-    let reviewed = row
-        .get::<_, i64>(offset + 13)
-        .unwrap_or(0);
+    let reviewed = row.get::<_, i64>(offset + 13).unwrap_or(0);
     let use_count = row.get::<_, i64>(offset + 14).unwrap_or(0);
     let last_used_at = row.get::<_, Option<String>>(offset + 15).unwrap_or(None);
     let archived_at = row.get::<_, Option<String>>(offset + 16).unwrap_or(None);

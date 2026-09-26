@@ -47,7 +47,9 @@ pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
 
 /// Normalize raw path strings for cross-platform comparison (PATH-01).
 pub fn normalize_path_str(raw: &str) -> String {
-    normalize_path_hint(raw).to_string_lossy().replace('\\', "/")
+    normalize_path_hint(raw)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 /// True when `path` starts with a Windows drive letter (`C:` / `D:/` …).
@@ -472,12 +474,7 @@ fn unignore_symbol_blocking(conn: &Connection, symbol: &DeadSymbol) -> Result<()
           AND COALESCE(file_path, '') = COALESCE(?3, '')
           AND COALESCE(line, -1) = COALESCE(?4, -1)
         "#,
-        params![
-            symbol.name,
-            symbol.project_id,
-            symbol.file,
-            symbol.line,
-        ],
+        params![symbol.name, symbol.project_id, symbol.file, symbol.line,],
     )?;
     Ok(())
 }
@@ -674,13 +671,14 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
 
         for row in rows {
             let row = row?;
-            let project = by_project
-                .entry(row.project_id.clone())
-                .or_insert_with(|| SemanticProject {
-                    name: row.project_id.clone(),
-                    repo_path: row.repo_path.clone(),
-                    ..SemanticProject::default()
-                });
+            let project =
+                by_project
+                    .entry(row.project_id.clone())
+                    .or_insert_with(|| SemanticProject {
+                        name: row.project_id.clone(),
+                        repo_path: row.repo_path.clone(),
+                        ..SemanticProject::default()
+                    });
             if project.repo_path.is_empty() && !row.repo_path.is_empty() {
                 project.repo_path = row.repo_path.clone();
             }

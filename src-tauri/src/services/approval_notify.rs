@@ -47,13 +47,7 @@ pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPe
     } else {
         payload.summary.clone()
     };
-    if let Err(err) = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(&body)
-        .show()
-    {
+    if let Err(err) = app.notification().builder().title(title).body(&body).show() {
         log::debug!("OS notification skipped: {err}");
     }
 }

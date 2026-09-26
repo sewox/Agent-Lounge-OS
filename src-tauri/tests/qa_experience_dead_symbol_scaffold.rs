@@ -35,7 +35,11 @@ async fn experience_crud_commands_scaffolding() {
         )
         .await
         .expect("update");
-    let updated = store.get_record(id.clone()).await.expect("get").expect("row");
+    let updated = store
+        .get_record(id.clone())
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(updated.adr_record, "edited");
 
     store.pin_experience(id.clone(), true).await.expect("pin");
@@ -47,11 +51,18 @@ async fn experience_crud_commands_scaffolding() {
     assert_eq!(unreviewed, 0);
 
     store.archive_experience(id.clone()).await.expect("archive");
-    let archived = store.get_record(id.clone()).await.expect("get").expect("row");
+    let archived = store
+        .get_record(id.clone())
+        .await
+        .expect("get")
+        .expect("row");
     assert_eq!(archived.status, EXPERIENCE_STATUS_ARCHIVED);
     assert!(archived.is_pinned);
 
-    store.unarchive_experience(id.clone()).await.expect("unarchive");
+    store
+        .unarchive_experience(id.clone())
+        .await
+        .expect("unarchive");
     let active = store.get_record(id).await.expect("get").expect("row");
     assert_eq!(active.status, EXPERIENCE_STATUS_ACTIVE);
 }

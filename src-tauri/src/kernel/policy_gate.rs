@@ -66,10 +66,7 @@ impl PolicyGate {
 
 pub fn classify_destructive(command: &str) -> Option<DestructiveClass> {
     let lower = command.to_ascii_lowercase();
-    let collapsed: String = lower
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Git (K6) — check before generic patterns
     if matches_git_reset_hard(&collapsed) {
@@ -192,8 +189,7 @@ mod tests {
         let d = PolicyGate::evaluate(cmd, source).unwrap();
         match d {
             PolicyDecision::RequireConfirmation {
-                never_ask_bypasses,
-                ..
+                never_ask_bypasses, ..
             } => assert!(!never_ask_bypasses),
             other => panic!("expected RequireConfirmation for {cmd:?}, got {other:?}"),
         }
@@ -233,12 +229,7 @@ mod tests {
 
     #[test]
     fn safe_commands_allowed() {
-        for cmd in [
-            "ls -la",
-            "cargo test",
-            "git status",
-            "git push origin main",
-        ] {
+        for cmd in ["ls -la", "cargo test", "git status", "git push origin main"] {
             let d = PolicyGate::evaluate(cmd, ActionSource::Agent).unwrap();
             assert!(matches!(d, PolicyDecision::Allow), "{cmd}");
         }

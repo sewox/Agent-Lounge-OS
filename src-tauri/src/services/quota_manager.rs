@@ -242,11 +242,7 @@ pub fn merge_claude_subscription_rows(quotas: &mut Vec<ToolQuota>) {
 
 fn is_claude_subscription_row(row: &ToolQuota) -> bool {
     let id = row.id.to_ascii_lowercase();
-    let host = row
-        .host_id
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let host = row.host_id.as_deref().unwrap_or("").to_ascii_lowercase();
     let tool = row.tool.to_ascii_lowercase();
     id.contains("claude_desktop")
         || id.contains("claude_cli")

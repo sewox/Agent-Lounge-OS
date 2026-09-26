@@ -18,6 +18,4 @@ pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,
 };
 pub use experiences::{default_db_path, ExperienceStore};
-pub use project_index::{
-    accepts_cross_platform_path, normalize_path_str, path_has_windows_drive,
-};
+pub use project_index::{accepts_cross_platform_path, normalize_path_str, path_has_windows_drive};

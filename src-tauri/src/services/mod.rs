@@ -1,8 +1,8 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
-pub mod autodiscover;
 pub mod approval_notify;
 pub mod auto_archive;
+pub mod autodiscover;
 pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
@@ -26,8 +26,8 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use approval_notify::{
-    emit_approval_pending, emit_approval_resolved, ApprovalPendingPayload,
-    APPROVAL_PENDING_EVENT, APPROVAL_RESOLVED_EVENT,
+    emit_approval_pending, emit_approval_resolved, ApprovalPendingPayload, APPROVAL_PENDING_EVENT,
+    APPROVAL_RESOLVED_EVENT,
 };
 pub use auto_archive::spawn_auto_archive;
 pub use graph_ui::{

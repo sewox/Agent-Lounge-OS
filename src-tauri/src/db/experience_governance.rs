@@ -187,11 +187,7 @@ impl ExperienceStore {
     }
 
     /// Archive active, unpinned rows unused for `ttl_days` (based on last_used_at or created_at).
-    pub async fn auto_archive_stale(
-        &self,
-        ttl_days: u64,
-        clock: &dyn ArchiveClock,
-    ) -> Result<u64> {
+    pub async fn auto_archive_stale(&self, ttl_days: u64, clock: &dyn ArchiveClock) -> Result<u64> {
         let now = clock.now_rfc3339();
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -203,12 +199,9 @@ impl ExperienceStore {
     }
 }
 
-fn update_experience_blocking(
-    conn: &Connection,
-    id: &str,
-    patch: &ExperienceUpdate,
-) -> Result<()> {
-    let mut record = get_full_record(conn, id)?.ok_or_else(|| anyhow::anyhow!("not found: {id}"))?;
+fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpdate) -> Result<()> {
+    let mut record =
+        get_full_record(conn, id)?.ok_or_else(|| anyhow::anyhow!("not found: {id}"))?;
     if record.original_content.is_none() {
         record.original_content = Some(if record.adr_record.trim().is_empty() {
             record.solution_summary.clone()
@@ -612,13 +605,8 @@ mod tests {
     async fn auto_archive_respects_ttl_and_pin_with_fake_clock() {
         let store = ExperienceStore::memory().unwrap();
         let task = LoungeTask::new("a", "p", "old");
-        let mut old = ExperienceRecord::from_task(
-            &task,
-            "s",
-            "a",
-            ExperienceOutcome::Success,
-            vec![],
-        );
+        let mut old =
+            ExperienceRecord::from_task(&task, "s", "a", ExperienceOutcome::Success, vec![]);
         old.created_at = "2020-01-01T00:00:00+00:00".into();
         old.last_used_at = Some("2020-01-01T00:00:00+00:00".into());
         old.is_pinned = false;
@@ -666,10 +654,7 @@ mod tests {
         store.archive_experience(id.clone()).await.unwrap();
 
         let (hits, from_archive) = store
-            .search_experiences_with_archive_fallback(
-                "unique-archive-token-zz".into(),
-                Some(5),
-            )
+            .search_experiences_with_archive_fallback("unique-archive-token-zz".into(), Some(5))
             .await
             .unwrap();
         assert!(from_archive);
