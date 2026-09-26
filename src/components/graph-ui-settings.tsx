@@ -1,7 +1,7 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { isTauri } from "@/lib/lounge";
 
 const DEFAULT_PORT = 9749;
@@ -12,23 +12,31 @@ export function GraphUiSettings() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
     if (!isTauri()) {
       return;
     }
-    try {
-      const value = await invoke<number>("get_graph_ui_port");
-      setPort(value);
-      setDraft(String(value));
-    } catch {
-      setPort(DEFAULT_PORT);
-      setDraft(String(DEFAULT_PORT));
-    }
-  }, []);
-
-  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const value = await invoke<number>("get_graph_ui_port");
+        if (cancelled) {
+          return;
+        }
+        setPort(value);
+        setDraft(String(value));
+      } catch {
+        if (!cancelled) {
+          setPort(DEFAULT_PORT);
+          setDraft(String(DEFAULT_PORT));
+        }
+      }
+    };
     void load();
-  }, [load]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const save = async () => {
     if (!isTauri() || saving) {

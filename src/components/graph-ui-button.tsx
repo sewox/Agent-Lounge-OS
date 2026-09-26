@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLounge } from "@/components/lounge-provider";
 import { isTauri } from "@/lib/lounge";
 
@@ -42,29 +42,32 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
     return fromMap || null;
   }, [projectRoot, projects, selectedProject, semanticMap.projects]);
 
-  const refresh = useCallback(async () => {
-    if (!isTauri()) {
-      setStatus(null);
-      return;
-    }
-    try {
-      const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
-        projectRoot: resolvedRoot,
-      });
-      setStatus(next);
-    } catch {
-      setStatus(null);
-    }
-  }, [resolvedRoot]);
-
   useEffect(() => {
-    void refresh();
     if (!isTauri()) {
       return;
     }
-    const timer = window.setInterval(() => void refresh(), 8_000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
+          projectRoot: resolvedRoot,
+        });
+        if (!cancelled) {
+          setStatus(next);
+        }
+      } catch {
+        if (!cancelled) {
+          setStatus(null);
+        }
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 8_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [resolvedRoot]);
 
   useEffect(() => {
     if (!toast) {
@@ -105,10 +108,20 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
     setBusy(true);
     try {
       await invoke("enable_graph_ui_cmd", { projectRoot: resolvedRoot });
-      await refresh();
+      const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
+        projectRoot: resolvedRoot,
+      });
+      setStatus(next);
     } catch (err) {
       setToast(err instanceof Error ? err.message : String(err));
-      await refresh();
+      try {
+        const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
+          projectRoot: resolvedRoot,
+        });
+        setStatus(next);
+      } catch {
+        /* probe fail — toast yeterli */
+      }
     } finally {
       setBusy(false);
     }
