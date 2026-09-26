@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { openRoute, collectConsoleErrors } from "../helpers/nav";
 import { getIpcLog } from "../harness/tauri-mock";
-import { measureLayout } from "../helpers/layout";
+import { measureLayout, formatLayoutFailure } from "../helpers/layout";
 
 test.describe("SH — global shell", () => {
   test("SH-01 · 8 nav links navigate and highlight active", async ({ page }) => {
@@ -205,6 +205,39 @@ test.describe("X — cross-cutting", () => {
       test.fail(true, `Dead clickables: ${result.dead.join(", ")}`);
     }
     expect(result.dead, `scanned=${result.scanned} dead=${result.dead.join("|")}`).toEqual([]);
+  });
+
+  test("X-02 · lang=tr must not dotted-İ English labels (TİME) [expected-fail until PR-2]", async ({
+    page,
+  }, testInfo) => {
+    // Live G2: <html lang="tr"> + CSS uppercase → TİME, SEMANTİC, ROUTİNG, ACTİVE, …
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "lang=tr + uppercase produces dotted İ on English UI (live S2 G2)",
+    });
+    test.fail(true, "Dotted-İ English labels still rendered");
+    await openRoute(page, "/dashboard", "full");
+    const lang = await page.locator("html").getAttribute("lang");
+    const text = await page.locator("body").innerText();
+    // Acceptable: lang=en for English UI, or lang=tr with no Turkish dotted-İ on EN stems.
+    const dotted = /TİME|SEMANTİC|ROUTİNG|ACTİVE|CRİTİCAL|DECİSİON|FİLTER|LİMİT|KİND/i.test(text);
+    expect(dotted, `dotted-İ labels with lang=${lang}`).toBe(false);
+  });
+
+  test("SH-08b · + New Node must not overlap AL-OS CORE (L5 / live G1) [expected-fail until PR-2]", async ({
+    page,
+  }, testInfo) => {
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "+ New Node overlaps AL-OS CORE (live S2 G1)",
+    });
+    await openRoute(page, "/dashboard", "full");
+    const m = await measureLayout(page, "/dashboard");
+    if (m.l5_newNodeOverlap || m.l5_sidebarOverflow) {
+      test.fail(true, formatLayoutFailure(m));
+    }
+    expect(m.l5_newNodeOverlap).toBe(false);
+    expect(m.l5_sidebarOverflow).toBe(false);
   });
 
   test("X-01 · TR/EN i18n dictionary + Settings switch + persistence [expected-fail until PR-2]", async ({

@@ -86,10 +86,10 @@ expect(union.y1).toBeGreaterThanOrEqual(0.85 * vp.height);               // L2 y
 ```
 
 - **L1 genişlik:** Panellerin birleşik genişliği, sidebar hariç içerik alanının en az %85'i olmalı.
-- **L2 yükseklik:** Son panelin alt kenarı viewport yüksekliğinin en az %85'inde olmalı ya da sayfa dikey scroll ediyor olmalı. Panel ekranın ortasında bitmemeli.
+- **L2 yükseklik:** Son panelin alt kenarı viewport yüksekliğinin en az %85'inde olmalı ya da sayfa dikey scroll ediyor olmalı. Panel ekranın ortasında bitmemeli. Ayrıca **içerik doluluğu:** yüksekliği viewport’un ≥%50’si olan panellerde satır/içerik alt kenarı panel yüksekliğinin %45’inden azsa fail (stretched frame, boş iç — live Health/Fleet).
 - **L3 boş bölge:** İçerik alanı 8x8'lik bir ızgaraya bölünür. Hiçbir panelle kesişmeyen ve bitişik boş hücrelerden oluşan en büyük dikdörtgen, içerik alanının %15'ini geçmemeli. Bu, "sağ yarı boş" durumunu yakalar.
-- **L4 ortalanmış dar kutu:** Tek bir panel `max-width` ile ortalanmışsa ve genişliği içerik alanının %70'inden azsa fail.
-- **L5 taşma:** `document.documentElement.scrollWidth <= innerWidth`, yani yatay scroll yok. `+ New Node` benzeri elemanlar sidebar sınırından taşmamalı.
+- **L4 dar tek panel:** Tek panel genişliği içerik alanının %70'inden azsa fail — ortalanmış **veya** sola yaslı sabit genişlik (live G4: Health/Fleet/Telemetry ~30–63%).
+- **L5 taşma:** `document` / `main` / panel `scrollWidth <= innerWidth` (portrait `/quotas` yatay taşması). Sidebar çocukları taşmamalı; **+ New Node** "AL-OS CORE" ile örtüşmemeli (live G1).
 - **L6 dikey (1080x1920):** Paneller alt alta dizilmeli. Her panelin genişliği içerik alanının en az %95'i olmalı.
 - Bu ölçümler için panellere `data-qa="panel"`, sidebar'a `data-qa="sidebar"` eklenmesi PR-2'nin işi.
 - Otomatik ölçümün yanında **screenshot review** yapılır: her PR'da viewport × route ekran görüntüleri artifact olarak yüklenir, reviewer gözle kontrol eder.
@@ -127,7 +127,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | SH-05 | Model select | Tauri'de `set_kernel_model` çağrılır ve seçim yeniden açılışta korunur. Browser'da açıklayıcı disabled durum gösterilir | A, M |
 | SH-06 | Index Workspace | Klasör seçilir, `index_workspace` çağrılır. Dead listesi ve Map dolar, KPI gerçek sayıyı gösterir | M, B |
 | SH-07 | Daemon satırları | "Checking services…" sonrası ya "Running" ya da "Disconnected" (kırmızı) ve "Restart Service" gösterilir. Açıklamasız `—` kalmaz | A, M |
-| SH-08 | Taşma | Hiçbir header/sidebar elemanı kendi kabından taşmaz (L5) | A, B |
+| SH-08 | Taşma | Hiçbir header/sidebar elemanı kendi kabından taşmaz (L5); **+ New Node** "AL-OS CORE" ile örtüşmez (live G1) | A, B |
 | SH-LAYOUT | L1–L6 | D0–D3 | A, M, B |
 
 ### 5.2 Dashboard (`/dashboard`)
@@ -158,6 +158,8 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | EX-10 | MCP yüzeyi | MCP'de update/delete tool'u **yok**; ajan sadece create ve search yapabilir | S3 |
 | EX-11 | SemanticMap | Ağaç seçimi ve pager regresyonsuz çalışır. Uzun isimlerde tooltip var (V6) | A |
 | EX-12 | Graph UI butonu | Tauri'de Enable/Open görünür ve çalışır. Browser'da açıklayıcı bir placeholder gösterilir, header boş görünmez (V11) | M |
+| EX-14 | Toplam = bridge | Vault’taki nodes/edges/files toplamı memory bridge toplamıyla aynı; query `LIMIT` (ör. 400/800) toplam diye gösterilmez (live S2) | A, M, B |
+| EX-15 | Log sanitizasyonu | Experience Log ham markdown/prompt dump (`## … ### Tecrübeler`) ve iç TR hata (`memory_bridge hata:`) göstermez; özetler kullanıcıya uygun | A, B |
 | EX-LAYOUT | L1–L6 | **Sercan'ın eki:** "Semantic Map + Experiences" içerik alanının ≥%85'ini kaplar. Sağ yarı ve alt kısım boş kalmaz. Dikeyde paneller alt alta | A, M, B |
 
 ### 5.4 Dead Symbols (Vault + Health), P0
@@ -238,6 +240,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | FL-01 | Worker offline | Bir Python worker (Grok) kapatıldığında 45 sn içinde status "Offline" olur (heartbeat) | S3, M |
 | FL-02 | Worker online | Heartbeat gelince worker Dashboard'da ve Fleet'te anında görünür | S3 |
 | SR-01 | `/stream` | Dashboard EventStream kontrolleriyle aynı davranır (regresyon) | A |
+| SR-02 | Heartbeat filtresi | Varsayılan görünümde `lounge.*.heartbeat` satırları filtrelenir veya collapse edilir; boş `Decision: —` chip’i gerçek trafiği gömmez (live S2) | A, B |
 | TL-01 | `/telemetry` | Weekly/project filtreleri ve "Markdown indir" dosyası beklenen içerikle iner | A |
 | QT-01 | `/quotas` | Filtre sekmeleri ve satırlar çalışır | A |
 | OB-01 | Onboarding: seçimsiz | Hiç tool seçilmemişken "Sistemi Başlat / Finish" disabled | A, B |
@@ -250,6 +253,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 | ID | Test | Kabul kriteri | Etiket |
 |----|------|---------------|--------|
 | X-01 | Dil birliği | Tüm UI tek dilde (dil kararı Sercan'da, bkz. O1). Hardcoded karışık string yok (V7) | A |
+| X-02 | Dotted İ | `lang="tr"` + CSS `uppercase` İngilizce etiketleri "TİME"/"SEMANTİC" yapmamalı (live G2); EN UI’da `lang=en` veya uppercase güvenli | A, B |
 | X-02 | Min font | 12px'ten küçük font yok (`text-meta` = 0.75rem). `text-[9|10|10.5|11px]` grep'i 0 | S4 |
 | X-03 | Konsol hataları | Her route'ta uncaught error ya da React warning yok | A, B |
 | X-04 | Handler taraması | Görünür her tıklanabilir eleman bir etki üretir: navigasyon, IPC çağrısı, state değişimi ya da açıklamalı disabled | A, B |

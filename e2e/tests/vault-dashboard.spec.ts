@@ -182,10 +182,49 @@ test.describe("EX — vault experiences", () => {
     const m = await measureLayout(page, "/vault");
     const fail = formatLayoutFailure(m);
     testInfo.annotations.push({ type: "layout", description: fail });
-    if (!m.l1_pass || !m.l3_pass) {
+    if (!m.l1_pass || !m.l3_pass || m.l2_sparseInterior) {
       test.fail(true, fail);
     }
-    expect(m.l1_pass && m.l3_pass).toBe(true);
+    expect(m.l1_pass && m.l3_pass && !m.l2_sparseInterior).toBe(true);
+  });
+
+  test("EX-14 · Vault totals must match bridge counts (not query LIMIT as total) [expected-fail until PR-2/4]", async ({
+    page,
+  }, testInfo) => {
+    // Live S2: UI showed 400 nodes / 800 edges while experience text said nodes=2286 edges=7958.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "LIMIT-shaped vault totals disagree with bridge figures (live S2)",
+    });
+    test.fail(true, "Vault presents query LIMIT as graph total");
+    await openRoute(page, "/vault", "full");
+    const text = await page.locator("main").innerText();
+    const bridge = text.match(/nodes=(\d+)\s+edges=(\d+)/i);
+    expect(bridge, "bridge stats appear in experience content").toBeTruthy();
+    const bridgeNodes = Number(bridge![1]);
+    const bridgeEdges = Number(bridge![2]);
+    const treeNodes = Number((text.match(/(\d+)\s*AST nodes/i) || text.match(/(\d+)\s*nodes/i) || [])[1] || 0);
+    const treeEdges = Number((text.match(/(\d+)\s*edges/i) || [])[1] || 0);
+    // Tree/header totals must equal bridge-reported counts (not a query LIMIT).
+    expect(treeNodes, `tree nodes ${treeNodes} vs bridge ${bridgeNodes}`).toBe(bridgeNodes);
+    expect(treeEdges, `tree edges ${treeEdges} vs bridge ${bridgeEdges}`).toBe(bridgeEdges);
+  });
+
+  test("EX-15 · Experience Log hides raw markdown dumps and internal TR errors [expected-fail until PR-3]", async ({
+    page,
+  }, testInfo) => {
+    // Live S2: log showed "## Cross-Project Memory ### Tecrübeler" and memory_bridge hata strings.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "Experience Log renders raw prompt/markdown + internal TR errors (live S2)",
+    });
+    test.fail(true, "Experience Log not sanitized for end users");
+    await openRoute(page, "/vault", "full");
+    const text = await page.locator("main").innerText();
+    expect(text).not.toMatch(/##\s*Cross-Project Memory/i);
+    expect(text).not.toMatch(/###\s*Tecrübeler/i);
+    expect(text).not.toMatch(/memory_bridge hata:/i);
+    expect(text).not.toMatch(/repo_path çözümlenemedi/i);
   });
 });
 

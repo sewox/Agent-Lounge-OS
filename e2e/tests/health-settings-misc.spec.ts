@@ -304,6 +304,24 @@ test.describe("AP / CP / misc", () => {
     expect(/Event Stream|NATS|Probe|all|task|exp/i.test(text)).toBeTruthy();
   });
 
+  test("SR-02 · Heartbeats filtered or collapsed by default (no empty Decision chips) [expected-fail until PR-2]", async ({
+    page,
+  }, testInfo) => {
+    // Live S2: stream was 100% lounge.*.heartbeat rows, each with Decision: —.
+    testInfo.annotations.push({
+      type: "expected-fail",
+      description: "Heartbeats not filtered/collapsed; empty Decision chips (live S2)",
+    });
+    test.fail(true, "Default stream still floods heartbeats");
+    await openRoute(page, "/stream", "full");
+    const text = await page.locator("main").innerText();
+    const hb = (text.match(/lounge\.(bus|workers)\.heartbeat/gi) || []).length;
+    const real = (text.match(/lounge\.task\.(requested|completed)|lounge\.experience/gi) || []).length;
+    expect(hb, "heartbeats visible in default view").toBe(0);
+    expect(real, "real traffic still visible").toBeGreaterThan(0);
+    expect(text).not.toMatch(/Decision:\s*[—\-–]/i);
+  });
+
   test("TL-01 · Telemetry filters + download", async ({ page }) => {
     await openRoute(page, "/telemetry", "full");
     const dl = page.getByRole("button", { name: /Markdown|indir|Download/i }).first();

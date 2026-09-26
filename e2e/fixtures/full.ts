@@ -105,8 +105,10 @@ const experiences: FixtureDataset["experiences"] = Array.from({ length: 16 }, (_
   project_id: ["Agent-Lounge-OS", "EchoMind", "codebase-memory-mcp"][i % 3],
   adr_summary:
     i === 0
-      ? "Indexed dispatcher.rs + NATS subjects. Long ADR text to exercise line-clamp: the full decision record should be readable in a detail drawer without truncation, including agent, tags, topic, related task, outcome, status, created and updated timestamps."
-      : `Experience ADR #${i + 1}: solved routing edge case and documented fallback path for local LMR.`,
+      ? "## Cross-Project Memory ### Tecrübeler - [e2e-verify|Agent-Lounge-OS] (score=0.33)\nmemory_bridge hata: repo_path çözümlenemedi: agent-lounge-os\nnodes=2286 edges=7958 dead=0\nIndexed dispatcher.rs + NATS subjects."
+      : i === 1
+        ? "Raw prompt dump should not appear in the Experience Log UI:\n```\n## Internal\n### Tecrübeler\n```"
+        : `Experience ADR #${i + 1}: solved routing edge case and documented fallback path for local LMR.`,
   outcome: (["success", "partial", "failure"] as const)[i % 3],
   related_task_id: i % 4 === 0 ? `task-${i}` : null,
   tags: i % 2 === 0 ? ["nats", "routing"] : ["index", "vault"],
@@ -232,7 +234,14 @@ export const FULL_FIXTURE: FixtureDataset = {
     ],
   },
   projects: [
-    { name: "Agent-Lounge-OS", root_path: "/Users/sercan/dev/Agent-Lounge-OS", nodes: 4810, edges: 42, files: 9421 },
+    // Live S2 saw LIMIT-shaped 400/800 while bridge text said 2286/7958 — fixture mirrors that mismatch for EX-14.
+    {
+      name: "Agent-Lounge-OS",
+      root_path: "/Users/macbookpro/Developer/Agent-Lounge-OS",
+      nodes: 400,
+      edges: 800,
+      files: 66,
+    },
     { name: "EchoMind", root_path: "/Users/sercan/dev/EchoMind", nodes: 1940, edges: 118, files: 4120 },
     { name: "codebase-memory-mcp", root_path: "/Users/sercan/dev/codebase-memory-mcp", nodes: 2210, edges: 87, files: 4861 },
   ],
@@ -244,6 +253,16 @@ export const FULL_FIXTURE: FixtureDataset = {
     quotas,
   },
   events: [
+    // Live S2: stream was 100% heartbeats with empty Decision chips — SR-02 expects these filtered/collapsed.
+    ...Array.from({ length: 20 }, (_, i) => ({
+      id: `hb-${i + 1}`,
+      time: `14:08:${String(i).padStart(2, "0")}.000`,
+      subject: i % 2 === 0 ? "lounge.bus.heartbeat" : "lounge.workers.heartbeat",
+      from: i % 2 === 0 ? "nats-hub" : "grok-tester",
+      to: "lounge-kernel",
+      payload: "0.1kb",
+      state: "ok" as const,
+    })),
     {
       id: "1",
       time: "14:09:22.001",
@@ -251,7 +270,7 @@ export const FULL_FIXTURE: FixtureDataset = {
       from: "dispatcher",
       to: "grok",
       payload: "1.2kb",
-      state: "ok",
+      state: "ok" as const,
     },
     {
       id: "2",
@@ -260,7 +279,7 @@ export const FULL_FIXTURE: FixtureDataset = {
       from: "vault",
       to: "storage",
       payload: "3.1kb",
-      state: "ok",
+      state: "ok" as const,
     },
     {
       id: "3",
@@ -269,7 +288,7 @@ export const FULL_FIXTURE: FixtureDataset = {
       from: "dispatcher",
       to: "nats",
       payload: "0.8kb",
-      state: "ok",
+      state: "ok" as const,
     },
   ],
   serviceReport: {
