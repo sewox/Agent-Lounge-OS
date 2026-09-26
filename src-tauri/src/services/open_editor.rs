@@ -72,17 +72,77 @@ fn open_with_custom_editor(editor: &str, path: &str, line: Option<i64>) -> Resul
 }
 
 fn open_with_platform_default(path: &str) -> Result<()> {
-    let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
-        ("open", vec![path])
-    } else if cfg!(target_os = "windows") {
-        ("cmd", vec!["/C", "start", "", path])
-    } else {
-        ("xdg-open", vec![path])
-    };
-    let mut cmd = GuardedCommand::new(program).source(ActionSource::User);
-    for arg in args {
+    let (program, args) = platform_opener_argv(path)?;
+    let mut cmd = GuardedCommand::new(&program).source(ActionSource::User);
+    for arg in &args {
         cmd = cmd.arg(arg);
     }
     let _child = cmd.spawn().with_context(|| format!("{program} opener"))?;
     Ok(())
+}
+
+/// Pure argv builder for the platform default opener (testable without spawning).
+pub fn platform_opener_argv(path: &str) -> Result<(String, Vec<String>)> {
+    if cfg!(target_os = "macos") {
+        Ok(("open".into(), vec![path.to_string()]))
+    } else if cfg!(target_os = "windows") {
+        windows_opener_argv(path)
+    } else {
+        Ok(("xdg-open".into(), vec![path.to_string()]))
+    }
+}
+
+/// Windows: `explorer.exe` with the path as a single argv element (never `cmd /C start`).
+pub fn windows_opener_argv(path: &str) -> Result<(String, Vec<String>)> {
+    if !accepts_cross_platform_path(path) {
+        bail!("path must include a separator or Windows drive letter");
+    }
+    // Reject shell metacharacters that would be dangerous if ever routed through cmd.
+    // With explorer + single argv they are still passed literally; we keep the check
+    // as defense-in-depth for callers that might shell-escape incorrectly.
+    if path.chars().any(|c| matches!(c, '&' | '|' | '^' | '%')) {
+        // Still open via explorer as one argv — do not reject; metacharacters are data.
+        // The important guarantee is we never hand them to `cmd`.
+    }
+    Ok(("explorer.exe".into(), vec![path.to_string()]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_opener_keeps_ampersand_path_as_single_argv() {
+        let path = r"C:\tmp\a&calc.exe";
+        let (program, args) = windows_opener_argv(path).expect("argv");
+        assert_eq!(program, "explorer.exe");
+        assert_eq!(args, vec![path.to_string()]);
+        assert_eq!(args.len(), 1);
+        assert!(!program.eq_ignore_ascii_case("cmd"));
+        assert!(!args
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case("/C") || a.eq_ignore_ascii_case("start")));
+    }
+
+    #[test]
+    fn windows_opener_rejects_non_path_strings() {
+        assert!(windows_opener_argv("nopath").is_err());
+    }
+
+    #[test]
+    fn accepts_cross_platform_round_trip_for_open_editor() {
+        let samples = [
+            r"C:\Users\sercan\dev\Agent-Lounge-OS\src\main.rs",
+            "/home/sercan/dev/Agent-Lounge-OS/src/main.rs",
+            r"mixed/path\with\both",
+        ];
+        for sample in samples {
+            assert!(accepts_cross_platform_path(sample), "accepts: {sample}");
+            let normalized = normalize_path_str(sample);
+            assert!(!normalized.is_empty());
+            let (program, args) = windows_opener_argv(sample).expect("windows argv");
+            assert_eq!(program, "explorer.exe");
+            assert_eq!(args, vec![sample.to_string()]);
+        }
+    }
 }

@@ -126,13 +126,23 @@ impl ExperienceStore {
     }
 
     pub async fn latest(&self, limit: usize) -> Result<Vec<LoungeExperience>> {
+        self.list_experiences(limit, false).await
+    }
+
+    /// List experiences ordered by `created_at` DESC.
+    /// When `include_archived` is false (default), only `active` rows are returned.
+    pub async fn list_experiences(
+        &self,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<LoungeExperience>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            latest_blocking(&conn, limit)
+            latest_blocking(&conn, limit, include_archived)
         })
         .await
-        .context("experience latest join")?
+        .context("experience list join")?
     }
 
     /// Command Palette / vault: lexical+vektör benzerliği, boşsa substring fallback.
@@ -456,9 +466,55 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
         }
     });
 
-    conn.execute(
-        r#"
-            INSERT OR REPLACE INTO experiences (
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM experiences WHERE id = ?1",
+            params![record.id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+
+    if exists {
+        // Content upsert: never REPLACE. Preserve governance flags unless the
+        // caller explicitly carries non-default pin/review/archive state.
+        conn.execute(
+            r#"
+            UPDATE experiences SET
+                project_id = ?1,
+                agent_id = ?2,
+                topic = ?3,
+                solution_summary = ?4,
+                adr_record = ?5,
+                outcome = ?6,
+                related_task_id = ?7,
+                tags_json = ?8,
+                embedding = ?9,
+                payload_json = ?10,
+                updated_at = ?11,
+                original_content = COALESCE(original_content, ?12)
+            WHERE id = ?13
+            "#,
+            params![
+                record.project_id,
+                record.agent_id,
+                record.topic,
+                record.solution_summary,
+                record.adr_record,
+                outcome,
+                record.related_task_id,
+                tags,
+                embedding,
+                payload,
+                updated_at,
+                original,
+                record.id,
+            ],
+        )?;
+    } else {
+        conn.execute(
+            r#"
+            INSERT INTO experiences (
                 id, project_id, agent_id, topic, solution_summary, adr_record,
                 outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                 status, reviewed, use_count, last_used_at, archived_at, is_pinned,
@@ -466,55 +522,63 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
                       ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
-        params![
-            record.id,
-            record.project_id,
-            record.agent_id,
-            record.topic,
-            record.solution_summary,
-            record.adr_record,
-            outcome,
-            record.related_task_id,
-            tags,
-            record.created_at,
-            embedding,
-            payload,
-            status,
-            if record.reviewed { 1 } else { 0 },
-            record.use_count as i64,
-            record.last_used_at,
-            record.archived_at,
-            if record.is_pinned { 1 } else { 0 },
-            updated_at,
-            original,
-        ],
-    )?;
+            params![
+                record.id,
+                record.project_id,
+                record.agent_id,
+                record.topic,
+                record.solution_summary,
+                record.adr_record,
+                outcome,
+                record.related_task_id,
+                tags,
+                record.created_at,
+                embedding,
+                payload,
+                status,
+                if record.reviewed { 1 } else { 0 },
+                record.use_count as i64,
+                record.last_used_at,
+                record.archived_at,
+                if record.is_pinned { 1 } else { 0 },
+                updated_at,
+                original,
+            ],
+        )?;
+    }
     Ok(())
 }
 
+const RECORD_SELECT_COLS: &str = r#"
+    id, project_id, agent_id, topic, solution_summary, adr_record,
+    outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+    status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+    updated_at, original_content
+"#;
+
 fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceRecord>> {
-    let row = conn
-        .query_row(
-            r#"
-            SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
-                   outcome, related_task_id, tags_json, created_at, embedding, payload_json,
-                   status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                   updated_at, original_content
-            FROM experiences WHERE id = ?1
-            "#,
-            params![id],
-            map_record,
-        )
-        .optional()?;
+    let sql = format!("SELECT {RECORD_SELECT_COLS} FROM experiences WHERE id = ?1");
+    let row = conn.query_row(&sql, params![id], map_record).optional()?;
     Ok(row)
 }
 
-fn latest_blocking(conn: &Connection, limit: usize) -> Result<Vec<LoungeExperience>> {
-    let mut stmt = conn.prepare(
-        "SELECT payload_json, id, project_id, agent_id, topic, solution_summary, adr_record,
-                outcome, related_task_id, tags_json, created_at, embedding
-         FROM experiences ORDER BY created_at DESC LIMIT ?1",
-    )?;
+fn latest_blocking(
+    conn: &Connection,
+    limit: usize,
+    include_archived: bool,
+) -> Result<Vec<LoungeExperience>> {
+    let status_clause = if include_archived {
+        ""
+    } else {
+        "WHERE COALESCE(status, 'active') = 'active'"
+    };
+    let sql = format!(
+        "SELECT payload_json, {RECORD_SELECT_COLS}
+         FROM experiences
+         {status_clause}
+         ORDER BY created_at DESC LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![limit as i64], |row| {
         Ok((row.get::<_, String>(0)?, map_record_from_parts(row, 1)?))
     })?;
@@ -580,7 +644,9 @@ fn score_rows(
     let sql = if project_id.is_some() {
         r#"
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record, embedding
-            FROM experiences WHERE project_id = ?1
+            FROM experiences
+            WHERE project_id = ?1
+              AND COALESCE(status, 'active') = 'active'
             "#
     } else {
         // Cross-Project Memory: başarılı tecrübe + ADR satırları (outcome=success).
@@ -588,6 +654,7 @@ fn score_rows(
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record, embedding
             FROM experiences
             WHERE lower(outcome) = 'success'
+              AND COALESCE(status, 'active') = 'active'
             "#
     };
     let mut stmt = conn.prepare(sql)?;
@@ -645,20 +712,16 @@ fn map_record_from_parts(
     let outcome: String = row.get(offset + 6)?;
     let tags_json: String = row.get(offset + 8)?;
     let blob: Option<Vec<u8>> = row.get(offset + 10)?;
-    // Governance columns are present on full SELECTs (offset 0 get_record).
-    // latest_blocking still uses the shorter column list — fall back via try_get.
     let status = row
-        .get::<_, Option<String>>(offset + 12)
-        .ok()
-        .flatten()
+        .get::<_, Option<String>>(offset + 12)?
         .unwrap_or_else(|| crate::models::EXPERIENCE_STATUS_ACTIVE.into());
-    let reviewed = row.get::<_, i64>(offset + 13).unwrap_or(0);
-    let use_count = row.get::<_, i64>(offset + 14).unwrap_or(0);
-    let last_used_at = row.get::<_, Option<String>>(offset + 15).unwrap_or(None);
-    let archived_at = row.get::<_, Option<String>>(offset + 16).unwrap_or(None);
-    let is_pinned = row.get::<_, i64>(offset + 17).unwrap_or(0);
-    let updated_at = row.get::<_, Option<String>>(offset + 18).unwrap_or(None);
-    let original_content = row.get::<_, Option<String>>(offset + 19).unwrap_or(None);
+    let reviewed = row.get::<_, i64>(offset + 13)?;
+    let use_count = row.get::<_, i64>(offset + 14)?;
+    let last_used_at = row.get::<_, Option<String>>(offset + 15)?;
+    let archived_at = row.get::<_, Option<String>>(offset + 16)?;
+    let is_pinned = row.get::<_, i64>(offset + 17)?;
+    let updated_at = row.get::<_, Option<String>>(offset + 18)?;
+    let original_content = row.get::<_, Option<String>>(offset + 19)?;
     Ok(ExperienceRecord {
         id: row.get(offset)?,
         project_id: row.get(offset + 1)?,
@@ -899,5 +962,120 @@ mod tests {
             crate::models::QuotaExhaustedAction::Stop
         );
         assert!(loaded.require_user_approval);
+    }
+
+    #[tokio::test]
+    async fn archive_filter_excludes_archived_from_default_paths() {
+        let store = ExperienceStore::memory().unwrap();
+        let topic = "unique-archive-filter-topic-zz";
+        let active = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-af", topic),
+            "active solution about archive filter",
+            "active adr archive filter",
+            ExperienceOutcome::Success,
+            vec!["archive-filter".into()],
+        );
+        let active_id = active.id.clone();
+        store.insert_record(active.clone()).await.unwrap();
+
+        let mut archived = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-af", topic),
+            "archived solution about archive filter",
+            "archived adr archive filter",
+            ExperienceOutcome::Success,
+            vec!["archive-filter".into()],
+        );
+        let archived_id = archived.id.clone();
+        archived.status = crate::models::EXPERIENCE_STATUS_ARCHIVED.into();
+        store.insert_record(archived).await.unwrap();
+        store.archive_experience(archived_id.clone()).await.unwrap();
+
+        let similar = store
+            .similar("proj-af".into(), topic.into(), Some(10))
+            .await
+            .unwrap();
+        assert!(
+            similar.iter().all(|h| h.id == active_id),
+            "similar must only return active: {:?}",
+            similar.iter().map(|h| &h.id).collect::<Vec<_>>()
+        );
+        assert!(!similar.iter().any(|h| h.id == archived_id));
+
+        let searched = store
+            .search_experiences("archive filter".into(), Some(20))
+            .await
+            .unwrap();
+        assert!(searched.iter().any(|r| r.id == active_id));
+        assert!(!searched.iter().any(|r| r.id == archived_id));
+
+        let listed = store.list_experiences(50, false).await.unwrap();
+        assert!(listed.iter().any(|r| r.id == active_id));
+        assert!(!listed.iter().any(|r| r.id == archived_id));
+
+        let with_archived = store.list_experiences(50, true).await.unwrap();
+        assert!(with_archived.iter().any(|r| r.id == active_id));
+        assert!(with_archived.iter().any(|r| r.id == archived_id));
+
+        let ctx = store
+            .fast_retrieve(crate::db::FastRetrieveQuery {
+                project_id: "proj-af".into(),
+                text: topic.into(),
+                embedding: None,
+                knowledge_hit: 0.55,
+                ast_refs: Vec::new(),
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        assert!(
+            ctx.experiences.iter().all(|h| h.id != archived_id),
+            "fast_retrieve must exclude archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_save_preserves_governance_flags() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut record = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-gov", "governance topic"),
+            "solution",
+            "adr body",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        let id = record.id.clone();
+        store.insert_record(record.clone()).await.unwrap();
+        store.pin_experience(id.clone(), true).await.unwrap();
+        store.mark_experience_reviewed(id.clone()).await.unwrap();
+        store.archive_experience(id.clone()).await.unwrap();
+
+        let before = store.get_record(id.clone()).await.unwrap().unwrap();
+        assert!(before.is_pinned);
+        assert!(before.reviewed);
+        assert_eq!(before.status, crate::models::EXPERIENCE_STATUS_ARCHIVED);
+
+        // Full SELECT via list(include_archived) path must surface the row.
+        let listed = store.list_experiences(20, true).await.unwrap();
+        assert!(listed.iter().any(|r| r.id == id));
+        let listed_active_only = store.list_experiences(20, false).await.unwrap();
+        assert!(!listed_active_only.iter().any(|r| r.id == id));
+
+        // Re-save content with default governance must not clobber flags.
+        record.solution_summary = "updated solution".into();
+        record.adr_record = "updated adr".into();
+        record.status = crate::models::EXPERIENCE_STATUS_ACTIVE.into();
+        record.is_pinned = false;
+        record.reviewed = false;
+        store.insert_record(record).await.unwrap();
+
+        let after = store.get_record(id).await.unwrap().unwrap();
+        assert!(after.is_pinned, "pin must survive re-save");
+        assert!(after.reviewed, "reviewed must survive re-save");
+        assert_eq!(
+            after.status,
+            crate::models::EXPERIENCE_STATUS_ARCHIVED,
+            "archive status must survive re-save"
+        );
+        assert_eq!(after.solution_summary, "updated solution");
     }
 }

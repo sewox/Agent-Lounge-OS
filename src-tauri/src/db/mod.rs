@@ -12,7 +12,7 @@ mod vector_memory;
 pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experience_governance::{
     ArchiveClock, ExperienceUpdate, FakeClock, SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS,
-    SETTING_EXPERIENCE_TTL_DAYS,
+    MIGRATION_PLACEHOLDER_CLEANUP_V1, SETTING_EXPERIENCE_TTL_DAYS,
 };
 pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,

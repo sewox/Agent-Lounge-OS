@@ -332,10 +332,11 @@ fn palette_shortcut_label_contract() {
     );
 }
 
-/// Migration: legacy draft/approved/deprecated → active preserved.
+/// Migration: legacy draft/approved → active; deprecated → archived.
 fn migrate_experience_status(status: &str) -> &'static str {
     match status {
-        "draft" | "approved" | "deprecated" | "active" => "active",
+        "deprecated" => "archived",
+        "draft" | "approved" | "active" => "active",
         _ => "active",
     }
 }
@@ -344,6 +345,6 @@ fn migrate_experience_status(status: &str) -> &'static str {
 fn experience_status_migration_contract() {
     assert_eq!(migrate_experience_status("draft"), "active");
     assert_eq!(migrate_experience_status("approved"), "active");
-    assert_eq!(migrate_experience_status("deprecated"), "active");
+    assert_eq!(migrate_experience_status("deprecated"), "archived");
     assert_eq!(migrate_experience_status("unknown-legacy"), "active");
 }

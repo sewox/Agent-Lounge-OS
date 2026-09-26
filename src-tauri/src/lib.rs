@@ -643,9 +643,10 @@ async fn pull_lmr_model(
 async fn list_experiences(
     state: tauri::State<'_, ExperienceStore>,
     limit: Option<usize>,
+    include_archived: Option<bool>,
 ) -> Result<Vec<LoungeExperience>, String> {
     state
-        .latest(limit.unwrap_or(20))
+        .list_experiences(limit.unwrap_or(20), include_archived.unwrap_or(false))
         .await
         .map_err(|err| err.to_string())
 }

@@ -105,7 +105,7 @@ const experiences: FixtureDataset["experiences"] = Array.from({ length: 16 }, (_
   project_id: ["Agent-Lounge-OS", "EchoMind", "codebase-memory-mcp"][i % 3],
   adr_summary:
     i === 0
-      ? "## Cross-Project Memory ### Tecrübeler - [e2e-verify|Agent-Lounge-OS] (score=0.33)\nmemory_bridge hata: repo_path çözümlenemedi: agent-lounge-os\nnodes=2286 edges=7958 dead=0\nIndexed dispatcher.rs + NATS subjects.\nPaths: C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src\\main.rs · /home/sercan/dev/Agent-Lounge-OS/src/main.rs · mixed/path\\with\\both"
+      ? "## Cross-Project Memory ### Tecrübeler - [e2e-verify|Agent-Lounge-OS] (score=0.33)\nmemory_bridge hata: repo_path çözümlenemedi: agent-lounge-os\nnodes=2286 edges=7958 dead=0\nIndexed dispatcher.rs + NATS subjects."
       : i === 1
         ? "Raw prompt dump should not appear in the Experience Log UI:\n```\n## Internal\n### Tecrübeler\n```"
         : `Experience ADR #${i + 1}: solved routing edge case and documented fallback path for local LMR.`,
@@ -170,8 +170,8 @@ export const FULL_FIXTURE: FixtureDataset = {
         name: "Agent-Lounge-OS",
         repo_path: "/Users/sercan/dev/Agent-Lounge-OS",
         files: 9421,
-        node_count: 2286,
-        edge_count: 7958,
+        node_count: 4810,
+        edge_count: 42,
         nodes: [
           {
             id: "n1",
@@ -198,7 +198,7 @@ export const FULL_FIXTURE: FixtureDataset = {
         repo_path: "/Users/sercan/dev/EchoMind",
         files: 4120,
         node_count: 1940,
-        edge_count: 0,
+        edge_count: 118,
         nodes: [
           {
             id: "n3",
@@ -217,7 +217,7 @@ export const FULL_FIXTURE: FixtureDataset = {
         repo_path: "/Users/sercan/dev/codebase-memory-mcp",
         files: 4861,
         node_count: 2210,
-        edge_count: 0,
+        edge_count: 87,
         nodes: [
           {
             id: "n4",
@@ -234,16 +234,16 @@ export const FULL_FIXTURE: FixtureDataset = {
     ],
   },
   projects: [
-    // EX-14: real bridge totals (not LIMIT-shaped 400/800).
+    // Live S2 saw LIMIT-shaped 400/800 while bridge text said 2286/7958 — fixture mirrors that mismatch for EX-14.
     {
       name: "Agent-Lounge-OS",
       root_path: "/Users/macbookpro/Developer/Agent-Lounge-OS",
-      nodes: 2286,
-      edges: 7958,
+      nodes: 400,
+      edges: 800,
       files: 66,
     },
-    { name: "EchoMind", root_path: "/Users/sercan/dev/EchoMind", nodes: 1940, edges: 0, files: 4120 },
-    { name: "codebase-memory-mcp", root_path: "/Users/sercan/dev/codebase-memory-mcp", nodes: 2210, edges: 0, files: 4861 },
+    { name: "EchoMind", root_path: "/Users/sercan/dev/EchoMind", nodes: 1940, edges: 118, files: 4120 },
+    { name: "codebase-memory-mcp", root_path: "/Users/sercan/dev/codebase-memory-mcp", nodes: 2210, edges: 87, files: 4861 },
   ],
   quotas,
   quotaState: {

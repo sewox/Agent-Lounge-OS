@@ -38,9 +38,58 @@ pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
               file_path TEXT,
               line INTEGER,
               ignored_at TEXT NOT NULL,
-              UNIQUE(project_id, name, file_path, line)
+              UNIQUE(project_id, name, file_path, kind)
+            );
+            CREATE TABLE IF NOT EXISTS project_flags (
+              project_id TEXT PRIMARY KEY,
+              hidden INTEGER NOT NULL DEFAULT 0
             );
             "#,
+    )?;
+    migrate_ignored_symbols_unique(conn)?;
+    let _ = crate::db::experience_governance::ensure_project_flags_table(conn);
+    Ok(())
+}
+
+/// Rebuild ignored_symbols if the UNIQUE still includes `line` (pre-F12).
+fn migrate_ignored_symbols_unique(conn: &Connection) -> Result<()> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ignored_symbols'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(create_sql) = sql else {
+        return Ok(());
+    };
+    let lower = create_sql.to_ascii_lowercase();
+    // Old: UNIQUE(project_id, name, file_path, line)
+    // New: UNIQUE(project_id, name, file_path, kind)
+    let has_line_unique = lower.contains("unique(project_id, name, file_path, line)");
+    let has_kind_unique = lower.contains("unique(project_id, name, file_path, kind)");
+    if !has_line_unique || has_kind_unique {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE ignored_symbols_new (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          name TEXT NOT NULL,
+          kind TEXT,
+          file_path TEXT,
+          line INTEGER,
+          ignored_at TEXT NOT NULL,
+          UNIQUE(project_id, name, file_path, kind)
+        );
+        INSERT OR IGNORE INTO ignored_symbols_new
+          (id, project_id, name, kind, file_path, line, ignored_at)
+        SELECT id, project_id, name, kind, file_path, line, ignored_at
+        FROM ignored_symbols;
+        DROP TABLE ignored_symbols;
+        ALTER TABLE ignored_symbols_new RENAME TO ignored_symbols;
+        "#,
     )?;
     Ok(())
 }
@@ -68,14 +117,6 @@ pub fn accepts_cross_platform_path(path: &str) -> bool {
         return false;
     }
     trimmed.contains('/') || trimmed.contains('\\') || path_has_windows_drive(trimmed)
-}
-
-const PLACEHOLDER_PROJECTS: &[&str] = &["backend-legacy", "frontend-new"];
-
-fn is_placeholder_project(name: &str) -> bool {
-    PLACEHOLDER_PROJECTS
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(name.trim()))
 }
 
 impl ExperienceStore {
@@ -409,7 +450,10 @@ fn list_dead_symbols_blocking(
             WHERE i.name = project_index.name
               AND COALESCE(i.project_id, '') = COALESCE(project_index.project_id, '')
               AND COALESCE(i.file_path, '') = COALESCE(project_index.file_path, '')
-              AND COALESCE(i.line, -1) = COALESCE(project_index.line, -1)
+              AND COALESCE(i.kind, '') = CASE
+                    WHEN project_index.kind = 'broken' THEN 'broken'
+                    ELSE 'unused'
+                  END
           )
         ORDER BY kind, name
         "#;
@@ -466,15 +510,20 @@ fn ignore_symbol_blocking(conn: &Connection, symbol: &DeadSymbol) -> Result<()> 
 }
 
 fn unignore_symbol_blocking(conn: &Connection, symbol: &DeadSymbol) -> Result<()> {
+    let kind = if symbol.kind.trim().is_empty() {
+        "unused"
+    } else {
+        symbol.kind.as_str()
+    };
     conn.execute(
         r#"
         DELETE FROM ignored_symbols
         WHERE name = ?1
           AND COALESCE(project_id, '') = COALESCE(?2, '')
           AND COALESCE(file_path, '') = COALESCE(?3, '')
-          AND COALESCE(line, -1) = COALESCE(?4, -1)
+          AND COALESCE(kind, '') = COALESCE(?4, '')
         "#,
-        params![symbol.name, symbol.project_id, symbol.file, symbol.line,],
+        params![symbol.name, symbol.project_id, symbol.file, kind],
     )?;
     Ok(())
 }
@@ -593,7 +642,7 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     let mut projects = Vec::new();
     for row in rows {
         let project = row?;
-        if is_placeholder_project(&project.name) {
+        if crate::db::experience_governance::is_project_hidden(conn, &project.name)? {
             continue;
         }
         projects.push(project);
@@ -727,7 +776,10 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
 
     let projects = by_project
         .into_values()
-        .filter(|project| !is_placeholder_project(&project.name))
+        .filter(|project| {
+            !crate::db::experience_governance::is_project_hidden(conn, &project.name)
+                .unwrap_or(false)
+        })
         .map(|mut project| {
             // Prefer DB totals so later LIMIT truncations cannot rewrite counts.
             let node_count: i64 = conn
@@ -966,5 +1018,133 @@ mod tests {
         let normalized = normalize_path_str(r"C:\Users\sercan\dev\..\Agent-Lounge-OS\src\main.rs");
         assert!(normalized.contains("Agent-Lounge-OS"));
         assert!(!normalized.contains('\\'));
+    }
+
+    #[tokio::test]
+    async fn count_star_totals_survive_truncated_node_lists() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = sample_graph();
+        // Simulate LIMIT-shaped payload: only 1 of 2 nodes in the list, but counts are real.
+        graph.node_count = 2286;
+        graph.edge_count = 7958;
+        graph.nodes.truncate(1);
+        let snapshot = store.save_project_index(graph).await.expect("save");
+        // Returned snapshot may carry declared bridge totals…
+        assert_eq!(snapshot.nodes, 2286);
+        assert_eq!(snapshot.edges, 7958);
+        // …while COUNT(*) reload reflects actual stored rows (not the LIMIT list length alone).
+        let listed = store
+            .project_index_snapshot(Some("lounge".into()))
+            .await
+            .expect("snapshot");
+        assert_eq!(listed.nodes, 1, "COUNT(*) nodes from DB rows");
+        assert_eq!(listed.edges, 1);
+        let map = store
+            .load_semantic_map(Some("lounge".into()))
+            .await
+            .expect("map");
+        assert_eq!(map.projects[0].node_count, 1);
+        assert_eq!(map.projects[0].edge_count, 1);
+    }
+
+    #[tokio::test]
+    async fn ignore_matches_without_requiring_line_equality() {
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_project_index(sample_graph())
+            .await
+            .expect("save");
+        let mut target = store
+            .list_dead_symbols(Some("lounge".into()))
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|row| row.name == "bar")
+            .expect("bar");
+        // Ignore with a different line — must still filter the dead row.
+        target.line = Some(9999);
+        store.ignore_symbol(target.clone()).await.expect("ignore");
+        let after = store
+            .list_dead_symbols(Some("lounge".into()))
+            .await
+            .expect("list after");
+        assert!(!after.iter().any(|row| row.name == "bar"));
+        store.unignore_symbol(target).await.expect("unignore");
+        assert_eq!(
+            store
+                .list_dead_symbols(Some("lounge".into()))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn real_frontend_new_listed_placeholder_hidden() {
+        let store = ExperienceStore::memory().expect("memory db");
+        // Real frontend-new with repo + nodes must appear.
+        store
+            .save_project_index(IndexGraph {
+                project: "frontend-new".into(),
+                repo_path: "/Users/dev/frontend-new".into(),
+                nodes: vec![AstNode {
+                    id: "main".into(),
+                    name: "main".into(),
+                    kind: "fn".into(),
+                    file: Some("src/main.ts".into()),
+                    line: Some(1),
+                    ref_count: 1,
+                }],
+                ..IndexGraph::default()
+            })
+            .await
+            .expect("save real");
+        // Empty backend-legacy placeholder signature → soft-hidden by migration.
+        {
+            let conn = store.conn.lock().expect("lock");
+            conn.execute(
+                r#"
+                INSERT INTO project_index (
+                    id, project_id, repo_path, kind, name, indexed_at
+                ) VALUES ('ph1', 'backend-legacy', '', 'meta', 'backend-legacy', '2026-01-01T00:00:00Z')
+                "#,
+                [],
+            )
+            .unwrap();
+            // Store migrate already marked cleanup done — clear so we can re-run against new rows.
+            conn.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                rusqlite::params![
+                    crate::db::experience_governance::MIGRATION_PLACEHOLDER_CLEANUP_V1
+                ],
+            )
+            .unwrap();
+            crate::db::experience_governance::cleanup_placeholder_projects(&conn).unwrap();
+        }
+        let projects = store.list_indexed_projects().await.expect("list");
+        assert!(
+            projects.iter().any(|p| p.name == "frontend-new"),
+            "real frontend-new must list"
+        );
+        assert!(
+            !projects.iter().any(|p| p.name == "backend-legacy"),
+            "placeholder backend-legacy must be hidden"
+        );
+    }
+
+    #[test]
+    fn path_normalization_round_trips_with_accepts_helper() {
+        for sample in [
+            r"C:\Users\sercan\dev\Agent-Lounge-OS\src\main.rs",
+            "/home/sercan/dev/Agent-Lounge-OS/src/main.rs",
+            r"mixed/path\with\both",
+        ] {
+            assert!(accepts_cross_platform_path(sample));
+            let norm = normalize_path_str(sample);
+            assert!(!norm.is_empty());
+            assert!(!norm.contains('\\'));
+            assert!(accepts_cross_platform_path(&norm) || path_has_windows_drive(sample));
+        }
     }
 }
