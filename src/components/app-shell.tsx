@@ -545,20 +545,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                     setOpenCommandPalette(true);
                   }
                 }}
-                className="w-full min-w-0 rounded-lg border border-outline-variant bg-surface-container-low py-1.5 pr-12 pl-8 font-body text-body text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
+                className="w-full min-w-0 rounded-lg border border-outline-variant bg-surface-container-low py-1.5 pr-3 pl-8 font-body text-body text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
                 placeholder="Filter subjects, repos, experiences"
               />
-              <button
-                type="button"
-                onClick={() => setOpenCommandPalette(true)}
-                className="absolute inset-y-0 right-1.5 flex items-center"
-                title="Command Palette"
-                aria-label="Open command palette"
-              >
-                <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant hover:border-primary hover:text-primary">
-                  {shortcutLabel}
-                </kbd>
-              </button>
             </label>
           )}
         </div>
@@ -566,6 +555,15 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="flex min-w-0 shrink-0 items-center gap-1.5">
           {onboarding ? null : (
             <>
+              <button
+                type="button"
+                onClick={() => setOpenCommandPalette(true)}
+                className="flex shrink-0 items-center rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 hover:border-primary"
+                title="Command Palette"
+                aria-label="Open command palette"
+              >
+                <kbd className="font-mono text-meta text-on-surface-variant">{shortcutLabel}</kbd>
+              </button>
               <ModelSelect
                 model={model}
                 models={models}
@@ -777,7 +775,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       )}
 
       <main
-        className={`mt-12 flex h-[calc(100vh-3rem)] min-h-0 min-w-0 flex-col gap-3 overflow-x-hidden overflow-y-auto bg-surface p-3.5 ${onboarding ? "ml-0" : "ml-[var(--sidebar-w)]"}`}
+        className={`mt-12 flex h-[calc(100vh-3rem)] min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto bg-surface p-3.5 ${
+          onboarding
+            ? "ml-0 w-full"
+            : "ml-[var(--sidebar-w)] w-[calc(100%-var(--sidebar-w))]"
+        }`}
         style={bannerHeight > 0 ? { paddingTop: `calc(0.875rem + ${bannerHeight}px)` } : undefined}
       >
         <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">{children}</div>

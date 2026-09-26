@@ -76,9 +76,12 @@ jobs:
 
       - name: Build Tauri Linux bundles (deb + AppImage)
         # Pass --bundles to the Tauri CLI (not cargo). Avoid a second `--`.
+        # beforeBundleCommand re-runs prepare-sidecar; allow the CI stub when the
+        # real MCP binary is not present so .deb / .AppImage still package.
         run: npm run tauri -- build --bundles deb,appimage
         env:
           CI: "true"
+          LOUNGE_SIDECAR_ALLOW_STUB: "1"
 
       - name: Collect artifact files
         if: always()
