@@ -72,7 +72,7 @@ body {
   --banner-h: 0px;
   --panel-min-h: 18.75rem; /* 300px at 100% */
   --panel-max-h: 31.25rem; /* 500px at 100% */
-  --stream-min-h: 25rem; /* ~400px — fits ≥10 event rows */
+  --stream-min-h: 30rem; /* ~480px — fits ≥10 event rows with chips */
 }
 
 .tnum {
