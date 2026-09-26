@@ -339,7 +339,7 @@ Uygulama **macOS, Windows ve Linux** üzerinde çalışır. Platforma özel vars
 | Yıkıcı komut algılama (AP-06/07) | POSIX (`rm -rf`, …) **ve** Windows (`del /s`, `rd /s`, `Remove-Item -Recurse`, `format`, …) |
 | Yollar | `/` ve `\` ayırıcıları + Windows sürücü harfleri (`C:\…`) doğru işlenir |
 | Palette kısayolu | Windows/Linux **Ctrl+K**, macOS **⌘K**; UI etiketi platforma göre uyarlanır (SH-04) |
-| CI | Linux: ana Playwright runner. Ayrıca `windows-latest` ve `macos-latest` üzerinde en az `cargo test` + frontend/Tauri build — **ayrı non-blocking** workflow (`qa-cross-platform.yml`) |
-| Canlı test (S2) | Mac script'leri Mac'e özel kalır. Windows ve Linux için kısa manuel checklist şablonları `scripts/qa/windows/` ve `scripts/qa/linux/` altında |
+| CI | Linux: ana Playwright runner. Ayrıca `windows-latest` ve `macos-latest` üzerinde en az `cargo test` + frontend build — **ayrı non-blocking** (`qa-cross-platform.yml`). S2-Linux paketi: **non-blocking** `linux-bundle.yml` (AppImage + `.deb` → artifact `agent-lounge-linux`; yalnızca `main` + `workflow_dispatch`) |
+| Canlı test (S2) | Mac script'leri Mac'e özel kalır. Windows / Linux checklist: `scripts/qa/windows/`, `scripts/qa/linux/` (Linux: 1280×800 + portrait window resize; runtime deps `RUNTIME_DEPS.md`) |
 
-Canlı test şablonları: `scripts/qa/mac/QA_Report.md`, `scripts/qa/windows/QA_Report.md`, `scripts/qa/linux/QA_Report.md`.
+Canlı test şablonları: `scripts/qa/mac/QA_Report.md`, `scripts/qa/windows/QA_Report.md`, `scripts/qa/linux/{README,CHECKLIST,QA_Report,RUNTIME_DEPS}.md`.

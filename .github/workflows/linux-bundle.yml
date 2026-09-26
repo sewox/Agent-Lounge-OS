@@ -1,0 +1,117 @@
+# Non-blocking Linux Tauri bundle for S2-Linux live testing.
+# Builds AppImage + .deb and uploads artifact `agent-lounge-linux`.
+# Does not run on pull_request (keeps PR CI fast); job is continue-on-error
+# so a bundle failure never blocks main.
+
+name: Linux bundle
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: linux-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # AppImage tooling on headless runners without FUSE mounts.
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+  NO_STRIP: "true"
+
+jobs:
+  linux-bundle:
+    name: Build AppImage + deb
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            wget \
+            pkg-config \
+            libssl-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            patchelf \
+            libfuse2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Stage externalBin stub (MCP sidecar)
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Build Tauri Linux bundles (deb + AppImage)
+        run: npm run tauri -- build -- --bundles deb appimage --ci
+        env:
+          CI: "1"
+
+      - name: Collect artifact files
+        if: always()
+        run: |
+          set -euo pipefail
+          DEST="${{ runner.temp }}/agent-lounge-linux"
+          mkdir -p "$DEST"
+          shopt -s nullglob
+          copied=0
+          for f in \
+            src-tauri/target/release/bundle/deb/*.deb \
+            src-tauri/target/release/bundle/appimage/*.AppImage \
+            src-tauri/target/release/bundle/appimage/*.AppImage.zsync
+          do
+            cp -v "$f" "$DEST/"
+            copied=1
+          done
+          # Fallback: unpackaged binary if bundler partially failed.
+          if [[ "$copied" -eq 0 ]]; then
+            if [[ -x src-tauri/target/release/agent-lounge-os ]]; then
+              cp -v src-tauri/target/release/agent-lounge-os "$DEST/"
+            fi
+          fi
+          cp scripts/qa/linux/RUNTIME_DEPS.md "$DEST/RUNTIME_DEPS.md"
+          cp scripts/qa/linux/README.md "$DEST/README.md"
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "runner=${RUNNER_OS}"
+          } > "$DEST/BUILD_INFO.txt"
+          ls -lah "$DEST"
+
+      - name: Upload agent-lounge-linux
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-lounge-linux
+          path: ${{ runner.temp }}/agent-lounge-linux/
+          if-no-files-found: warn
+          retention-days: 14
