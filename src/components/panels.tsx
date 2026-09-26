@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { GraphUiButton } from "@/components/graph-ui-button";
+import { GraphUiSettings } from "@/components/graph-ui-settings";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { SemanticMap } from "@/components/SemanticMap";
@@ -416,13 +418,16 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             </h3>
           )}
         </div>
-        <span className="font-body text-meta text-outline">
-          {whispered.size > 0 ? (
-            <span className="text-primary">whisper · live</span>
-          ) : (
-            "memory_bridge + sqlite"
-          )}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="font-body text-meta text-outline">
+            {whispered.size > 0 ? (
+              <span className="text-primary">whisper · live</span>
+            ) : (
+              "memory_bridge + sqlite"
+            )}
+          </span>
+          <GraphUiButton />
+        </div>
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 sm:border-r sm:border-b-0">
@@ -908,6 +913,7 @@ export function SettingsPanel() {
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-auto">
       <div className="space-y-3">
+      <GraphUiSettings />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
           <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">

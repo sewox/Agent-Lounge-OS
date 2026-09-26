@@ -1,6 +1,7 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
 pub mod autodiscover;
+pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
 pub mod lmr_runtime;
@@ -21,7 +22,14 @@ use tokio::sync::Mutex;
 
 use crate::models::ServiceReport;
 
-pub use memory_bridge::MemoryBridge;
+pub use graph_ui::{
+    enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
+    open_or_focus_graph_window, persist_port, resolve_cbm_project_name, GraphUiState,
+    GraphUiStatus, GRAPH_WINDOW_LABEL,
+};
+pub use memory_bridge::{
+    probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode, DEFAULT_GRAPH_UI_PORT,
+};
 pub use model_manager::{LayaEnginePhase, LayaEngineStatus, ModelManager, LAYA_ENGINE_EVENT};
 pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};
 pub use ollama::{
@@ -62,7 +70,10 @@ impl ServiceManager {
             log::warn!("{err}");
             MemoryBridge::from_binary("codebase-memory-mcp")
         });
+        Self::with_memory(memory)
+    }
 
+    pub fn with_memory(memory: MemoryBridge) -> Self {
         Self {
             ollama: OllamaService::new(),
             nats: NatsService::new(),
@@ -72,6 +83,10 @@ impl ServiceManager {
 
     pub fn shared() -> SharedServices {
         Arc::new(Mutex::new(Self::new()))
+    }
+
+    pub fn shared_with_memory(memory: MemoryBridge) -> SharedServices {
+        Arc::new(Mutex::new(Self::with_memory(memory)))
     }
 
     /// Test / stub: gerçek daemon olmadan health + recovery yollarını doğrula.
