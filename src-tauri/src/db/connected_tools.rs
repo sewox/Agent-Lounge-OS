@@ -103,6 +103,22 @@ impl ExperienceStore {
         .context("connected_tools list join")?
     }
 
+    /// Tek bir aracı upsert eder; diğer kayıtları pasifleştirmez (MCP istemci heartbeat).
+    pub async fn upsert_connected_tool(&self, tool: DiscoveredTool) -> Result<ConnectedTool> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
+            upsert_tool(&conn, &tool, &now)?;
+            list_connected_tools_blocking(&conn)?
+                .into_iter()
+                .find(|row| row.id == tool.id)
+                .context("upsert sonrası satır yok")
+        })
+        .await
+        .context("connected_tools upsert join")?
+    }
+
     pub fn connected_tools_empty(&self) -> Result<bool> {
         let conn = self.conn.lock().expect("experience db lock");
         let count: i64 =
@@ -363,5 +379,22 @@ mod tests {
             "deactivated rows still occupy the table"
         );
         assert_eq!(crate::window_route_for_store(&store), "/dashboard");
+    }
+
+    #[tokio::test]
+    async fn upsert_mcp_client_does_not_deactivate_others() {
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_selected_tools(vec![sample_tool("notion")])
+            .await
+            .expect("save");
+        let mut cursor = DiscoveredTool::host_app("cursor", "Cursor");
+        cursor.detail = Some("MCP".into());
+        store.upsert_connected_tool(cursor).await.expect("upsert");
+        let listed = store.list_connected_tools().await.expect("list");
+        let notion = listed.iter().find(|r| r.id == "cursor:notion").unwrap();
+        let app = listed.iter().find(|r| r.id == "app:cursor").unwrap();
+        assert!(notion.enabled && notion.is_active);
+        assert!(app.enabled && app.is_active);
     }
 }

@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod db;
 pub mod infra;
 pub mod kernel;

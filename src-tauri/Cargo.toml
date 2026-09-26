@@ -11,6 +11,10 @@ rust-version = "1.77.2"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "lounge-mcp"
+path = "src/bin/lounge_mcp.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
