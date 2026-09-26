@@ -22,12 +22,12 @@ use models::{
 };
 use services::autodiscover::discovery_report;
 use services::{
-    api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys,
+    api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys, data_root,
     enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
     open_or_focus_graph_window, open_path_in_editor, persist_port, record_dead_snapshot,
-    record_whisper_injection, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, GraphUiState, GraphUiStatus,
-    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    record_whisper_injection, resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump,
+    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, GraphUiState,
+    GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
     GRAPH_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -37,7 +37,7 @@ const DASHBOARD_ROUTE: &str = "/dashboard";
 
 /// `connected_tools` boşsa onboarding, doluysa dashboard.
 pub fn initial_window_route() -> &'static str {
-    match ExperienceStore::open(db::default_db_path(workspace_root())) {
+    match ExperienceStore::open(db::default_db_path(data_root())) {
         Ok(store) => window_route_for_store(&store),
         Err(err) => {
             log::warn!("connected_tools okunamadı, onboarding: {err}");
@@ -88,9 +88,15 @@ pub fn run_with_start_route(start_route: &'static str) {
                 )?;
             }
 
-            let workspace = workspace_root();
-            let store = ExperienceStore::open(db::default_db_path(&workspace))
-                .map_err(|err| err.to_string())?;
+            let workspace = resolve_data_root_for_app(app.handle()).map_err(|err| {
+                format!("uygulama veri dizini hazırlanamadı (LOUNGE_DATA_DIR veya app data): {err}")
+            })?;
+            let store = ExperienceStore::open(db::default_db_path(&workspace)).map_err(|err| {
+                format!(
+                    "experience veritabanı açılamadı ({}): {err}",
+                    db::default_db_path(&workspace).display()
+                )
+            })?;
             open_main_window(app, start_route)?;
             let model = default_model_lock();
             let memory = MemoryBridge::discover().unwrap_or_else(|err| {
@@ -1006,7 +1012,7 @@ async fn get_discovery_report(
             services::system_ollama_endpoint(),
         )
     };
-    discovery_report(workspace_root(), lounge_endpoint, system_endpoint)
+    discovery_report(data_root(), lounge_endpoint, system_endpoint)
         .await
         .map_err(|err| err.to_string())
 }
@@ -1138,11 +1144,4 @@ async fn set_graph_ui_port(
         .await
         .map_err(|err| err.to_string())?;
     Ok(port)
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
 }

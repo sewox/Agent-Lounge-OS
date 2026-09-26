@@ -708,14 +708,15 @@ fn resolve_binary(repo_root: &Path) -> Result<PathBuf> {
         }
     }
 
-    candidates.push(repo_root.join("bridge/codebase-memory-mcp"));
-    candidates.push(repo_root.join("bridge/codebase-memory-mcp.exe"));
-
-    // Yerel paketleme / prepare-sidecar: binaries/codebase-memory-mcp-$TARGET_TRIPLE
-    let binaries_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
-    candidates.push(binaries_dir.join("codebase-memory-mcp"));
-    candidates.push(binaries_dir.join("codebase-memory-mcp.exe"));
-    candidates.push(binaries_dir.join(packaged_sidecar_filename()));
+    // Repo-relative adaylar yalnızca debug/dev; release binary'ye CI yolu gömülmez.
+    if cfg!(debug_assertions) {
+        candidates.push(repo_root.join("bridge/codebase-memory-mcp"));
+        candidates.push(repo_root.join("bridge/codebase-memory-mcp.exe"));
+        let binaries_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+        candidates.push(binaries_dir.join("codebase-memory-mcp"));
+        candidates.push(binaries_dir.join("codebase-memory-mcp.exe"));
+        candidates.push(binaries_dir.join(packaged_sidecar_filename()));
+    }
 
     if let Some(on_path) = find_executable("codebase-memory-mcp") {
         candidates.push(on_path);

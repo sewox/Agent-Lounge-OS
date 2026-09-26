@@ -1012,11 +1012,9 @@ pub fn resolve_nats_url() -> String {
         .unwrap_or_else(default_nats_url)
 }
 
+/// Experience DB / veri kökü — release'te app data (`LOUNGE_DATA_DIR` ezer).
 pub fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::services::data_root()
 }
 
 #[cfg(test)]
