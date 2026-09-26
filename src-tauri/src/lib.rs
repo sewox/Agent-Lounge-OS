@@ -270,7 +270,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             open_graph_ui,
             enable_graph_ui_cmd,
             get_graph_ui_port,
-            set_graph_ui_port
+            set_graph_ui_port,
+            write_text_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -294,6 +295,17 @@ pub fn run_with_start_route(start_route: &'static str) {
             }
             _ => {}
         });
+}
+
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+    }
+    std::fs::write(&target, contents).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

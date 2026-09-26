@@ -38,6 +38,61 @@ export function degradedCoreServiceNames(report: ServiceReport | null | undefine
   return names;
 }
 
+/** Supervisor auto-restart phase for the degraded banner (single accurate message). */
+export type DegradedRestartPhase =
+  | { kind: "retrying"; attempt: number; max: number; waitSecs: number | null }
+  | { kind: "exhausted"; max: number }
+  | { kind: "unknown" };
+
+function parseRestartPhase(error: string | null | undefined): DegradedRestartPhase | null {
+  if (!error) {
+    return null;
+  }
+  const exhausted = error.match(/limiti aşıldı\s*\((\d+)\s*deneme\)/i);
+  if (exhausted) {
+    return { kind: "exhausted", max: Number(exhausted[1]) || 5 };
+  }
+  const retry = error.match(/deneme\s+(\d+)\s*\/\s*(\d+)/i);
+  if (retry) {
+    const wait = error.match(/(?:yeniden deneme|sonra)\s+(\d+)\s*s/i);
+    return {
+      kind: "retrying",
+      attempt: Number(retry[1]) || 1,
+      max: Number(retry[2]) || 5,
+      waitSecs: wait ? Number(wait[1]) : null,
+    };
+  }
+  if (/Service Degraded/i.test(error)) {
+    return { kind: "unknown" };
+  }
+  return null;
+}
+
+/**
+ * Prefer exhausted over retrying when either core daemon reports it.
+ * Returns null when nothing is degraded.
+ */
+export function resolveDegradedRestart(
+  report: ServiceReport | null | undefined,
+): { names: string[]; phase: DegradedRestartPhase } | null {
+  const names = degradedCoreServiceNames(report);
+  if (names.length === 0 || !report) {
+    return null;
+  }
+  const phases = [report.ollama.error, report.nats.error]
+    .map(parseRestartPhase)
+    .filter((row): row is DegradedRestartPhase => row != null);
+  const exhausted = phases.find((row) => row.kind === "exhausted");
+  if (exhausted) {
+    return { names, phase: exhausted };
+  }
+  const retrying = phases.find((row) => row.kind === "retrying");
+  if (retrying) {
+    return { names, phase: retrying };
+  }
+  return { names, phase: phases[0] ?? { kind: "unknown" } };
+}
+
 export type DecisionGatePhase = "loading" | "ready" | "failed" | "available";
 
 export type DecisionGateStatus = {
@@ -88,7 +143,39 @@ export type NatsEvent = {
   decisionLabel?: string;
   /** Multi-agent zinciri — örn. `Task A -> Triggered Task B`. */
   chainLabel?: string;
+  /** Epoch ms for newest-first ordering (out-of-order bus arrivals). */
+  createdAtMs?: number;
 };
+
+/** Sort key: createdAtMs, else parse `HH:mm:ss.mmm` / ISO `time`. */
+export function eventSortKey(event: Pick<NatsEvent, "time" | "createdAtMs">): number {
+  if (event.createdAtMs != null && Number.isFinite(event.createdAtMs)) {
+    return event.createdAtMs;
+  }
+  const clock = event.time.match(
+    /^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/,
+  );
+  if (clock) {
+    const hours = Number(clock[1]);
+    const minutes = Number(clock[2]);
+    const seconds = Number(clock[3] ?? 0);
+    const millis = Number((clock[4] ?? "0").padEnd(3, "0").slice(0, 3));
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
+  }
+  const parsed = Date.parse(event.time);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/** Newest first; stable for equal timestamps (preserves relative insert order). */
+export function sortEventsNewestFirst(events: NatsEvent[]): NatsEvent[] {
+  return events
+    .map((event, index) => ({ event, index }))
+    .sort((left, right) => {
+      const diff = eventSortKey(right.event) - eventSortKey(left.event);
+      return diff !== 0 ? diff : left.index - right.index;
+    })
+    .map(({ event }) => event);
+}
 
 export type NatsTone = "task" | "success" | "error";
 
@@ -748,7 +835,8 @@ export function formatLatencyMs(ms: number): string {
 
 export function formatLayaDecision(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) {
-    return "Laya Decision: —";
+    // Avoid "Decision: —" copy — SR-02 treats that as empty Event Stream chips.
+    return "Laya idle";
   }
   return `Laya Decision: ${formatLatencyMs(ms)}`;
 }
@@ -849,7 +937,7 @@ export function pathBasename(path: string | null | undefined): string | null {
   return path.split(/[/\\]/).filter(Boolean).at(-1) ?? null;
 }
 
-/** Canlı dead sayımı: deadSymbols → map.dead → lastIndex.dead; indeks yoksa mock toplamı. */
+/** Canlı dead sayımı: deadSymbols → map.dead → lastIndex.dead; indeks yoksa 0 (KPI "—" UI'da). */
 export function resolveDeadSymbolCount(input: {
   deadSymbols: DeadSymbol[];
   semanticMap: SemanticMap;
@@ -861,11 +949,102 @@ export function resolveDeadSymbolCount(input: {
     input.projects.length > 0 ||
     input.semanticMap.projects.length > 0;
   if (!hasIndex) {
-    return MOCK_HEALTH.reduce((sum, row) => sum + row.dead, 0);
+    return 0;
   }
   const fromList = input.deadSymbols.length;
   const fromMap = input.semanticMap.projects.reduce((sum, row) => sum + row.dead.length, 0);
   return fromList || fromMap || input.lastIndex?.dead || 0;
+}
+
+/** True when there is no indexed project / map data to show. */
+export function hasIndexedWorkspace(input: {
+  lastIndex: IndexSnapshot | null;
+  projects: ProjectSummary[];
+  semanticMap: SemanticMap;
+}): boolean {
+  return (
+    Boolean(input.lastIndex) ||
+    input.projects.length > 0 ||
+    input.semanticMap.projects.length > 0
+  );
+}
+
+/**
+ * K9 UI: Claude Desktop + Claude CLI are one subscription account.
+ * Compatible with PR-1 merged backend rows (single card) and legacy dual rows.
+ * Only subscription rows are folded; original list position is preserved.
+ */
+export function mergeClaudeQuotaRows(quotas: ToolQuota[]): ToolQuota[] {
+  const isClaudeSubscription = (row: ToolQuota): boolean => {
+    if ((row.access_mode || row.kind) !== "subscription") {
+      return false;
+    }
+    const host = (row.host_id || "").toLowerCase();
+    const tool = row.tool.toLowerCase();
+    const id = row.id.toLowerCase();
+    return (
+      host === "claude_desktop" ||
+      host === "claude_cli" ||
+      host === "claude" ||
+      id.includes("claude_desktop") ||
+      id.includes("claude_cli") ||
+      tool.includes("claude desktop") ||
+      tool.includes("claude cli") ||
+      tool === "claude"
+    );
+  };
+
+  const claudeRows = quotas.filter(isClaudeSubscription);
+  if (claudeRows.length <= 1) {
+    return quotas.map((row) => {
+      if (!isClaudeSubscription(row) || row.tool.toLowerCase().includes("plugin")) {
+        return row;
+      }
+      return { ...row, tool: "Claude", host_id: row.host_id || "claude" };
+    });
+  }
+
+  const primary = claudeRows[0]!;
+  const mergedIds = new Set(claudeRows.map((row) => row.id));
+  const worstTone = claudeRows.reduce<ToolQuota["tone"]>((tone, row) => {
+    if (row.tone === "amber" || row.exhausted) return "amber";
+    if (row.tone === "warn" && tone !== "amber") return "warn";
+    return tone;
+  }, primary.tone);
+  const maxPercent = claudeRows.reduce<number | null>((max, row) => {
+    if (row.percent == null) return max;
+    if (max == null) return row.percent;
+    return Math.max(max, row.percent);
+  }, null);
+
+  const merged: ToolQuota = {
+    ...primary,
+    id: primary.id.startsWith("app:claude") ? "app:claude" : primary.id,
+    tool: "Claude",
+    host_id: "claude",
+    tone: worstTone,
+    percent: maxPercent,
+    exhausted: claudeRows.some((row) => row.exhausted),
+  };
+
+  const result: ToolQuota[] = [];
+  let inserted = false;
+  for (const row of quotas) {
+    if (!mergedIds.has(row.id)) {
+      result.push(row);
+      continue;
+    }
+    if (!inserted) {
+      result.push(merged);
+      inserted = true;
+    }
+  }
+  return result;
+}
+
+/** Heartbeat / bus ping subjects — hidden by default in Event Stream (SR-02). */
+export function isHeartbeatSubject(subject: string): boolean {
+  return /heartbeat/i.test(subject);
 }
 
 /**
@@ -1020,8 +1199,9 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     state = "queued";
   }
   const created = new Date(message.created_at);
+  const createdAtMs = Number.isNaN(created.getTime()) ? undefined : created.getTime();
   let time = message.created_at;
-  if (!Number.isNaN(created.getTime())) {
+  if (createdAtMs != null) {
     time = `${istanbulClockParts(created, true)}.${String(created.getMilliseconds()).padStart(3, "0")}`;
   }
   const telemetry = parseDecisionTelemetry(message);
@@ -1036,96 +1216,9 @@ export function loungeMessageToEvent(message: LoungeMessage): NatsEvent {
     state,
     decisionLabel: ownMs != null ? formatDecisionStreamLabel(ownMs) : undefined,
     chainLabel: extractWorkflowChainLabel(message.payload),
+    createdAtMs,
   };
 }
-
-export type SemanticNode = {
-  name: string;
-  edges: number;
-  modules: string[];
-};
-
-export type ProjectHealthRow = {
-  name: string;
-  indexed: number;
-  files: string;
-  nodes: string;
-  stale: number;
-  dead: number;
-  sync: string;
-};
-
-export const MOCK_EVENTS: NatsEvent[] = [
-  { id: "d1", time: "14:09:29.004", subject: "lounge.telemetry.decision", from: "decision_engine", to: "bus", payload: "0.2kb", state: "ok", decisionLabel: "Decision: 4ms" },
-  { id: "1", time: "14:09:18.441", subject: "lounge.task.requested", from: "kernel", to: "dispatcher", payload: "1.2kb", state: "queued" },
-  { id: "2", time: "14:09:18.512", subject: "lounge.task.assigned", from: "dispatcher", to: "ollama", payload: "0.4kb", state: "ok" },
-  { id: "3", time: "14:09:19.108", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "3.8kb", state: "ok", chainLabel: "implement workflow engine -> Triggered Auto-Test after Code: implement workflow engine" },
-  { id: "w1", time: "14:09:19.220", subject: "lounge.task.requested", from: "workflow_engine", to: "grok_bot", payload: "0.8kb", state: "queued", chainLabel: "implement workflow engine -> Triggered Auto-Test after Code: implement workflow engine" },
-  { id: "4", time: "14:09:19.140", subject: "lounge.experience.reported", from: "kernel", to: "vault", payload: "2.1kb", state: "ok" },
-  { id: "5", time: "14:09:21.002", subject: "lounge.task.requested", from: "alice", to: "kernel", payload: "0.9kb", state: "queued" },
-  { id: "6", time: "14:09:22.774", subject: "lounge.task.failed", from: "dispatcher", to: "nats", payload: "0.6kb", state: "error" },
-  { id: "7", time: "14:09:23.112", subject: "lounge.task.retry", from: "dispatcher", to: "kernel", payload: "0.6kb", state: "retry" },
-  { id: "8", time: "14:09:24.089", subject: "lounge.vault.query", from: "agent_mcp", to: "vault", payload: "1.4kb", state: "ok" },
-  { id: "9", time: "14:09:25.421", subject: "lounge.heartbeat.ping", from: "worker-01", to: "nats", payload: "0.1kb", state: "ok" },
-  { id: "10", time: "14:09:26.115", subject: "lounge.experience.commit", from: "vault", to: "storage", payload: "4.2kb", state: "ok" },
-  { id: "11", time: "14:09:27.802", subject: "lounge.task.assigned", from: "dispatcher", to: "ollama", payload: "0.5kb", state: "ok" },
-  { id: "12", time: "14:09:28.190", subject: "lounge.task.completed", from: "dispatcher", to: "nats", payload: "2.9kb", state: "ok" },
-];
-
-export const MOCK_NODES: SemanticNode[] = [
-  { name: "Agent-Lounge-OS", edges: 42, modules: ["kernel.rs", "dispatcher.rs", "memory_bridge.rs"] },
-  { name: "EchoMind", edges: 118, modules: ["ollama_client.py", "embeddings.py"] },
-  { name: "codebase-memory-mcp", edges: 87, modules: ["indexer.ts", "server.ts"] },
-];
-
-export const MOCK_EXPERIENCES: LoungeExperience[] = [
-  {
-    id: "e1",
-    type: "experience",
-    agent: "lounge-kernel",
-    project_id: "Agent-Lounge-OS",
-    adr_summary: "Indexed dispatcher.rs + NATS subjects",
-    outcome: "success",
-    tags: [],
-    created_at: "2026-09-18T11:09:00.000Z",
-  },
-  {
-    id: "e2",
-    type: "experience",
-    agent: "lounge-kernel",
-    project_id: "EchoMind",
-    adr_summary: "Ollama tags probe, nats-server missing PATH",
-    outcome: "partial",
-    tags: [],
-    created_at: "2026-09-18T10:51:00.000Z",
-  },
-  {
-    id: "e3",
-    type: "experience",
-    agent: "lounge-kernel",
-    project_id: "Agent-Lounge-OS",
-    adr_summary: "MemoryBridge stdout MCP unwrap",
-    outcome: "success",
-    tags: [],
-    created_at: "2026-09-18T09:02:00.000Z",
-  },
-  {
-    id: "e4",
-    type: "experience",
-    agent: "lounge-kernel",
-    project_id: "shared/lounge_protocol",
-    adr_summary: "task.schema.json kind+repo_path",
-    outcome: "success",
-    tags: [],
-    created_at: "2026-09-18T08:18:00.000Z",
-  },
-];
-
-export const MOCK_HEALTH: ProjectHealthRow[] = [
-  { name: "Agent-Lounge-OS", indexed: 100, files: "9,421", nodes: "4,810", stale: 0, dead: 12, sync: "14:09" },
-  { name: "EchoMind", indexed: 86, files: "4,120", nodes: "1,940", stale: 3, dead: 41, sync: "13:44" },
-  { name: "codebase-memory-mcp", indexed: 100, files: "4,861", nodes: "2,210", stale: 0, dead: 74, sync: "09:12" },
-];
 
 export type QuotaKind = AccessMode;
 export type QuotaTone = "ok" | "warn" | "live" | "local" | "amber";
@@ -1409,149 +1502,6 @@ export const DEFAULT_POLICY: RoutingPolicy = {
   ],
 };
 
-export const MOCK_QUOTAS: ToolQuota[] = [
-    {
-        id: "app:cursor",
-        tool: "Cursor",
-        kind: "subscription",
-        unit: "subscription",
-        used: "15% · $232 / $400",
-        remaining: "$168",
-        reset: "—",
-        percent: 15,
-        tone: "ok",
-        label: "15% plan",
-        access_mode: "subscription",
-        host_id: "cursor",
-    },
-    {
-        id: "app:claude_desktop",
-        tool: "Claude Desktop",
-        kind: "subscription",
-        unit: "subscription",
-        used: "0% 5s · 56% 7g",
-        remaining: "100% 5s · 44% 7g",
-        reset: "kullanınca · —",
-        percent: 56,
-        tone: "ok",
-        label: "56%",
-        access_mode: "subscription",
-        host_id: "claude_desktop",
-    },
-    {
-        id: "app:claude_cli",
-        tool: "Claude CLI",
-        kind: "subscription",
-        unit: "subscription",
-        used: "0% 5s · 56% 7g",
-        remaining: "100% 5s · 44% 7g",
-        reset: "kullanınca · —",
-        percent: 56,
-        tone: "ok",
-        label: "56%",
-        access_mode: "subscription",
-        host_id: "claude_cli",
-    },
-    {
-        id: "app:grok_bot",
-        tool: "Grok Bot",
-        kind: "subscription",
-        unit: "subscription",
-        used: "42%",
-        remaining: "58%",
-        reset: "—",
-        percent: 42,
-        tone: "ok",
-        label: "42%",
-        access_mode: "subscription",
-        host_id: "grok_bot",
-    },
-    {
-        id: "app:antigravity",
-        tool: "Antigravity",
-        kind: "subscription",
-        unit: "subscription",
-        used: "20% 5s · 35% 7g · 10% 3p 5s",
-        remaining: "80% 5s · 65% 7g · 90% 3p 5s",
-        reset: "kullanınca · — · kullanınca",
-        percent: 35,
-        tone: "ok",
-        label: "35%",
-        access_mode: "subscription",
-        host_id: "antigravity",
-    },
-  {
-    id: "lmr",
-    tool: "LMR · llama3.1:8b",
-    kind: "local",
-    unit: "ram/vram",
-    used: "6.1 / 8.0 GB",
-    remaining: "1.9 GB",
-    reset: "LOCAL",
-    percent: 76,
-    tone: "ok",
-    label: "76% ram",
-    access_mode: "local",
-    host_id: null,
-  },
-  {
-    id: "nats",
-    tool: "NATS broker",
-    kind: "local",
-    unit: "conn",
-    used: "2 conn · 40 in_msgs",
-    remaining: "local",
-    reset: "LOCAL",
-    percent: null,
-    tone: "ok",
-    label: "ok LOCAL",
-    access_mode: "local",
-    host_id: null,
-  },
-  {
-    id: "cbm",
-    tool: "codebase-memory-mcp",
-    kind: "local",
-    unit: "local",
-    used: "ready",
-    remaining: "unlimited",
-    reset: "LOCAL",
-    percent: null,
-    tone: "local",
-    label: "ok LOCAL",
-    access_mode: "local",
-    host_id: null,
-  },
-  {
-    id: "plugin:notion",
-    tool: "notion",
-    kind: "plugin",
-    unit: "plugin",
-    used: "2 host",
-    remaining: "Cursor · Antigravity",
-    reset: "HOST",
-    percent: null,
-    tone: "ok",
-    label: "plugin",
-    access_mode: "plugin",
-    host_id: "cursor",
-  },
-  {
-    id: "claude_desktop:github",
-    tool: "github",
-    kind: "plugin",
-    unit: "plugin",
-    used: "host üzerinden",
-    remaining: "Claude Desktop",
-    reset: "HOST",
-    percent: null,
-    tone: "ok",
-    label: "plugin",
-    access_mode: "plugin",
-    host_id: "claude_desktop",
-  },
-];
-
 export function quotaBarClass(percent: number): string {
   if (percent >= 90) {
     return "bg-error";
@@ -1834,6 +1784,7 @@ export async function fetchAgentEfficiencyReport(options?: {
   return report;
 }
 
+/** Browser harness: anchor download. Prefer `saveMarkdownReport` in the UI. */
 export function downloadMarkdownFile(filename: string, content: string): void {
   const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -1844,6 +1795,48 @@ export function downloadMarkdownFile(filename: string, content: string): void {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+export type SaveMarkdownResult =
+  | { ok: true; path: string; mode: "tauri" | "browser" }
+  | { ok: false; cancelled?: boolean; error: string };
+
+/** Tauri: native save dialog + write. Browser: anchor download. */
+export async function saveMarkdownReport(
+  filename: string,
+  content: string,
+): Promise<SaveMarkdownResult> {
+  const safeName = filename.endsWith(".md") ? filename : `${filename}.md`;
+  if (!isTauri()) {
+    try {
+      downloadMarkdownFile(safeName, content);
+      return { ok: true, path: safeName, mode: "browser" };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { invoke } = await import("@tauri-apps/api/core");
+    const path = await save({
+      defaultPath: safeName,
+      title: "Markdown indir",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (typeof path !== "string" || path.length === 0) {
+      return { ok: false, cancelled: true, error: "İptal edildi" };
+    }
+    await invoke("write_text_file", { path, contents: content });
+    return { ok: true, path, mode: "tauri" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function pickWorkspaceFolder(): Promise<string | null> {
