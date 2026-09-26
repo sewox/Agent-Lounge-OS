@@ -60,7 +60,29 @@ pub fn evaluate_security(
             level.as_str(),
             p
         ),
+        expires_at: None,
+        timeout_secs: None,
     })
+}
+
+/// DecisionGate soğuk / sınıflandırma yokken muhafazakâr güvenlik onayı.
+pub fn unclassified_security_approval(
+    task_id: &str,
+    summary: &str,
+    from_agent: &str,
+) -> ApprovalRequest {
+    ApprovalRequest {
+        task_id: task_id.into(),
+        summary: summary.into(),
+        from_agent: from_agent.into(),
+        to_agent: KERNEL_AGENT.into(),
+        kind: ApprovalKind::SecurityRisky,
+        reason: format!(
+            "DecisionGate soğuk veya sınıflandırma yok — muhafazakâr güvenlik onayı · {SECURITY_OVERLAY_PROMPT}"
+        ),
+        expires_at: None,
+        timeout_secs: None,
+    }
 }
 
 pub fn is_security_approval(kind: &ApprovalKind) -> bool {
@@ -107,6 +129,8 @@ impl SecurityAlertPayload {
             to_agent: self.to_agent.clone(),
             kind: self.kind.clone(),
             reason: self.reason.clone(),
+            expires_at: None,
+            timeout_secs: None,
         }
     }
 }
@@ -211,6 +235,14 @@ mod tests {
     fn safe_does_not_suspend() {
         assert!(!requires_suspend(SecurityLevel::Safe));
         assert!(evaluate_security("t1", "ok", "cursor", &decision(SecurityLevel::Safe)).is_none());
+    }
+
+    #[test]
+    fn unclassified_security_approval_is_risky() {
+        let req = unclassified_security_approval("t-cold", "do stuff", "cursor");
+        assert_eq!(req.kind, ApprovalKind::SecurityRisky);
+        assert!(is_security_approval(&req.kind));
+        assert!(req.reason.contains("muhafazakâr") || req.reason.contains("soğuk"));
     }
 
     #[test]

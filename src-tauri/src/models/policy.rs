@@ -90,6 +90,23 @@ pub struct ApprovalRequest {
     pub to_agent: String,
     pub kind: ApprovalKind,
     pub reason: String,
+    /// RFC3339 — UI geri sayımı; yoksa istemci varsayılan süre kullanır.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Onay bekleme süresi (saniye); UI geri sayımı için.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl ApprovalRequest {
+    /// UI geri sayımı için süre damgası (RFC3339 + saniye).
+    pub fn stamp_timeout(mut self, timeout: std::time::Duration) -> Self {
+        let secs = timeout.as_secs();
+        self.timeout_secs = Some(secs);
+        let expires = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        self.expires_at = Some(expires.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +160,8 @@ pub fn decide_route(
                     to_agent: policy.local_fallback_agent.clone(),
                     kind: ApprovalKind::QuotaLocalFallback,
                     reason,
+                    expires_at: None,
+                    timeout_secs: None,
                 },
             },
             QuotaExhaustedAction::AskThenAbort => RouteIntent::NeedApproval {
@@ -153,6 +172,8 @@ pub fn decide_route(
                     to_agent: to.into(),
                     kind: ApprovalKind::QuotaAbort,
                     reason,
+                    expires_at: None,
+                    timeout_secs: None,
                 },
             },
         };
@@ -167,6 +188,8 @@ pub fn decide_route(
                 to_agent: to.into(),
                 kind: ApprovalKind::AgentSwitch,
                 reason: "ajanlar arası geçiş kullanıcı onayı ister".into(),
+                expires_at: None,
+                timeout_secs: None,
             },
         };
     }

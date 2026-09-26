@@ -399,6 +399,8 @@ pub struct DecisionGate {
     status: Arc<StdMutex<DecisionGateStatus>>,
     declined: Arc<AtomicBool>,
     load_in_flight: Arc<AtomicBool>,
+    /// Soğuk session uyarısını bir kez (veya yeniden soğuyunca bir kez) bas.
+    cold_logged: Arc<AtomicBool>,
     /// Feedback SQLite — User Bias için (opsiyonel; testlerde boş kalabilir).
     bias_store: Arc<StdMutex<Option<crate::db::ExperienceStore>>>,
 }
@@ -419,6 +421,7 @@ impl DecisionGate {
             status,
             declined,
             load_in_flight,
+            cold_logged: Arc::new(AtomicBool::new(false)),
             bias_store: Arc::new(StdMutex::new(None)),
         };
         let worker = gate.clone();
@@ -449,16 +452,19 @@ impl DecisionGate {
         );
         self.declined.store(false, Ordering::SeqCst);
         self.load_in_flight.store(false, Ordering::SeqCst);
+        self.cold_logged.store(false, Ordering::SeqCst);
         self.set_status(DecisionGateStatus::ready(&session.device_name));
         *self.session.lock().expect("laya session lock") = Some(session);
     }
 
     pub fn fail_load(&self, err: &str) {
         let status = status_from_load_error(err);
-        log::warn!(
-            "DecisionGate soğuk: {}",
-            status.detail.as_deref().unwrap_or(err)
-        );
+        if !self.cold_logged.swap(true, Ordering::SeqCst) {
+            log::warn!(
+                "DecisionGate soğuk: {}",
+                status.detail.as_deref().unwrap_or(err)
+            );
+        }
         self.load_in_flight.store(false, Ordering::SeqCst);
         self.set_status(status);
     }
@@ -929,6 +935,12 @@ fn argmax(map: &HashMap<String, f32>) -> (String, f32) {
 
 fn infer_worker(jobs: std_mpsc::Receiver<LoungeMessage>, gate: DecisionGate) {
     while let Ok(msg) = jobs.recv() {
+        if !gate.is_ready() {
+            if !gate.cold_logged.swap(true, Ordering::SeqCst) {
+                log::warn!("DecisionGate soğuk: session yok (sonraki mesajlar sessizce atlanır)");
+            }
+            continue;
+        }
         if let Err(err) = gate.process_message(msg) {
             log::warn!("DecisionGate çıkarsama: {err}");
         }
@@ -991,6 +1003,8 @@ pub fn security_approval(
                 .copied()
                 .unwrap_or(decision.security.confidence)
         ),
+        expires_at: None,
+        timeout_secs: None,
     })
 }
 

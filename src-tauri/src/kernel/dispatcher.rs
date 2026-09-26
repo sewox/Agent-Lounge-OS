@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -33,6 +34,16 @@ use crate::services::{
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// UI'ya onay banner'ını temizletmek için Tauri olayı.
+pub const ROUTING_APPROVAL_EVENT: &str = "lounge://routing-approval";
+pub const ROUTING_APPROVAL_CLEARED_EVENT: &str = "lounge://routing-approval-cleared";
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ApprovalCleared {
+    pub task_id: String,
+    pub reason: String,
+}
 
 /// `execute_task` sonucu — yerel tamamlandı veya dış worker'a delege edildi.
 #[derive(Debug, Clone)]
@@ -70,6 +81,9 @@ pub struct Dispatcher {
     app: Arc<StdMutex<Option<AppHandle>>>,
     decisions: DecisionCache,
     workers: WorkerRegistry,
+    approval_timeout: Duration,
+    /// DecisionGate RAM'de ve sınıflandırma yapabiliyorsa true.
+    gate_ready: Arc<AtomicBool>,
 }
 
 impl Dispatcher {
@@ -93,7 +107,22 @@ impl Dispatcher {
             app: Arc::new(StdMutex::new(None)),
             decisions: Arc::new(StdMutex::new(HashMap::new())),
             workers: WorkerRegistry::new(),
+            approval_timeout: APPROVAL_TIMEOUT,
+            gate_ready: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn with_approval_timeout(mut self, timeout: Duration) -> Self {
+        self.approval_timeout = timeout;
+        self
+    }
+
+    pub fn set_gate_ready(&self, ready: bool) {
+        self.gate_ready.store(ready, Ordering::SeqCst);
+    }
+
+    pub fn gate_is_ready(&self) -> bool {
+        self.gate_ready.load(Ordering::SeqCst)
     }
 
     pub fn with_workers(mut self, workers: WorkerRegistry) -> Self {
@@ -197,9 +226,13 @@ impl Dispatcher {
         log::info!("dispatcher dinliyor: {} ({TASK_REQUESTED})", self.nats_url);
 
         while let Some(msg) = rx.recv().await {
-            if let Err(err) = self.handle_nats_message(&nc, msg).await {
-                log::error!("iş emri işlenemedi: {err}");
-            }
+            let this = self.clone();
+            let nc = nc.clone();
+            tokio::spawn(async move {
+                if let Err(err) = this.handle_nats_message(&nc, msg).await {
+                    log::error!("iş emri işlenemedi: {err}");
+                }
+            });
         }
         Ok(())
     }
@@ -225,6 +258,7 @@ impl Dispatcher {
             }
             Err(err) => {
                 log::error!("görev başarısız {}: {err}", task.id);
+                self.emit_approval_cleared(&task.id, "failed");
                 // Güvenlik Red zaten lounge.task.failed (cancel) yayınladı.
                 if !is_security_denied_error(&err) {
                     publish_json(nc, TASK_FAILED, &task).await?;
@@ -454,6 +488,7 @@ impl Dispatcher {
 
     /// Kullanıcı tercihi + kota; harici ajan geçişi onaysız olamaz.
     /// Testlerde `stub_decision` varken kota onayı beklenmez; güvenlik askısı stub yokken.
+    /// DecisionGate kararı yoksa (soğuk/sınıflandırılamadı) muhafazakâr güvenlik onayı istenir.
     async fn apply_routing_policy(
         &self,
         task: &mut LoungeTask,
@@ -477,6 +512,24 @@ impl Dispatcher {
                         .await;
                 }
             }
+        } else if self.stub_decision.is_none() && !self.gate_is_ready() {
+            // Soğuk DecisionGate — sınıflandırma yok; güvenlik atlanmaz, muhafazakâr onay.
+            let policy = self.store.get_routing_policy().await.unwrap_or_default();
+            let request = crate::kernel::policy_manager::unclassified_security_approval(
+                &task.id,
+                &task.summary,
+                &task.source_agent,
+            );
+            return self
+                .await_approval(
+                    task,
+                    request,
+                    Some(SecurityLevel::Risky),
+                    None,
+                    &policy.local_fallback_agent,
+                    &policy.local_fallback_model,
+                )
+                .await;
         }
 
         if self.stub_decision.is_some() {
@@ -537,6 +590,16 @@ impl Dispatcher {
         }
     }
 
+    fn emit_approval_cleared(&self, task_id: &str, reason: &str) {
+        if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
+            let payload = ApprovalCleared {
+                task_id: task_id.to_string(),
+                reason: reason.to_string(),
+            };
+            let _ = app.emit(ROUTING_APPROVAL_CLEARED_EVENT, &payload);
+        }
+    }
+
     /// Görev ajana gitmeden önce onay hold; güvenlik / kota NATS alert + resume.
     async fn await_approval(
         &self,
@@ -547,11 +610,12 @@ impl Dispatcher {
         local_agent: &str,
         local_model: &str,
     ) -> Result<()> {
+        let request = request.stamp_timeout(self.approval_timeout);
         let (tx, rx) = oneshot::channel();
         let task_id = request.task_id.clone();
         self.pending.lock().await.insert(task_id.clone(), tx);
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
-            let _ = app.emit("lounge://routing-approval", &request);
+            let _ = app.emit(ROUTING_APPROVAL_EVENT, &request);
         }
 
         if is_security_approval(&request.kind) {
@@ -573,11 +637,16 @@ impl Dispatcher {
             }
         }
 
-        let vote = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
+        let vote = match tokio::time::timeout(self.approval_timeout, rx).await {
             Ok(Ok(vote)) => vote,
-            Ok(Err(_)) => anyhow::bail!("routing onay kanalı kapandı"),
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&task_id);
+                self.emit_approval_cleared(&task_id, "channel_closed");
+                anyhow::bail!("routing onay kanalı kapandı")
+            }
             Err(_) => {
                 self.pending.lock().await.remove(&task_id);
+                self.emit_approval_cleared(&task_id, "timeout");
                 anyhow::bail!("routing onayı zaman aşımı")
             }
         };
@@ -1144,5 +1213,119 @@ mod tests {
         assert_eq!(payload["vote"], "deny");
         assert_eq!(payload["status"], "cancelled");
         assert_eq!(payload["task_id"], "task-deny-1");
+    }
+
+    fn critical_decision(task_id: &str) -> DecisionResult {
+        DecisionResult {
+            message_id: task_id.into(),
+            subject: TASK_REQUESTED.into(),
+            routing: Scored {
+                value: RoutingType::Task,
+                confidence: 0.9,
+                probabilities: HashMap::from([("Task".into(), 0.9)]),
+            },
+            security: Scored {
+                value: SecurityLevel::Critical,
+                confidence: 0.95,
+                probabilities: HashMap::from([("Critical".into(), 0.95)]),
+            },
+            knowledge_hit: 0.1,
+            elapsed_ms: 7,
+            elapsed_us: 7_000,
+            device: "cpu".into(),
+            recall: Default::default(),
+        }
+    }
+
+    fn live_dispatcher(timeout: Duration) -> Dispatcher {
+        Dispatcher::new(
+            "nats://127.0.0.1:4222",
+            crate::services::lounge_ollama_endpoint(),
+            default_model_lock(),
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+            ExperienceStore::memory().unwrap(),
+            PathBuf::from("/tmp"),
+        )
+        .with_approval_timeout(timeout)
+    }
+
+    #[tokio::test]
+    async fn concurrent_security_approvals_run_in_parallel() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+
+        let t1 = LoungeTask::new("cursor", "agent-lounge-os", "task one critical");
+        let t2 = LoungeTask::new("cursor", "agent-lounge-os", "task two critical");
+        dispatcher.inject_decision(critical_decision(&t1.id));
+        dispatcher.inject_decision(critical_decision(&t2.id));
+
+        let id1 = t1.id.clone();
+        let id2 = t2.id.clone();
+        let d1 = dispatcher.clone();
+        let d2 = dispatcher.clone();
+        let h1 = tokio::spawn(async move { d1.handle_task(t1).await });
+        let h2 = tokio::spawn(async move { d2.handle_task(t2).await });
+
+        let started = std::time::Instant::now();
+        loop {
+            if dispatcher.pending.lock().await.len() >= 2 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "iki onay eşzamanlı beklemeli — sıralı işleme olsaydı ikinci görev birinci bitene kadar pending'e girmezdi"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        dispatcher
+            .resolve_vote(id1, RoutingVote::Approve)
+            .await
+            .unwrap();
+        dispatcher
+            .resolve_vote(id2, RoutingVote::Approve)
+            .await
+            .unwrap();
+        assert!(h1.await.unwrap().is_ok());
+        assert!(h2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn approval_timeout_removes_pending() {
+        let dispatcher = live_dispatcher(Duration::from_millis(60));
+        dispatcher.set_gate_ready(true);
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "timeout me");
+        dispatcher.inject_decision(critical_decision(&task.id));
+        let err = dispatcher.handle_task(task).await.unwrap_err();
+        assert!(err.to_string().contains("zaman aşımı"), "unexpected: {err}");
+        assert!(dispatcher.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cold_gate_requires_conservative_security_approval() {
+        let dispatcher = live_dispatcher(Duration::from_secs(3));
+        assert!(!dispatcher.gate_is_ready());
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "unclassified work");
+        let id = task.id.clone();
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        loop {
+            if dispatcher.pending.lock().await.contains_key(&id) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "soğuk gate muhafazakâr onay beklemeli"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        dispatcher
+            .resolve_vote(id, RoutingVote::Approve)
+            .await
+            .unwrap();
+        assert!(handle.await.unwrap().is_ok());
     }
 }

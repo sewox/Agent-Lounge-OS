@@ -3,4 +3,4 @@
 pub mod mcp_http;
 pub mod mcp_server;
 
-pub use mcp_server::{run_stdio, McpServer};
+pub use mcp_server::{run_stdio, ClientCtx, McpServer};

@@ -20,6 +20,10 @@
       "minLength": 1,
       "description": "Çalışma alanı kökü — project_index ile otomatik project_id eşlemesi"
     },
+    "restrict_to_project": {
+      "type": "boolean",
+      "description": "true ise yalnızca çözülen/explicit project_id kayıtları döner; false/yoksa diğer projeler sıralamada sonra gelir"
+    },
     "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
   }
 }

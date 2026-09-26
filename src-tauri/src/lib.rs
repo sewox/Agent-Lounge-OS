@@ -444,6 +444,9 @@ async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &Mod
         .unwrap_or(0);
     if !kernel::decision_engine::ram_is_sufficient(available) {
         gate.fail_load(&kernel::decision_engine::format_ram_blocked(available));
+        if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+            dispatcher.set_gate_ready(false);
+        }
         emit_decision_gate(app, &gate.status());
         return;
     }
@@ -454,14 +457,32 @@ async fn run_laya_load(app: &tauri::AppHandle, gate: &DecisionGate, models: &Mod
             .clone()
             .unwrap_or_else(|| "Laya ağırlıkları yok".into());
         gate.fail_load(&detail);
+        if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+            dispatcher.set_gate_ready(false);
+        }
         emit_decision_gate(app, &gate.status());
         return;
     }
     let dir = PathBuf::from(&engine.path);
     match tokio::task::spawn_blocking(move || kernel::decision_engine::load_session(&dir)).await {
-        Ok(Ok(session)) => gate.install(session),
-        Ok(Err(err)) => gate.fail_load(&err.to_string()),
-        Err(err) => gate.fail_load(&err.to_string()),
+        Ok(Ok(session)) => {
+            gate.install(session);
+            if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+                dispatcher.set_gate_ready(true);
+            }
+        }
+        Ok(Err(err)) => {
+            gate.fail_load(&err.to_string());
+            if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+                dispatcher.set_gate_ready(false);
+            }
+        }
+        Err(err) => {
+            gate.fail_load(&err.to_string());
+            if let Some(dispatcher) = app.try_state::<Dispatcher>() {
+                dispatcher.set_gate_ready(false);
+            }
+        }
     }
     emit_decision_gate(app, &gate.status());
 }

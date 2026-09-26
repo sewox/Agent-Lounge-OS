@@ -70,6 +70,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn accepts_restrict_to_project_flag() {
+        let good = json!({
+            "query": "redis config",
+            "active_file": "/tmp/proj/src/main.rs",
+            "restrict_to_project": false
+        });
+        validate(SchemaKind::McpSearch, &good).expect("restrict_to_project allowed");
+    }
+
+    #[test]
     fn rejects_extra_mcp_search_fields() {
         let bad = json!({ "query": "nats", "hack": true });
         let err = validate(SchemaKind::McpSearch, &bad).unwrap_err();

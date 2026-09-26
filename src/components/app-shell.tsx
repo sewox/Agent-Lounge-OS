@@ -11,6 +11,7 @@ import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 import {
   isSecurityApproval,
   isQuotaApproval,
+  approvalRemainingSecs,
   SECURITY_OVERLAY_PROMPT,
   QUOTA_ALERT_PROMPT,
   QUOTA_CONTINUE_LOCAL_LABEL,
@@ -68,6 +69,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     amberAlert,
     amberTools,
     approval,
+    approvalError,
     decisionGate,
     layaEngine,
     decisionTelemetry,
@@ -83,6 +85,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
   const onboarding = pathname === "/onboarding";
   const [layaDismissed, setLayaDismissed] = useState(false);
+  const [approvalSecsLeft, setApprovalSecsLeft] = useState<number | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
   useEffect(() => {
     if (layaPhase.current !== decisionGate?.phase) {
@@ -90,6 +93,21 @@ export function AppShell({ children }: { children: ReactNode }) {
       setLayaDismissed(false);
     }
   }, [decisionGate?.phase]);
+  useEffect(() => {
+    if (!approval) {
+      const clearId = window.setTimeout(() => setApprovalSecsLeft(null), 0);
+      return () => window.clearTimeout(clearId);
+    }
+    const tick = () => setApprovalSecsLeft(approvalRemainingSecs(approval));
+    const bootId = window.setTimeout(tick, 0);
+    const intervalId = window.setInterval(tick, 1000);
+    return () => {
+      window.clearTimeout(bootId);
+      window.clearInterval(intervalId);
+    };
+  }, [approval]);
+  const countdownLabel =
+    approvalSecsLeft != null ? ` · ${approvalSecsLeft}s` : "";
   const layaBanner =
     decisionGate?.phase === "available" ||
     (Boolean(decisionGate) &&
@@ -105,7 +123,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     (approval && !securityHold && !quotaHold) ||
     indexing ||
     indexNotice ||
-    layaBanner;
+    layaBanner ||
+    Boolean(approvalError);
   const bannerOffset = Boolean(statusBanner);
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-50"
@@ -123,7 +142,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-error-dim uppercase">
               Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} ·
-              PENDING_APPROVAL
+              PENDING_APPROVAL{countdownLabel}
             </p>
             <h2
               id="security-overlay-title"
@@ -163,7 +182,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         >
           <div className="w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg">
             <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-tertiary uppercase">
-              Quota Alert · QUOTA_BLOCKED
+              Quota Alert · QUOTA_BLOCKED{countdownLabel}
             </p>
             <h2
               id="quota-overlay-title"
@@ -231,7 +250,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-mono text-[11px]">
             <div className="min-w-0 truncate text-on-surface">
-              <span className="font-bold uppercase text-error-dim">Routing onayı · </span>
+              <span className="font-bold uppercase text-error-dim">
+                Routing onayı{countdownLabel} ·{" "}
+              </span>
               {approval.from_agent} → {approval.to_agent} · {approval.summary}
               <span className="ml-2 text-outline">{approval.reason}</span>
             </div>
@@ -287,6 +308,15 @@ export function AppShell({ children }: { children: ReactNode }) {
             }`}
           >
             {indexNotice.text}
+          </div>
+        </div>
+      ) : approvalError ? (
+        <div
+          className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
+          role="status"
+        >
+          <div className="truncate px-4 font-mono text-[11px] font-semibold text-error-dim">
+            {approvalError}
           </div>
         </div>
       ) : layaBanner && decisionGate ? (

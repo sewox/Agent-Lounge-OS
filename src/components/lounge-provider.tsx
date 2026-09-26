@@ -41,6 +41,10 @@ import {
   mergeWhisperedExperiences,
   pruneMsgWindow,
   recordMsgTick,
+  formatApprovalClearReason,
+  ROUTING_APPROVAL_CLEARED_EVENT,
+  ROUTING_APPROVAL_EVENT,
+  type ApprovalCleared,
   type ApprovalRequest,
   type DeadSymbol,
   type DecisionGateStatus,
@@ -94,6 +98,7 @@ type LoungeContextValue = {
   indexNotice: IndexNotice | null;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
+  approvalError: string | null;
   decisionGate: DecisionGateStatus | null;
   layaEngine: LayaEngineStatus | null;
   decisionTelemetry: LoungeTelemetry | null;
@@ -145,6 +150,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
   const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
@@ -492,10 +498,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     if (!approval) {
       return;
     }
-    if (isTauri()) {
-      await invoke("resolve_routing", { taskId: approval.task_id, vote });
+    setApprovalError(null);
+    try {
+      if (isTauri()) {
+        await invoke("resolve_routing", { taskId: approval.task_id, vote });
+      }
+      setApproval(null);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      const missing = text.toLowerCase().includes("bekleyen") || text.toLowerCase().includes("yok");
+      if (missing) {
+        setApproval(null);
+        setApprovalError("Bekleyen onay kalmamış — banner kapatıldı");
+      } else {
+        setApprovalError(text || "Onay işlenemedi");
+      }
     }
-    setApproval(null);
   }, [approval]);
 
   const markWhisperUseful = useCallback(async (experienceId: string, projectId?: string) => {
@@ -510,6 +528,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       });
     }
   }, []);
+
+  useEffect(() => {
+    if (!approvalError) {
+      return;
+    }
+    const id = window.setTimeout(() => setApprovalError(null), 6000);
+    return () => window.clearTimeout(id);
+  }, [approvalError]);
 
   useEffect(() => {
     return () => {
@@ -619,10 +645,25 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           }),
         );
         unlisteners.push(
-          await listen<ApprovalRequest>("lounge://routing-approval", (event) => {
+          await listen<ApprovalRequest>(ROUTING_APPROVAL_EVENT, (event) => {
             if (!cancelled) {
+              setApprovalError(null);
               setApproval(event.payload);
             }
+          }),
+        );
+        unlisteners.push(
+          await listen<ApprovalCleared>(ROUTING_APPROVAL_CLEARED_EVENT, (event) => {
+            if (cancelled) {
+              return;
+            }
+            setApproval((current) => {
+              if (!current || current.task_id === event.payload.task_id) {
+                return null;
+              }
+              return current;
+            });
+            setApprovalError(formatApprovalClearReason(event.payload.reason));
           }),
         );
       } catch (error) {
@@ -669,6 +710,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexNotice,
       policy,
       approval,
+      approvalError,
       decisionGate,
       layaEngine,
       decisionTelemetry,
@@ -710,6 +752,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexNotice,
       policy,
       approval,
+      approvalError,
       decisionGate,
       layaEngine,
       decisionTelemetry,
