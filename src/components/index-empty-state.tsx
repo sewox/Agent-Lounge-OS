@@ -17,7 +17,7 @@ export function IndexEmptyState({
   return (
     <div
       data-qa="index-empty"
-      className={`flex min-h-[12rem] w-full flex-col items-center justify-center gap-3 rounded border border-dashed border-outline-variant bg-surface-container-high/40 px-4 py-8 text-center ${className}`}
+      className={`flex w-full flex-col items-center justify-center gap-3 rounded border border-dashed border-outline-variant bg-surface-container-high/40 px-4 py-6 text-center ${className}`}
     >
       <p className="font-body text-body font-semibold text-on-surface">{detail}</p>
       <p className="max-w-md font-body text-meta leading-normal text-on-surface-variant">
@@ -27,7 +27,7 @@ export function IndexEmptyState({
         type="button"
         onClick={() => void indexWorkspace()}
         disabled={indexing}
-        className="min-h-8 rounded-lg bg-primary-container px-3 py-1.5 font-body text-body font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
+        className="min-h-8 shrink-0 rounded-lg bg-primary-container px-3 py-1.5 font-body text-body font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
       >
         {indexing ? "Scanning..." : "Index Workspace Now"}
       </button>

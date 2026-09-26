@@ -26,6 +26,7 @@ import {
   layaEnginePercentage,
   mergeClaudeQuotaRows,
   saveMarkdownReport,
+  sortEventsNewestFirst,
   natsEventTone,
   natsToneLabel,
   PAGE_SIZE,
@@ -211,7 +212,7 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   const filtered = useMemo(() => {
-    return events.filter((event) => {
+    const rows = events.filter((event) => {
       if (!showHeartbeats && isHeartbeatSubject(event.subject)) {
         return false;
       }
@@ -227,6 +228,7 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
       const haystack = `${event.subject} ${event.from} ${event.to} ${eventDecisionLabel(event, decisionLive ? latencyMs : null)} ${event.chainLabel ?? ""}`.toLowerCase();
       return haystack.includes(query.trim().toLowerCase());
     });
+    return sortEventsNewestFirst(rows);
   }, [decisionLive, events, latencyMs, query, showHeartbeats, subjectFilter]);
 
   const pages = pageCount(filtered.length);
@@ -292,12 +294,12 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full border-collapse text-left font-body text-body">
+        <table className="w-full table-fixed border-collapse text-left font-body text-body">
           <thead className="sticky top-0 z-10">
             <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 font-body text-meta tracking-label text-outline uppercase">
-              <th className="w-[90px] px-2.5 py-1.5 font-medium">Time</th>
+              <th className="w-[6.5rem] px-2.5 py-1.5 font-medium">Time</th>
               <th className="px-2 py-1.5 font-medium">Subject</th>
-              <th className="px-2 py-1.5 font-medium">Route</th>
+              <th className="w-[11rem] px-2 py-1.5 font-medium">Route</th>
               <th className="w-14 px-2 py-1.5 text-right font-medium">Payload</th>
               <th className="w-16 px-2.5 py-1.5 text-right font-medium">State</th>
             </tr>
@@ -310,6 +312,7 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
               const showDecision =
                 Boolean(event.decisionLabel) ||
                 (decisionLive && !isHeartbeatSubject(event.subject) && !decision.includes("—"));
+              const routeLabel = `${event.from} → ${event.to}`;
               return (
                 <tr
                   key={event.id}
@@ -321,8 +324,10 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
                         : "bg-secondary-container/10 hover:bg-secondary-container/20"
                   }
                 >
-                  <td className="tnum px-2.5 py-1.5 font-mono text-on-surface-variant">{event.time}</td>
-                  <td className={`px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
+                  <td className="tnum whitespace-nowrap px-2.5 py-1.5 font-mono text-on-surface-variant">
+                    {event.time}
+                  </td>
+                  <td className={`min-w-0 px-2 py-1.5 ${subjectClass(event.subject, selected)}`}>
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <span className="min-w-0 break-words font-mono">{event.subject}</span>
                       {showDecision ? (
@@ -342,10 +347,17 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
                       ) : null}
                     </div>
                   </td>
-                  <td className="px-2 py-1.5 font-mono text-on-surface-variant">
-                    {event.from} <span className="text-outline">→</span> {event.to}
+                  <td className="w-[11rem] max-w-[11rem] px-2 py-1.5">
+                    <span
+                      className="block truncate whitespace-nowrap font-mono text-on-surface-variant"
+                      title={routeLabel}
+                    >
+                      {routeLabel}
+                    </span>
                   </td>
-                  <td className="tnum px-2.5 py-1.5 text-right font-mono text-on-surface-variant">{event.payload}</td>
+                  <td className="tnum whitespace-nowrap px-2.5 py-1.5 text-right font-mono text-on-surface-variant">
+                    {event.payload}
+                  </td>
                   <td className="px-2.5 py-1.5 text-right">
                     <span className={`rounded border px-1.5 py-0.5 font-body text-meta tracking-label uppercase ${eventToneClass(tone)}`}>
                       {natsToneLabel(tone)}
@@ -475,7 +487,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       <div className="flex min-h-0 w-full flex-1 flex-col xl:flex-row">
         <div
           data-qa="panel"
-          className="flex min-h-0 w-full flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 xl:border-r xl:border-b-0"
+          className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-auto border-b border-outline-variant bg-surface-container-low/40 p-2.5 xl:border-r xl:border-b-0"
         >
           <SemanticMap
             semanticMap={semanticMap}
