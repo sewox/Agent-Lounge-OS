@@ -97,9 +97,9 @@ jobs:
           install -m 755 "$BIN" bridge/codebase-memory-mcp
           # Sanitize: first token only (avoid shell metacharacters in GITHUB_ENV).
           RAW_VER="$(bridge/codebase-memory-mcp --version 2>/dev/null | head -n1 || true)"
-          VERSION="$(printf '%s' "$RAW_VER" | tr -cd 'A-Za-z0-9._+-:' | head -c 64)"
+          VERSION="$(printf '%s' "$RAW_VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
           if [[ -z "$VERSION" ]]; then
-            VERSION="${CBM_RELEASE}"
+            VERSION="${CBM_RELEASE#v}"
           fi
           SIZE_B="$(wc -c < bridge/codebase-memory-mcp | tr -d '[:space:]')"
           if [[ "$SIZE_B" -lt 4096 ]]; then
@@ -165,9 +165,9 @@ jobs:
               exit 1
             fi
             RAW_VER="$("$SIDECAR" --version 2>/dev/null | head -n1 || true)"
-            VERSION="$(printf '%s' "$RAW_VER" | tr -cd 'A-Za-z0-9._+-:' | head -c 64)"
+            VERSION="$(printf '%s' "$RAW_VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
             if [[ -z "$VERSION" ]]; then
-              VERSION="${CBM_RELEASE}"
+              VERSION="${CBM_RELEASE#v}"
             fi
             echo "bundled --version: $VERSION (raw=${RAW_VER})"
             {
@@ -209,7 +209,10 @@ jobs:
           if [[ -z "$VER" ]]; then
             VER="${{ steps.sidecar.outputs.version }}"
           fi
-          VER="$(printf '%s' "$VER" | tr -cd 'A-Za-z0-9._+-:' | head -c 64)"
+          VER="$(printf '%s' "$VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
+          if [[ -z "$VER" ]]; then
+            VER="${CBM_RELEASE#v}"
+          fi
           SZ="${SIDECAR_SIZE_BYTES:-${{ steps.sidecar.outputs.size_bytes }}}"
           {
             echo "commit=${GITHUB_SHA}"

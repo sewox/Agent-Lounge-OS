@@ -377,5 +377,7 @@ test.describe("AP / CP / misc", () => {
     await expect(page.locator("main")).toBeVisible();
     const text = await page.locator("main").innerText();
     expect(/Worker Fleet|Fleet|memory-bridge|Grok|LMR|NATS|DecisionGate/i.test(text)).toBeTruthy();
+    await expect(page.getByText("Worker detail").first()).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: /Heartbeat/i })).toBeVisible();
   });
 });

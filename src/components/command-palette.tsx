@@ -367,9 +367,15 @@ export function CommandPalette() {
           ) : (
             <span className="font-mono text-meta text-outline">sqlite</span>
           )}
-          <kbd className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant">
-            esc
-          </kbd>
+          <button
+            type="button"
+            onClick={close}
+            className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant hover:bg-surface-bright hover:text-on-surface"
+            aria-label="Close command palette"
+            title="Esc"
+          >
+            Esc
+          </button>
         </div>
 
         <div

@@ -38,6 +38,61 @@ export function degradedCoreServiceNames(report: ServiceReport | null | undefine
   return names;
 }
 
+/** Supervisor auto-restart phase for the degraded banner (single accurate message). */
+export type DegradedRestartPhase =
+  | { kind: "retrying"; attempt: number; max: number; waitSecs: number | null }
+  | { kind: "exhausted"; max: number }
+  | { kind: "unknown" };
+
+function parseRestartPhase(error: string | null | undefined): DegradedRestartPhase | null {
+  if (!error) {
+    return null;
+  }
+  const exhausted = error.match(/limiti aşıldı\s*\((\d+)\s*deneme\)/i);
+  if (exhausted) {
+    return { kind: "exhausted", max: Number(exhausted[1]) || 5 };
+  }
+  const retry = error.match(/deneme\s+(\d+)\s*\/\s*(\d+)/i);
+  if (retry) {
+    const wait = error.match(/(?:yeniden deneme|sonra)\s+(\d+)\s*s/i);
+    return {
+      kind: "retrying",
+      attempt: Number(retry[1]) || 1,
+      max: Number(retry[2]) || 5,
+      waitSecs: wait ? Number(wait[1]) : null,
+    };
+  }
+  if (/Service Degraded/i.test(error)) {
+    return { kind: "unknown" };
+  }
+  return null;
+}
+
+/**
+ * Prefer exhausted over retrying when either core daemon reports it.
+ * Returns null when nothing is degraded.
+ */
+export function resolveDegradedRestart(
+  report: ServiceReport | null | undefined,
+): { names: string[]; phase: DegradedRestartPhase } | null {
+  const names = degradedCoreServiceNames(report);
+  if (names.length === 0 || !report) {
+    return null;
+  }
+  const phases = [report.ollama.error, report.nats.error]
+    .map(parseRestartPhase)
+    .filter((row): row is DegradedRestartPhase => row != null);
+  const exhausted = phases.find((row) => row.kind === "exhausted");
+  if (exhausted) {
+    return { names, phase: exhausted };
+  }
+  const retrying = phases.find((row) => row.kind === "retrying");
+  if (retrying) {
+    return { names, phase: retrying };
+  }
+  return { names, phase: phases[0] ?? { kind: "unknown" } };
+}
+
 export type DecisionGatePhase = "loading" | "ready" | "failed" | "available";
 
 export type DecisionGateStatus = {
@@ -1695,6 +1750,7 @@ export async function fetchAgentEfficiencyReport(options?: {
   return report;
 }
 
+/** Browser harness: anchor download. Prefer `saveMarkdownReport` in the UI. */
 export function downloadMarkdownFile(filename: string, content: string): void {
   const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -1705,6 +1761,48 @@ export function downloadMarkdownFile(filename: string, content: string): void {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+export type SaveMarkdownResult =
+  | { ok: true; path: string; mode: "tauri" | "browser" }
+  | { ok: false; cancelled?: boolean; error: string };
+
+/** Tauri: native save dialog + write. Browser: anchor download. */
+export async function saveMarkdownReport(
+  filename: string,
+  content: string,
+): Promise<SaveMarkdownResult> {
+  const safeName = filename.endsWith(".md") ? filename : `${filename}.md`;
+  if (!isTauri()) {
+    try {
+      downloadMarkdownFile(safeName, content);
+      return { ok: true, path: safeName, mode: "browser" };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { invoke } = await import("@tauri-apps/api/core");
+    const path = await save({
+      defaultPath: safeName,
+      title: "Markdown indir",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (typeof path !== "string" || path.length === 0) {
+      return { ok: false, cancelled: true, error: "İptal edildi" };
+    }
+    await invoke("write_text_file", { path, contents: content });
+    return { ok: true, path, mode: "tauri" };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function pickWorkspaceFolder(): Promise<string | null> {

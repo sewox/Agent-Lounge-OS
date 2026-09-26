@@ -53,6 +53,11 @@ test.describe("SH — global shell", () => {
     await dialog.locator("input").first().focus();
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0, { timeout: 5_000 });
+    // Esc control button also closes (not only the keyboard key).
+    await page.keyboard.press("Control+k");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: /close command palette|^Esc$/i }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 5_000 });
   });
 
   test("SH-04b · Palette shortcut UI label adapts (Ctrl+K on Win/Linux, ⌘K on macOS)", async ({
