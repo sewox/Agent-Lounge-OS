@@ -55,12 +55,40 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       if (cb) cb(payload);
     }
 
+    function seedBusEvents(handler: number) {
+      const rows = window.__QA_FIXTURE__?.events ?? [];
+      // Defer past LoungeProvider boot `setEvents([])` so SR-02 sees real traffic.
+      window.setTimeout(() => {
+        for (const ev of rows) {
+          const kbMatch = String(ev.payload || "0.1kb").match(/([\d.]+)/);
+          const payloadBytes = Math.max(1, Math.round(Number(kbMatch?.[1] || 0.1) * 1024));
+          runCallback(handler, {
+            event: "nats-event",
+            id: Math.floor(Math.random() * 1e9),
+            payload: {
+              id: ev.id,
+              type: "bus",
+              subject: ev.subject,
+              source_agent: ev.from,
+              target_agent: ev.to,
+              created_at: new Date().toISOString(),
+              payload: {},
+              payload_bytes: payloadBytes,
+            },
+          });
+        }
+      }, 120);
+    }
+
     function handleEventPlugin(cmd: string, args: Record<string, unknown> | undefined) {
       if (cmd === "plugin:event|listen") {
         const event = String(args?.event ?? "");
         const handler = Number(args?.handler);
         if (!listeners.has(event)) listeners.set(event, []);
         listeners.get(event)!.push(handler);
+        if (event === "nats-event") {
+          seedBusEvents(handler);
+        }
         return handler;
       }
       if (cmd === "plugin:event|emit") {
@@ -276,6 +304,6 @@ export async function getIpcLog(page: Page) {
 
 export async function waitForAppReady(page: Page) {
   await page.waitForSelector("main", { timeout: 30_000 });
-  // Allow LoungeProvider boot (setTimeout 0 + refresh invokes).
-  await page.waitForTimeout(400);
+  // Allow LoungeProvider boot (setTimeout 0 + refresh invokes) and fixture bus seed.
+  await page.waitForTimeout(550);
 }

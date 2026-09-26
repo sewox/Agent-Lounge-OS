@@ -469,7 +469,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       });
       return;
     }
-    await invoke<LoungeMessage>("probe_bus");
+    try {
+      const message = await invoke<LoungeMessage>("probe_bus");
+      if (message?.subject) {
+        ingestBusMessage(message);
+      }
+    } catch (error) {
+      console.error(error);
+    }
   }, [ingestBusMessage]);
 
   const switchProject = useCallback((name: string | null) => {

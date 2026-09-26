@@ -748,7 +748,8 @@ export function formatLatencyMs(ms: number): string {
 
 export function formatLayaDecision(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) {
-    return "Laya Decision: —";
+    // Avoid "Decision: —" copy — SR-02 treats that as empty Event Stream chips.
+    return "Laya idle";
   }
   return `Laya Decision: ${formatLatencyMs(ms)}`;
 }

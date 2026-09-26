@@ -472,10 +472,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <GraphUiButton />
         </div>
       </div>
-      <div className="flex min-h-0 w-full flex-1 flex-col lg:flex-row">
+      <div className="flex min-h-0 w-full flex-1 flex-col xl:flex-row">
         <div
           data-qa="panel"
-          className="flex min-h-0 w-full flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 lg:border-r lg:border-b-0"
+          className="flex min-h-0 w-full flex-1 flex-col overflow-hidden border-b border-outline-variant bg-surface-container-low/40 p-2.5 xl:border-r xl:border-b-0"
         >
           <SemanticMap
             semanticMap={semanticMap}
@@ -1248,6 +1248,10 @@ export function FleetPanel() {
           </p>
         </div>
       </div>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-2 font-body text-meta text-outline">
+        <span className="font-body">{workers.length} workers registered</span>
+        <span className="font-mono">nats · supervisor</span>
+      </div>
     </section>
   );
 }
@@ -1509,6 +1513,14 @@ export function TelemetryPanel() {
             </div>
           ) : null}
         </div>
+      </div>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-2">
+        <span className="font-body text-meta text-outline">
+          Efficiency · {report ? report.scopeLabel : "waiting"}
+        </span>
+        <span className="font-mono text-meta text-outline">
+          buffer {events.length} · dead {deadSymbols.length}
+        </span>
       </div>
     </section>
   );
