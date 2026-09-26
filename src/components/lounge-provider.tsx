@@ -540,18 +540,21 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       return;
     }
     const expires = new Date(Date.now() + 90_000).toISOString();
-    setApproval({
-      task_id: "demo-routing-task",
-      summary:
-        "Uzun routing özeti: Claude → LMR geçişi için kullanıcı onayı bekleniyor; mesajın tamamı kesilmeden görünmeli ve satır kırılmalı.",
-      from_agent: "claude-desktop",
-      to_agent: "lmr-local",
-      kind: "agent_switch",
-      reason:
-        "Kota eşiği aşıldı · otomatik ajan geçişi kilitli · reason metni de wrap olmalı, ellipsis yok.",
-      expires_at: expires,
-      timeout_secs: 90,
-    });
+    const timer = window.setTimeout(() => {
+      setApproval({
+        task_id: "demo-routing-task",
+        summary:
+          "Uzun routing özeti: Claude → LMR geçişi için kullanıcı onayı bekleniyor; mesajın tamamı kesilmeden görünmeli ve satır kırılmalı.",
+        from_agent: "claude-desktop",
+        to_agent: "lmr-local",
+        kind: "agent_switch",
+        reason:
+          "Kota eşiği aşıldı · otomatik ajan geçişi kilitli · reason metni de wrap olmalı, ellipsis yok.",
+        expires_at: expires,
+        timeout_secs: 90,
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
