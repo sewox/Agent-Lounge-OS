@@ -12,7 +12,7 @@ use super::probe::{
     endpoint, find_executable, lounge_nats_dir, tcp_ready, wait_until, DEFAULT_NATS_HOST,
     DEFAULT_NATS_HTTP_PORT, DEFAULT_NATS_PORT,
 };
-use crate::kernel::DecisionGate;
+use crate::kernel::{DecisionGate, GuardedCommand};
 use crate::models::{ServiceHealth, ServiceId};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(400);
@@ -377,8 +377,9 @@ fn listen_pids(port: u16) -> Vec<u32> {
 
 #[cfg(not(windows))]
 fn unix_listen_pids(port: u16) -> Vec<u32> {
-    let output = std::process::Command::new("lsof")
+    let output = GuardedCommand::new("lsof")
         .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .internal_daemon()
         .output();
     let Ok(output) = output else {
         return Vec::new();
@@ -394,8 +395,9 @@ fn unix_listen_pids(port: u16) -> Vec<u32> {
 
 #[cfg(windows)]
 fn windows_listen_pids(port: u16) -> Vec<u32> {
-    let output = std::process::Command::new("netstat")
+    let output = GuardedCommand::new("netstat")
         .args(["-ano", "-p", "tcp"])
+        .internal_daemon()
         .output();
     let Ok(output) = output else {
         return Vec::new();
@@ -508,8 +510,12 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
         let port = listener.local_addr().ok()?.port();
         drop(listener);
-        let child = std::process::Command::new(binary)
+        let mut command = GuardedCommand::new(binary)
             .args(["-a", "127.0.0.1", "-p", &port.to_string()])
+            .internal_daemon()
+            .into_std_command()
+            .ok()?;
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

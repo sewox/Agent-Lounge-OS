@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use super::probe::{find_executable, first_existing, repo_root_from_crate};
+use crate::kernel::GuardedCommand;
 use crate::models::{
     AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectList, ProjectSummary,
     ServiceHealth, ServiceId,
@@ -443,12 +444,15 @@ impl MemoryBridge {
         let pid = Arc::new(AtomicU32::new(0));
         let pid_for_child = pid.clone();
 
-        // Tokio runtime'ı bloklamamak için std::process::Command spawn_blocking içinde.
+        // Tokio runtime'ı bloklamamak için GuardedCommand → std Command spawn_blocking içinde.
         let wait = tokio::task::spawn_blocking(move || {
-            let mut command = std::process::Command::new(&binary);
-            command
+            let mut command = GuardedCommand::new(&binary)
                 .arg("cli")
                 .args(&args)
+                .internal_daemon()
+                .into_std_command()
+                .with_context(|| format!("subprocess gate başarısız: {}", binary.display()))?;
+            command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -647,14 +651,16 @@ pub fn extract_rpc_tool_text(payload: &Value) -> Result<String> {
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
+        let _ = GuardedCommand::new("kill")
             .args(["-KILL", &pid.to_string()])
+            .internal_daemon()
             .status();
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
+        let _ = GuardedCommand::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
+            .internal_daemon()
             .status();
     }
 }

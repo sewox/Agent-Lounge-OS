@@ -1,7 +1,7 @@
 //! codebase-memory-mcp 3D Graph UI — probe, spawn, singleton window.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use super::memory_bridge::{
     probe_ui_config, MemoryBridge, DEFAULT_GRAPH_UI_PORT, UI_PROBE_TIMEOUT,
 };
 use super::probe::{tcp_ready, wait_until};
+use crate::kernel::GuardedCommand;
 
 pub const GRAPH_WINDOW_LABEL: &str = "graph-window";
 const ENABLE_READY_DEADLINE: Duration = Duration::from_secs(10);
@@ -349,10 +350,13 @@ pub async fn enable_graph_ui(
         bail!("codebase-memory-mcp bulunamadı");
     }
 
-    let mut command = Command::new(binary);
-    command
+    let mut command = GuardedCommand::new(binary)
         .arg("--ui=true")
         .arg(format!("--port={port}"))
+        .internal_daemon()
+        .into_std_command()
+        .with_context(|| format!("graph UI gate başarısız: {}", binary.display()))?;
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

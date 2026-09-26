@@ -13,6 +13,7 @@ use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
+use crate::kernel::GuardedCommand;
 use crate::models::{DiscoveredTool, ToolQuota, AMBER_THRESHOLD};
 
 const HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(8);
@@ -578,8 +579,9 @@ fn claude_oauth_token_from_os_store() -> Option<String> {
 }
 
 fn read_secret_command(program: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(program)
+    let output = GuardedCommand::new(program)
         .args(args)
+        .internal_daemon()
         .output()
         .ok()?;
     if !output.status.success() {
@@ -630,8 +632,12 @@ public static class NativeCred {
 }
 "@
 [NativeCred]::Read($env:LOUNGE_CRED_TARGET)"#;
-    let output = std::process::Command::new("powershell")
+    let mut command = GuardedCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .internal_daemon()
+        .into_std_command()
+        .ok()?;
+    let output = command
         .env("LOUNGE_CRED_TARGET", target)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
