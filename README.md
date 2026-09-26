@@ -185,11 +185,11 @@ cargo build --manifest-path src-tauri/Cargo.toml --bin lounge-mcp --release   # 
 
 ### Cursor / Claude Desktop (MCP)
 
-Lounge’u dış ajanlara açmak için `lounge-mcp` stdio sunucusunu derleyip istemci config’ine ekleyin. Hazır snippet’ler ve tool listesi: **[`docs/mcp.md`](docs/mcp.md)**.
+Kernel masaüstü uygulaması **`http://127.0.0.1:18791`** üzerinde MCP HTTP sunar. `lounge-mcp` binary Claude/Cursor için **stdio shim** olup bu HTTP’ye proxy eder (dashboard `connected_tools` ile senkron). Kernel kapalıysa shim gömülü SQLite moduna düşer.
 
-Özet (yolları mutlak yapın):
+Hazır snippet’ler: **[`docs/mcp.md`](docs/mcp.md)**.
 
-**Cursor** — `.cursor/mcp.json`:
+**Cursor** — `.cursor/mcp.json` (yolları mutlak yapın):
 
 ```json
 {
@@ -198,6 +198,7 @@ Lounge’u dış ajanlara açmak için `lounge-mcp` stdio sunucusunu derleyip is
       "command": "/ABS/PATH/TO/src-tauri/target/release/lounge-mcp",
       "args": [],
       "env": {
+        "LOUNGE_MCP_URL": "http://127.0.0.1:18791",
         "LOUNGE_DB_PATH": "/ABS/PATH/TO/experiences/lounge.sqlite"
       }
     }
@@ -207,7 +208,7 @@ Lounge’u dış ajanlara açmak için `lounge-mcp` stdio sunucusunu derleyip is
 
 **Claude Desktop** — `claude_desktop_config.json` içinde aynı `mcpServers` bloğu.
 
-`lounge_search_experience` / `lounge_record_*` için Tauri UI gerekmez. `lounge_dispatch_task` için NATS + çalışan Lounge Kernel gerekir (güvenlik/kota baypas edilmez).
+`lounge_dispatch_task` için NATS + Kernel gerekir (PENDING_APPROVAL / kota baypas edilmez). MCP dosya yazmaz ve ayar değiştirmez.
 
 ---
 

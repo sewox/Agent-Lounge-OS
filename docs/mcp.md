@@ -1,28 +1,30 @@
 # Lounge MCP — Dış ajan bağlantısı
 
-Agent Lounge OS, Cursor ve Claude Desktop’a **Model Context Protocol (MCP)** sunucusu olarak açılır. Taşıma: **stdio** (JSON-RPC 2.0, satır sonu ile ayrılmış). Bu, her iki istemcinin de resmi olarak desteklediği yoldur.
+Agent Lounge OS, Cursor ve Claude Desktop’a **Model Context Protocol (MCP)** ile açılır.
 
-## Mimari
+## Mimari (Connectivity Phase)
 
-| Bileşen | Rol |
-|---------|-----|
-| `lounge-mcp` binary | Stdio MCP sunucusu (`src-tauri/src/bin/lounge_mcp.rs`) |
-| `bridge/mcp_server.rs` | Protokol + tool işleyicileri |
-| Experience store (SQLite) | Arama / kayıt — **UI gerekmez** |
-| NATS `lounge.task.requested` | Görev dağıtımı — **Kernel + NATS gerekir** |
+| Katman | Rol |
+|--------|-----|
+| **Kernel HTTP** `127.0.0.1:18791` | Tauri uygulaması ayaktayken MCP JSON-RPC (`POST /mcp`) + SSE nabız (`GET /mcp/sse`) |
+| **`lounge-mcp` stdio shim** | Claude Desktop / Cursor `command` ile başlatır → Kernel HTTP’ye proxy |
+| **Standalone fallback** | Kernel kapalıysa aynı binary gömülü SQLite modunda çalışır (`LOUNGE_MCP_STANDALONE=1` zorlar) |
 
 ```text
 Cursor / Claude Desktop
         │  stdio (MCP)
         ▼
-   lounge-mcp
-        ├─► SQLite experiences  (search / record)
-        └─► NATS 4222 ──► Lounge Kernel (DecisionGate, security, quota)
+   lounge-mcp  ──proxy──►  Kernel HTTP :18791  ──►  aynı ExperienceStore (dashboard sync)
+        │                         │
+        │ (fallback)              ├── NATS task.requested → DecisionGate / security / quota
+        └── SQLite experiences ◄──┘
 ```
 
-**Önemli:** `lounge_dispatch_task` / `lounge_ask_agent` politikayı baypas etmez. Görev bus’a yazılır; Kernel dinliyorsa güvenlik (`PENDING_APPROVAL`) ve kota kapıları uygulanır. Yalnızca MCP çalışıyorsa arama/kayıt yine çalışır; dispatch NATS’a ulaşamazsa hata döner.
+**Güvenlik sınırı (bilinçli):** MCP dosya sistemi yazmaz; kota / politika / routing ayarlarını değiştirmez. Bunlar yalnızca Tauri UI’dan değişir.
 
-Bağlanan istemci `connected_tools` tablosuna (`app:cursor`, `app:claude_desktop`, …) yazılır; dashboard’daki bağlı ajanlar listesinde görünür.
+**Atomik kayıt:** `lounge_record_*` SQLite (+ yerel embedding) yazar; `LOUNGE_QDRANT_URL` / `LOUNGE_CHROMA_URL` varsa uzak indeksi de bekler — uzak yazım başarısızsa SQLite satırı geri alınır.
+
+**Otomatik project_id:** `active_file` veya `workspace_root` verildiğinde `project_index.repo_path` üzerinden en uzun eşleşen proje seçilir.
 
 ## Binary derleme
 
@@ -30,26 +32,16 @@ Bağlanan istemci `connected_tools` tablosuna (`app:cursor`, `app:claude_desktop
 cargo build --manifest-path src-tauri/Cargo.toml --bin lounge-mcp --release
 ```
 
-Çıktı (örnek):
-
-- `src-tauri/target/release/lounge-mcp`
-
-Geliştirme:
-
-```bash
-cargo run --manifest-path src-tauri/Cargo.toml --bin lounge-mcp
-```
-
 ### Ortam değişkenleri
 
 | Değişken | Anlam |
 |----------|--------|
-| `LOUNGE_DB_PATH` / `LOUNGE_EXPERIENCE_DB` | Experience SQLite yolu (yoksa `experiences/lounge.sqlite`) |
+| `LOUNGE_MCP_URL` / `LOUNGE_MCP_BIND` | Kernel HTTP (varsayılan `http://127.0.0.1:18791`) |
+| `LOUNGE_MCP_STANDALONE=1` | Proxy’yi atla; gömülü sunucu |
+| `LOUNGE_DB_PATH` / `LOUNGE_EXPERIENCE_DB` | Standalone SQLite |
 | `LOUNGE_NATS_URL` | Varsayılan `nats://127.0.0.1:4222` |
 
 ## Cursor — `.cursor/mcp.json`
-
-Proje köküne veya kullanıcı MCP ayarına yapıştırın (`command` yolunu kendi binary’nize göre düzeltin):
 
 ```json
 {
@@ -58,6 +50,7 @@ Proje köküne veya kullanıcı MCP ayarına yapıştırın (`command` yolunu ke
       "command": "/ABS/PATH/TO/Agent-Lounge-OS/src-tauri/target/release/lounge-mcp",
       "args": [],
       "env": {
+        "LOUNGE_MCP_URL": "http://127.0.0.1:18791",
         "LOUNGE_DB_PATH": "/ABS/PATH/TO/Agent-Lounge-OS/experiences/lounge.sqlite",
         "LOUNGE_NATS_URL": "nats://127.0.0.1:4222"
       }
@@ -65,6 +58,8 @@ Proje köküne veya kullanıcı MCP ayarına yapıştırın (`command` yolunu ke
   }
 }
 ```
+
+Dashboard ile senkron için **Agent Lounge OS uygulamasını açık tutun**; shim otomatik HTTP’ye bağlanır.
 
 ## Claude Desktop — `claude_desktop_config.json`
 
@@ -77,6 +72,7 @@ macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
       "command": "/ABS/PATH/TO/Agent-Lounge-OS/src-tauri/target/release/lounge-mcp",
       "args": [],
       "env": {
+        "LOUNGE_MCP_URL": "http://127.0.0.1:18791",
         "LOUNGE_DB_PATH": "/ABS/PATH/TO/Agent-Lounge-OS/experiences/lounge.sqlite",
         "LOUNGE_NATS_URL": "nats://127.0.0.1:4222"
       }
@@ -85,32 +81,36 @@ macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-Claude’u yeniden başlattıktan sonra araçlar listesinde Lounge tool’larını görmelisiniz.
+Claude yalnızca stdio başlatır; `lounge-mcp` Kernel HTTP’ye köprü kurar.
 
 ## Tool’lar
 
-| Tool | Açıklama |
-|------|----------|
-| `lounge_search_experience` | `query`, isteğe bağlı `project` — tecrübe / ADR ara |
-| `lounge_record_experience` | `project` + `context` / `decision` — yeni tecrübe |
-| `lounge_record_decision` | Aynı iş — ADR alias |
-| `lounge_dispatch_task` | `target_agent`, `task`, `project` → NATS |
-| `lounge_ask_agent` | Dispatch alias |
-| `lounge_status` | Bağlı ajanlar + NATS/LMR sağlık |
+| Tool | Şema | Not |
+|------|------|-----|
+| `lounge_search_experience` | `mcp_search_experience.schema.json` | `active_file` / `workspace_root` → project |
+| `lounge_record_experience` | MCP args + `experience.schema.json` | Atomik SQLite↔vektör |
+| `lounge_record_decision` | aynı | ADR alias |
+| `lounge_dispatch_task` | MCP args + `task.schema.json` | NATS; PENDING_APPROVAL baypas yok |
+| `lounge_ask_agent` | aynı | Dispatch alias |
+| `lounge_status` | `mcp_status.schema.json` | Bağlı ajanlar + sağlık |
+
+Serbest biçim / `additionalProperties` → net MCP `isError` yanıtı.
 
 ## Manuel duman testi
 
 ```bash
+# Kernel ayaktayken (tercih):
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"cursor","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lounge_status","arguments":{}}}' \
   | cargo run --manifest-path src-tauri/Cargo.toml --bin lounge-mcp --quiet
+
+# Standalone:
+LOUNGE_MCP_STANDALONE=1 cargo run --manifest-path src-tauri/Cargo.toml --bin lounge-mcp
 ```
 
-Otomatik test: `bridge::mcp_server::tests::stdio_transport_roundtrip` (duplex stdio framing + experience store).
+## Follow-up (bu PR dışı)
 
-## Sonraki adım (bu PR dışı)
-
-NATS worker şablonu (`workers/bot_template.py`) — Grok / özel botların `lounge.tasks.<bot>` dinlemesi.
+NATS worker şablonu (`workers/bot_template.py`) — bot/Grok bağlantısı.

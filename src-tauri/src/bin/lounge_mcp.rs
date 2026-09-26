@@ -1,11 +1,15 @@
-//! Lounge MCP — Cursor / Claude Desktop stdio sunucusu.
+//! Lounge MCP — Cursor / Claude Desktop stdio shim (+ standalone fallback).
 //!
-//! Kullanım:
-//!   cargo run --manifest-path src-tauri/Cargo.toml --bin lounge-mcp
+//! Tercih edilen yol: Agent Lounge OS (Kernel) `http://127.0.0.1:18791` üzerinde
+//! MCP HTTP sunar; bu binary stdio ↔ HTTP proxy yapar (dashboard ile aynı store).
+//!
+//! Kernel kapalıysa veya `LOUNGE_MCP_STANDALONE=1` ise gömülü SQLite moduna düşer.
 //!
 //! Ortam:
-//!   LOUNGE_DB_PATH / LOUNGE_EXPERIENCE_DB — SQLite yolu
-//!   LOUNGE_NATS_URL — varsayılan nats://127.0.0.1:4222
+//!   LOUNGE_MCP_URL / LOUNGE_MCP_BIND — Kernel HTTP
+//!   LOUNGE_DB_PATH / LOUNGE_EXPERIENCE_DB — standalone SQLite
+//!   LOUNGE_NATS_URL — standalone NATS
+//!   LOUNGE_MCP_STANDALONE=1 — HTTP proxy'yi atla
 
 use std::process::ExitCode;
 
@@ -13,9 +17,8 @@ use app_lib::bridge::mcp_server::{resolve_db_path, resolve_nats_url, run_stdio, 
 use app_lib::db::ExperienceStore;
 
 fn main() -> ExitCode {
-    // MCP: yalnızca stderr'e log (stdout protokole ayrılmış).
     eprintln!(
-        "[lounge-mcp] Agent Lounge OS MCP {} — stdio",
+        "[lounge-mcp] Agent Lounge OS MCP {} — stdio shim",
         env!("CARGO_PKG_VERSION")
     );
 

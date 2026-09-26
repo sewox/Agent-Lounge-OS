@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -80,6 +81,19 @@ impl ExperienceStore {
         .context("project_index list join")?
     }
 
+    /// `active_file` / `workspace_root` / açık path → `project_index.repo_path` eşlemesi.
+    /// En uzun eşleşen kök kazanır; yoksa `None`.
+    pub async fn resolve_project_id(&self, path_hint: impl Into<String>) -> Result<Option<String>> {
+        let path_hint = path_hint.into();
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            resolve_project_id_blocking(&conn, &path_hint)
+        })
+        .await
+        .context("project_index resolve join")?
+    }
+
     pub async fn load_semantic_map(&self, project_id: Option<String>) -> Result<SemanticMap> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -105,6 +119,80 @@ impl ExperienceStore {
         .await
         .context("project_index search join")?
     }
+}
+
+fn resolve_project_id_blocking(conn: &Connection, path_hint: &str) -> Result<Option<String>> {
+    let needle = normalize_path_hint(path_hint);
+    if needle.as_os_str().is_empty() {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT DISTINCT project_id, repo_path, file_path
+        FROM project_index
+        WHERE TRIM(repo_path) != '' OR (file_path IS NOT NULL AND TRIM(file_path) != '')
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+
+    let mut best: Option<(usize, String)> = None;
+    for row in rows {
+        let (project_id, repo_path, file_path) = row?;
+        let candidates = [
+            Some(repo_path.as_str()),
+            file_path.as_deref().filter(|s| !s.trim().is_empty()),
+        ];
+        for candidate in candidates.into_iter().flatten() {
+            let root = normalize_path_hint(candidate);
+            if root.as_os_str().is_empty() {
+                continue;
+            }
+            if path_is_within(&needle, &root) {
+                let score = root.as_os_str().len();
+                if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                    best = Some((score, project_id.clone()));
+                }
+            }
+        }
+    }
+    Ok(best.map(|(_, id)| id))
+}
+
+fn normalize_path_hint(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return PathBuf::new();
+    }
+    let path = PathBuf::from(trimmed);
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    // Henüz var olmayan / test path'leri için lexical normalize.
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    if path == root {
+        return true;
+    }
+    path.starts_with(root)
 }
 
 fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<()> {

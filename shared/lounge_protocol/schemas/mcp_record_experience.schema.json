@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_record_experience.schema.json",
+  "title": "McpRecordExperienceArgs",
+  "description": "lounge_record_experience / lounge_record_decision tool girdileri. Sonuç LoungeExperience şemasına dönüştürülüp doğrulanır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "project": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "context": { "type": "string", "minLength": 1 },
+    "topic": { "type": "string", "minLength": 1 },
+    "decision": { "type": "string", "minLength": 1 },
+    "outcome_text": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "outcome": {
+      "type": "string",
+      "enum": ["success", "failure", "partial"]
+    },
+    "agent": { "type": "string", "minLength": 1 },
+    "active_file": { "type": "string", "minLength": 1 },
+    "workspace_root": { "type": "string", "minLength": 1 }
+  },
+  "anyOf": [
+    { "required": ["context"] },
+    { "required": ["topic"] },
+    { "required": ["decision"] },
+    { "required": ["summary"] },
+    { "required": ["outcome_text"] }
+  ]
+}

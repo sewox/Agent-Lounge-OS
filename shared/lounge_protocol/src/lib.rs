@@ -1,8 +1,12 @@
 //! Lounge bus zarfı — NATS `lounge.>` üzerindeki her mesaj bu struct ile taşınır.
 
+pub mod schema;
+
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub use schema::{validate as validate_schema, SchemaKind};
 
 pub const WILDCARD: &str = "lounge.>";
 pub const UI_EVENT: &str = "nats-event";
