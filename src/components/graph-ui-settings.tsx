@@ -64,16 +64,16 @@ export function GraphUiSettings() {
   return (
     <div className="rounded-lg border border-outline-variant bg-surface-container">
       <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
-        <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+        <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
           Graph UI Port
         </h2>
-        <p className="mt-1 font-body text-xs text-on-surface-variant">
+        <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
           codebase-memory-mcp 3D Graph UI dinleme portu (varsayılan {DEFAULT_PORT}). Port başka bir
           süreçte doluysa Settings&apos;ten değiştirin.
         </p>
       </div>
       <div className="flex flex-wrap items-end gap-2 p-3">
-        <label className="space-y-1 font-mono text-xs text-on-surface-variant">
+        <label className="space-y-1 font-body text-meta text-on-surface-variant">
           Port
           <input
             type="number"
@@ -81,19 +81,19 @@ export function GraphUiSettings() {
             max={65535}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            className="block w-28 rounded border border-outline-variant bg-surface-container-low px-2 py-1 font-mono text-xs text-on-surface"
+            className="block w-28 rounded border border-outline-variant bg-surface-container-low px-2 py-1 font-body text-body text-on-surface"
           />
         </label>
         <button
           type="button"
           disabled={saving || draft === String(port)}
           onClick={() => void save()}
-          className="rounded bg-primary-container px-2.5 py-1 font-mono text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
+          className="rounded bg-primary-container px-2.5 py-1 font-body text-meta font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
         >
           {saving ? "…" : "Kaydet"}
         </button>
         {message ? (
-          <p className="w-full font-body text-xs text-on-surface-variant" role="status">
+          <p className="w-full font-body text-meta text-on-surface-variant" role="status">
             {message}
           </p>
         ) : null}

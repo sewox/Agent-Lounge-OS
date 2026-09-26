@@ -153,7 +153,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
               : `codebase-memory-mcp Graph UI · port ${status.port}`
           }
           onClick={() => void onEnable()}
-          className="rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 font-mono text-xs font-semibold text-on-surface hover:bg-surface-bright disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 font-body text-meta font-semibold text-on-surface hover:bg-surface-bright disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "…" : "Enable Graph UI"}
         </button>
@@ -163,7 +163,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
           type="button"
           disabled={busy}
           onClick={() => void onOpen()}
-          className="rounded bg-primary-container px-2.5 py-1 font-mono text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
+          className="rounded bg-primary-container px-2.5 py-1 font-body text-meta font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
         >
           {busy ? "…" : "Open 3D Graph"}
         </button>
@@ -173,13 +173,13 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
           type="button"
           disabled
           title="Index workspace first"
-          className="cursor-not-allowed rounded border border-outline-variant/60 bg-surface-container-high/50 px-2.5 py-1 font-mono text-xs text-on-surface-variant opacity-70"
+          className="cursor-not-allowed rounded border border-outline-variant/60 bg-surface-container-high/50 px-2.5 py-1 font-body text-meta text-on-surface-variant opacity-70"
         >
           Open 3D Graph
         </button>
       ) : null}
       {toast ? (
-        <p className="max-w-[18rem] text-right font-body text-xs text-error" role="status">
+        <p className="max-w-[18rem] text-right font-body text-meta text-error" role="status">
           {toast}
         </p>
       ) : null}

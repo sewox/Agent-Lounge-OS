@@ -283,7 +283,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                     if let Some(state) = app_handle.try_state::<GraphUiState>() {
                         on_main_window_closed(app_handle, state.inner());
                     } else if let Some(window) = app_handle.get_webview_window(GRAPH_WINDOW_LABEL) {
-                        let _ = window.close();
+                        let _ = window.destroy();
                     }
                 }
             }

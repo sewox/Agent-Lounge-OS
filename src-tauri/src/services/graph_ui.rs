@@ -147,10 +147,10 @@ pub async fn persist_port(
         .set_setting(SETTINGS_KEY.into(), port.to_string())
         .await
         .context("graph_ui_port kaydedilemedi")?;
-    // Stale navigation lock: port değiştiyse pencereyi kapat (sonraki open yeniden yaratır).
+    // Stale navigation lock: port değiştiyse destroy (sync) — aynı label ile recreate çakışmasın.
     if state.window_port() != Some(port) {
         if let Some(window) = app.get_webview_window(GRAPH_WINDOW_LABEL) {
-            let _ = window.close();
+            let _ = window.destroy();
         }
         state.set_window_port(None);
     }
@@ -295,8 +295,8 @@ pub fn open_or_focus_graph_window(
             window.set_focus().context("graph-window set_focus")?;
             return Ok(());
         }
-        // Port değişti — stale navigation lock; kapat ve yeniden yarat.
-        let _ = window.close();
+        // Port değişti — stale navigation lock; sync destroy sonra aynı label ile recreate.
+        let _ = window.destroy();
         state.set_window_port(None);
     }
 
@@ -316,7 +316,7 @@ pub fn open_or_focus_graph_window(
 /// Main kapanınca graph-window + Lounge child temizliği.
 pub fn on_main_window_closed(app: &AppHandle, state: &GraphUiState) {
     if let Some(window) = app.get_webview_window(GRAPH_WINDOW_LABEL) {
-        let _ = window.close();
+        let _ = window.destroy();
     }
     state.set_window_port(None);
     state.kill_spawned_child();
