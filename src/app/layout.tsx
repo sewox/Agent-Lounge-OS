@@ -1,32 +1,87 @@
 import type { Metadata } from "next";
-import { Geist, IBM_Plex_Sans, JetBrains_Mono, Public_Sans } from "next/font/google";
+import localFont from "next/font/local";
 import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import { LoungeProvider } from "@/components/lounge-provider";
 import { UiScaleProvider } from "@/components/ui-scale-provider";
 import "./globals.css";
 
-const geistSans = Geist({
+const geistSans = localFont({
+  src: "./fonts/Geist-Variable.woff2",
   variable: "--font-geist-sans",
-  subsets: ["latin", "latin-ext"],
+  weight: "100 900",
+  display: "swap",
 });
 
-const ibmPlex = IBM_Plex_Sans({
+const ibmPlex = localFont({
+  src: [
+    {
+      path: "./fonts/IBMPlexSans-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "./fonts/IBMPlexSans-Medium.woff2",
+      weight: "500",
+      style: "normal",
+    },
+    {
+      path: "./fonts/IBMPlexSans-SemiBold.woff2",
+      weight: "600",
+      style: "normal",
+    },
+  ],
   variable: "--font-ibm-plex",
-  subsets: ["latin", "latin-ext"],
-  weight: ["400", "500", "600"],
+  display: "swap",
 });
 
-const jetbrains = JetBrains_Mono({
+const jetbrains = localFont({
+  src: [
+    {
+      path: "./fonts/JetBrainsMono-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "./fonts/JetBrainsMono-Medium.woff2",
+      weight: "500",
+      style: "normal",
+    },
+    {
+      path: "./fonts/JetBrainsMono-SemiBold.woff2",
+      weight: "600",
+      style: "normal",
+    },
+    {
+      path: "./fonts/JetBrainsMono-Bold.woff2",
+      weight: "700",
+      style: "normal",
+    },
+  ],
   variable: "--font-jetbrains",
-  subsets: ["latin", "latin-ext"],
-  weight: ["400", "500", "600", "700"],
+  display: "swap",
 });
 
-const publicSans = Public_Sans({
+const publicSans = localFont({
+  src: [
+    {
+      path: "./fonts/PublicSans-Regular.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "./fonts/PublicSans-Medium.woff2",
+      weight: "500",
+      style: "normal",
+    },
+    {
+      path: "./fonts/PublicSans-SemiBold.woff2",
+      weight: "600",
+      style: "normal",
+    },
+  ],
   variable: "--font-public-sans",
-  subsets: ["latin", "latin-ext"],
-  weight: ["400", "500", "600"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
