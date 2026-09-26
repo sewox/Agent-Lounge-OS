@@ -26,8 +26,8 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use approval_notify::{
-    emit_approval_pending, emit_approval_resolved, ApprovalPendingPayload, APPROVAL_PENDING_EVENT,
-    APPROVAL_RESOLVED_EVENT,
+    emit_approval_pending, emit_approval_resolved, focus_app_for_approval, ApprovalPendingPayload,
+    APPROVAL_BANNER_FOCUS_EVENT, APPROVAL_PENDING_EVENT, APPROVAL_RESOLVED_EVENT,
 };
 pub use auto_archive::spawn_auto_archive;
 pub use graph_ui::{

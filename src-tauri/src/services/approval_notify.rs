@@ -1,13 +1,15 @@
 //! OS + frontend notifications when approvals are pending or resolved.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::models::ApprovalRequest;
 
 pub const APPROVAL_PENDING_EVENT: &str = "approval_pending";
 pub const APPROVAL_RESOLVED_EVENT: &str = "approval_resolved";
+/// Frontend listens for this when a notification click (or focus command) should open the banner.
+pub const APPROVAL_BANNER_FOCUS_EVENT: &str = "approval_banner_focus";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalPendingPayload {
@@ -39,6 +41,10 @@ pub struct ApprovalResolvedPayload {
 }
 
 /// Emit `approval_pending` to the frontend and show an OS notification when possible.
+///
+/// No volume/interval escalation while backgrounded — a single OS toast + event.
+/// Notification click → focus is handled by [`focus_app_for_approval`] (FE `onAction`
+/// or OS activate); desktop `tauri-plugin-notification` has no Rust click callback.
 pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPendingPayload) {
     let _ = app.emit(APPROVAL_PENDING_EVENT, &payload);
     let title = "Approval required";
@@ -47,9 +53,36 @@ pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPe
     } else {
         payload.summary.clone()
     };
-    if let Err(err) = app.notification().builder().title(title).body(&body).show() {
+    if let Err(err) = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(&body)
+        .extra("task_id", &payload.task_id)
+        .extra("event", APPROVAL_PENDING_EVENT)
+        .show()
+    {
         log::debug!("OS notification skipped: {err}");
     }
+}
+
+/// Focus the main window and ask the UI to open the approval banner.
+pub fn focus_app_for_approval<R: Runtime>(app: &AppHandle<R>, task_id: Option<&str>) {
+    if let Some(window) = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next())
+    {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit(
+        APPROVAL_BANNER_FOCUS_EVENT,
+        &ApprovalResolvedPayload {
+            task_id: task_id.unwrap_or("").to_string(),
+            reason: "notification_click".to_string(),
+        },
+    );
 }
 
 /// Emit `approval_resolved` when a pending approval is cleared.

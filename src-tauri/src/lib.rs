@@ -265,6 +265,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             unignore_symbol,
             list_ignored_symbols,
             open_in_editor,
+            focus_app_for_approval,
             trigger_grok_test,
             list_projects,
             list_quotas,
@@ -767,6 +768,16 @@ async fn open_in_editor(
     open_path_in_editor(&store, path, line, editor_command)
         .await
         .map_err(|err| err.to_string())
+}
+
+/// Notification click / tray activate → focus main window + open approval banner.
+#[tauri::command]
+async fn focus_app_for_approval(
+    app: tauri::AppHandle,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    services::focus_app_for_approval(&app, task_id.as_deref());
+    Ok(())
 }
 
 #[tauri::command]

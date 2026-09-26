@@ -229,8 +229,13 @@ impl NatsService {
         })?;
         let args = nats_server_args(&self.config, with_monitor);
 
-        let mut command = Command::new(&binary);
-        command.args(&args).stdin(Stdio::null()).kill_on_drop(true);
+        let std_cmd = GuardedCommand::new(&binary)
+            .args(&args)
+            .internal_daemon()
+            .into_std_command()
+            .with_context(|| format!("NATS gate başarısız: {}", binary.display()))?;
+        let mut command = Command::from(std_cmd);
+        command.stdin(Stdio::null()).kill_on_drop(true);
         attach_nats_log(&mut command);
         apply_no_window(&mut command);
 
