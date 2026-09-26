@@ -292,7 +292,7 @@ impl Default for NatsService {
 fn apply_no_window(_command: &mut Command) {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
+        // tokio::process::Command exposes creation_flags on Windows directly.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         _command.creation_flags(CREATE_NO_WINDOW);
     }
