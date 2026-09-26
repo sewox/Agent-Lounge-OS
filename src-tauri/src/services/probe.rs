@@ -408,7 +408,7 @@ mod tests {
             root.display()
         );
         assert!(
-            root_str.contains(APP_IDENTIFIER) || root == PathBuf::from("/tmp/custom"),
+            root_str.contains(APP_IDENTIFIER),
             "expected app-data-style root, got {root_str}"
         );
     }
