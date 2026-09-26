@@ -31,7 +31,8 @@ env:
   APPIMAGE_EXTRACT_AND_RUN: "1"
   NO_STRIP: "true"
   CBM_RELEASE: "v0.11.0"
-  CBM_ASSET: "codebase-memory-mcp-linux-amd64.tar.gz"
+  # Portable = statically linked; runs on ubuntu-22.04 (dyn build needs GLIBCXX_3.4.32).
+  CBM_ASSET: "codebase-memory-mcp-linux-amd64-portable.tar.gz"
 
 jobs:
   linux-bundle:
@@ -94,16 +95,19 @@ jobs:
             exit 1
           fi
           install -m 755 "$BIN" bridge/codebase-memory-mcp
-          VERSION="$(bridge/codebase-memory-mcp --version 2>&1 | head -n1 || true)"
+          # Sanitize: first token only (avoid shell metacharacters in GITHUB_ENV).
+          RAW_VER="$(bridge/codebase-memory-mcp --version 2>/dev/null | head -n1 || true)"
+          VERSION="$(printf '%s' "$RAW_VER" | tr -cd 'A-Za-z0-9._+-:' | head -c 64)"
+          if [[ -z "$VERSION" ]]; then
+            VERSION="${CBM_RELEASE}"
+          fi
           SIZE_B="$(wc -c < bridge/codebase-memory-mcp | tr -d '[:space:]')"
           if [[ "$SIZE_B" -lt 4096 ]]; then
             echo "FAIL: staged binary looks like a stub ($SIZE_B bytes)"
             exit 1
           fi
-          echo "version<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$VERSION" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          echo "size_bytes=$SIZE_B" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "size_bytes=${SIZE_B}" >> "$GITHUB_OUTPUT"
           echo "ok=1" >> "$GITHUB_OUTPUT"
           echo "sidecar ok: $VERSION ($SIZE_B bytes)"
 
@@ -160,13 +164,21 @@ jobs:
               echo "FAIL: bundled sidecar is stub-sized"
               exit 1
             fi
-            VERSION="$("$SIDECAR" --version 2>&1 | head -n1 || true)"
-            echo "bundled --version: $VERSION"
-            echo "SIDECAR_VERSION=$VERSION" >> "$GITHUB_ENV"
-            echo "SIDECAR_SIZE_BYTES=$SIZE_B" >> "$GITHUB_ENV"
+            RAW_VER="$("$SIDECAR" --version 2>/dev/null | head -n1 || true)"
+            VERSION="$(printf '%s' "$RAW_VER" | tr -cd 'A-Za-z0-9._+-:' | head -c 64)"
+            if [[ -z "$VERSION" ]]; then
+              VERSION="${CBM_RELEASE}"
+            fi
+            echo "bundled --version: $VERSION (raw=${RAW_VER})"
+            {
+              echo "SIDECAR_VERSION=${VERSION}"
+              echo "SIDECAR_SIZE_BYTES=${SIZE_B}"
+            } >> "$GITHUB_ENV"
           else
-            echo "SIDECAR_VERSION=stub" >> "$GITHUB_ENV"
-            echo "SIDECAR_SIZE_BYTES=$SIZE_B" >> "$GITHUB_ENV"
+            {
+              echo "SIDECAR_VERSION=stub"
+              echo "SIDECAR_SIZE_BYTES=${SIZE_B}"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Collect artifact files
@@ -193,7 +205,11 @@ jobs:
           cp scripts/qa/linux/RUNTIME_DEPS.md "$DEST/RUNTIME_DEPS.md"
           cp scripts/qa/linux/README.md "$DEST/README.md"
           MODE="${{ steps.stage.outputs.mode }}"
-          VER="${SIDECAR_VERSION:-${{ steps.sidecar.outputs.version }}}"
+          VER="${SIDECAR_VERSION:-}"
+          if [[ -z "$VER" ]]; then
+            VER="${{ steps.sidecar.outputs.version }}"
+          fi
+          VER="$(printf '%s' "$VER" | tr -cd 'A-Za-z0-9._+-:' | head -c 64)"
           SZ="${SIDECAR_SIZE_BYTES:-${{ steps.sidecar.outputs.size_bytes }}}"
           {
             echo "commit=${GITHUB_SHA}"
@@ -204,6 +220,7 @@ jobs:
             echo "sidecar_size_bytes=${SZ:-unknown}"
             echo "sidecar_triple=x86_64-unknown-linux-gnu"
             echo "sidecar_release=${CBM_RELEASE}"
+            echo "sidecar_asset=${CBM_ASSET}"
           } > "$DEST/BUILD_INFO.txt"
           cat "$DEST/BUILD_INFO.txt"
           ls -lah "$DEST"
