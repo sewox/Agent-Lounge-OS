@@ -326,9 +326,9 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
 
-        let mut hits = self
+        let (mut hits, from_archive) = self
             .store
-            .search_experiences(query.clone(), limit.or(Some(24)))
+            .search_experiences_with_archive_fallback(query.clone(), limit.or(Some(24)))
             .await?;
 
         if restrict {
@@ -344,6 +344,10 @@ impl McpServer {
             hits.truncate(cap);
         }
 
+        for row in &hits {
+            let _ = self.store.bump_experience_usage(row.id.clone()).await;
+        }
+
         let experiences: Vec<Value> = hits
             .iter()
             .map(|row| {
@@ -351,6 +355,10 @@ impl McpServer {
                     .as_ref()
                     .map(|pid| row.project_id == *pid)
                     .unwrap_or(false);
+                let mut tags = row.tags.clone();
+                if from_archive && !tags.iter().any(|t| t == "archived") {
+                    tags.push("archived".into());
+                }
                 json!({
                     "id": row.id,
                     "type": row.msg_type,
@@ -359,9 +367,10 @@ impl McpServer {
                     "adr_summary": row.adr_summary,
                     "outcome": row.outcome,
                     "related_task_id": row.related_task_id,
-                    "tags": row.tags,
+                    "tags": tags,
                     "created_at": row.created_at,
                     "same_project": same_project,
+                    "archived": from_archive,
                 })
             })
             .collect();
@@ -371,6 +380,7 @@ impl McpServer {
             "project_id": project,
             "restrict_to_project": restrict,
             "count": experiences.len(),
+            "from_archive": from_archive,
             "experiences": experiences,
         }))
     }
@@ -430,6 +440,10 @@ impl McpServer {
         validate_schema(SchemaKind::Experience, &experience_json).map_err(|e| anyhow!(e))?;
 
         let record = ExperienceRecord::from_lounge(&experience, topic.clone());
+        // O6: MCP rows are auto-approved (active) but unreviewed.
+        let mut record = record;
+        record.status = crate::models::EXPERIENCE_STATUS_ACTIVE.into();
+        record.reviewed = false;
         let id = record.id.clone();
         self.store.insert_record_atomic(record).await?;
 
@@ -1099,6 +1113,7 @@ mod tests {
                 tags: vec![],
                 created_at: now_rfc3339(),
                 embedding: Vec::new(),
+                ..Default::default()
             })
             .await
             .expect("seed");
@@ -1197,6 +1212,7 @@ mod tests {
                 tags: vec!["redis".into()],
                 created_at: now_rfc3339(),
                 embedding: Vec::new(),
+                ..Default::default()
             })
             .await
             .expect("seed a");

@@ -188,15 +188,10 @@ test.describe("EX — vault experiences", () => {
     expect(m.l1_pass && m.l3_pass && !m.l2_sparseInterior).toBe(true);
   });
 
-  test("EX-14 · Vault totals must match bridge counts (not query LIMIT as total) [expected-fail until PR-2/4]", async ({
+  test("EX-14 · Vault totals must match bridge counts (not query LIMIT as total)", async ({
     page,
-  }, testInfo) => {
+  }) => {
     // Live S2: UI showed 400 nodes / 800 edges while experience text said nodes=2286 edges=7958.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "LIMIT-shaped vault totals disagree with bridge figures (live S2)",
-    });
-    test.fail(true, "Vault presents query LIMIT as graph total");
     await openRoute(page, "/vault", "full");
     const text = await page.locator("main").innerText();
     const bridge = text.match(/nodes=(\d+)\s+edges=(\d+)/i);

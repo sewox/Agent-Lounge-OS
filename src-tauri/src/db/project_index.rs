@@ -30,9 +30,50 @@ pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_project_index_project_kind
               ON project_index(project_id, kind);
+            CREATE TABLE IF NOT EXISTS ignored_symbols (
+              id TEXT PRIMARY KEY,
+              project_id TEXT,
+              name TEXT NOT NULL,
+              kind TEXT,
+              file_path TEXT,
+              line INTEGER,
+              ignored_at TEXT NOT NULL,
+              UNIQUE(project_id, name, file_path, line)
+            );
             "#,
     )?;
     Ok(())
+}
+
+/// Normalize raw path strings for cross-platform comparison (PATH-01).
+pub fn normalize_path_str(raw: &str) -> String {
+    normalize_path_hint(raw).to_string_lossy().replace('\\', "/")
+}
+
+/// True when `path` starts with a Windows drive letter (`C:` / `D:/` …).
+pub fn path_has_windows_drive(path: &str) -> bool {
+    let mut chars = path.trim().chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    )
+}
+
+/// True when the string looks like a filesystem path (`/`, `\`, or drive letter).
+pub fn accepts_cross_platform_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.contains('/') || trimmed.contains('\\') || path_has_windows_drive(trimmed)
+}
+
+const PLACEHOLDER_PROJECTS: &[&str] = &["backend-legacy", "frontend-new"];
+
+fn is_placeholder_project(name: &str) -> bool {
+    PLACEHOLDER_PROJECTS
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(name.trim()))
 }
 
 impl ExperienceStore {
@@ -119,6 +160,39 @@ impl ExperienceStore {
         .await
         .context("project_index search join")?
     }
+
+    pub async fn ignore_symbol(&self, symbol: DeadSymbol) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            ignore_symbol_blocking(&conn, &symbol)
+        })
+        .await
+        .context("ignore_symbol join")?
+    }
+
+    pub async fn unignore_symbol(&self, symbol: DeadSymbol) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            unignore_symbol_blocking(&conn, &symbol)
+        })
+        .await
+        .context("unignore_symbol join")?
+    }
+
+    pub async fn list_ignored_symbols(
+        &self,
+        project_id: Option<String>,
+    ) -> Result<Vec<DeadSymbol>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_ignored_symbols_blocking(&conn, project_id.as_deref())
+        })
+        .await
+        .context("list_ignored_symbols join")?
+    }
 }
 
 fn resolve_project_id_blocking(conn: &Connection, path_hint: &str) -> Result<Option<String>> {
@@ -170,7 +244,9 @@ fn normalize_path_hint(raw: &str) -> PathBuf {
     if trimmed.is_empty() {
         return PathBuf::new();
     }
-    let path = PathBuf::from(trimmed);
+    // PATH-01: unify Windows `\` and drive-letter paths before lexical normalize.
+    let unified = trimmed.replace('\\', "/");
+    let path = PathBuf::from(&unified);
     if let Ok(canon) = path.canonicalize() {
         return canon;
     }
@@ -178,11 +254,17 @@ fn normalize_path_hint(raw: &str) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
+            Component::Prefix(prefix) => {
+                out.push(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                out.push(Component::RootDir.as_os_str());
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 out.pop();
             }
-            other => out.push(other.as_os_str()),
+            Component::Normal(part) => out.push(part),
         }
     }
     out
@@ -320,6 +402,13 @@ fn list_dead_symbols_blocking(
         FROM project_index
         WHERE kind IN ('dead', 'broken')
           AND (?1 IS NULL OR project_id = ?1)
+          AND NOT EXISTS (
+            SELECT 1 FROM ignored_symbols i
+            WHERE i.name = project_index.name
+              AND COALESCE(i.project_id, '') = COALESCE(project_index.project_id, '')
+              AND COALESCE(i.file_path, '') = COALESCE(project_index.file_path, '')
+              AND COALESCE(i.line, -1) = COALESCE(project_index.line, -1)
+          )
         ORDER BY kind, name
         "#;
     let mut stmt = conn.prepare(sql)?;
@@ -344,6 +433,83 @@ fn list_dead_symbols_blocking(
         symbols.push(row?);
     }
     Ok(symbols)
+}
+
+fn ignore_symbol_blocking(conn: &Connection, symbol: &DeadSymbol) -> Result<()> {
+    // SQLite UNIQUE treats NULLs as distinct — delete then insert for stable upsert.
+    let _ = unignore_symbol_blocking(conn, symbol);
+    let id = Uuid::new_v4().to_string();
+    let now = now_rfc3339();
+    let kind = if symbol.kind.trim().is_empty() {
+        None
+    } else {
+        Some(symbol.kind.as_str())
+    };
+    conn.execute(
+        r#"
+        INSERT INTO ignored_symbols (id, project_id, name, kind, file_path, line, ignored_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            id,
+            symbol.project_id,
+            symbol.name,
+            kind,
+            symbol.file,
+            symbol.line,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn unignore_symbol_blocking(conn: &Connection, symbol: &DeadSymbol) -> Result<()> {
+    conn.execute(
+        r#"
+        DELETE FROM ignored_symbols
+        WHERE name = ?1
+          AND COALESCE(project_id, '') = COALESCE(?2, '')
+          AND COALESCE(file_path, '') = COALESCE(?3, '')
+          AND COALESCE(line, -1) = COALESCE(?4, -1)
+        "#,
+        params![
+            symbol.name,
+            symbol.project_id,
+            symbol.file,
+            symbol.line,
+        ],
+    )?;
+    Ok(())
+}
+
+fn list_ignored_symbols_blocking(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> Result<Vec<DeadSymbol>> {
+    let sql = r#"
+        SELECT project_id, name, kind, file_path, line
+        FROM ignored_symbols
+        WHERE ?1 IS NULL OR project_id = ?1
+        ORDER BY ignored_at DESC, name
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok(DeadSymbol {
+            project_id: row.get(0)?,
+            name: row.get(1)?,
+            kind: row
+                .get::<_, Option<String>>(2)?
+                .unwrap_or_else(|| "unused".into()),
+            file: row.get(3)?,
+            line: row.get(4)?,
+            detail: Some("ignored".into()),
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 fn project_index_snapshot_blocking(
@@ -429,7 +595,11 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     })?;
     let mut projects = Vec::new();
     for row in rows {
-        projects.push(row?);
+        let project = row?;
+        if is_placeholder_project(&project.name) {
+            continue;
+        }
+        projects.push(project);
     }
     Ok(projects)
 }
@@ -479,87 +649,105 @@ fn search_index_nodes_blocking(
 }
 
 fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Result<SemanticMap> {
-    let sql = r#"
-        SELECT project_id, repo_path, kind, name, file_path, line, target, ref_count, detail
-        FROM project_index
-        WHERE ?1 IS NULL OR project_id = ?1
-        ORDER BY project_id, kind, name
-        "#;
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![project_id], |row| {
-        Ok(MapRow {
-            project_id: row.get(0)?,
-            repo_path: row.get(1)?,
-            kind: row.get(2)?,
-            name: row.get(3)?,
-            file_path: row.get(4)?,
-            line: row.get(5)?,
-            target: row.get(6)?,
-            ref_count: row.get(7)?,
-            detail: row.get(8)?,
-        })
-    })?;
-
     let mut by_project: BTreeMap<String, SemanticProject> = BTreeMap::new();
-    for row in rows {
-        let row = row?;
-        let project = by_project
-            .entry(row.project_id.clone())
-            .or_insert_with(|| SemanticProject {
-                name: row.project_id.clone(),
-                repo_path: row.repo_path.clone(),
-                ..SemanticProject::default()
-            });
-        if project.repo_path.is_empty() && !row.repo_path.is_empty() {
-            project.repo_path = row.repo_path.clone();
-        }
-        match row.kind.as_str() {
-            "node" => {
-                let id = row
-                    .target
-                    .clone()
-                    .filter(|id| !id.is_empty())
-                    .unwrap_or_else(|| row.name.clone());
-                project.nodes.push(AstNode {
-                    id,
-                    name: row.name,
-                    kind: row.detail.unwrap_or_default(),
-                    file: row.file_path,
-                    line: row.line,
-                    ref_count: row.ref_count.max(0) as u64,
+    {
+        let sql = r#"
+            SELECT project_id, repo_path, kind, name, file_path, line, target, ref_count, detail
+            FROM project_index
+            WHERE ?1 IS NULL OR project_id = ?1
+            ORDER BY project_id, kind, name
+            "#;
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok(MapRow {
+                project_id: row.get(0)?,
+                repo_path: row.get(1)?,
+                kind: row.get(2)?,
+                name: row.get(3)?,
+                file_path: row.get(4)?,
+                line: row.get(5)?,
+                target: row.get(6)?,
+                ref_count: row.get(7)?,
+                detail: row.get(8)?,
+            })
+        })?;
+
+        for row in rows {
+            let row = row?;
+            let project = by_project
+                .entry(row.project_id.clone())
+                .or_insert_with(|| SemanticProject {
+                    name: row.project_id.clone(),
+                    repo_path: row.repo_path.clone(),
+                    ..SemanticProject::default()
                 });
+            if project.repo_path.is_empty() && !row.repo_path.is_empty() {
+                project.repo_path = row.repo_path.clone();
             }
-            "reference" => {
-                project.references.push(CodeReference {
-                    from_id: row.name,
-                    to_id: row.target.unwrap_or_default(),
-                    file: row.file_path,
-                    line: row.line,
-                });
+            match row.kind.as_str() {
+                "node" => {
+                    let id = row
+                        .target
+                        .clone()
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or_else(|| row.name.clone());
+                    project.nodes.push(AstNode {
+                        id,
+                        name: row.name,
+                        kind: row.detail.unwrap_or_default(),
+                        file: row.file_path,
+                        line: row.line,
+                        ref_count: row.ref_count.max(0) as u64,
+                    });
+                }
+                "reference" => {
+                    project.references.push(CodeReference {
+                        from_id: row.name,
+                        to_id: row.target.unwrap_or_default(),
+                        file: row.file_path,
+                        line: row.line,
+                    });
+                }
+                "dead" | "broken" => {
+                    project.dead.push(DeadSymbol {
+                        name: row.name,
+                        kind: if row.kind == "broken" {
+                            "broken".into()
+                        } else {
+                            "unused".into()
+                        },
+                        file: row.file_path,
+                        line: row.line,
+                        detail: row.detail,
+                        project_id: Some(row.project_id),
+                    });
+                }
+                _ => {}
             }
-            "dead" | "broken" => {
-                project.dead.push(DeadSymbol {
-                    name: row.name,
-                    kind: if row.kind == "broken" {
-                        "broken".into()
-                    } else {
-                        "unused".into()
-                    },
-                    file: row.file_path,
-                    line: row.line,
-                    detail: row.detail,
-                    project_id: Some(row.project_id),
-                });
-            }
-            _ => {}
         }
     }
 
     let projects = by_project
         .into_values()
+        .filter(|project| !is_placeholder_project(&project.name))
         .map(|mut project| {
-            project.node_count = project.nodes.len() as u64;
-            project.edge_count = project.references.len() as u64;
+            // Prefer DB totals so later LIMIT truncations cannot rewrite counts.
+            let node_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM project_index WHERE project_id = ?1 AND kind = 'node'",
+                    params![project.name],
+                    |row| row.get(0),
+                )
+                .unwrap_or(project.nodes.len() as i64);
+            let edge_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM project_index WHERE project_id = ?1 AND kind = 'reference'",
+                    params![project.name],
+                    |row| row.get(0),
+                )
+                .unwrap_or(project.references.len() as i64);
+            project.node_count = node_count.max(0) as u64;
+            project.edge_count = edge_count.max(0) as u64;
             let mut files = HashSet::new();
             for node in &project.nodes {
                 if let Some(file) = node.file.as_deref().filter(|path| !path.is_empty()) {
@@ -721,5 +909,64 @@ mod tests {
             .unwrap();
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].name, "only");
+    }
+
+    #[tokio::test]
+    async fn ignore_symbol_filters_dead_list() {
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_project_index(sample_graph())
+            .await
+            .expect("save");
+        let dead = store
+            .list_dead_symbols(Some("lounge".into()))
+            .await
+            .expect("list");
+        assert_eq!(dead.len(), 2);
+        let target = dead
+            .iter()
+            .find(|row| row.name == "bar")
+            .cloned()
+            .expect("bar");
+        store.ignore_symbol(target.clone()).await.expect("ignore");
+        let after = store
+            .list_dead_symbols(Some("lounge".into()))
+            .await
+            .expect("list after");
+        assert_eq!(after.len(), 1);
+        assert!(!after.iter().any(|row| row.name == "bar"));
+        let ignored = store
+            .list_ignored_symbols(Some("lounge".into()))
+            .await
+            .expect("ignored");
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].name, "bar");
+        store.unignore_symbol(target).await.expect("unignore");
+        assert_eq!(
+            store
+                .list_dead_symbols(Some("lounge".into()))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn path_helpers_accept_windows_and_posix() {
+        assert!(path_has_windows_drive(r"C:\Users\x\file.rs"));
+        assert!(path_has_windows_drive("D:/work/repo"));
+        assert!(!path_has_windows_drive("/home/x/file.rs"));
+        assert!(accepts_cross_platform_path(
+            r"C:\Users\sercan\dev\Agent-Lounge-OS\src\main.rs"
+        ));
+        assert!(accepts_cross_platform_path(
+            "/home/sercan/dev/Agent-Lounge-OS/src/main.rs"
+        ));
+        assert!(accepts_cross_platform_path(r"mixed/path\with\both"));
+        assert!(!accepts_cross_platform_path("no-separators"));
+        let normalized = normalize_path_str(r"C:\Users\sercan\dev\..\Agent-Lounge-OS\src\main.rs");
+        assert!(normalized.contains("Agent-Lounge-OS"));
+        assert!(!normalized.contains('\\'));
     }
 }

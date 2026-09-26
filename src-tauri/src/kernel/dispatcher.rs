@@ -652,6 +652,7 @@ impl Dispatcher {
                 reason: reason.to_string(),
             };
             let _ = app.emit(ROUTING_APPROVAL_CLEARED_EVENT, &payload);
+            crate::services::emit_approval_resolved(&app, task_id, reason);
         }
     }
 
@@ -680,6 +681,10 @@ impl Dispatcher {
             );
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
             let _ = app.emit(ROUTING_APPROVAL_EVENT, &request);
+            crate::services::emit_approval_pending(
+                &app,
+                crate::services::ApprovalPendingPayload::from(&request),
+            );
         }
 
         if is_security_approval(&request.kind) {

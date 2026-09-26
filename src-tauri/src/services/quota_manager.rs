@@ -201,7 +201,60 @@ pub async fn collect_quota_state_with_keys(
     quotas.extend(openai);
     quotas.extend(anthropic);
     quotas.extend(grok);
+    merge_claude_subscription_rows(&mut quotas);
     QuotaState::from_quotas(quotas)
+}
+
+/// K9: collapse claude_desktop + claude_cli subscription rows into one `app:claude` account.
+pub fn merge_claude_subscription_rows(quotas: &mut Vec<ToolQuota>) {
+    let claude_idxs: Vec<usize> = quotas
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| is_claude_subscription_row(row))
+        .map(|(i, _)| i)
+        .collect();
+    if claude_idxs.is_empty() {
+        return;
+    }
+    // Prefer the row with live percent / richer used text.
+    let keep = *claude_idxs
+        .iter()
+        .max_by_key(|&&i| {
+            let row = &quotas[i];
+            let live_score = row.percent.map(|p| (p * 100.0) as i64).unwrap_or(-1);
+            let rich = if row.used.contains('/') || row.percent.is_some() {
+                1_000_000
+            } else {
+                0
+            };
+            rich + live_score
+        })
+        .unwrap_or(&claude_idxs[0]);
+    quotas[keep].id = "app:claude".into();
+    quotas[keep].tool = "Claude".into();
+    quotas[keep].host_id = Some("claude".into());
+    let mut drop: Vec<usize> = claude_idxs.into_iter().filter(|&i| i != keep).collect();
+    drop.sort_unstable_by(|a, b| b.cmp(a));
+    for i in drop {
+        quotas.remove(i);
+    }
+}
+
+fn is_claude_subscription_row(row: &ToolQuota) -> bool {
+    let id = row.id.to_ascii_lowercase();
+    let host = row
+        .host_id
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let tool = row.tool.to_ascii_lowercase();
+    id.contains("claude_desktop")
+        || id.contains("claude_cli")
+        || id == "app:claude"
+        || host == "claude_desktop"
+        || host == "claude_cli"
+        || host == "claude"
+        || (tool.contains("claude") && row.access_mode == "subscription")
 }
 
 pub async fn api_keys_from_store(store: &ExperienceStore) -> ApiKeys {
@@ -1425,6 +1478,39 @@ mod tests {
             ..ToolQuota::default()
         }
         .with_mode("subscription", Some(host))
+    }
+
+    #[test]
+    fn merges_claude_desktop_and_cli_into_one_account() {
+        let mut quotas = vec![
+            sub_row(
+                "app:claude_desktop",
+                "Claude Desktop",
+                "claude_desktop",
+                Some(40.0),
+                false,
+            ),
+            sub_row(
+                "app:claude_cli",
+                "Claude CLI",
+                "claude_cli",
+                Some(82.0),
+                false,
+            ),
+            sub_row("app:cursor", "Cursor", "cursor", Some(15.0), false),
+        ];
+        merge_claude_subscription_rows(&mut quotas);
+        let claude: Vec<_> = quotas
+            .iter()
+            .filter(|row| row.id == "app:claude" || row.tool == "Claude")
+            .collect();
+        assert_eq!(claude.len(), 1, "expected a single Claude account row");
+        assert_eq!(claude[0].id, "app:claude");
+        assert_eq!(claude[0].tool, "Claude");
+        assert_eq!(claude[0].host_id.as_deref(), Some("claude"));
+        // Prefer live usage from either source (higher/known percent wins via sort).
+        assert!(claude[0].percent.is_some());
+        assert_eq!(quotas.iter().filter(|r| r.id == "app:cursor").count(), 1);
     }
 
     #[test]

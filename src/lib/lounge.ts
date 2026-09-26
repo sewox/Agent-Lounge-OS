@@ -849,6 +849,41 @@ export function pathBasename(path: string | null | undefined): string | null {
   return path.split(/[/\\]/).filter(Boolean).at(-1) ?? null;
 }
 
+/** PATH-01: unify separators for display / comparison. */
+export function normalizePath(raw: string): string {
+  return raw.trim().replace(/\\/g, "/");
+}
+
+/** True when path starts with a Windows drive letter (`C:` / `D:/`). */
+export function isWindowsDrivePath(path: string): boolean {
+  return /^[A-Za-z]:/.test(path.trim());
+}
+
+/** True when string looks like a filesystem path (`/`, `\`, or drive letter). */
+export function acceptsCrossPlatformPath(path: string): boolean {
+  const trimmed = path.trim();
+  if (!trimmed) return false;
+  return trimmed.includes("/") || trimmed.includes("\\") || isWindowsDrivePath(trimmed);
+}
+
+/**
+ * EX-14: vault node/edge totals prefer semanticMap counts (real totals) over
+ * LIMIT-shaped list lengths or stale project summaries.
+ */
+export function resolveVaultTotals(
+  projects: ProjectSummary[],
+  semanticMap: SemanticMap,
+): { nodes: number; edges: number } {
+  const mapNodes = semanticMap.projects.reduce((sum, row) => sum + (row.node_count || 0), 0);
+  const mapEdges = semanticMap.projects.reduce((sum, row) => sum + (row.edge_count || 0), 0);
+  if (mapNodes > 0 || mapEdges > 0) {
+    return { nodes: mapNodes, edges: mapEdges };
+  }
+  const projectNodes = projects.reduce((sum, row) => sum + (row.nodes || 0), 0);
+  const projectEdges = projects.reduce((sum, row) => sum + (row.edges || 0), 0);
+  return { nodes: projectNodes, edges: projectEdges };
+}
+
 /** Canlı dead sayımı: deadSymbols → map.dead → lastIndex.dead; indeks yoksa mock toplamı. */
 export function resolveDeadSymbolCount(input: {
   deadSymbols: DeadSymbol[];

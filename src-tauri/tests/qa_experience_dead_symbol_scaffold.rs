@@ -1,34 +1,72 @@
-//! PR-0 scaffolding for experience / dead-symbol command integration tests (S3).
-//! Pure command-list stubs are `#[ignore]` until PR-1 wires them.
-//! Remaining tests exercise real helper logic that documents §10–§10.2 contracts.
+//! Experience / dead-symbol integration tests (PR-1 Backend-Core).
 
-#![allow(dead_code)]
+use app_lib::db::{ExperienceStore, ExperienceUpdate};
+use app_lib::models::{
+    DeadSymbol, ExperienceOutcome, ExperienceRecord, LoungeTask, EXPERIENCE_STATUS_ACTIVE,
+    EXPERIENCE_STATUS_ARCHIVED,
+};
 
-/// Placeholder: `get_experience` / `update_experience` / soft-delete archive.
-/// PR-1 will inject an ephemeral SQLite + MemoryBridgeConfig and assert roundtrips.
-#[test]
-#[ignore = "scaffold: PR-1 will implement experience commands"]
-fn experience_crud_commands_scaffolding() {
-    let planned = [
-        "get_experience",
-        "update_experience",
-        "archive_experience",
-        "pin_experience",
-        "mark_experience_reviewed",
-    ];
-    assert_eq!(planned.len(), 5);
+/// Real experience CRUD via ExperienceStore (insert → get → update → archive → pin → reviewed).
+#[tokio::test]
+async fn experience_crud_commands_scaffolding() {
+    let store = ExperienceStore::memory().expect("memory db");
+    let task = LoungeTask::new("cursor", "proj", "topic");
+    let mut record = ExperienceRecord::from_task(
+        &task,
+        "solution",
+        "adr body",
+        ExperienceOutcome::Success,
+        vec!["tag".into()],
+    );
+    record.reviewed = false;
+    let id = record.id.clone();
+    store.insert_record(record).await.expect("insert");
+
+    let loaded = store.get(id.clone()).await.expect("get").expect("row");
+    assert_eq!(loaded.adr_summary, "adr body");
+
+    store
+        .update_experience(
+            id.clone(),
+            ExperienceUpdate {
+                adr_summary: Some("edited".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("update");
+    let updated = store.get_record(id.clone()).await.expect("get").expect("row");
+    assert_eq!(updated.adr_record, "edited");
+
+    store.pin_experience(id.clone(), true).await.expect("pin");
+    store
+        .mark_experience_reviewed(id.clone())
+        .await
+        .expect("reviewed");
+    let unreviewed = store.count_unreviewed_experiences().await.expect("count");
+    assert_eq!(unreviewed, 0);
+
+    store.archive_experience(id.clone()).await.expect("archive");
+    let archived = store.get_record(id.clone()).await.expect("get").expect("row");
+    assert_eq!(archived.status, EXPERIENCE_STATUS_ARCHIVED);
+    assert!(archived.is_pinned);
+
+    store.unarchive_experience(id.clone()).await.expect("unarchive");
+    let active = store.get_record(id).await.expect("get").expect("row");
+    assert_eq!(active.status, EXPERIENCE_STATUS_ACTIVE);
 }
 
-/// O6: MCP create → approved + reviewed=false (not Draft).
+/// O6 / K4: MCP create → status active + reviewed=false (not Draft).
 fn mcp_row_is_auto_approved_unreviewed(status: &str, reviewed: bool) -> bool {
-    status == "approved" && !reviewed
+    status == "active" && !reviewed
 }
 
 #[test]
 fn experience_mcp_auto_approve_unreviewed_contract() {
-    assert!(mcp_row_is_auto_approved_unreviewed("approved", false));
+    assert!(mcp_row_is_auto_approved_unreviewed("active", false));
     assert!(!mcp_row_is_auto_approved_unreviewed("draft", false));
-    assert!(!mcp_row_is_auto_approved_unreviewed("approved", true));
+    assert!(!mcp_row_is_auto_approved_unreviewed("approved", false));
+    assert!(!mcp_row_is_auto_approved_unreviewed("active", true));
 }
 
 /// O2 / S3: when active hits are empty, fall back to archive and tag "archived".
@@ -76,18 +114,69 @@ fn experience_ttl_use_count_auto_archive_contract() {
     assert!(!schema_has_ttl_fields(&["reviewed", "created_at"]));
 }
 
-/// Placeholder: dead-symbol ignore + FIX_WITH_AGENT + open_in_editor.
-#[test]
-#[ignore = "scaffold: PR-1/PR-4 will implement dead-symbol actions"]
-fn dead_symbol_actions_scaffolding() {
-    let planned = [
-        "ignore_dead_symbol",
-        "list_ignored_symbols",
-        "unignore_dead_symbol",
-        "open_in_editor",
-        "create_task_from_dead_symbol",
-    ];
-    assert_eq!(planned.len(), 5);
+/// Dead-symbol ignore / unignore roundtrip via store methods.
+#[tokio::test]
+async fn dead_symbol_actions_scaffolding() {
+    use app_lib::models::{AstNode, CodeReference, IndexGraph};
+
+    let store = ExperienceStore::memory().expect("memory db");
+    let graph = IndexGraph {
+        project: "lounge".into(),
+        repo_path: "/tmp/lounge".into(),
+        node_count: 1,
+        edge_count: 0,
+        nodes: vec![AstNode {
+            id: "dead_fn".into(),
+            name: "dead_fn".into(),
+            kind: "fn".into(),
+            file: Some("src/dead.rs".into()),
+            line: Some(4),
+            ref_count: 0,
+        }],
+        references: vec![CodeReference {
+            from_id: "main".into(),
+            to_id: "other".into(),
+            file: Some("src/main.rs".into()),
+            line: Some(1),
+        }],
+        dead: vec![DeadSymbol {
+            name: "dead_fn".into(),
+            kind: "unused".into(),
+            file: Some("src/dead.rs".into()),
+            line: Some(4),
+            detail: Some("no refs".into()),
+            project_id: Some("lounge".into()),
+        }],
+        ..IndexGraph::default()
+    };
+    store.save_project_index(graph).await.expect("save");
+
+    let dead = store
+        .list_dead_symbols(Some("lounge".into()))
+        .await
+        .expect("list");
+    assert!(!dead.is_empty());
+    let target = dead[0].clone();
+    store.ignore_symbol(target.clone()).await.expect("ignore");
+    assert!(store
+        .list_dead_symbols(Some("lounge".into()))
+        .await
+        .unwrap()
+        .is_empty());
+    let ignored = store
+        .list_ignored_symbols(Some("lounge".into()))
+        .await
+        .expect("ignored");
+    assert_eq!(ignored.len(), 1);
+    store.unignore_symbol(target).await.expect("unignore");
+    assert_eq!(
+        store
+            .list_dead_symbols(Some("lounge".into()))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// O3 / §10.2: map OS → default editor launcher.
@@ -108,7 +197,7 @@ fn open_in_editor_cross_platform_contract() {
     assert_eq!(default_editor_opener("freebsd"), None);
 }
 
-/// O4 / §10.2: destructive-command detection (POSIX + Windows).
+/// O4 / §10.2: destructive-command detection (POSIX + Windows + git force).
 fn matches_destructive_pattern(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
     const PATTERNS: &[&str] = &[
@@ -122,6 +211,11 @@ fn matches_destructive_pattern(command: &str) -> bool {
         "drop table",
         "truncate ",
         "migrate down",
+        "git reset --hard",
+        "push --force",
+        "git push --force",
+        "clean -fd",
+        "git clean -fd",
     ];
     PATTERNS.iter().any(|p| lower.contains(p))
 }
@@ -136,9 +230,11 @@ fn destructive_operation_gate_contract() {
     ));
     assert!(matches_destructive_pattern("format C:"));
     assert!(matches_destructive_pattern("DROP TABLE experiences"));
+    assert!(matches_destructive_pattern("git reset --hard HEAD"));
+    assert!(matches_destructive_pattern("git push --force origin main"));
+    assert!(matches_destructive_pattern("git clean -fd"));
     assert!(!matches_destructive_pattern("ls -la"));
     assert!(!matches_destructive_pattern("cargo test"));
-    // Never Ask must not bypass — policy flag stays false in the gate.
     let never_ask_bypasses_destructive = false;
     assert!(!never_ask_bypasses_destructive);
 }
@@ -168,6 +264,12 @@ fn cross_platform_path_handling_contract() {
     assert!(path_has_windows_drive(r"C:\Users\x\file.rs"));
     assert!(path_has_windows_drive("D:/work/repo"));
     assert!(!path_has_windows_drive("/home/x/file.rs"));
+    assert!(app_lib::db::accepts_cross_platform_path(
+        r"C:\Users\sercan\dev\Agent-Lounge-OS\src\main.rs"
+    ));
+    assert!(app_lib::db::accepts_cross_platform_path(
+        "/home/sercan/dev/Agent-Lounge-OS/src/main.rs"
+    ));
 }
 
 /// §10.1: alert kinds + repeat interval validation.
@@ -219,18 +321,18 @@ fn palette_shortcut_label_contract() {
     );
 }
 
-/// Migration: legacy draft/approved/deprecated → approved preserved.
+/// Migration: legacy draft/approved/deprecated → active preserved.
 fn migrate_experience_status(status: &str) -> &'static str {
     match status {
-        "draft" | "approved" | "deprecated" => "approved",
-        _ => "approved",
+        "draft" | "approved" | "deprecated" | "active" => "active",
+        _ => "active",
     }
 }
 
 #[test]
 fn experience_status_migration_contract() {
-    assert_eq!(migrate_experience_status("draft"), "approved");
-    assert_eq!(migrate_experience_status("approved"), "approved");
-    assert_eq!(migrate_experience_status("deprecated"), "approved");
-    assert_eq!(migrate_experience_status("unknown-legacy"), "approved");
+    assert_eq!(migrate_experience_status("draft"), "active");
+    assert_eq!(migrate_experience_status("approved"), "active");
+    assert_eq!(migrate_experience_status("deprecated"), "active");
+    assert_eq!(migrate_experience_status("unknown-legacy"), "active");
 }

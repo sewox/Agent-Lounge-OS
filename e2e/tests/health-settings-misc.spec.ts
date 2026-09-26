@@ -268,15 +268,10 @@ test.describe("AP / CP / misc", () => {
     expect(await page.locator('[data-qa="approval-notification"]').count()).toBeGreaterThan(0);
   });
 
-  test("PATH-01 · Path handling accepts / \\ and Windows drive letters [expected-fail until PR-1]", async ({
+  test("PATH-01 · Path handling accepts / \\ and Windows drive letters", async ({
     page,
-  }, testInfo) => {
+  }) => {
     // §10.2: both separators + C:\… must round-trip through index / open / display.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "Cross-platform path normalization not exposed in UI (§10.2)",
-    });
-    test.fail(true, "Path separator / drive-letter contract not implemented");
     await openRoute(page, "/vault", "full");
     const samples = [
       "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src\\main.rs",

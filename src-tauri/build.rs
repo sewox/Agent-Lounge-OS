@@ -6,7 +6,17 @@ fn main() {
     // not only during `tauri build`. Stage a tiny host-triple stub when missing so
     // CI and local check builds work; prepare-sidecar.sh replaces stubs for packaging.
     ensure_external_bin_stub();
-    tauri_build::build();
+    #[cfg(windows)]
+    {
+        let mut windows = tauri_build::WindowsAttributes::new();
+        windows = windows.app_manifest(include_str!("windows-app-manifest.xml"));
+        tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows))
+            .expect("failed to run build script");
+    }
+    #[cfg(not(windows))]
+    {
+        tauri_build::build();
+    }
 }
 
 fn ensure_external_bin_stub() {

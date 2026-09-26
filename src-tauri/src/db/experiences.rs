@@ -311,11 +311,21 @@ fn create_experiences_sql() -> &'static str {
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 embedding BLOB,
-                payload_json TEXT NOT NULL
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                reviewed INTEGER NOT NULL DEFAULT 0,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at TEXT,
+                archived_at TEXT,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                original_content TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_experiences_project ON experiences(project_id);
             CREATE INDEX IF NOT EXISTS idx_experiences_agent ON experiences(agent_id);
             CREATE INDEX IF NOT EXISTS idx_experiences_topic ON experiences(project_id, topic);
+            CREATE INDEX IF NOT EXISTS idx_experiences_status ON experiences(status);
+            CREATE INDEX IF NOT EXISTS idx_experiences_reviewed ON experiences(reviewed);
             "#
 }
 
@@ -336,6 +346,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
+        let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
         return Ok(());
     }
 
@@ -353,6 +364,8 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         .all(|name| cols.iter().any(|col| col == name));
     if !has_required {
         rebuild_legacy(conn, &cols)?;
+        crate::db::experience_governance::migrate_experience_governance(conn)?;
+        let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
         return Ok(());
     }
 
@@ -366,6 +379,8 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_experiences_topic ON experiences(project_id, topic);
             "#,
     )?;
+    crate::db::experience_governance::migrate_experience_governance(conn)?;
+    let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
     Ok(())
 }
 
@@ -424,13 +439,32 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
     } else {
         encode_embedding(&record.embedding)
     };
+    let status = if record.status.trim().is_empty() {
+        crate::models::EXPERIENCE_STATUS_ACTIVE
+    } else {
+        record.status.as_str()
+    };
+    let updated_at = record
+        .updated_at
+        .clone()
+        .unwrap_or_else(|| record.created_at.clone());
+    let original = record.original_content.clone().unwrap_or_else(|| {
+        if record.adr_record.trim().is_empty() {
+            record.solution_summary.clone()
+        } else {
+            record.adr_record.clone()
+        }
+    });
 
     conn.execute(
         r#"
             INSERT OR REPLACE INTO experiences (
                 id, project_id, agent_id, topic, solution_summary, adr_record,
-                outcome, related_task_id, tags_json, created_at, embedding, payload_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+                status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+                updated_at, original_content
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
         params![
             record.id,
@@ -445,6 +479,14 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
             record.created_at,
             embedding,
             payload,
+            status,
+            if record.reviewed { 1 } else { 0 },
+            record.use_count as i64,
+            record.last_used_at,
+            record.archived_at,
+            if record.is_pinned { 1 } else { 0 },
+            updated_at,
+            original,
         ],
     )?;
     Ok(())
@@ -455,7 +497,9 @@ fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceR
         .query_row(
             r#"
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
-                   outcome, related_task_id, tags_json, created_at, embedding, payload_json
+                   outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+                   status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+                   updated_at, original_content
             FROM experiences WHERE id = ?1
             "#,
             params![id],
@@ -601,6 +645,22 @@ fn map_record_from_parts(
     let outcome: String = row.get(offset + 6)?;
     let tags_json: String = row.get(offset + 8)?;
     let blob: Option<Vec<u8>> = row.get(offset + 10)?;
+    // Governance columns are present on full SELECTs (offset 0 get_record).
+    // latest_blocking still uses the shorter column list — fall back via try_get.
+    let status = row
+        .get::<_, Option<String>>(offset + 12)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| crate::models::EXPERIENCE_STATUS_ACTIVE.into());
+    let reviewed = row
+        .get::<_, i64>(offset + 13)
+        .unwrap_or(0);
+    let use_count = row.get::<_, i64>(offset + 14).unwrap_or(0);
+    let last_used_at = row.get::<_, Option<String>>(offset + 15).unwrap_or(None);
+    let archived_at = row.get::<_, Option<String>>(offset + 16).unwrap_or(None);
+    let is_pinned = row.get::<_, i64>(offset + 17).unwrap_or(0);
+    let updated_at = row.get::<_, Option<String>>(offset + 18).unwrap_or(None);
+    let original_content = row.get::<_, Option<String>>(offset + 19).unwrap_or(None);
     Ok(ExperienceRecord {
         id: row.get(offset)?,
         project_id: row.get(offset + 1)?,
@@ -617,6 +677,14 @@ fn map_record_from_parts(
             .as_deref()
             .and_then(decode_embedding)
             .unwrap_or_default(),
+        status,
+        reviewed: reviewed != 0,
+        use_count: use_count.max(0) as u64,
+        last_used_at,
+        archived_at,
+        is_pinned: is_pinned != 0,
+        updated_at,
+        original_content,
     })
 }
 
@@ -631,7 +699,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     Ok(found.is_some())
 }
 
-fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
+pub(crate) fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     let mut names = Vec::new();
@@ -641,7 +709,7 @@ fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn has_col(cols: &[String], name: &str) -> bool {
+pub(crate) fn has_col(cols: &[String], name: &str) -> bool {
     cols.iter().any(|col| col == name)
 }
 

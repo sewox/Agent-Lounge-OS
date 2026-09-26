@@ -228,12 +228,40 @@ impl MemoryBridge {
                 }
             }
         }
-        graph.node_count = graph.node_count.max(graph.nodes.len() as u64);
-        graph.edge_count = graph.edge_count.max(graph.references.len() as u64);
+        // EX-14: truncated LIMIT lists must not overwrite real graph totals.
+        if let Ok((nodes, edges)) = self.fetch_graph_totals(project).await {
+            if nodes > 0 {
+                graph.node_count = graph.node_count.max(nodes);
+            }
+            if edges > 0 {
+                graph.edge_count = graph.edge_count.max(edges);
+            }
+        }
+        if graph.node_count == 0 {
+            graph.node_count = graph.nodes.len() as u64;
+        }
+        if graph.edge_count == 0 {
+            graph.edge_count = graph.references.len() as u64;
+        }
         if graph.files.unwrap_or(0) == 0 {
             graph.files = Some(graph.unique_file_count());
         }
         Ok(())
+    }
+
+    /// Full graph counts via Cypher COUNT (not LIMIT-shaped list lengths).
+    async fn fetch_graph_totals(&self, project: &str) -> Result<(u64, u64)> {
+        let mut nodes: u64 = 0;
+        for label in ["Function", "Method"] {
+            let query = format!("MATCH (f:{label}) RETURN count(f) AS c");
+            let payload = self.query_graph_json(project, &query).await?;
+            nodes = nodes.saturating_add(count_from_query(&payload));
+        }
+        let edge_payload = self
+            .query_graph_json(project, "MATCH ()-[r:CALLS]->() RETURN count(r) AS c")
+            .await?;
+        let edges = count_from_query(&edge_payload);
+        Ok((nodes, edges))
     }
 
     async fn fetch_ast_nodes(&self, project: &str) -> Result<Vec<AstNode>> {
@@ -852,6 +880,51 @@ fn count_field(value: &Value, keys: &[&str]) -> u64 {
         }
     }
     0
+}
+
+/// Extract `c` / `count` from a Cypher COUNT query JSON payload.
+fn count_from_query(payload: &Value) -> u64 {
+    if let Some(n) = json_u64_at(payload, &["c"])
+        .or_else(|| json_u64_at(payload, &["count"]))
+        .or_else(|| json_u64(payload))
+    {
+        return n;
+    }
+    // Common shapes: { "rows": [ { "c": N } ] } or [ { "c": N } ]
+    if let Some(rows) = payload
+        .get("rows")
+        .or_else(|| payload.get("results"))
+        .or_else(|| payload.get("data"))
+        .and_then(Value::as_array)
+    {
+        if let Some(first) = rows.first() {
+            if let Some(n) = json_u64_at(first, &["c"])
+                .or_else(|| json_u64_at(first, &["count"]))
+                .or_else(|| json_u64(first))
+            {
+                return n;
+            }
+        }
+    }
+    if let Some(arr) = payload.as_array() {
+        if let Some(first) = arr.first() {
+            if let Some(n) = json_u64_at(first, &["c"])
+                .or_else(|| json_u64_at(first, &["count"]))
+                .or_else(|| json_u64(first))
+            {
+                return n;
+            }
+        }
+    }
+    0
+}
+
+fn json_u64_at(value: &Value, keys: &[&str]) -> Option<u64> {
+    let mut cur = value;
+    for key in keys {
+        cur = cur.get(*key)?;
+    }
+    json_u64(cur)
 }
 
 fn parse_node_array(value: &Value) -> Vec<AstNode> {
