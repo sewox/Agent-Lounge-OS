@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod db;
 pub mod infra;
 pub mod kernel;
@@ -127,8 +128,17 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(dispatcher.clone());
             app.manage(gate);
             app.manage(models);
-            app.manage(store);
+            app.manage(store.clone());
             app.manage(bus.clone());
+
+            // MCP HTTP — Cursor/Claude stdio shim buraya proxy eder (dashboard sync).
+            let mcp_store = store.clone();
+            let mcp_nats = bus.nats_url().to_string();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = bridge::mcp_http::serve(mcp_store, mcp_nats).await {
+                    log::warn!("MCP HTTP durdu: {err}");
+                }
+            });
 
             tauri::async_runtime::spawn(async move {
                 let mut meter = InferMeter::new();

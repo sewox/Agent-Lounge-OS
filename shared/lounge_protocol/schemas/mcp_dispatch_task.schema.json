@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_dispatch_task.schema.json",
+  "title": "McpDispatchTaskArgs",
+  "description": "lounge_dispatch_task / lounge_ask_agent tool girdileri. Sonuç LoungeTask şemasına dönüştürülüp doğrulanır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target_agent", "task"],
+  "properties": {
+    "target_agent": { "type": "string", "minLength": 1 },
+    "agent": { "type": "string", "minLength": 1 },
+    "task": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "project": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "active_file": { "type": "string", "minLength": 1 },
+    "workspace_root": { "type": "string", "minLength": 1 },
+    "repo_path": { "type": "string", "minLength": 1 }
+  }
+}

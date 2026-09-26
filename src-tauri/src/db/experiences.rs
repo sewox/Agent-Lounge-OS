@@ -51,16 +51,63 @@ impl ExperienceStore {
     }
 
     pub async fn insert_record(&self, record: ExperienceRecord) -> Result<()> {
+        let prepared = prepare_record_embedding(record);
         let conn = self.conn.clone();
-        let for_vector = record.clone();
+        let for_vector = prepared.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            insert_record_blocking(&conn, &record)
+            insert_record_blocking(&conn, &prepared)
         })
         .await
         .context("experience insert join")??;
         super::vector_memory::spawn_upsert(for_vector);
         Ok(())
+    }
+
+    /// SQLite (+ yerel embedding) ve yapılandırılmış uzak vektör indeksini atomik yazar.
+    /// Uzak yazım başarısız olursa SQLite satırı geri alınır.
+    /// Uzak backend yoksa tek SQLite yazımı yeterlidir (yerel embedding aynı satırda).
+    pub async fn insert_record_atomic(&self, record: ExperienceRecord) -> Result<()> {
+        let prepared = prepare_record_embedding(record);
+        let id = prepared.id.clone();
+        let conn = self.conn.clone();
+        let for_sqlite = prepared.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            insert_record_blocking(&conn, &for_sqlite)
+        })
+        .await
+        .context("experience atomic insert join")??;
+
+        if !super::vector_memory::remote_configured() {
+            return Ok(());
+        }
+
+        match super::vector_memory::upsert_experience(&prepared).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if let Err(rollback_err) = self.delete_record(id.clone()).await {
+                    log::error!(
+                        "vektör upsert başarısız ve SQLite rollback de başarısız: {err}; {rollback_err}"
+                    );
+                }
+                Err(err).context("vektör indeksi yazılamadı; SQLite kaydı geri alındı")
+            }
+        }
+    }
+
+    pub async fn delete_record(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            conn.execute(
+                "DELETE FROM experiences WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("experience delete join")?
     }
 
     pub async fn get(&self, id: String) -> Result<Option<LoungeExperience>> {
@@ -356,6 +403,13 @@ fn rebuild_legacy(conn: &Connection, cols: &[String]) -> Result<()> {
     )?;
     conn.execute("DROP TABLE experiences_legacy", [])?;
     Ok(())
+}
+
+fn prepare_record_embedding(mut record: ExperienceRecord) -> ExperienceRecord {
+    if record.embedding.is_empty() {
+        record.embedding = lexical_embedding(&record.search_text());
+    }
+    record
 }
 
 fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Result<()> {

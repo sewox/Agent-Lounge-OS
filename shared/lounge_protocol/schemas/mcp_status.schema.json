@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_status.schema.json",
+  "title": "McpStatusArgs",
+  "description": "lounge_status — argüman kabul etmez.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}

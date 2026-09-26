@@ -37,8 +37,13 @@ fn chroma_url() -> Option<String> {
     env_url("LOUNGE_CHROMA_URL")
 }
 
+/// Qdrant veya Chroma yapılandırılmış mı?
+pub fn remote_configured() -> bool {
+    qdrant_url().is_some() || chroma_url().is_some()
+}
+
 pub fn spawn_upsert(record: ExperienceRecord) {
-    if qdrant_url().is_none() && chroma_url().is_none() {
+    if !remote_configured() {
         return;
     }
     if record.embedding.is_empty() {

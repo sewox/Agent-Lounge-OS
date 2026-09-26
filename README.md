@@ -16,6 +16,7 @@
 | **Stack** | Rust (Tokio) · Tauri 2 · Next.js · NATS · SQLite |
 | **Inference** | Candle + Laya (`DecisionGate`) — isteğe bağlı LMR (`127.0.0.1:18790`) |
 | **Hafıza** | `memory_bridge` → codebase-memory-mcp · experience store |
+| **MCP** | `lounge-mcp` stdio sunucusu — Cursor / Claude Desktop |
 | **Lisans / hedef** | Local-first · tek binary masaüstü kabuğu |
 
 ---
@@ -35,6 +36,7 @@
 | **Cmd+K palette** | Experience store + memory_bridge üzerinde hızlı komut / proje / Grok test paleti. |
 | **Feedback bias** | Kullanıcı approve/deny istatistikleri skor sonrası bias uygular (model yeniden eğitilmez). |
 | **Efficiency report** | Fısıltı enjeksiyonları, gecikme ve ajan verimliliği telemetrisi. |
+| **Lounge MCP** | Cursor / Claude Desktop, stdio MCP ile tecrübe ara/kaydet ve NATS üzerinden görev iletir. |
 
 > **Lounge LMR ≠ host Ollama.** LMR kapalı devre bir örnekdir (`LOUNGE_OLLAMA_PORT=18790`, ayrı `data/lmr` runtime). Sistemdeki `~/.ollama` / Ollama.app / `:11434` ayrı kalır.
 
@@ -70,6 +72,12 @@ flowchart TB
     SQLite["SQLite experiences · project_index · feedback"]
   end
 
+  subgraph Ext["Dış MCP istemcileri"]
+    CursorMCP["Cursor"]
+    ClaudeMCP["Claude Desktop"]
+    LoungeMCP["lounge-mcp · stdio"]
+  end
+
   Shell <-->|Tauri commands| Kernel
   Palette --> Kernel
   Quotas --> Kernel
@@ -82,9 +90,15 @@ flowchart TB
   Bridge --> MCP
   Bridge --> SQLite
   Gate -.->|ağırlıklar| LayaDir["AgentLounge/models/laya"]
+  CursorMCP --> LoungeMCP
+  ClaudeMCP --> LoungeMCP
+  LoungeMCP -->|search/record| SQLite
+  LoungeMCP -->|task.requested| Subjects
 ```
 
 **Akış (özet):** UI veya ajan NATS’a mesaj yazar → Kernel `DecisionGate` Laya ile sınıflandırır → güvenlik/kota uygulanır → gerekirse LMR’ye gider veya cross-project context fısıltılanır → sonuçlar experience store’a yazılır.
+
+Dış IDE’ler (`Cursor` / `Claude Desktop`) Lounge’u **MCP tool** olarak çağırabilir — ayrıntı: [`docs/mcp.md`](docs/mcp.md).
 
 ---
 
@@ -166,7 +180,35 @@ npm run tauri dev      # masaüstü + Next.js
 npm run build          # Next production build
 npm run types:check    # typegen + tsc
 npm run ci             # lint + types + build
+cargo build --manifest-path src-tauri/Cargo.toml --bin lounge-mcp --release   # MCP sidecar
 ```
+
+### Cursor / Claude Desktop (MCP)
+
+Kernel masaüstü uygulaması **`http://127.0.0.1:18791`** üzerinde MCP HTTP sunar. `lounge-mcp` binary Claude/Cursor için **stdio shim** olup bu HTTP’ye proxy eder (dashboard `connected_tools` ile senkron). Kernel kapalıysa shim gömülü SQLite moduna düşer.
+
+Hazır snippet’ler: **[`docs/mcp.md`](docs/mcp.md)**.
+
+**Cursor** — `.cursor/mcp.json` (yolları mutlak yapın):
+
+```json
+{
+  "mcpServers": {
+    "agent-lounge-os": {
+      "command": "/ABS/PATH/TO/src-tauri/target/release/lounge-mcp",
+      "args": [],
+      "env": {
+        "LOUNGE_MCP_URL": "http://127.0.0.1:18791",
+        "LOUNGE_DB_PATH": "/ABS/PATH/TO/experiences/lounge.sqlite"
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop** — `claude_desktop_config.json` içinde aynı `mcpServers` bloğu.
+
+`lounge_dispatch_task` için NATS + Kernel gerekir (PENDING_APPROVAL / kota baypas edilmez). MCP dosya yazmaz ve ayar değiştirmez.
 
 ---
 
@@ -176,7 +218,9 @@ npm run ci             # lint + types + build
 Agent-Lounge-OS/
 ├── src/                 # Next.js UI (dashboard, palette, quotas)
 ├── src-tauri/           # Rust Kernel: DecisionGate, LMR, NATS, memory
+│   └── src/bridge/      # lounge-mcp (MCP stdio sunucusu)
 ├── shared/              # lounge_protocol (NATS zarfı + şemalar)
+├── docs/mcp.md          # Cursor / Claude bağlantı kılavuzu
 ├── public/logo.png
 ├── docs/screenshots/    # ürün görselleri (yer tutucu)
 └── data/                # yerel LMR / NATS (git’e girmeyebilir)
@@ -192,7 +236,7 @@ Agent-Lounge-OS/
 
 ## English summary
 
-**Agent Lounge OS** is a local multi-agent orchestration layer (Rust + Tauri + Next.js + NATS). Decisions run through a native **DecisionGate** powered by **Laya** (Candle), not a cloud router. Model calls go to **Lounge LMR** on `127.0.0.1:18790` — **not** the host Ollama instance on `:11434`. Cross-project memory injects context via `lounge.context.whisper`; security, quotas, semantic maps, Cmd+K, feedback bias, and efficiency reports complete the engineering-focused desktop shell.
+**Agent Lounge OS** is a local multi-agent orchestration layer (Rust + Tauri + Next.js + NATS). Decisions run through a native **DecisionGate** powered by **Laya** (Candle), not a cloud router. Model calls go to **Lounge LMR** on `127.0.0.1:18790` — **not** the host Ollama instance on `:11434`. Cross-project memory injects context via `lounge.context.whisper`; security, quotas, semantic maps, Cmd+K, feedback bias, and efficiency reports complete the engineering-focused desktop shell. External agents connect via the **`lounge-mcp`** stdio MCP server (see `docs/mcp.md`).
 
 ```bash
 npm install && npm run tauri dev
