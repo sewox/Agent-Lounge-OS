@@ -6,7 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::experiences::{column_names, has_col};
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, ExperienceRecord, EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
+    now_rfc3339, ExperienceRecord, ARCHIVED_BY_TTL, ARCHIVED_BY_USER, EXPERIENCE_STATUS_ACTIVE,
+    EXPERIENCE_STATUS_ARCHIVED,
 };
 
 /// Settings key for auto-archive TTL in days (default 90).
@@ -105,6 +106,21 @@ impl ExperienceStore {
         })
         .await
         .context("experience mark_reviewed join")?
+    }
+
+    /// Mark every active unreviewed row reviewed (not just a client-loaded page).
+    pub async fn mark_all_experiences_reviewed(&self) -> Result<u64> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let n = conn.execute(
+                "UPDATE experiences SET reviewed = 1, updated_at = ?1 WHERE reviewed = 0 AND status = ?2",
+                params![now_rfc3339(), EXPERIENCE_STATUS_ACTIVE],
+            )?;
+            Ok(n as u64)
+        })
+        .await
+        .context("experience mark_all_reviewed join")?
     }
 
     pub async fn count_unreviewed_experiences(&self) -> Result<u64> {
@@ -271,12 +287,12 @@ fn set_archive_blocking(conn: &Connection, id: &str, archive: bool) -> Result<()
     let now = now_rfc3339();
     if archive {
         conn.execute(
-            "UPDATE experiences SET status = ?1, archived_at = ?2, updated_at = ?2 WHERE id = ?3",
-            params![EXPERIENCE_STATUS_ARCHIVED, now, id],
+            "UPDATE experiences SET status = ?1, archived_at = ?2, archived_by = ?3, updated_at = ?2 WHERE id = ?4",
+            params![EXPERIENCE_STATUS_ARCHIVED, now, ARCHIVED_BY_USER, id],
         )?;
     } else {
         conn.execute(
-            "UPDATE experiences SET status = ?1, archived_at = NULL, updated_at = ?2 WHERE id = ?3",
+            "UPDATE experiences SET status = ?1, archived_at = NULL, archived_by = NULL, updated_at = ?2 WHERE id = ?3",
             params![EXPERIENCE_STATUS_ACTIVE, now, id],
         )?;
     }
@@ -290,7 +306,7 @@ fn get_full_record(conn: &Connection, id: &str) -> Result<Option<ExperienceRecor
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                    outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                    status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                   updated_at, original_content
+                   updated_at, original_content, archived_by
             FROM experiences WHERE id = ?1
             "#,
             params![id],
@@ -333,6 +349,7 @@ fn map_full_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExperienceRecord
         is_pinned: is_pinned != 0,
         updated_at: row.get(18)?,
         original_content: row.get(19)?,
+        archived_by: row.get(20)?,
     })
 }
 
@@ -347,10 +364,13 @@ fn search_filtered_blocking(
     } else {
         ""
     };
+    // Column-backed governance fields — never prefer stale payload_json.
     let sql = format!(
         r#"
-        SELECT payload_json, id, project_id, agent_id, topic, solution_summary, adr_record,
-               outcome, related_task_id, tags_json, created_at
+        SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
+               outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+               status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+               updated_at, original_content, archived_by
         FROM experiences
         WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
           {status_clause}
@@ -373,31 +393,7 @@ fn search_filtered_blocking(
 }
 
 fn map_lounge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::LoungeExperience> {
-    let payload: String = row.get(0)?;
-    if let Ok(exp) = serde_json::from_str(&payload) {
-        return Ok(exp);
-    }
-    let outcome: String = row.get(6)?;
-    let tags_json: String = row.get(8)?;
-    Ok(crate::models::LoungeExperience {
-        id: row.get(1)?,
-        msg_type: "experience".into(),
-        agent: row.get(3)?,
-        project_id: row.get(2)?,
-        adr_summary: {
-            let adr: String = row.get(5)?;
-            if adr.trim().is_empty() {
-                row.get(4)?
-            } else {
-                adr
-            }
-        },
-        outcome: serde_json::from_value(serde_json::Value::String(outcome))
-            .unwrap_or(crate::models::ExperienceOutcome::Success),
-        related_task_id: row.get(7)?,
-        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        created_at: row.get(9)?,
-    })
+    Ok(map_full_record(row)?.to_lounge())
 }
 
 fn auto_archive_blocking(conn: &Connection, ttl_days: u64, now_rfc: &str) -> Result<u64> {
@@ -443,8 +439,8 @@ fn auto_archive_blocking(conn: &Connection, ttl_days: u64, now_rfc: &str) -> Res
     let archived_at = now.to_rfc3339();
     for id in &ids {
         conn.execute(
-            "UPDATE experiences SET status = ?1, archived_at = ?2, updated_at = ?2 WHERE id = ?3",
-            params![EXPERIENCE_STATUS_ARCHIVED, archived_at, id],
+            "UPDATE experiences SET status = ?1, archived_at = ?2, archived_by = ?3, updated_at = ?2 WHERE id = ?4",
+            params![EXPERIENCE_STATUS_ARCHIVED, archived_at, ARCHIVED_BY_TTL, id],
         )?;
     }
     Ok(ids.len() as u64)
@@ -462,6 +458,7 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
         ("is_pinned", "INTEGER NOT NULL DEFAULT 0"),
         ("updated_at", "TEXT"),
         ("original_content", "TEXT"),
+        ("archived_by", "TEXT"),
     ];
     let mut added_reviewed = false;
     for (name, decl) in additions {
@@ -689,11 +686,47 @@ mod tests {
         assert!(archived.is_pinned);
         assert!(archived.reviewed);
         assert!(archived.archived_at.is_some());
+        assert_eq!(archived.archived_by.as_deref(), Some(ARCHIVED_BY_USER));
 
         store.unarchive_experience(id.clone()).await.unwrap();
         let active = store.get_record(id).await.unwrap().unwrap();
         assert_eq!(active.status, EXPERIENCE_STATUS_ACTIVE);
         assert!(active.archived_at.is_none());
+        assert!(active.archived_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_all_reviewed_updates_every_active_row() {
+        let store = ExperienceStore::memory().unwrap();
+        for i in 0..3 {
+            let mut record = ExperienceRecord::from_task(
+                &LoungeTask::new("cursor", "proj-all", format!("t{i}")),
+                "s",
+                "a",
+                ExperienceOutcome::Success,
+                vec![],
+            );
+            record.reviewed = false;
+            store.insert_record(record).await.unwrap();
+        }
+        let mut archived = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-all", "archived"),
+            "s",
+            "a",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        archived.reviewed = false;
+        let archived_id = archived.id.clone();
+        store.insert_record(archived).await.unwrap();
+        store.archive_experience(archived_id.clone()).await.unwrap();
+
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 3);
+        let changed = store.mark_all_experiences_reviewed().await.unwrap();
+        assert_eq!(changed, 3);
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 0);
+        let still = store.get_record(archived_id).await.unwrap().unwrap();
+        assert!(!still.reviewed, "archived rows are outside mark-all scope");
     }
 
     #[tokio::test]

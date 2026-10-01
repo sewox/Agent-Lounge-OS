@@ -435,6 +435,8 @@ impl McpServer {
             related_task_id: None,
             tags: vec!["mcp".into(), "external".into()],
             created_at: now_rfc3339(),
+            reviewed: false,
+            ..Default::default()
         };
         let experience_json = serde_json::to_value(&experience)?;
         validate_schema(SchemaKind::Experience, &experience_json).map_err(|e| anyhow!(e))?;
@@ -1390,5 +1392,7 @@ mod tests {
         );
         let latest = store.latest(5).await.unwrap();
         assert_eq!(latest.len(), 1);
+        assert!(!latest[0].reviewed, "MCP rows land unreviewed");
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
     }
 }

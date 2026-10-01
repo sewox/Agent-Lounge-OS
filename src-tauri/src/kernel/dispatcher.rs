@@ -48,7 +48,7 @@ pub struct ApprovalCleared {
 /// `execute_task` sonucu — yerel tamamlandı veya dış worker'a delege edildi.
 #[derive(Debug, Clone)]
 enum TaskExecution {
-    Local(LoungeExperience),
+    Local(Box<LoungeExperience>),
     Delegated { bot_id: String, subject: String },
 }
 
@@ -292,7 +292,7 @@ impl Dispatcher {
         match self.execute_task(task.clone(), context, Some(nc)).await {
             Ok(TaskExecution::Local(experience)) => {
                 publish_json(nc, TASK_COMPLETED, &task).await?;
-                publish_json(nc, EXPERIENCE_REPORTED, &experience).await?;
+                publish_json(nc, EXPERIENCE_REPORTED, experience.as_ref()).await?;
             }
             Ok(TaskExecution::Delegated { bot_id, subject }) => {
                 log::info!(
@@ -315,7 +315,7 @@ impl Dispatcher {
     pub async fn handle_task(&self, task: LoungeTask) -> Result<LoungeExperience> {
         let context = self.recall_context(&task).await.unwrap_or_default();
         match self.execute_task(task, context, None).await? {
-            TaskExecution::Local(experience) => Ok(experience),
+            TaskExecution::Local(experience) => Ok(*experience),
             TaskExecution::Delegated { bot_id, .. } => {
                 anyhow::bail!(
                     "görev dış worker'a delegasyon bekliyor: {bot_id} (NATS bağlantısı yok)"
@@ -501,7 +501,7 @@ impl Dispatcher {
             .insert_record(record.clone())
             .await
             .context("tecrübe SQLite'a yazılamadı")?;
-        Ok(TaskExecution::Local(record.to_lounge()))
+        Ok(TaskExecution::Local(Box::new(record.to_lounge())))
     }
 
     async fn analyze_work_order(

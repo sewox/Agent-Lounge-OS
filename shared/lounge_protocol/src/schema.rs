@@ -101,6 +101,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_experience_with_governance_fields() {
+        let good = json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "type": "experience",
+            "agent": "cursor",
+            "project_id": "demo",
+            "adr_summary": "use pool",
+            "outcome": "success",
+            "created_at": "2026-09-18T12:00:00.000Z",
+            "status": "active",
+            "reviewed": false,
+            "use_count": 0,
+            "last_used_at": null,
+            "archived_at": null,
+            "is_pinned": false,
+            "updated_at": null,
+            "original_content": null
+        });
+        validate(SchemaKind::Experience, &good).expect("governance fields allowed");
+    }
+
+    #[test]
     fn rejects_freeform_experience() {
         let bad = json!({
             "id": "11111111-1111-4111-8111-111111111111",

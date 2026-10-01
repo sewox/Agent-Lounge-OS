@@ -417,7 +417,69 @@ fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<
         )?;
     }
 
+    // Persist bridge-declared totals so LIMIT-truncated node/edge lists cannot
+    // collapse COUNT(*) reloads to SEMANTIC_NODE_LIMIT / SEMANTIC_CALL_LIMIT.
+    let declared_nodes = graph.node_count.max(graph.nodes.len() as u64);
+    let declared_edges = graph.edge_count.max(graph.references.len() as u64);
+    let totals_payload = serde_json::json!({
+        "declared_node_count": declared_nodes,
+        "declared_edge_count": declared_edges,
+    })
+    .to_string();
+    conn.execute(
+        r#"
+        INSERT INTO project_index (
+            id, project_id, repo_path, kind, name, file_path, line, target,
+            ref_count, detail, payload_json, indexed_at
+        ) VALUES (?1, ?2, ?3, 'meta', '__graph_totals__', NULL, NULL, NULL, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            Uuid::new_v4().to_string(),
+            project,
+            graph.repo_path,
+            declared_nodes as i64,
+            declared_edges.to_string(),
+            totals_payload,
+            now,
+        ],
+    )?;
+
     Ok(())
+}
+
+const GRAPH_TOTALS_NAME: &str = "__graph_totals__";
+
+fn read_declared_totals(conn: &Connection, project_id: &str) -> Result<(u64, u64)> {
+    let row: Option<(i64, String, String)> = conn
+        .query_row(
+            r#"
+            SELECT ref_count, COALESCE(detail, '0'), COALESCE(payload_json, '{}')
+            FROM project_index
+            WHERE project_id = ?1 AND kind = 'meta' AND name = ?2
+            LIMIT 1
+            "#,
+            params![project_id, GRAPH_TOTALS_NAME],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((ref_count, detail, payload)) = row else {
+        return Ok((0, 0));
+    };
+    let mut nodes = ref_count.max(0) as u64;
+    let mut edges = detail.parse::<u64>().unwrap_or(0);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) {
+        if let Some(n) = value.get("declared_node_count").and_then(|v| v.as_u64()) {
+            nodes = nodes.max(n);
+        }
+        if let Some(e) = value.get("declared_edge_count").and_then(|v| v.as_u64()) {
+            edges = edges.max(e);
+        }
+    }
+    Ok((nodes, edges))
+}
+
+fn reconcile_totals(declared: u64, counted: u64) -> u64 {
+    declared.max(counted)
 }
 
 struct IndexRow<'a> {
@@ -853,7 +915,7 @@ fn project_index_snapshot_blocking(
         |row| row.get(0),
     )?;
     let files: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT NULLIF(file_path, '')) FROM project_index WHERE project_id = ?1",
+        "SELECT COUNT(DISTINCT NULLIF(file_path, '')) FROM project_index WHERE project_id = ?1 AND kind != 'meta'",
         params![project],
         |row| row.get(0),
     )?;
@@ -864,12 +926,13 @@ fn project_index_snapshot_blocking(
             |row| row.get(0),
         )
         .optional()?;
+    let (declared_nodes, declared_edges) = read_declared_totals(conn, &project)?;
 
     Ok(IndexSnapshot {
         project,
         status: indexed_status.map(|_| "indexed".into()),
-        nodes: nodes as u64,
-        edges: edges as u64,
+        nodes: reconcile_totals(declared_nodes, nodes.max(0) as u64),
+        edges: reconcile_totals(declared_edges, edges.max(0) as u64),
         files: Some(files as u64),
         dead: dead as u64,
     })
@@ -882,30 +945,35 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
             MAX(repo_path),
             SUM(CASE WHEN kind = 'node' THEN 1 ELSE 0 END),
             SUM(CASE WHEN kind = 'reference' THEN 1 ELSE 0 END),
-            COUNT(DISTINCT NULLIF(file_path, ''))
+            COUNT(DISTINCT CASE WHEN kind != 'meta' THEN NULLIF(file_path, '') END)
         FROM project_index
         GROUP BY project_id
         ORDER BY MAX(indexed_at) DESC, project_id
         "#;
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
-        Ok(ProjectSummary {
-            name: row.get(0)?,
-            root_path: row
-                .get::<_, Option<String>>(1)?
-                .filter(|path| !path.is_empty()),
-            nodes: row.get::<_, i64>(2)? as u64,
-            edges: row.get::<_, i64>(3)? as u64,
-            files: Some(row.get::<_, i64>(4)? as u64),
-        })
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)? as u64,
+            row.get::<_, i64>(3)? as u64,
+            row.get::<_, i64>(4)? as u64,
+        ))
     })?;
     let mut projects = Vec::new();
     for row in rows {
-        let project = row?;
-        if crate::db::experience_governance::is_project_hidden(conn, &project.name)? {
+        let (name, root_path, counted_nodes, counted_edges, files) = row?;
+        if crate::db::experience_governance::is_project_hidden(conn, &name)? {
             continue;
         }
-        projects.push(project);
+        let (declared_nodes, declared_edges) = read_declared_totals(conn, &name)?;
+        projects.push(ProjectSummary {
+            name,
+            root_path: root_path.filter(|path| !path.is_empty()),
+            nodes: reconcile_totals(declared_nodes, counted_nodes),
+            edges: reconcile_totals(declared_edges, counted_edges),
+            files: Some(files),
+        });
     }
     Ok(projects)
 }
@@ -1042,7 +1110,8 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
                 .unwrap_or(false)
         })
         .map(|mut project| {
-            // Prefer DB totals so later LIMIT truncations cannot rewrite counts.
+            // Prefer max(declared bridge totals, COUNT(*)) so LIMIT-capped lists
+            // cannot rewrite the UI to SEMANTIC_NODE_LIMIT / SEMANTIC_CALL_LIMIT.
             let node_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM project_index WHERE project_id = ?1 AND kind = 'node'",
@@ -1057,8 +1126,10 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
                     |row| row.get(0),
                 )
                 .unwrap_or(project.references.len() as i64);
-            project.node_count = node_count.max(0) as u64;
-            project.edge_count = edge_count.max(0) as u64;
+            let (declared_nodes, declared_edges) =
+                read_declared_totals(conn, &project.name).unwrap_or((0, 0));
+            project.node_count = reconcile_totals(declared_nodes, node_count.max(0) as u64);
+            project.edge_count = reconcile_totals(declared_edges, edge_count.max(0) as u64);
             let mut files = HashSet::new();
             for node in &project.nodes {
                 if let Some(file) = node.file.as_deref().filter(|path| !path.is_empty()) {
@@ -1283,34 +1354,44 @@ mod tests {
         assert!(!normalized.contains('\\'));
     }
 
-    /// EX-14 backend proof: bridge may declare large totals while the stored list is
-    /// LIMIT-truncated; `COUNT(*)` over rows reflects what was actually persisted.
-    /// UI wiring that reconciles the two is owned by PR-3 (expected-fail in e2e).
+    /// EX-14: bridge-declared totals survive LIMIT-truncated row storage and are
+    /// returned as max(declared, COUNT(*)) from snapshot / list / semantic map.
     #[tokio::test]
-    async fn ex14_declared_bridge_totals_differ_from_count_star_rows() {
+    async fn ex14_declared_bridge_totals_survive_limit_shaped_storage() {
         let store = ExperienceStore::memory().expect("memory db");
         let mut graph = sample_graph();
-        // Simulate LIMIT-shaped payload: only 1 of 2 nodes in the list, but counts are real.
+        // Simulate LIMIT-shaped payload: only 1 node/edge persisted, declared counts are real.
         graph.node_count = 2286;
         graph.edge_count = 7958;
         graph.nodes.truncate(1);
+        graph.references.truncate(1);
         let snapshot = store.save_project_index(graph).await.expect("save");
-        // Returned snapshot may carry declared bridge totals…
         assert_eq!(snapshot.nodes, 2286);
         assert_eq!(snapshot.edges, 7958);
-        // …while COUNT(*) reload reflects actual stored rows (not the LIMIT list length alone).
         let listed = store
             .project_index_snapshot(Some("lounge".into()))
             .await
             .expect("snapshot");
-        assert_eq!(listed.nodes, 1, "COUNT(*) nodes from DB rows");
-        assert_eq!(listed.edges, 1);
+        assert_eq!(listed.nodes, 2286, "declared totals must win over COUNT(*)");
+        assert_eq!(listed.edges, 7958);
         let map = store
             .load_semantic_map(Some("lounge".into()))
             .await
             .expect("map");
-        assert_eq!(map.projects[0].node_count, 1);
-        assert_eq!(map.projects[0].edge_count, 1);
+        assert_eq!(map.projects[0].node_count, 2286);
+        assert_eq!(map.projects[0].edge_count, 7958);
+        assert_eq!(
+            map.projects[0].nodes.len(),
+            1,
+            "row list stays LIMIT-shaped"
+        );
+        let projects = store.list_indexed_projects().await.expect("list");
+        let lounge = projects
+            .iter()
+            .find(|p| p.name == "lounge")
+            .expect("lounge");
+        assert_eq!(lounge.nodes, 2286);
+        assert_eq!(lounge.edges, 7958);
     }
 
     #[tokio::test]

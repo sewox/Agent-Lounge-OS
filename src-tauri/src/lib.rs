@@ -273,6 +273,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             unarchive_experience,
             pin_experience,
             mark_experience_reviewed,
+            mark_all_experiences_reviewed,
+            count_experiences,
             count_unreviewed_experiences,
             ignore_symbol,
             unignore_symbol,
@@ -661,9 +663,25 @@ async fn list_experiences(
     state: tauri::State<'_, ExperienceStore>,
     limit: Option<usize>,
     include_archived: Option<bool>,
+    offset: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
     state
-        .list_experiences(limit.unwrap_or(20), include_archived.unwrap_or(false))
+        .list_experiences_page(
+            limit.unwrap_or(20),
+            include_archived.unwrap_or(false),
+            offset.unwrap_or(0),
+        )
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn count_experiences(
+    state: tauri::State<'_, ExperienceStore>,
+    include_archived: Option<bool>,
+) -> Result<u64, String> {
+    state
+        .count_experiences(include_archived.unwrap_or(false))
         .await
         .map_err(|err| err.to_string())
 }
@@ -729,6 +747,16 @@ async fn mark_experience_reviewed(
 ) -> Result<(), String> {
     state
         .mark_experience_reviewed(id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn mark_all_experiences_reviewed(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<u64, String> {
+    state
+        .mark_all_experiences_reviewed()
         .await
         .map_err(|err| err.to_string())
 }
