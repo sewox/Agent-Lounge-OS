@@ -147,7 +147,11 @@ export type NatsEvent = {
   createdAtMs?: number;
 };
 
-/** Sort key: createdAtMs, else parse `HH:mm:ss.mmm` / ISO `time`. */
+/**
+ * Sort key: prefer `createdAtMs`; else parse `HH:mm:ss.mmm` / ISO `time`.
+ * Clock-only fallback wraps at midnight (00:00:01 sorts below 23:59:59).
+ * Live bus events set `createdAtMs`, so this only affects fixtures without it.
+ */
 export function eventSortKey(event: Pick<NatsEvent, "time" | "createdAtMs">): number {
   if (event.createdAtMs != null && Number.isFinite(event.createdAtMs)) {
     return event.createdAtMs;
@@ -1801,7 +1805,10 @@ export type SaveMarkdownResult =
   | { ok: true; path: string; mode: "tauri" | "browser" }
   | { ok: false; cancelled?: boolean; error: string };
 
-/** Tauri: native save dialog + write. Browser: anchor download. */
+/**
+ * Tauri: Rust-side save dialog + write (`save_markdown_report` — webview never
+ * supplies a filesystem path). Browser: anchor download.
+ */
 export async function saveMarkdownReport(
   filename: string,
   content: string,
@@ -1819,23 +1826,19 @@ export async function saveMarkdownReport(
     }
   }
   try {
-    const { save } = await import("@tauri-apps/plugin-dialog");
     const { invoke } = await import("@tauri-apps/api/core");
-    const path = await save({
-      defaultPath: safeName,
-      title: "Markdown indir",
-      filters: [{ name: "Markdown", extensions: ["md"] }],
+    const path = await invoke<string>("save_markdown_report", {
+      defaultName: safeName,
+      contents: content,
     });
-    if (typeof path !== "string" || path.length === 0) {
-      return { ok: false, cancelled: true, error: "İptal edildi" };
-    }
-    await invoke("write_text_file", { path, contents: content });
     return { ok: true, path, mode: "tauri" };
   } catch (error) {
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
+    const message = error instanceof Error ? error.message : String(error);
+    // Rust returns plain "cancelled" when the user dismisses the dialog.
+    if (message === "cancelled" || /cancelled/i.test(message)) {
+      return { ok: false, cancelled: true, error: "İptal edildi" };
+    }
+    return { ok: false, error: message };
   }
 }
 
