@@ -198,6 +198,9 @@ impl Dispatcher {
             Some(PendingApproval { tx, .. }) => {
                 tx.send(vote)
                     .map_err(|_| anyhow::anyhow!("onay alıcısı kapanmış"))?;
+                // Clear OS-notification pending slot immediately so Focused/Reopen
+                // cannot re-raise the window with a stale id after a user decision.
+                crate::services::clear_pending_approval_if_matches(&task_id);
                 Ok(())
             }
             None => anyhow::bail!("bekleyen routing onayı yok: {task_id}"),
@@ -646,6 +649,9 @@ impl Dispatcher {
     }
 
     fn emit_approval_cleared(&self, task_id: &str, reason: &str) {
+        // Always clear the pending-notification slot (id-matched), even when the
+        // AppHandle is not wired (unit tests / early boot).
+        crate::services::clear_pending_approval_if_matches(task_id);
         if let Some(app) = self.app.lock().expect("dispatcher app lock").clone() {
             let payload = ApprovalCleared {
                 task_id: task_id.to_string(),
@@ -725,6 +731,15 @@ impl Dispatcher {
                 anyhow::bail!("routing onayı zaman aşımı")
             }
         };
+
+        // Approve / ApproveLocal / Deny — clear slot + notify UI (resolve_vote also
+        // clears immediately; this covers any future non-oneshot resolution paths).
+        let clear_reason = match &vote {
+            RoutingVote::Approve => "approved",
+            RoutingVote::ApproveLocal => "approved_local",
+            RoutingVote::Deny => "denied",
+        };
+        self.emit_approval_cleared(&task_id, clear_reason);
 
         match vote {
             RoutingVote::Approve => {
@@ -1369,6 +1384,58 @@ mod tests {
         let err = dispatcher.handle_task(task).await.unwrap_err();
         assert!(err.to_string().contains("zaman aşımı"), "unexpected: {err}");
         assert_eq!(dispatcher.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_vote_clears_notification_pending_slot() {
+        use crate::services::{
+            clear_pending_approval_if_matches, pending_approval_task_id,
+            set_pending_approval_task_id, should_focus_on_activation,
+        };
+
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "slot clear me");
+        let id = task.id.clone();
+        dispatcher.inject_decision(critical_decision(&id));
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        loop {
+            if dispatcher.has_pending(&id) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "approval should become pending"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        // Simulate what emit_approval_pending does when AppHandle is wired.
+        set_pending_approval_task_id(Some(id.clone()));
+        assert!(should_focus_on_activation());
+
+        dispatcher
+            .resolve_vote(id.clone(), RoutingVote::Approve)
+            .unwrap();
+        assert_eq!(
+            pending_approval_task_id(),
+            None,
+            "resolve_vote must clear the notification pending slot"
+        );
+        assert!(
+            !should_focus_on_activation(),
+            "activation after resolve must be inert"
+        );
+        // Mismatched clear is a no-op even if something re-armed incorrectly.
+        set_pending_approval_task_id(Some("other".into()));
+        assert!(!clear_pending_approval_if_matches(&id));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("other"));
+        let _ = clear_pending_approval_if_matches("other");
+
+        assert!(handle.await.unwrap().is_ok());
     }
 
     #[tokio::test]

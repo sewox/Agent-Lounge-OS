@@ -88,6 +88,23 @@ pub fn pending_approval_task_id() -> Option<String> {
         .clone()
 }
 
+/// Clear the pending-approval slot only when it still holds `task_id`.
+/// Returns true if the slot was cleared.
+pub fn clear_pending_approval_if_matches(task_id: &str) -> bool {
+    let mut slot = pending_slot().lock().expect("pending approval lock");
+    if slot.as_deref() == Some(task_id) {
+        *slot = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether app activation should raise + emit the approval banner.
+pub fn should_focus_on_activation() -> bool {
+    pending_approval_task_id().is_some()
+}
+
 fn request_dock_attention<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app
         .get_webview_window("main")
@@ -156,17 +173,17 @@ pub fn focus_app_for_approval<R: Runtime>(app: &AppHandle<R>, task_id: Option<&s
 /// Called from the Tauri run loop when the app is activated (dock/taskbar/reopen)
 /// or the main window gains focus while an approval is still pending.
 pub fn on_app_activated_for_pending_approval<R: Runtime>(app: &AppHandle<R>) {
-    if pending_approval_task_id().is_some() {
+    if should_focus_on_activation() {
         focus_app_for_approval(app, None);
     }
 }
 
 /// Emit `approval_resolved` when a pending approval is cleared.
+///
+/// Slot clear is **id-matched only**: a different `task_id` must not wipe the
+/// current pending approval.
 pub fn emit_approval_resolved<R: Runtime>(app: &AppHandle<R>, task_id: &str, reason: &str) {
-    let current = pending_approval_task_id();
-    if current.as_deref() == Some(task_id) || current.is_some() {
-        set_pending_approval_task_id(None);
-    }
+    clear_pending_approval_if_matches(task_id);
     let payload = ApprovalResolvedPayload {
         task_id: task_id.to_string(),
         reason: reason.to_string(),
@@ -208,5 +225,47 @@ mod tests {
         assert_eq!(pending_approval_task_id().as_deref(), Some("task-1"));
         set_pending_approval_task_id(None);
         assert_eq!(pending_approval_task_id(), None);
+    }
+
+    #[test]
+    fn clear_pending_if_matches_only_matching_id() {
+        set_pending_approval_task_id(Some("task-keep".into()));
+        assert!(!clear_pending_approval_if_matches("task-other"));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("task-keep"));
+        assert!(clear_pending_approval_if_matches("task-keep"));
+        assert_eq!(pending_approval_task_id(), None);
+        // Clearing again / clearing empty is a no-op.
+        assert!(!clear_pending_approval_if_matches("task-keep"));
+        assert!(!should_focus_on_activation());
+    }
+
+    #[test]
+    fn resolve_paths_clear_slot_so_activation_is_inert() {
+        // Mirrors resolve_vote / await_approval (Approve, Deny, ApproveLocal, routing).
+        for (id, _vote) in [
+            ("approve-1", "Approve"),
+            ("deny-1", "Deny"),
+            ("local-1", "ApproveLocal"),
+            ("route-1", "routing"),
+        ] {
+            set_pending_approval_task_id(Some(id.into()));
+            assert!(should_focus_on_activation());
+            assert!(clear_pending_approval_if_matches(id));
+            assert_eq!(pending_approval_task_id(), None);
+            assert!(
+                !should_focus_on_activation(),
+                "after {id} resolution, activation must not raise/emit"
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_clear_leaves_pending_so_activation_still_armed() {
+        set_pending_approval_task_id(Some("live-approval".into()));
+        assert!(!clear_pending_approval_if_matches("stale-other"));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("live-approval"));
+        assert!(should_focus_on_activation());
+        // Clean up for other tests sharing the process-wide slot.
+        assert!(clear_pending_approval_if_matches("live-approval"));
     }
 }

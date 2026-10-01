@@ -28,11 +28,12 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use approval_notify::{
-    emit_approval_pending, emit_approval_resolved, focus_app_for_approval,
-    install_destructive_approval_emitter, on_app_activated_for_pending_approval,
-    pending_approval_task_id, set_pending_approval_task_id, ApprovalPendingPayload,
-    ApprovalResolvedPayload, APPROVAL_BANNER_FOCUS_EVENT, APPROVAL_PENDING_EVENT,
-    APPROVAL_PENDING_NATS, APPROVAL_RESOLVED_EVENT,
+    clear_pending_approval_if_matches, emit_approval_pending, emit_approval_resolved,
+    focus_app_for_approval, install_destructive_approval_emitter,
+    on_app_activated_for_pending_approval, pending_approval_task_id, set_pending_approval_task_id,
+    should_focus_on_activation, ApprovalPendingPayload, ApprovalResolvedPayload,
+    APPROVAL_BANNER_FOCUS_EVENT, APPROVAL_PENDING_EVENT, APPROVAL_PENDING_NATS,
+    APPROVAL_RESOLVED_EVENT,
 };
 pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;

@@ -11,52 +11,51 @@ type registered with `registerActionTypes`. The desktop plugin surface is
 `notify` / permission helpers — it does **not** deliver click/action callbacks to
 the webview on Windows, macOS, or Linux. We do **not** claim otherwise.
 
-### Desktop path (Win / macOS / Linux)
+### Desktop path (Win / macOS / Linux) — Rust
 
 1. Rust `emit_approval_pending` shows an OS toast (best-effort) and **requests
    dock/taskbar attention** (`UserAttentionType::Critical`).
 2. The pending `task_id` is stored in a process slot.
 3. When the app is activated while that slot is set:
-   - **macOS**: `RunEvent::Reopen` (dock click / notification activation that
-     reopens the app) → `on_app_activated_for_pending_approval`.
+   - **macOS**: `RunEvent::Reopen` → `on_app_activated_for_pending_approval`.
    - **All desktop**: `WindowEvent::Focused(true)` on the main window → same
-     handler (covers toast-driven activation when the OS focuses the app, Alt-Tab,
-     taskbar click).
+     handler (toast-driven activation, Alt-Tab, taskbar click).
 4. That handler calls `focus_app_for_approval`: unminimize / show / set_focus,
    clear attention, emit `approval_banner_focus`.
-5. Frontend `ApprovalNotificationBridge` listens for `approval_banner_focus` and
-   scrolls/focuses the approval banner. A window/`visibilitychange` focus
-   fallback also invokes `focus_app_for_approval` while a pending approval exists
-   (covers harness + environments where Rust focus events are not observable from
-   JS alone).
+5. On **every** resolution path (Approve / ApproveLocal / Deny via `resolve_vote`
+   / `await_approval`, plus timeout / channel_closed), the slot is cleared with
+   **id match only** so a later focus cannot re-raise with a stale id.
+
+Rust unit tests cover: matching clear, mismatched id does not clear, activation
+gate is inert after resolve.
+
+### Frontend bridge + Playwright (front-end contract only)
+
+`ApprovalNotificationBridge` listens for `approval_banner_focus` and focuses the
+tabindex banner. Playwright AP-10 uses the **e2e Tauri mock** of
+`focus_app_for_approval`, which emits the event and focuses the banner in the
+harness. That proves the **front-end contract** (invoke → banner focus / window
+focus fallback), **not** the live Rust raise path. Do not treat AP-10 e2e as a
+desktop OS toast-click pass.
 
 ### Mobile (out of primary scope for PR-2b targets)
 
 If `onAction` fires (action-typed notification), the bridge invokes
 `focus_app_for_approval`. Registration failures are **logged**, never swallowed.
 
-### Where click cannot be delivered
+## S2 live checklist — NOT YET RUN
 
-If a desktop environment shows a non-interactive bubble and does not activate the
-app on click, the user must bring Lounge forward manually (dock / Alt-Tab /
-taskbar). On that next focus, the banner is focused and attention is cleared.
-**S2 live** still verifies toast → activate → banner on each OS.
+Manual verification on real OS toasts is **required** and is **not claimed Pass**
+in this PR until executed and recorded here.
+
+| Platform | Click / activation | Checklist | Status |
+|----------|--------------------|-----------|--------|
+| **macOS** | Notification Center often activates the app; plugin `onAction` does **not** fire. | Pending approval toast → window forward + banner focus. If toast cannot activate: dock/Alt-Tab with still-pending approval → banner focus. After Approve/Deny, further focus must **not** re-raise. | **NOT YET RUN** |
+| **Windows** | Toast may activate a packaged app; `onAction` does **not** fire. Dev `cargo tauri dev` toasts are unreliable. | Same as macOS. | **NOT YET RUN** |
+| **Linux** | libnotify / D-Bus varies; default-action callbacks are **not** wired through the Tauri notification plugin. | Same as macOS. | **NOT YET RUN** |
 
 Capability: `notification:default` on the `main` window
 (`src-tauri/capabilities/default.json`).
-
-## Platform matrix
-
-| Platform | Click / action delivery | What we do |
-|----------|-------------------------|------------|
-| **macOS** | Notification Center often activates the app; plugin `onAction` does **not** fire on desktop. | Dock attention + `RunEvent::Reopen` / window focus → `focus_app_for_approval`. |
-| **Windows** | Toast may activate a packaged app; `onAction` does **not** fire on desktop. Dev `cargo tauri dev` toasts are unreliable for activation. | Taskbar attention + window focus → `focus_app_for_approval`. |
-| **Linux** | libnotify / D-Bus varies (GNOME/KDE). Default-action callbacks are **not** wired through the Tauri notification plugin. | Attention + window focus → `focus_app_for_approval`. |
-
-**S2 live checklist:** click a real pending-approval toast on each OS; confirm the
-Lounge window comes forward and the approval banner is focused. If the toast
-cannot activate the app, Alt-Tab / click the taskbar or dock with a still-pending
-approval and verify the banner focuses.
 
 **No background volume/interval escalation** (K1): the alert audio engine keeps
 the user-configured volume and interval while the window is hidden; the OS
