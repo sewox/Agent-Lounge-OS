@@ -267,16 +267,17 @@ test.describe("AP / CP / misc", () => {
   }) => {
     // Engine + minimal control for PR-2b; full Settings polish is PR-5.
     await openRoute(page, "/settings", "full");
-    const section = page.locator('[data-qa="approval-sound"], section').filter({
-      hasText: /Alert sound|Onay sesi|Approval sound|Dinle/i,
-    });
-    expect(await section.count(), "sound settings section").toBeGreaterThan(0);
+    const section = page.locator('[data-qa="approval-sound"]');
+    await expect(section, "sound settings section").toBeVisible();
+    await section.scrollIntoViewIfNeeded();
     await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play|Listen|Test/i })).toBeVisible();
-    await expect(page.getByText(/wav|mp3|ogg|aiff|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
-    await expect(page.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
-  // Persist: toggle off writes lounge.approvalSound so PR-5 Settings can reuse it.
-    const toggle = section.getByRole("switch").or(section.locator('input[type="checkbox"]')).first();
+    await expect(section.getByText(/wav|mp3|ogg|aiff|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
+    await expect(section.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
+    // Persist: toggle off writes lounge.approvalSound so PR-5 Settings can reuse it.
+    // Scope to this panel only — outer Settings <section> also contains locked routing checkboxes.
+    const toggle = section.locator('input[type="checkbox"]:not([disabled]), [role="switch"]:not([disabled])').first();
     await expect(toggle).toBeVisible();
+    await expect(toggle).toBeEnabled();
     await toggle.click();
     await page.waitForTimeout(200);
     const stored = await page.evaluate(
