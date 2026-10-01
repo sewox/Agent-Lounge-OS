@@ -12,11 +12,9 @@ test.describe("DB — dashboard", () => {
     expect(value).toMatch(/\b10\b/);
   });
 
-  test("DB-01-empty · KPI must not show 127 when no index [expected-fail until PR-2]", async ({
+  test("DB-01-empty · KPI must not show 127 when no index", async ({
     page,
-  }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "MOCK_HEALTH sum 127" });
-    test.fail(true, "Empty index still falls back to MOCK_HEALTH total 127");
+  }) => {
     await openRoute(page, "/dashboard", "empty");
     const text = await page.locator("main").innerText();
     expect(text).not.toMatch(/\b127\b/);
@@ -67,9 +65,6 @@ test.describe("DB — dashboard", () => {
     const box = await vaultTitle.boundingBox();
     expect(box).toBeTruthy();
     const belowFold = Boolean(box && box.y > 700);
-    if (belowFold) {
-      test.fail(true, "Vault panel mostly below fold at 1280x800");
-    }
     expect(belowFold, "vault title should be in first fold").toBe(false);
   });
 

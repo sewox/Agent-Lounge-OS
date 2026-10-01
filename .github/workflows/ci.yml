@@ -108,9 +108,24 @@ jobs:
         run: pytest workers/tests -q
         working-directory: ${{ github.workspace }}
 
+  static-gates:
+    name: QA static gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Mock-ban (strict)
+        run: bash scripts/qa/gates/mock-ban.sh
+        env:
+          QA_MOCK_BAN_STRICT: "1"
+
+      - name: Small-font grep
+        run: bash scripts/qa/gates/small-font.sh
+
   ci:
     name: CI
-    needs: [frontend, rust, workers]
+    needs: [frontend, rust, workers, static-gates]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -119,3 +134,4 @@ jobs:
           test "${{ needs.frontend.result }}" = "success"
           test "${{ needs.rust.result }}" = "success"
           test "${{ needs.workers.result }}" = "success"
+          test "${{ needs.static-gates.result }}" = "success"

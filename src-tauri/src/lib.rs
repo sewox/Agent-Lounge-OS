@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod db;
 pub mod infra;
 pub mod kernel;
+pub mod markdown_export;
 pub mod models;
 pub mod services;
 
@@ -297,7 +298,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             open_graph_ui,
             enable_graph_ui_cmd,
             get_graph_ui_port,
-            set_graph_ui_port
+            set_graph_ui_port,
+            markdown_export::save_markdown_report
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

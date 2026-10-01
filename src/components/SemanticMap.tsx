@@ -2,9 +2,9 @@
 
 import { useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
+import { IndexEmptyState } from "@/components/index-empty-state";
 import { Pager } from "@/components/ui";
 import {
-  MOCK_NODES,
   pageCount,
   pageSlice,
   pathBasename,
@@ -128,37 +128,7 @@ function buildRows(
     }));
   }
 
-  return MOCK_NODES.flatMap((row) => {
-    const projectRow: MapRow = {
-      key: `mock:${row.name}`,
-      selection: {
-        id: row.name,
-        name: row.name,
-        kind: "project",
-        file: null,
-        project: row.name,
-      },
-      label: row.name,
-      meta: `${row.edges} edges`,
-      kind: "project",
-      depth: 0,
-    };
-    const modules = row.modules.map((mod) => ({
-      key: `mock:${row.name}:${mod}`,
-      selection: {
-        id: mod,
-        name: mod.replace(/\.[^.]+$/, ""),
-        kind: "file",
-        file: mod,
-        project: row.name,
-      },
-      label: mod,
-      meta: "module",
-      kind: "node" as const,
-      depth: 1,
-    }));
-    return [projectRow, ...modules];
-  });
+  return [];
 }
 
 function nodeRow(project: string, node: AstNode): MapRow {
@@ -213,10 +183,21 @@ export function SemanticMap({
   const safePage = Math.min(page, pages - 1);
   const visible = pageSlice(rows, safePage, NODE_PAGE);
   const active = selectionKey(selected);
-  const repoCount = semanticMap.projects.length || projects.length || MOCK_NODES.length;
+  const repoCount = semanticMap.projects.length || projects.length;
+
+  if (rows.length === 0) {
+    return (
+      <div className="flex h-full min-h-[12rem] w-full min-w-0 flex-1 flex-col">
+        <IndexEmptyState
+          detail="No data found."
+          className="h-full min-h-[12rem] flex-1 justify-center"
+        />
+      </div>
+    );
+  }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
       <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
         <span>Indexed Files</span>
         <span className="text-on-surface-variant">
@@ -259,11 +240,6 @@ export function SemanticMap({
             </button>
           );
         })}
-        {rows.length === 0 ? (
-          <div className="px-1 py-3 text-meta text-on-surface-variant">
-            Indeks yok · memory_bridge bekleniyor
-          </div>
-        ) : null}
       </div>
       <div className="mt-1.5 flex shrink-0 items-center justify-between border-t border-outline-variant/40 pt-1.5 font-body text-meta text-outline">
         <span>{selected ? `seçili: ${selected.name}` : `${rows.length} düğüm / ref`}</span>

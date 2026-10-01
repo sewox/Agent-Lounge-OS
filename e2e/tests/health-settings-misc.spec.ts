@@ -3,11 +3,9 @@ import { openRoute } from "../helpers/nav";
 import { getIpcLog } from "../harness/tauri-mock";
 
 test.describe("HM — health / map empty states", () => {
-  test("HM-01 · Empty DB must not show MOCK_HEALTH 12/41/74 [expected-fail until PR-2]", async ({
+  test("HM-01 · Empty DB must not show MOCK_HEALTH 12/41/74", async ({
     page,
-  }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "HealthPanel falls back to MOCK_HEALTH" });
-    test.fail(true, "MOCK_HEALTH still shown when map/projects empty");
+  }) => {
     await openRoute(page, "/health", "empty");
     const text = await page.locator("main").innerText();
     const hasMock = /\b12\b/.test(text) && /\b41\b/.test(text);
@@ -15,14 +13,27 @@ test.describe("HM — health / map empty states", () => {
     expect(!hasMock && hasEmpty).toBeTruthy();
   });
 
-  test("HM-02 · Empty Map must not use MOCK_NODES [expected-fail until PR-2]", async ({
+  test("HM-02 · Empty Map must not use MOCK_NODES", async ({
     page,
-  }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "SemanticMap falls back to MOCK_NODES" });
-    test.fail(true, "MOCK_NODES still used when empty");
+  }) => {
     await openRoute(page, "/vault", "empty");
     const text = await page.locator("main").innerText();
     expect(!/EchoMind/.test(text) && /No data found|Index Workspace/i.test(text)).toBeTruthy();
+  });
+
+  test("HM-06 · Tauri reject: no fake Claude % / Amber in bell", async ({ page }) => {
+    await openRoute(page, "/dashboard", "reject");
+    await page.waitForTimeout(400);
+    const main = await page.locator("main").innerText();
+    expect(main).not.toMatch(/Claude\s*7\d%/i);
+    expect(main).not.toMatch(/Claude\s*5\d%/i);
+    expect(main).toMatch(/Kota verisi alınamadı/i);
+    await page.getByRole("button", { name: "Alert history" }).click();
+    const history = page.locator('[data-qa="alert-history"]');
+    await expect(history).toBeVisible();
+    const historyText = await history.innerText();
+    expect(historyText).not.toMatch(/Amber/i);
+    expect(historyText).not.toMatch(/Claude\s*\d+%/i);
   });
 
   test("HM-03 · Full DB shows live health rows", async ({ page }) => {
@@ -44,22 +55,16 @@ test.describe("HM — health / map empty states", () => {
 });
 
 test.describe("ST — settings", () => {
-  test("ST-01 · Routing table not clipped @ D0 [expected-fail until PR-2/5]", async ({
+  test("ST-01 · Routing table not clipped @ D0", async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== "D0" && testInfo.project.name !== "D4-scale", "D0/D4");
     await openRoute(page, "/settings", "full");
     const vp = page.viewportSize()!;
-    const target = page.locator("table").first();
-    const fallback = page.getByText(/Cursor|trigger|Routing|agent_id/i).last();
-    const el = (await target.count()) > 0 ? target : fallback;
-    await expect(el).toBeVisible();
-    const box = await el.boundingBox();
+    const region = page.locator('[data-qa="routing-table"]');
+    await expect(region).toBeVisible();
+    const box = await region.boundingBox();
     const clipped = Boolean(box && box.y + box.height > vp.height - 4);
-    if (clipped) {
-      testInfo.annotations.push({ type: "expected-fail", description: "V8 clipped routing table" });
-      test.fail(true, "Routing controls clipped at bottom of viewport");
-    }
     expect(clipped, "routing controls must fit in viewport or scroll").toBe(false);
   });
 
@@ -304,15 +309,9 @@ test.describe("AP / CP / misc", () => {
     expect(/Event Stream|NATS|Probe|all|task|exp/i.test(text)).toBeTruthy();
   });
 
-  test("SR-02 · Heartbeats filtered or collapsed by default (no empty Decision chips) [expected-fail until PR-2]", async ({
+  test("SR-02 · Heartbeats filtered or collapsed by default (no empty Decision chips)", async ({
     page,
-  }, testInfo) => {
-    // Live S2: stream was 100% lounge.*.heartbeat rows, each with Decision: —.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "Heartbeats not filtered/collapsed; empty Decision chips (live S2)",
-    });
-    test.fail(true, "Default stream still floods heartbeats");
+  }) => {
     await openRoute(page, "/stream", "full");
     const text = await page.locator("main").innerText();
     const hb = (text.match(/lounge\.(bus|workers)\.heartbeat/gi) || []).length;
@@ -378,5 +377,7 @@ test.describe("AP / CP / misc", () => {
     await expect(page.locator("main")).toBeVisible();
     const text = await page.locator("main").innerText();
     expect(/Worker Fleet|Fleet|memory-bridge|Grok|LMR|NATS|DecisionGate/i.test(text)).toBeTruthy();
+    await expect(page.getByText("Worker detail").first()).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: /Heartbeat/i })).toBeVisible();
   });
 });

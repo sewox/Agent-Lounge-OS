@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "types:check": "next typegen && tsc --noEmit",
-    "test:unit": "node --experimental-strip-types --test src/lib/ui-prefs.test.ts",
+    "test:unit": "node --experimental-strip-types --test src/lib/ui-prefs.test.ts src/lib/lounge-events.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:report": "node scripts/qa/generate-baseline-report.mjs",
     "qa:gates": "bash scripts/qa/gates/mock-ban.sh && bash scripts/qa/gates/small-font.sh",
