@@ -286,6 +286,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             services::approval_sound::pick_custom_approval_sound,
             services::approval_sound::load_custom_approval_sound_data_url,
             confirm_destructive,
+            reject_destructive,
             trigger_grok_test,
             list_projects,
             list_quotas,
@@ -868,6 +869,12 @@ async fn focus_app_for_approval(
 #[tauri::command]
 async fn confirm_destructive(id: String) -> Result<(), String> {
     kernel::confirm_destructive(&id).map_err(|err| err.to_string())
+}
+
+/// Reject / dismiss a pending destructive confirmation (clears notification slot).
+#[tauri::command]
+async fn reject_destructive(id: String) -> Result<(), String> {
+    kernel::reject_destructive(&id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

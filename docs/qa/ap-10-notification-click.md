@@ -22,12 +22,15 @@ the webview on Windows, macOS, or Linux. We do **not** claim otherwise.
      handler (toast-driven activation, Alt-Tab, taskbar click).
 4. That handler calls `focus_app_for_approval`: unminimize / show / set_focus,
    clear attention, emit `approval_banner_focus`.
-5. On **every** resolution path (Approve / ApproveLocal / Deny via `resolve_vote`
-   / `await_approval`, plus timeout / channel_closed), the slot is cleared with
-   **id match only** so a later focus cannot re-raise with a stale id.
+5. On **every** resolution path the pending slot is cleared with **id match only**
+   so a later focus cannot re-raise with a stale id:
+   - Routing: Approve / ApproveLocal / Deny via `resolve_vote` / `await_approval`,
+     plus timeout / channel_closed / failed.
+   - Destructive: `confirm_destructive`, `reject_destructive`, and expiry purge
+     inside `take_confirmed_allowance` (slot id = confirm id).
 
 Rust unit tests cover: matching clear, mismatched id does not clear, activation
-gate is inert after resolve.
+gate is inert after resolve (routing + destructive confirm/reject).
 
 ### Frontend bridge + Playwright (front-end contract only)
 

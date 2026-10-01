@@ -1392,7 +1392,6 @@ mod tests {
             approval_notify::pending_slot_test_lock, clear_pending_approval_if_matches,
             pending_approval_task_id, set_pending_approval_task_id, should_focus_on_activation,
         };
-        let _slot_guard = pending_slot_test_lock();
 
         let dispatcher = live_dispatcher(Duration::from_secs(5));
         dispatcher.set_gate_ready(true);
@@ -1414,27 +1413,30 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
 
-        // Simulate what emit_approval_pending does when AppHandle is wired.
-        set_pending_approval_task_id(Some(id.clone()));
-        assert!(should_focus_on_activation());
+        // Hold the process-wide slot lock only around synchronous slot mutations —
+        // never across `.await` (clippy::await_holding_lock).
+        {
+            let _slot_guard = pending_slot_test_lock();
+            set_pending_approval_task_id(Some(id.clone()));
+            assert!(should_focus_on_activation());
 
-        dispatcher
-            .resolve_vote(id.clone(), RoutingVote::Approve)
-            .unwrap();
-        assert_eq!(
-            pending_approval_task_id(),
-            None,
-            "resolve_vote must clear the notification pending slot"
-        );
-        assert!(
-            !should_focus_on_activation(),
-            "activation after resolve must be inert"
-        );
-        // Mismatched clear is a no-op even if something re-armed incorrectly.
-        set_pending_approval_task_id(Some("other".into()));
-        assert!(!clear_pending_approval_if_matches(&id));
-        assert_eq!(pending_approval_task_id().as_deref(), Some("other"));
-        let _ = clear_pending_approval_if_matches("other");
+            dispatcher
+                .resolve_vote(id.clone(), RoutingVote::Approve)
+                .unwrap();
+            assert_eq!(
+                pending_approval_task_id(),
+                None,
+                "resolve_vote must clear the notification pending slot"
+            );
+            assert!(
+                !should_focus_on_activation(),
+                "activation after resolve must be inert"
+            );
+            set_pending_approval_task_id(Some("other".into()));
+            assert!(!clear_pending_approval_if_matches(&id));
+            assert_eq!(pending_approval_task_id().as_deref(), Some("other"));
+            let _ = clear_pending_approval_if_matches("other");
+        }
 
         assert!(handle.await.unwrap().is_ok());
     }
