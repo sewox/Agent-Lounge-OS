@@ -54,8 +54,15 @@ export default defineConfig({
     },
     {
       name: "D4-scale",
-      testMatch: /ui-scale|settings|layout/,
-      use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 },
+      // Include vault-dashboard so EX-* / PATH-adjacent vault cases run at 130% scale.
+      testMatch: /ui-scale|settings|layout|vault-dashboard|health-settings/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1280, height: 800 },
+        deviceScaleFactor: 1,
+        // 130% UI scale is applied by the app's ui-scale fixture/query in layout specs;
+        // vault EX-* still need to execute on this project per PR-3 acceptance.
+      },
     },
   ],
   webServer: {
