@@ -135,13 +135,13 @@ test.describe("SH — global shell", () => {
 test.describe("X — cross-cutting", () => {
   test("X-03 · no uncaught console errors on dashboard", async ({ page }) => {
     const errors = await collectConsoleErrors(page);
-    // Use browser fixture (no __TAURI_INTERNALS__ mock) so client hydrate matches
-    // the static SSR HTML. The full Tauri mock flips isTauri() before paint and
-    // produces a known React #418 harness artifact unrelated to product locale.
-    await openRoute(page, "/dashboard", "browser");
+    // Must exercise the full Tauri fixture (product path). ApprovalNotificationBridge
+    // no longer branches on isTauri() during render, so hydrate matches SSR.
+    // Keep the #418 filter un-widened — hydration mismatches must fail the test.
+    await openRoute(page, "/dashboard", "full");
     await page.waitForTimeout(500);
     const critical = errors.filter(
-      (e) => !/favicon|Download the React|hydration/i.test(e),
+      (e) => !/favicon|Download the React DevTools/i.test(e),
     );
     expect(critical, critical.join("\n")).toEqual([]);
   });
@@ -260,9 +260,11 @@ test.describe("X — cross-cutting", () => {
   test("X-01 · TR/EN i18n dictionary + Settings switch + persistence", async ({
     page,
   }) => {
-    // O1: strings from i18n dict; Settings language switch; choice persists; no hardcoded mix.
+    // O1: strings from i18n dict; Settings language switch; choice persists.
+    // Strengthened beyond a 4-word mixed grep: assert html lang + dictionary chrome
+    // for surfaces that ARE translated (shell/dashboard). Leftovers (model picker,
+    // palette, fleet/onboarding/telemetry bodies) are listed in the PR body — not asserted here.
     await openRoute(page, "/settings", "full");
-    // Prefer the Settings panel switch (not the chrome header) so D3 portrait stays reliable.
     const langSwitch = page
       .locator('[data-qa="panel"] [data-qa="locale-switch"]')
       .or(page.getByRole("radiogroup", { name: /Language|Dil/i }))
@@ -273,11 +275,25 @@ test.describe("X — cross-cutting", () => {
     await page.waitForTimeout(400);
     const stored = await page.evaluate(() => localStorage.getItem("lounge.locale") || localStorage.getItem("locale"));
     expect(stored).toMatch(/en/i);
-    // Hardcoded mixed TR/EN chrome must be gone once dictionary is wired.
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+
     await openRoute(page, "/dashboard", "full");
-    const text = await page.locator("main").innerText();
-    const mixed = /kapalı|düğüm|TEMİZ|Kaydet/i.test(text) && /Dashboard|Index Workspace/i.test(text);
-    expect(mixed, "hardcoded mixed TR/EN strings").toBe(false);
+    const enShell = await page.locator('[data-qa="sidebar"]').innerText();
+    expect(enShell).toMatch(/Active daemons/i);
+    expect(enShell).not.toMatch(/Aktif servisler/i);
+
+    const headerSwitch = page.locator('[data-qa="locale-switch"]').first();
+    await headerSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
+    await page.waitForTimeout(300);
+    await expect(page.locator("html")).toHaveAttribute("lang", "tr");
+    const trShell = await page.locator('[data-qa="sidebar"]').innerText();
+    expect(trShell).toMatch(/Aktif servisler/i);
+    expect(trShell).not.toMatch(/Active daemons/i);
+    // Translated Index Workspace chrome must flip with the dictionary.
+    const indexBtn = page.getByRole("button", { name: /Index Workspace|Çalışma Alanını Tara/i });
+    if (await indexBtn.count()) {
+      await expect(indexBtn.first()).toHaveText(/Çalışma Alanını Tara/i);
+    }
   });
 
   test("X-02 · min font gate delegated to S4 grep (smoke DOM check)", async ({ page }) => {

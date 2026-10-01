@@ -1,7 +1,9 @@
 //! OS + frontend notifications when approvals are pending or resolved.
 
+use std::sync::{Mutex, OnceLock};
+
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime, UserAttentionType};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::models::ApprovalRequest;
@@ -69,13 +71,43 @@ pub struct ApprovalResolvedPayload {
     pub reason: String,
 }
 
+fn pending_slot() -> &'static Mutex<Option<String>> {
+    static SLOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Remember the latest pending approval so activation / focus can raise the banner.
+pub fn set_pending_approval_task_id(task_id: Option<String>) {
+    *pending_slot().lock().expect("pending approval lock") = task_id;
+}
+
+pub fn pending_approval_task_id() -> Option<String> {
+    pending_slot()
+        .lock()
+        .expect("pending approval lock")
+        .clone()
+}
+
+fn request_dock_attention<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next())
+    {
+        // Bounce dock / flash taskbar so the user notices even when click
+        // callbacks are unavailable on desktop.
+        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
+    }
+}
+
 /// Emit `approval_pending` to the frontend and show an OS notification when possible.
 ///
-/// No volume/interval escalation while backgrounded — a single OS toast + event.
-/// Desktop click delivery varies by OS (macOS Notification Center, Windows toast,
-/// Linux libnotify/D-Bus). When click callbacks are unavailable, focusing the app
-/// (or calling [`focus_app_for_approval`]) still raises the window and banner.
+/// Desktop note: `@tauri-apps/plugin-notification` `onAction` is **mobile-only**.
+/// On Win/mac/Linux we: (1) show a toast, (2) request dock/taskbar attention,
+/// (3) raise + focus the banner when the app is activated (`RunEvent::Reopen` on
+/// macOS / `WindowEvent::Focused(true)` on all desktop) while a pending approval
+/// is recorded. See `docs/qa/ap-10-notification-click.md`.
 pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPendingPayload) {
+    set_pending_approval_task_id(Some(payload.task_id.clone()));
     let _ = app.emit(APPROVAL_PENDING_EVENT, &payload);
     let title = "Approval required";
     let body = if payload.summary.trim().is_empty() {
@@ -92,12 +124,16 @@ pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPe
         .extra("event", APPROVAL_PENDING_EVENT)
         .show()
     {
-        log::debug!("OS notification skipped: {err}");
+        log::warn!("OS notification skipped: {err}");
     }
+    request_dock_attention(app);
 }
 
 /// Focus the main window and ask the UI to open the approval banner.
 pub fn focus_app_for_approval<R: Runtime>(app: &AppHandle<R>, task_id: Option<&str>) {
+    let resolved = task_id
+        .map(str::to_string)
+        .or_else(pending_approval_task_id);
     if let Some(window) = app
         .get_webview_window("main")
         .or_else(|| app.webview_windows().into_values().next())
@@ -105,18 +141,32 @@ pub fn focus_app_for_approval<R: Runtime>(app: &AppHandle<R>, task_id: Option<&s
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        // Clear attention once the user is looking at the app.
+        let _ = window.request_user_attention(None);
     }
     let _ = app.emit(
         APPROVAL_BANNER_FOCUS_EVENT,
         &ApprovalResolvedPayload {
-            task_id: task_id.unwrap_or("").to_string(),
+            task_id: resolved.unwrap_or_default(),
             reason: "notification_click".to_string(),
         },
     );
 }
 
+/// Called from the Tauri run loop when the app is activated (dock/taskbar/reopen)
+/// or the main window gains focus while an approval is still pending.
+pub fn on_app_activated_for_pending_approval<R: Runtime>(app: &AppHandle<R>) {
+    if pending_approval_task_id().is_some() {
+        focus_app_for_approval(app, None);
+    }
+}
+
 /// Emit `approval_resolved` when a pending approval is cleared.
 pub fn emit_approval_resolved<R: Runtime>(app: &AppHandle<R>, task_id: &str, reason: &str) {
+    let current = pending_approval_task_id();
+    if current.as_deref() == Some(task_id) || current.is_some() {
+        set_pending_approval_task_id(None);
+    }
     let payload = ApprovalResolvedPayload {
         task_id: task_id.to_string(),
         reason: reason.to_string(),
@@ -146,4 +196,17 @@ pub fn install_destructive_approval_emitter<R: Runtime>(app: AppHandle<R>, nats_
                 }
             });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_slot_round_trips_and_clears() {
+        set_pending_approval_task_id(Some("task-1".into()));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("task-1"));
+        set_pending_approval_task_id(None);
+        assert_eq!(pending_approval_task_id(), None);
+    }
 }

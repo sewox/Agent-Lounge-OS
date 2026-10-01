@@ -173,18 +173,6 @@ pub async fn pick_custom_approval_sound(app: AppHandle) -> Result<String, String
     Ok(format!("{CUSTOM_SOUND_NAME}.{ext}"))
 }
 
-/// Resolve a stored custom sound file to an absolute path (internal / diagnostics only).
-/// Webview playback must use [`load_custom_approval_sound_data_url`] — never a raw path.
-#[tauri::command]
-pub async fn resolve_custom_approval_sound(
-    app: AppHandle,
-    file_name: String,
-) -> Result<String, String> {
-    let dir = sounds_dir(&app)?;
-    let path = resolve_confined_sound_path(&dir, &file_name)?;
-    Ok(path.to_string_lossy().into_owned())
-}
-
 /// Load a stored custom sound as a `data:` URL for HTML Audio (no asset protocol, no raw paths).
 #[tauri::command]
 pub async fn load_custom_approval_sound_data_url(
@@ -257,6 +245,29 @@ mod tests {
     #[test]
     fn validate_source_rejects_empty_path() {
         assert!(validate_source_file(Path::new("")).is_err());
+    }
+
+    #[test]
+    fn validate_source_rejects_zero_byte_file() {
+        let empty = write_temp("empty.wav", b"");
+        let err = validate_source_file(&empty).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "expected empty-file rejection, got: {err}"
+        );
+        let _ = fs::remove_dir_all(empty.parent().unwrap());
+    }
+
+    #[test]
+    fn validate_source_rejects_extension_magic_mismatch() {
+        // .wav extension but plain-text payload (not RIFF/WAVE).
+        let mismatch = write_temp("fake.wav", b"NOTAUDIO!!!!XXXX");
+        let err = validate_source_file(&mismatch).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("magic") || err.to_lowercase().contains("unrecognized"),
+            "expected magic-byte rejection, got: {err}"
+        );
+        let _ = fs::remove_dir_all(mismatch.parent().unwrap());
     }
 
     #[test]

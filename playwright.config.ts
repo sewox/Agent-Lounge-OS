@@ -49,7 +49,7 @@ export default defineConfig({
     },
     {
       name: "D960",
-      testMatch: /vault-dashboard|health-settings/,
+      testMatch: /vault-dashboard|health-settings|shell-cross/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 960, height: 800 }, deviceScaleFactor: 1 },
     },
     {

@@ -5,6 +5,7 @@ import {
   BUILTIN_SOUND_IDS,
   clampIntervalSecs,
   clampVolume,
+  clearCustomSoundDataUrlCache,
   DEFAULT_APPROVAL_SOUND_SETTINGS,
   parseApprovalSoundSettings,
   resolveAlertSoundSrc,
@@ -46,6 +47,7 @@ describe("approval sound settings", () => {
   });
 
   it("custom bare name is not a playable sync URL; async loader supplies data URL", async () => {
+    clearCustomSoundDataUrlCache();
     const settings: ApprovalSoundSettings = {
       ...DEFAULT_APPROVAL_SOUND_SETTINGS,
       soundId: "custom",
@@ -57,6 +59,23 @@ describe("approval sound settings", () => {
       return "data:audio/wav;base64,AAAA";
     });
     assert.equal(src, "data:audio/wav;base64,AAAA");
+  });
+
+  it("caches custom data URLs across resolve calls", async () => {
+    clearCustomSoundDataUrlCache();
+    const settings: ApprovalSoundSettings = {
+      ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+      soundId: "custom",
+      customFileName: "custom-alert.wav",
+    };
+    let loads = 0;
+    const loader = async () => {
+      loads += 1;
+      return "data:audio/wav;base64,CACHED";
+    };
+    assert.equal(await resolveAlertSoundSrcAsync(settings, loader), "data:audio/wav;base64,CACHED");
+    assert.equal(await resolveAlertSoundSrcAsync(settings, loader), "data:audio/wav;base64,CACHED");
+    assert.equal(loads, 1);
   });
 
   it("writeApprovalSoundSettings never persists URLs", () => {
@@ -148,6 +167,174 @@ describe("ApprovalAlertEngine", () => {
     }
     assert.equal(plays.length, after);
     assert.equal(engine.isPending, false);
+  });
+
+  it("plays custom sound via data URL from loader (Audio.src)", async () => {
+    clearCustomSoundDataUrlCache();
+    const dataUrl = "data:audio/wav;base64,Q3VzdG9tQWxlcnQ=";
+    const plays: { src: string }[] = [];
+    let loadCount = 0;
+    const settings: ApprovalSoundSettings = {
+      ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+      soundId: "custom",
+      customFileName: "custom-alert.wav",
+      intervalSecs: 5,
+    };
+    const handles = new Map<number, () => void>();
+    let nextHandle = 1;
+
+    const engine = new ApprovalAlertEngine({
+      readSettings: () => settings,
+      loadCustomSound: async (name) => {
+        loadCount += 1;
+        assert.equal(name, "custom-alert.wav");
+        return dataUrl;
+      },
+      createAudio: () => ({
+        src: "",
+        volume: 1,
+        currentTime: 0,
+        play: async function play(this: { src: string }) {
+          plays.push({ src: this.src });
+        },
+        pause() {},
+      }),
+      timer: {
+        setInterval(handler) {
+          const id = nextHandle++;
+          handles.set(id, handler);
+          return id;
+        },
+        clearInterval(handle) {
+          handles.delete(handle as number);
+        },
+      },
+    });
+
+    engine.onPending();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(plays.length, 1);
+    assert.equal(plays[0]?.src, dataUrl);
+
+    for (const tick of handles.values()) {
+      tick();
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(plays.length, 2);
+    assert.equal(plays[1]?.src, dataUrl);
+    // Second play should hit the cache (one disk/load).
+    assert.equal(loadCount, 1);
+
+    engine.onResolved();
+    const after = plays.length;
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(plays.length, after);
+  });
+
+  it("does not play custom sound if resolved before loader finishes", async () => {
+    clearCustomSoundDataUrlCache();
+    const plays: string[] = [];
+    let resolveLoad!: (url: string) => void;
+    const settings: ApprovalSoundSettings = {
+      ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+      soundId: "custom",
+      customFileName: "custom-alert.wav",
+    };
+    const engine = new ApprovalAlertEngine({
+      readSettings: () => settings,
+      loadCustomSound: () =>
+        new Promise((resolve) => {
+          resolveLoad = resolve;
+        }),
+      createAudio: () => ({
+        src: "",
+        volume: 1,
+        currentTime: 0,
+        play: async function play(this: { src: string }) {
+          plays.push(this.src);
+        },
+        pause() {},
+      }),
+      timer: {
+        setInterval() {
+          return 1;
+        },
+        clearInterval() {},
+      },
+    });
+
+    engine.onPending();
+    engine.onResolved();
+    resolveLoad("data:audio/wav;base64,LATE");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(plays.length, 0);
+  });
+
+  it("loader rejection does not throw", async () => {
+    clearCustomSoundDataUrlCache();
+    const settings: ApprovalSoundSettings = {
+      ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+      soundId: "custom",
+      customFileName: "custom-alert.wav",
+    };
+    const engine = new ApprovalAlertEngine({
+      readSettings: () => settings,
+      loadCustomSound: async () => {
+        throw new Error("disk fail");
+      },
+      createAudio: () => ({
+        src: "",
+        volume: 1,
+        currentTime: 0,
+        play: async () => undefined,
+        pause() {},
+      }),
+      timer: {
+        setInterval() {
+          return 1;
+        },
+        clearInterval() {},
+      },
+    });
+    assert.doesNotThrow(() => engine.onPending());
+    await new Promise((r) => setTimeout(r, 20));
+    engine.onResolved();
+  });
+
+  it("refreshSettings restarts interval when intervalSecs changes", () => {
+    const settings: ApprovalSoundSettings = {
+      ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+      intervalSecs: 10,
+    };
+    const cleared: number[] = [];
+    const started: number[] = [];
+    let handleId = 1;
+    const engine = new ApprovalAlertEngine({
+      readSettings: () => settings,
+      createAudio: () => ({
+        src: "",
+        volume: 1,
+        currentTime: 0,
+        play: async () => undefined,
+        pause() {},
+      }),
+      timer: {
+        setInterval(_handler, ms) {
+          started.push(ms);
+          return handleId++;
+        },
+        clearInterval(handle) {
+          cleared.push(handle as number);
+        },
+      },
+    });
+    engine.onPending();
+    assert.deepEqual(started, [10_000]);
+    settings.intervalSecs = 20;
+    engine.refreshSettings();
+    assert.ok(cleared.length >= 1);
+    assert.equal(started.at(-1), 20_000);
+    engine.onResolved();
   });
 
   it("respects disabled settings", () => {

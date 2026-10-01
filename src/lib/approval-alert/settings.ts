@@ -20,6 +20,13 @@ export const DEFAULT_APPROVAL_SOUND_SETTINGS: ApprovalSoundSettings = {
   intervalSecs: 60,
 };
 
+/** Cache data: URLs so repeats do not re-read/base64 up to 5 MB from disk. */
+const customSoundDataUrlCache = new Map<string, string>();
+
+export function clearCustomSoundDataUrlCache(): void {
+  customSoundDataUrlCache.clear();
+}
+
 const MAX_INTERVAL_SECS = 600;
 const MIN_INTERVAL_SECS = 5;
 
@@ -107,6 +114,14 @@ export function writeApprovalSoundSettings(
   } catch {
     /* ignore */
   }
+  // Same-tab listeners (storage events only fire cross-tab).
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("lounge.approvalSound"));
+  }
+  // New custom file → drop cached data URL for that name.
+  if (payload.soundId === "custom" && payload.customFileName) {
+    customSoundDataUrlCache.delete(payload.customFileName);
+  }
 }
 
 /** Bare file name only — never a path, URL, or data URI. */
@@ -170,15 +185,25 @@ export async function resolveAlertSoundSrcAsync(
   if (settings.soundId !== "custom" || !bare) {
     return builtinSoundSrc("chime-soft");
   }
-  if (loadCustom) {
-    return loadCustom(bare);
+  const cached = customSoundDataUrlCache.get(bare);
+  if (cached) {
+    return cached;
   }
+  let url = "";
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<string>("load_custom_approval_sound_data_url", { fileName: bare });
+    if (loadCustom) {
+      url = await loadCustom(bare);
+    } else {
+      const { invoke } = await import("@tauri-apps/api/core");
+      url = await invoke<string>("load_custom_approval_sound_data_url", { fileName: bare });
+    }
   } catch {
     return "";
   }
+  if (url.startsWith("data:audio/")) {
+    customSoundDataUrlCache.set(bare, url);
+  }
+  return url;
 }
 
 export type TimerLike = {

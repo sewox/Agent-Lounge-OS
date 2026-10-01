@@ -97,14 +97,23 @@ export function ApprovalSoundSettingsPanel() {
         <label className="block space-y-1 font-body text-meta text-on-surface-variant">
           {t("soundPreset")}
           <select
-            value={settings.soundId === "custom" ? "chime-soft" : settings.soundId}
-            onChange={(event) =>
+            value={settings.soundId}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "custom") {
+                persist({
+                  ...settings,
+                  soundId: "custom",
+                  customFileName: settings.customFileName,
+                });
+                return;
+              }
               persist({
                 ...settings,
-                soundId: event.target.value as BuiltinSoundId,
+                soundId: value as BuiltinSoundId,
                 customFileName: null,
-              })
-            }
+              });
+            }}
             className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-body text-body text-on-surface"
           >
             {BUILTIN_SOUND_IDS.map((id) => (
@@ -112,6 +121,9 @@ export function ApprovalSoundSettingsPanel() {
                 {id}
               </option>
             ))}
+            {settings.soundId === "custom" && settings.customFileName ? (
+              <option value="custom">{settings.customFileName}</option>
+            ) : null}
           </select>
         </label>
         <div className="flex flex-wrap items-center gap-2">

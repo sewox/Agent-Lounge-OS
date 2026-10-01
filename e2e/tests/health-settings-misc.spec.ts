@@ -227,7 +227,7 @@ test.describe("AP / CP / misc", () => {
     page,
   }) => {
     // §10.1 / §10.2: webview HTMLAudioElement; bundled wav/mp3/ogg;
-    // plays when hidden; default 60s repeat until decision. No background escalation.
+    // plays when hidden; configured interval repeat until decision. No background escalation.
     await page.addInitScript(() => {
       type PlayLog = { src: string; t: number };
       const g = window as Window & { __QA_AUDIO_PLAYS__?: PlayLog[] };
@@ -235,31 +235,66 @@ test.describe("AP / CP / misc", () => {
       const proto = HTMLAudioElement.prototype;
       const origPlay = proto.play;
       proto.play = function playSpy(this: HTMLAudioElement, ...args: unknown[]) {
-        g.__QA_AUDIO_PLAYS__!.push({ src: this.currentSrc || this.src || "", t: Date.now() });
+        g.__QA_AUDIO_PLAYS__!.push({
+          src: this.currentSrc || this.src || "",
+          t: Date.now(),
+        });
         return origPlay.apply(this, args as []).catch(() => undefined as unknown as void);
       };
+      localStorage.setItem(
+        "lounge.approvalSound",
+        JSON.stringify({
+          enabled: true,
+          soundId: "chime-soft",
+          customFileName: null,
+          volume: 0.7,
+          intervalSecs: 5,
+        }),
+      );
     });
     await openRoute(page, "/dashboard?demo=routing-banner", "browser");
     await page.waitForTimeout(800);
-    // Simulate background/hidden: document.hidden cannot be set; blur + visibility stub.
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    await page.waitForTimeout(500);
-    const plays = await page.evaluate(() => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__ ?? []);
-    expect(plays.length, "audio play spy should see ≥1 alert while approval pending").toBeGreaterThan(0);
-    const bundled = /\.(wav|mp3|ogg)(\?|$)/i;
-    const srcOk = (plays as { src: string }[]).some((p) => !p.src || bundled.test(p.src));
-    expect(srcOk, "bundled alert should be wav/mp3/ogg (or empty until asset wired)").toBeTruthy();
-    const decide = page.getByRole("button", { name: /Onayla|Approve|Reddet|Deny/i }).first();
-    if (await decide.count()) {
-      await decide.click();
-      const after = await page.evaluate(
-        () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
-      );
-      expect(after).toBeGreaterThan(0);
+    await page.waitForTimeout(400);
+
+    const firstBatch = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: { src: string }[] }).__QA_AUDIO_PLAYS__ ?? [],
+    );
+    expect(firstBatch.length, "audio play spy should see ≥1 alert while approval pending").toBeGreaterThan(0);
+    for (const p of firstBatch) {
+      expect(p.src, "alert src must be non-empty").toBeTruthy();
+      expect(p.src, `expected bundled chime-soft wav, got ${p.src}`).toMatch(/chime-soft\.wav/i);
     }
+    const beforeRepeat = firstBatch.length;
+
+    await page.waitForTimeout(5_200);
+    const afterRepeat = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+    );
+    expect(afterRepeat, "should repeat at least once over the configured interval").toBeGreaterThan(
+      beforeRepeat,
+    );
+
+    const allPlays = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: { src: string }[] }).__QA_AUDIO_PLAYS__ ?? [],
+    );
+    const uniqueSrc = [...new Set(allPlays.map((p) => p.src))];
+    expect(uniqueSrc.length, "must not escalate to a different sound").toBe(1);
+
+    const decide = page.getByRole("button", { name: /Onayla|Approve|Reddet|Deny/i }).first();
+    await expect(decide).toBeVisible();
+    const atDecision = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+    );
+    await decide.click();
+    await page.waitForTimeout(5_500);
+    const afterResolve = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+    );
+    expect(afterResolve, "must stop repeating after approve/deny").toBe(atDecision);
   });
 
   test("AP-09 · Settings sound options (engine prefs; full Settings UI in PR-5)", async ({
@@ -289,19 +324,69 @@ test.describe("AP / CP / misc", () => {
     expect(stored.length).toBeGreaterThan(0);
   });
 
-  test("AP-10 · Native OS notification surface + banner focus hook", async ({
+  test("AP-10 · Native OS notification → focus_app_for_approval + banner focus", async ({
     page,
   }, testInfo) => {
-    // §10.1 / §10.2: Tauri notification plugin on all three OSes; click focuses app + banner.
-    // Full click delivery is OS-dependent and verified on S2 live checklists.
+    // Desktop: plugin onAction never fires. Harness verifies the real desktop path —
+    // invoke focus_app_for_approval (Rust/mock emits approval_banner_focus) + window-focus
+    // fallback while a pending approval is shown. S2 live covers real OS toasts.
     testInfo.annotations.push({
       type: "manual",
       description:
-        "S2 live: notification click focuses app + banner on macOS / Windows / Linux (§10.2). Some platforms cannot deliver click events — fallback: focus_app_for_approval + approval_banner_focus.",
+        "S2 live: toast/dock activates app → focus_app_for_approval on macOS/Windows/Linux. Plugin onAction is mobile-only; see docs/qa/ap-10-notification-click.md.",
     });
     await openRoute(page, "/dashboard", "full");
     expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();
-    expect(await page.locator('[data-qa="approval-notification"]').count()).toBeGreaterThan(0);
+    const marker = page.locator('[data-qa="approval-notification"]');
+    await expect(marker).toHaveCount(1);
+    await expect
+      .poll(async () => marker.getAttribute("data-tauri-ready"), { timeout: 5_000 })
+      .toBe("1");
+
+    await page.evaluate(() => {
+      const f = window.__QA_FIXTURE__;
+      if (!f) throw new Error("missing fixture");
+      f.pendingApprovals = [
+        {
+          task_id: "ap10-focus-task",
+          summary: "AP-10 focus test approval",
+          from_agent: "claude",
+          to_agent: "lmr",
+          kind: "agent_switch",
+          reason: "harness",
+          expires_at: new Date(Date.now() + 90_000).toISOString(),
+          timeout_secs: 90,
+        },
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const banner = page.locator('[data-qa="approval-banner"]');
+    await expect(banner).toBeVisible({ timeout: 5_000 });
+
+    await page.evaluate(async () => {
+      const internals = window.__TAURI_INTERNALS__ as {
+        invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      await internals.invoke("focus_app_for_approval", { taskId: "ap10-focus-task" });
+    });
+    const log = await getIpcLog(page);
+    expect(
+      log.some((e) => e.cmd === "focus_app_for_approval"),
+      "focus_app_for_approval must be invoked",
+    ).toBeTruthy();
+    await expect(banner).toBeFocused({ timeout: 3_000 });
+
+    await page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+    });
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect(banner).toBeFocused({ timeout: 3_000 });
+    const log2 = await getIpcLog(page);
+    expect(
+      log2.filter((e) => e.cmd === "focus_app_for_approval").length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   test("PATH-01 · Path handling accepts / \\ and Windows drive letters", async ({

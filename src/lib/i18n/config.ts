@@ -13,16 +13,16 @@ import trSettings from "./locales/tr/settings.json";
 import trShell from "./locales/tr/shell.json";
 import { detectInitialLocale, LOCALE_KEY, type AppLocale } from "./locale";
 
+/**
+ * Only real dictionaries — no aliased namespaces that hide untranslated surfaces.
+ * vault / health / fleet / quotas / telemetry / onboarding / palette leftovers
+ * are still hardcoded; listed honestly in the PR body.
+ */
 export const I18N_NAMESPACES = [
   "shell",
   "dashboard",
-  "vault",
-  "health",
-  "fleet",
-  "quotas",
   "settings",
   "approvals",
-  "errors",
   "common",
 ] as const;
 
@@ -32,27 +32,15 @@ const resources = {
   en: {
     shell: enShell,
     dashboard: enDashboard,
-    // vault/health/fleet/quotas intentionally share shell chrome copy until those
-    // surfaces get dedicated dictionaries (see PR body "not translated" list).
-    vault: enShell,
-    health: enShell,
-    fleet: enShell,
-    quotas: enShell,
     settings: enSettings,
     approvals: enApprovals,
-    errors: enCommon,
     common: enCommon,
   },
   tr: {
     shell: trShell,
     dashboard: trDashboard,
-    vault: trShell,
-    health: trShell,
-    fleet: trShell,
-    quotas: trShell,
     settings: trSettings,
     approvals: trApprovals,
-    errors: trCommon,
     common: trCommon,
   },
 } as const;
