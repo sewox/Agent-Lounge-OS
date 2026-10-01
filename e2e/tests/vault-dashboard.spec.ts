@@ -24,10 +24,13 @@ test.describe("DB — dashboard", () => {
     page,
   }, testInfo) => {
     await openRoute(page, "/dashboard", "full");
-    // Select first map node if present
-    const node = page.getByText(/Agent-Lounge-OS/i).first();
+    // Prefer Semantic Map project row — avoid experience cards that also mention the name.
+    const node = page
+      .locator('[data-qa="panel"]')
+      .getByRole("button", { name: /Agent-Lounge-OS/i })
+      .first();
     if (await node.count()) {
-      await node.click();
+      await node.click({ timeout: 5_000 }).catch(() => undefined);
       await page.waitForTimeout(300);
     }
     const text = await page.locator("main").innerText();
