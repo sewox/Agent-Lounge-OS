@@ -154,20 +154,39 @@ impl ExperienceStore {
         self.list_experiences(limit, false).await
     }
 
-    /// List experiences ordered by `created_at` DESC.
+    /// List experiences ordered by `is_pinned DESC, created_at DESC`.
     /// When `include_archived` is false (default), only `active` rows are returned.
     pub async fn list_experiences(
         &self,
         limit: usize,
         include_archived: bool,
     ) -> Result<Vec<LoungeExperience>> {
+        self.list_experiences_page(limit, include_archived, 0).await
+    }
+
+    pub async fn list_experiences_page(
+        &self,
+        limit: usize,
+        include_archived: bool,
+        offset: usize,
+    ) -> Result<Vec<LoungeExperience>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            latest_blocking(&conn, limit, include_archived)
+            latest_blocking(&conn, limit, include_archived, offset)
         })
         .await
         .context("experience list join")?
+    }
+
+    pub async fn count_experiences(&self, include_archived: bool) -> Result<u64> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            count_experiences_blocking(&conn, include_archived)
+        })
+        .await
+        .context("experience count join")?
     }
 
     /// Command Palette / vault: lexical+vektör benzerliği, boşsa substring fallback.
@@ -355,7 +374,8 @@ fn create_experiences_sql() -> &'static str {
                 archived_at TEXT,
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT,
-                original_content TEXT
+                original_content TEXT,
+                archived_by TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_experiences_project ON experiences(project_id);
             CREATE INDEX IF NOT EXISTS idx_experiences_agent ON experiences(agent_id);
@@ -544,9 +564,9 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 id, project_id, agent_id, topic, solution_summary, adr_record,
                 outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                 status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                updated_at, original_content
+                updated_at, original_content, archived_by
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
             "#,
             params![
                 record.id,
@@ -569,6 +589,7 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 if record.is_pinned { 1 } else { 0 },
                 updated_at,
                 original,
+                record.archived_by,
             ],
         )?;
     }
@@ -579,7 +600,7 @@ const RECORD_SELECT_COLS: &str = r#"
     id, project_id, agent_id, topic, solution_summary, adr_record,
     outcome, related_task_id, tags_json, created_at, embedding, payload_json,
     status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-    updated_at, original_content
+    updated_at, original_content, archived_by
 "#;
 
 fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceRecord>> {
@@ -592,32 +613,40 @@ fn latest_blocking(
     conn: &Connection,
     limit: usize,
     include_archived: bool,
+    offset: usize,
 ) -> Result<Vec<LoungeExperience>> {
     let status_clause = if include_archived {
         ""
     } else {
         "WHERE COALESCE(status, 'active') = 'active'"
     };
+    // Governance columns are the single source of truth — never prefer stale payload_json.
     let sql = format!(
-        "SELECT payload_json, {RECORD_SELECT_COLS}
+        "SELECT {RECORD_SELECT_COLS}
          FROM experiences
          {status_clause}
-         ORDER BY is_pinned DESC, created_at DESC LIMIT ?1"
+         ORDER BY is_pinned DESC, created_at DESC LIMIT ?1 OFFSET ?2"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit as i64], |row| {
-        Ok((row.get::<_, String>(0)?, map_record_from_parts(row, 1)?))
-    })?;
+    let rows = stmt.query_map(params![limit as i64, offset as i64], map_record)?;
     let mut out = Vec::new();
     for row in rows {
-        let (payload, record) = row?;
-        if let Ok(experience) = serde_json::from_str::<LoungeExperience>(&payload) {
-            out.push(experience);
-        } else {
-            out.push(record.to_lounge());
-        }
+        out.push(row?.to_lounge());
     }
     Ok(out)
+}
+
+fn count_experiences_blocking(conn: &Connection, include_archived: bool) -> Result<u64> {
+    let n: i64 = if include_archived {
+        conn.query_row("SELECT COUNT(*) FROM experiences", [], |row| row.get(0))?
+    } else {
+        conn.query_row(
+            "SELECT COUNT(*) FROM experiences WHERE COALESCE(status, 'active') = 'active'",
+            [],
+            |row| row.get(0),
+        )?
+    };
+    Ok(n.max(0) as u64)
 }
 
 fn similar_blocking(
@@ -748,6 +777,7 @@ fn map_record_from_parts(
     let is_pinned = row.get::<_, i64>(offset + 17)?;
     let updated_at = row.get::<_, Option<String>>(offset + 18)?;
     let original_content = row.get::<_, Option<String>>(offset + 19)?;
+    let archived_by = row.get::<_, Option<String>>(offset + 20).unwrap_or(None);
     Ok(ExperienceRecord {
         id: row.get(offset)?,
         project_id: row.get(offset + 1)?,
@@ -769,6 +799,7 @@ fn map_record_from_parts(
         use_count: use_count.max(0) as u64,
         last_used_at,
         archived_at,
+        archived_by,
         is_pinned: is_pinned != 0,
         updated_at,
         original_content,
@@ -1103,5 +1134,85 @@ mod tests {
             "archive status must survive re-save"
         );
         assert_eq!(after.solution_summary, "updated solution");
+    }
+
+    #[tokio::test]
+    async fn list_and_search_read_governance_from_columns_not_payload() {
+        let store = ExperienceStore::memory().unwrap();
+        let record = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-cols", "column truth topic"),
+            "solution body",
+            "adr body for columns",
+            ExperienceOutcome::Success,
+            vec!["gov".into()],
+        );
+        let id = record.id.clone();
+        store.insert_record(record).await.unwrap();
+
+        store.pin_experience(id.clone(), true).await.unwrap();
+        store.mark_experience_reviewed(id.clone()).await.unwrap();
+        store.archive_experience(id.clone()).await.unwrap();
+
+        let listed = store.list_experiences(20, true).await.unwrap();
+        let row = listed.iter().find(|r| r.id == id).expect("listed");
+        assert!(row.is_pinned, "list must reflect pin column");
+        assert!(row.reviewed, "list must reflect reviewed column");
+        assert_eq!(row.status, crate::models::EXPERIENCE_STATUS_ARCHIVED);
+        assert_eq!(
+            row.archived_by.as_deref(),
+            Some(crate::models::ARCHIVED_BY_USER)
+        );
+
+        let searched = store
+            .search_experiences_filtered("column truth".into(), Some(20), None)
+            .await
+            .unwrap();
+        let hit = searched.iter().find(|r| r.id == id).expect("searched");
+        assert!(hit.is_pinned);
+        assert!(hit.reviewed);
+        assert_eq!(hit.status, crate::models::EXPERIENCE_STATUS_ARCHIVED);
+    }
+
+    #[tokio::test]
+    async fn list_orders_pinned_first_and_count_supports_paging() {
+        let store = ExperienceStore::memory().unwrap();
+        for i in 0..5 {
+            let mut record = ExperienceRecord::from_task(
+                &LoungeTask::new("cursor", "proj-page", format!("topic {i}")),
+                format!("sol {i}"),
+                format!("adr {i}"),
+                ExperienceOutcome::Success,
+                vec![],
+            );
+            record.created_at = format!("2026-01-0{}T00:00:00+00:00", i + 1);
+            record.updated_at = Some(record.created_at.clone());
+            if i == 2 {
+                record.is_pinned = true;
+            }
+            store.insert_record(record).await.unwrap();
+        }
+        store
+            .pin_experience(
+                store
+                    .list_experiences(50, false)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.adr_summary.contains("adr 2"))
+                    .unwrap()
+                    .id,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let page = store.list_experiences_page(2, false, 0).await.unwrap();
+        assert_eq!(page.len(), 2);
+        assert!(page[0].is_pinned, "pinned row sorts first");
+        let total = store.count_experiences(false).await.unwrap();
+        assert_eq!(total, 5);
+        let page2 = store.list_experiences_page(2, false, 2).await.unwrap();
+        assert_eq!(page2.len(), 2);
+        assert!(!page2.iter().any(|r| r.is_pinned) || page2[0].id != page[0].id);
     }
 }

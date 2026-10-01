@@ -110,8 +110,11 @@ type LoungeContextValue = {
   switchProject: (name: string | null) => void;
   focusExperience: (experience: LoungeExperience) => void;
   unreviewedCount: number;
+  experienceTotal: number;
+  experiencesLoading: boolean;
+  experiencesError: string | null;
   showArchived: boolean;
-  setShowArchived: Dispatch<SetStateAction<boolean>>;
+  setShowArchived: (next: boolean) => void;
   experienceDrawerOpen: boolean;
   experienceDetail: LoungeExperience | null;
   experienceDetailLoading: boolean;
@@ -121,6 +124,7 @@ type LoungeContextValue = {
   openExperience: (id: string) => Promise<void>;
   closeExperience: () => void;
   refreshExperiences: (includeArchivedOverride?: boolean) => Promise<void>;
+  loadMoreExperiences: () => Promise<void>;
   updateExperience: (id: string, patch: ExperienceUpdatePatch) => Promise<void>;
   archiveExperience: (id: string) => Promise<void>;
   unarchiveExperience: (id: string) => Promise<void>;
@@ -184,7 +188,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [deadSymbolNotice, setDeadSymbolNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [unreviewedCount, setUnreviewedCount] = useState(0);
-  const [showArchived, setShowArchived] = useState(false);
+  const [experienceTotal, setExperienceTotal] = useState(0);
+  const [experiencesLoading, setExperiencesLoading] = useState(false);
+  const [experiencesError, setExperiencesError] = useState<string | null>(null);
+  const [showArchived, setShowArchivedState] = useState(false);
   const [experienceDrawerId, setExperienceDrawerId] = useState<string | null>(null);
   const [experienceDetail, setExperienceDetail] = useState<LoungeExperience | null>(null);
   const [experienceDetailLoading, setExperienceDetailLoading] = useState(false);
@@ -193,6 +200,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [openCommandPalette, setOpenCommandPalette] = useState(false);
   const [clock, setClock] = useState("--:--");
   const whisperFocusTimer = useRef<number | null>(null);
+  const experienceBusTimer = useRef<number | null>(null);
+  const EXPERIENCE_PAGE_SIZE = 100;
   const [indexing, setIndexing] = useState(false);
   const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
@@ -211,14 +220,25 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       return;
     }
     const includeArchived = includeArchivedOverride ?? showArchived;
+    setExperiencesLoading(true);
+    setExperiencesError(null);
     try {
-      const rows = await invoke<LoungeExperience[]>("list_experiences", {
-        limit: 100,
-        include_archived: includeArchived,
-      });
+      const [rows, total] = await Promise.all([
+        invoke<LoungeExperience[]>("list_experiences", {
+          limit: EXPERIENCE_PAGE_SIZE,
+          offset: 0,
+          includeArchived,
+        }),
+        invoke<number>("count_experiences", { includeArchived }).catch(() => null),
+      ]);
       setExperiences(sortExperiencesForDisplay(rows));
-    } catch {
+      setExperienceTotal(total != null ? Number(total) : rows.length);
+    } catch (error) {
       setExperiences([]);
+      setExperienceTotal(0);
+      setExperiencesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExperiencesLoading(false);
     }
     try {
       const count = await invoke<number>("count_unreviewed_experiences");
@@ -227,6 +247,46 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setUnreviewedCount(0);
     }
   }, [showArchived]);
+
+  const setShowArchived = useCallback(
+    (next: boolean) => {
+      setShowArchivedState(next);
+      void refreshExperiences(next);
+    },
+    [refreshExperiences],
+  );
+
+  const loadMoreExperiences = useCallback(async () => {
+    if (!isTauri() || experiencesLoading) {
+      return;
+    }
+    if (experiences.length >= experienceTotal) {
+      return;
+    }
+    setExperiencesLoading(true);
+    setExperiencesError(null);
+    try {
+      const rows = await invoke<LoungeExperience[]>("list_experiences", {
+        limit: EXPERIENCE_PAGE_SIZE,
+        offset: experiences.length,
+        includeArchived: showArchived,
+      });
+      setExperiences((current) => {
+        const seen = new Set(current.map((row) => row.id));
+        const merged = [...current];
+        for (const row of rows) {
+          if (!seen.has(row.id)) {
+            merged.push(row);
+          }
+        }
+        return sortExperiencesForDisplay(merged);
+      });
+    } catch (error) {
+      setExperiencesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExperiencesLoading(false);
+    }
+  }, [experienceTotal, experiences.length, experiencesLoading, showArchived]);
 
   const refreshSemantic = useCallback(async () => {
     if (!isTauri()) {
@@ -471,9 +531,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       }
     }
     if (row.subject.includes("experience")) {
-      void refreshSemantic();
+      if (experienceBusTimer.current != null) {
+        window.clearTimeout(experienceBusTimer.current);
+      }
+      experienceBusTimer.current = window.setTimeout(() => {
+        experienceBusTimer.current = null;
+        void refreshExperiences();
+      }, 400);
     }
-  }, [refreshSemantic]);
+  }, [refreshExperiences]);
 
   const indexWorkspace = useCallback(async () => {
     if (indexing) {
@@ -625,12 +691,24 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       } else {
         setExperiences((current) =>
           current.map((row) =>
-            row.id === id ? { ...row, status: "archived", archived_at: new Date().toISOString() } : row,
+            row.id === id
+              ? {
+                  ...row,
+                  status: "archived",
+                  archived_at: new Date().toISOString(),
+                  archived_by: "user",
+                }
+              : row,
           ),
         );
         setExperienceDetail((current) =>
           current?.id === id
-            ? { ...current, status: "archived", archived_at: new Date().toISOString() }
+            ? {
+                ...current,
+                status: "archived",
+                archived_at: new Date().toISOString(),
+                archived_by: "user",
+              }
             : current,
         );
       }
@@ -674,14 +752,18 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const markAllExperiencesReviewed = useCallback(async () => {
-    const pending = experiences.filter((row) => row.reviewed === false && row.status !== "archived");
-    await Promise.all(
-      pending.map((row) => invoke("mark_experience_reviewed", { id: row.id })),
+    await invoke<number>("mark_all_experiences_reviewed");
+    const count = await invoke<number>("count_unreviewed_experiences");
+    setUnreviewedCount(Number(count));
+    setExperiences((current) =>
+      current.map((row) =>
+        row.status === "archived" ? row : { ...row, reviewed: true },
+      ),
     );
-    setUnreviewedCount(0);
-    setExperiences((current) => current.map((row) => ({ ...row, reviewed: true })));
-    setExperienceDetail((current) => (current ? { ...current, reviewed: true } : current));
-  }, [experiences]);
+    setExperienceDetail((current) =>
+      current && current.status !== "archived" ? { ...current, reviewed: true } : current,
+    );
+  }, []);
 
   const focusExperience = useCallback(
     (experience: LoungeExperience) => {
@@ -847,6 +929,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         setKernel("browser");
         setEvents(browserEvents);
         setExperiences(browserExperiences);
+        setExperienceTotal(browserExperiences.length);
         setQuotas(browserQuotas);
         const amber = browserQuotas
           .filter((row) => (row.percent ?? 0) >= AMBER_THRESHOLD)
@@ -1111,6 +1194,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       switchProject,
       focusExperience,
       unreviewedCount,
+      experienceTotal,
+      experiencesLoading,
+      experiencesError,
       showArchived,
       setShowArchived,
       experienceDrawerOpen: experienceDrawerId != null,
@@ -1122,6 +1208,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       openExperience,
       closeExperience,
       refreshExperiences,
+      loadMoreExperiences,
       updateExperience,
       archiveExperience,
       unarchiveExperience,
@@ -1180,7 +1267,11 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       switchProject,
       focusExperience,
       unreviewedCount,
+      experienceTotal,
+      experiencesLoading,
+      experiencesError,
       showArchived,
+      setShowArchived,
       experienceDrawerId,
       experienceDetail,
       experienceDetailLoading,
@@ -1189,6 +1280,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       openExperience,
       closeExperience,
       refreshExperiences,
+      loadMoreExperiences,
       updateExperience,
       archiveExperience,
       unarchiveExperience,

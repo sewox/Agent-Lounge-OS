@@ -319,15 +319,27 @@ test.describe("AP / CP / misc", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
-    const samples = [
-      "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src\\main.rs",
-      "/home/sercan/dev/Agent-Lounge-OS/src/main.rs",
-      "mixed/path\\with\\both",
-    ];
-    for (const sample of samples) {
-      const hit = page.getByText(sample, { exact: false });
-      expect(await hit.count(), `path sample visible or accepted: ${sample}`).toBeGreaterThan(0);
-    }
+    // Real project root (Windows) appears when the project is selected — not a fake Path reference box.
+    await page
+      .locator('[data-qa="panel"]')
+      .getByRole("button", { name: /Agent-Lounge-OS/i })
+      .first()
+      .click();
+    const winRoot = "C:\\Users\\sercan\\dev\\Agent-Lounge-OS";
+    await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(winRoot);
+    // Real dead-symbol file path with drive letter + backslashes stays unaltered in the vault list.
+    await expect(page.locator("main")).toContainText(
+      "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src-tauri\\src\\kernel\\dispatcher.rs",
+    );
+    // POSIX project root from another indexed repo.
+    await page
+      .locator('[data-qa="panel"]')
+      .getByRole("button", { name: /EchoMind/i })
+      .first()
+      .click();
+    await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(
+      "/home/sercan/dev/EchoMind",
+    );
   });
 
   test("CP-05 · Palette has no Re-index / Clear Cache", async ({ page }) => {

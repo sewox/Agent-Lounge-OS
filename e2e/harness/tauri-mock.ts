@@ -143,7 +143,9 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             throw new Error("list_experiences unavailable");
           }
           const limit = typeof args?.limit === "number" ? args.limit : 100;
-          const includeArchived = Boolean(args?.include_archived);
+          const offset = typeof args?.offset === "number" ? args.offset : 0;
+          // Match Tauri 2 camelCase IPC args (includeArchived), not snake_case.
+          const includeArchived = Boolean(args?.includeArchived);
           const rows = f.experiences
             .filter((row) => includeArchived || (row.status ?? "active") !== "archived")
             .slice()
@@ -154,7 +156,13 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               }
               return right.created_at.localeCompare(left.created_at);
             });
-          return rows.slice(0, limit);
+          return rows.slice(offset, offset + limit);
+        }
+        case "count_experiences": {
+          const includeArchived = Boolean(args?.includeArchived);
+          return f.experiences.filter(
+            (row) => includeArchived || (row.status ?? "active") !== "archived",
+          ).length;
         }
         case "get_experience": {
           const id = String(args?.id ?? "");
@@ -193,6 +201,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           }
           row.status = "archived";
           row.archived_at = new Date().toISOString();
+          row.archived_by = "user";
           return null;
         }
         case "unarchive_experience": {
@@ -203,6 +212,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           }
           row.status = "active";
           row.archived_at = null;
+          row.archived_by = null;
           return null;
         }
         case "pin_experience": {
@@ -223,6 +233,16 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           }
           row.reviewed = true;
           return null;
+        }
+        case "mark_all_experiences_reviewed": {
+          let changed = 0;
+          for (const row of f.experiences) {
+            if (row.reviewed === false && (row.status ?? "active") === "active") {
+              row.reviewed = true;
+              changed += 1;
+            }
+          }
+          return changed;
         }
         case "count_unreviewed_experiences":
           return f.experiences.filter(

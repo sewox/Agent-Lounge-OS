@@ -6,7 +6,6 @@ const INTERNAL_LINE_PATTERNS = [
   /^##\s*Cross-Project Memory/i,
   /^###\s*Tecrübeler/i,
   /^```/,
-  /^-\s*\[e2e-verify/i,
 ];
 
 const INTERNAL_INLINE_PATTERNS = [

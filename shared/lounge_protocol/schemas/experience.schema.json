@@ -70,6 +70,9 @@
       "type": ["string", "null"],
       "format": "date-time"
     },
+    "archived_by": {
+      "type": ["string", "null"]
+    },
     "is_pinned": {
       "type": "boolean"
     },

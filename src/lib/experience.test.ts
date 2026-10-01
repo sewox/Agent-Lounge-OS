@@ -24,6 +24,8 @@ describe("formatDisplayPath", () => {
     expect(formatDisplayPath("/home/dev/main.rs")).toBe("/home/dev/main.rs");
     expect(formatDisplayPath("mixed/path\\with\\both")).toBe("mixed/path\\with\\both");
     expect(acceptsCrossPlatformPath("C:\\Users\\dev\\main.rs")).toBe(true);
+    expect(acceptsCrossPlatformPath("/home/dev/main.rs")).toBe(true);
+    expect(acceptsCrossPlatformPath("mixed/path\\with\\both")).toBe(true);
   });
 });
 

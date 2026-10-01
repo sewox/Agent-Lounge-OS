@@ -17,33 +17,9 @@ const mkHealth = (
 
 const deadSymbols: FixtureDataset["deadSymbols"] = [
   {
-    name: "path_sample_win",
-    kind: "unused",
-    file: "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src\\main.rs",
-    line: 1,
-    detail: "PATH-01 Windows sample",
-    project_id: "Agent-Lounge-OS",
-  },
-  {
-    name: "path_sample_posix",
-    kind: "unused",
-    file: "/home/sercan/dev/Agent-Lounge-OS/src/main.rs",
-    line: 1,
-    detail: "PATH-01 POSIX sample",
-    project_id: "Agent-Lounge-OS",
-  },
-  {
-    name: "path_sample_mixed",
-    kind: "unused",
-    file: "mixed/path\\with\\both",
-    line: 1,
-    detail: "PATH-01 mixed separators",
-    project_id: "Agent-Lounge-OS",
-  },
-  {
     name: "orphan_dispatch",
     kind: "unused",
-    file: "src-tauri/src/kernel/dispatcher.rs",
+    file: "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src-tauri\\src\\kernel\\dispatcher.rs",
     line: 142,
     detail: "fn never referenced",
     project_id: "Agent-Lounge-OS",
@@ -60,7 +36,7 @@ const deadSymbols: FixtureDataset["deadSymbols"] = [
   {
     name: "legacy_embed",
     kind: "unused",
-    file: "workers/grok_bot.py",
+    file: "/home/sercan/dev/EchoMind/workers/grok_bot.py",
     line: 41,
     detail: "dead import",
     project_id: "EchoMind",
@@ -143,6 +119,7 @@ const experiences: FixtureDataset["experiences"] = Array.from({ length: 16 }, (_
   use_count: i === 15 ? 0 : i,
   last_used_at: i === 15 ? null : new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
   archived_at: i === 15 ? new Date(Date.UTC(2026, 8, 1, 12, 0, 0)).toISOString() : null,
+  archived_by: i === 15 ? "ttl" : null,
   is_pinned: i === 2,
   updated_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
   original_content: null,
@@ -274,6 +251,7 @@ export const FULL_FIXTURE: FixtureDataset = {
     ],
   },
   projects: [
+    // Mirrors post-B3 backend shape: LIMIT-truncated lists, reconciled declared totals.
     {
       name: "Agent-Lounge-OS",
       root_path: "C:\\Users\\sercan\\dev\\Agent-Lounge-OS",
@@ -281,7 +259,7 @@ export const FULL_FIXTURE: FixtureDataset = {
       edges: 7958,
       files: 9421,
     },
-    { name: "EchoMind", root_path: "/Users/sercan/dev/EchoMind", nodes: 1940, edges: 118, files: 4120 },
+    { name: "EchoMind", root_path: "/home/sercan/dev/EchoMind", nodes: 1940, edges: 118, files: 4120 },
     { name: "codebase-memory-mcp", root_path: "/Users/sercan/dev/codebase-memory-mcp", nodes: 2210, edges: 87, files: 4861 },
   ],
   quotas,

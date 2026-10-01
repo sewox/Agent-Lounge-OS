@@ -136,6 +136,8 @@ export type LoungeExperience = {
   use_count?: number;
   last_used_at?: string | null;
   archived_at?: string | null;
+  /** `user` | `ttl` */
+  archived_by?: string | null;
   is_pinned?: boolean;
   updated_at?: string | null;
   original_content?: string | null;

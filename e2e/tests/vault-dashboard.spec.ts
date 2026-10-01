@@ -9,7 +9,7 @@ test.describe("DB — dashboard", () => {
     const value = await page.locator("main").getByText("DEAD SYMBOLS").locator("xpath=ancestor::*[contains(@class,'rounded')][1]").innerText();
     // With full fixture, deadSymbols.length is 10 — must not be 127.
     expect(value).not.toMatch(/\b127\b/);
-    expect(value).toMatch(/\b13\b/);
+    expect(value).toMatch(/\b10\b/);
   });
 
   test("DB-01-empty · KPI must not show 127 when no index", async ({
@@ -30,7 +30,7 @@ test.describe("DB — dashboard", () => {
       .getByRole("button", { name: /Agent-Lounge-OS/i })
       .first();
     if (await node.count()) {
-      await node.click({ timeout: 5_000 }).catch(() => undefined);
+      await node.click();
       await page.waitForTimeout(300);
     }
     const text = await page.locator("main").innerText();
@@ -120,7 +120,9 @@ test.describe("EX — vault experiences", () => {
       .first()
       .click();
     const drawer = page.locator("[data-qa=experience-drawer]");
-    await expect(drawer.getByRole("button", { name: /^Edit$/i })).toBeVisible();
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("button", { name: /^Edit$/i }).click();
+    await expect(drawer).toHaveAttribute("data-mode", "edit");
     const adrInput = drawer.locator('[data-qa="experience-adr-input"]');
     await expect(adrInput).toBeVisible();
     await expect(adrInput).toHaveValue(/Indexed dispatcher\.rs/i);
@@ -128,20 +130,44 @@ test.describe("EX — vault experiences", () => {
     await drawer.getByRole("button", { name: /^Save$/i }).click();
     await expect(drawer).toContainText("Edited ADR summary for e2e verification.");
     const log = await getIpcLog(page);
-    expect(log.some((entry) => entry.cmd === "update_experience")).toBeTruthy();
+    const update = log.find((entry) => entry.cmd === "update_experience");
+    expect(update).toBeTruthy();
+    expect(JSON.stringify(update?.args ?? {})).toMatch(/Edited ADR summary for e2e verification/);
   });
 
   test("EX-03 · Soft delete / archive", async ({ page }) => {
     await openRoute(page, "/vault", "full");
-    await page.locator('[data-qa="experience-card"]').nth(1).click();
-    page.once("dialog", (dialog) => dialog.accept());
-    await page.getByRole("button", { name: /^Archive$/i }).click();
+    const target = page
+      .locator('[data-qa="experience-card"]')
+      .filter({ hasText: /Experience ADR #14/i })
+      .first();
+    await expect(target).toBeVisible();
+    await target.click();
+    const drawer = page.locator("[data-qa=experience-drawer]");
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("button", { name: /^Archive$/i }).click();
+    await expect(page.locator('[data-qa="archive-confirm"]')).toBeVisible();
+    await page.locator('[data-qa="archive-confirm"]').getByRole("button", { name: /^Archive$/i }).click();
+    await expect(drawer).toHaveCount(0);
+    await expect(
+      page.locator('[data-qa="experience-card"]').filter({ hasText: /Experience ADR #14/i }),
+    ).toHaveCount(0);
     await page.getByRole("button", { name: /Show Archived/i }).click();
-    expect(
-      await page.locator('[data-qa="experience-card"]').filter({ hasText: /archived/i }).count(),
-    ).toBeGreaterThanOrEqual(1);
+    const archivedCard = page
+      .locator('[data-qa="experience-card"]')
+      .filter({ hasText: /Experience ADR #14/i })
+      .first();
+    await expect(archivedCard).toBeVisible();
+    await expect(archivedCard).toContainText(/archived/i);
     const log = await getIpcLog(page);
     expect(log.some((entry) => entry.cmd === "archive_experience")).toBeTruthy();
+    expect(
+      log.some(
+        (entry) =>
+          entry.cmd === "list_experiences" &&
+          Boolean((entry.args as { includeArchived?: boolean } | null)?.includeArchived),
+      ),
+    ).toBeTruthy();
   });
 
   test("EX-04 · Pin", async ({ page }) => {
@@ -155,6 +181,8 @@ test.describe("EX — vault experiences", () => {
     const log = await getIpcLog(page);
     expect(log.some((entry) => entry.cmd === "pin_experience")).toBeTruthy();
     await page.locator("[data-qa=experience-drawer]").getByRole("button", { name: /✕|Close/i }).click();
+    const cards = page.locator('[data-qa="experience-card"]');
+    await expect(cards.first()).toContainText("PIN");
     await expect(
       page.locator('[data-qa="experience-card"]').filter({ hasText: /Experience ADR #14/i }).first(),
     ).toContainText("PIN");
@@ -166,16 +194,44 @@ test.describe("EX — vault experiences", () => {
     await openRoute(page, "/vault", "full");
     const badge = page.locator('[data-qa="unreviewed-count"]');
     await expect(badge).toBeVisible();
-    const badgeText = ((await badge.first().textContent()) || "").trim();
-    expect(Number(badgeText)).toBeGreaterThan(0);
+    const before = Number(((await badge.first().textContent()) || "").trim());
+    expect(before).toBeGreaterThan(0);
     const unreviewedCard = page
       .locator('[data-qa="experience-card"]')
       .filter({ hasText: /unreviewed/i })
       .first();
     await unreviewedCard.click();
-    await expect(page.getByRole("button", { name: /Mark reviewed/i })).toHaveCount(0);
-    await page.getByRole("button", { name: /✕|Close/i }).click();
+    const drawer = page.locator("[data-qa=experience-drawer]");
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByRole("button", { name: /Mark reviewed/i })).toHaveCount(0);
+    await drawer.getByRole("button", { name: /✕|Close/i }).click();
     await expect(badge).toHaveCount(0);
+  });
+
+  test("EX-05b · Mark all reviewed clears badge from backend count", async ({ page }) => {
+    await openRoute(page, "/vault", "full");
+    // Seed multiple unreviewed active rows, then refetch via Show Archived toggle.
+    await page.evaluate(() => {
+      const fixture = (
+        window as Window & { __QA_FIXTURE__?: { experiences: Array<Record<string, unknown>> } }
+      ).__QA_FIXTURE__;
+      if (!fixture) return;
+      for (const row of fixture.experiences) {
+        if ((row.status ?? "active") === "active") {
+          row.reviewed = false;
+        }
+      }
+    });
+    await page.getByRole("button", { name: /Show Archived/i }).click();
+    await page.getByRole("button", { name: /Hide Archived/i }).click();
+    const badge = page.locator('[data-qa="unreviewed-count"]');
+    await expect(badge.first()).toBeVisible();
+    expect(Number(((await badge.first().textContent()) || "").trim())).toBeGreaterThan(1);
+    await page.getByRole("button", { name: /Mark all reviewed/i }).click();
+    await expect(badge).toHaveCount(0);
+    const log = await getIpcLog(page);
+    expect(log.some((entry) => entry.cmd === "mark_all_experiences_reviewed")).toBeTruthy();
+    expect(log.some((entry) => entry.cmd === "count_unreviewed_experiences")).toBeTruthy();
   });
 
   test("EX-08 · List limit > 12", async ({ page }) => {
@@ -188,10 +244,16 @@ test.describe("EX — vault experiences", () => {
     await openRoute(page, "/vault", "full");
     await expect(page.getByRole("button", { name: /Show Archived/i })).toBeVisible();
     await page.getByRole("button", { name: /Show Archived/i }).click();
-    const archived = page.locator('[data-qa="experience-card"]').filter({ hasText: /archived/i }).first();
+    const archived = page
+      .locator('[data-qa="experience-card"]')
+      .filter({ hasText: /Experience ADR #16/i })
+      .first();
     await expect(archived).toBeVisible();
     await archived.click();
-    await page.getByRole("button", { name: /^Restore$/i }).click();
+    const drawer = page.locator("[data-qa=experience-drawer]");
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText(/Restore from auto-archive/i);
+    await drawer.getByRole("button", { name: /^Restore$/i }).click();
     const log = await getIpcLog(page);
     expect(log.some((entry) => entry.cmd === "unarchive_experience")).toBeTruthy();
   });
@@ -202,6 +264,22 @@ test.describe("EX — vault experiences", () => {
     const fail = formatLayoutFailure(m);
     testInfo.annotations.push({ type: "layout", description: fail });
     expect(m.l1_pass && m.l3_pass && !m.l2_sparseInterior, fail).toBe(true);
+
+    // Drawer + footer must remain fully visible at 960px / D4-scale as well as D0–D3.
+    await page.locator('[data-qa="experience-card"]').first().click();
+    const drawer = page.locator("[data-qa=experience-drawer]");
+    await expect(drawer).toBeVisible();
+    const footer = drawer.locator('[data-qa="experience-drawer-footer"]');
+    await expect(footer).toBeVisible();
+    const footerBox = await footer.boundingBox();
+    const viewport = page.viewportSize();
+    expect(footerBox).toBeTruthy();
+    expect(viewport).toBeTruthy();
+    expect(footerBox!.y + footerBox!.height).toBeLessThanOrEqual((viewport!.height ?? 0) + 1);
+    const header = page.locator('[data-qa="vault-experience-header"]');
+    const headerBox = await header.boundingBox();
+    expect(headerBox).toBeTruthy();
+    expect(headerBox!.width).toBeLessThanOrEqual((viewport!.width ?? 0) + 1);
   });
 
   test("EX-14 · Vault totals must match bridge counts (not query LIMIT as total)", async ({

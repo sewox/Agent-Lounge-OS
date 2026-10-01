@@ -168,6 +168,9 @@ pub struct LoungeExperience {
     pub last_used_at: Option<String>,
     #[serde(default)]
     pub archived_at: Option<String>,
+    /// `user` | `ttl` — why the row was archived (soft-delete provenance).
+    #[serde(default)]
+    pub archived_by: Option<String>,
     #[serde(default)]
     pub is_pinned: bool,
     #[serde(default)]
@@ -175,6 +178,11 @@ pub struct LoungeExperience {
     #[serde(default)]
     pub original_content: Option<String>,
 }
+
+/// Manual archive from the Vault UI.
+pub const ARCHIVED_BY_USER: &str = "user";
+/// Soft-hide from the 90-day TTL auto-archive path.
+pub const ARCHIVED_BY_TTL: &str = "ttl";
 
 fn default_reviewed_true() -> bool {
     true
@@ -197,6 +205,7 @@ impl Default for LoungeExperience {
             use_count: 0,
             last_used_at: None,
             archived_at: None,
+            archived_by: None,
             is_pinned: false,
             updated_at: None,
             original_content: None,
@@ -260,6 +269,8 @@ pub struct ExperienceRecord {
     #[serde(default)]
     pub archived_at: Option<String>,
     #[serde(default)]
+    pub archived_by: Option<String>,
+    #[serde(default)]
     pub is_pinned: bool,
     #[serde(default)]
     pub updated_at: Option<String>,
@@ -292,6 +303,7 @@ impl Default for ExperienceRecord {
             use_count: 0,
             last_used_at: None,
             archived_at: None,
+            archived_by: None,
             is_pinned: false,
             updated_at: Some(created),
             original_content: None,
@@ -319,6 +331,7 @@ impl ExperienceRecord {
             use_count: 0,
             last_used_at: None,
             archived_at: None,
+            archived_by: None,
             is_pinned: false,
             updated_at: Some(experience.created_at.clone()),
             original_content: Some(content),
@@ -352,6 +365,7 @@ impl ExperienceRecord {
             use_count: 0,
             last_used_at: None,
             archived_at: None,
+            archived_by: None,
             is_pinned: false,
             updated_at: Some(created),
             original_content: Some(if adr_record.is_empty() {
@@ -389,6 +403,7 @@ impl ExperienceRecord {
             use_count: self.use_count,
             last_used_at: self.last_used_at.clone(),
             archived_at: self.archived_at.clone(),
+            archived_by: self.archived_by.clone(),
             is_pinned: self.is_pinned,
             updated_at: self.updated_at.clone(),
             original_content: self.original_content.clone(),

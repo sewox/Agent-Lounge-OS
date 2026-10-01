@@ -1392,5 +1392,7 @@ mod tests {
         );
         let latest = store.latest(5).await.unwrap();
         assert_eq!(latest.len(), 1);
+        assert!(!latest[0].reviewed, "MCP rows land unreviewed");
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
     }
 }

@@ -6,7 +6,7 @@ import { GraphUiButton } from "@/components/graph-ui-button";
 import { GraphUiSettings } from "@/components/graph-ui-settings";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
-import { ExperienceDrawer, VaultPathReference } from "@/components/experience-drawer";
+import { ExperienceDrawer } from "@/components/experience-drawer";
 import { SemanticMap } from "@/components/SemanticMap";
 import {
   formatDisplayPath,
@@ -426,8 +426,11 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     showArchived,
     setShowArchived,
     unreviewedCount,
+    experienceTotal,
+    experiencesLoading,
+    experiencesError,
     markAllExperiencesReviewed,
-    refreshExperiences,
+    loadMoreExperiences,
     openExperience,
     experienceDrawerOpen,
     experienceDetail,
@@ -456,12 +459,14 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     () => resolveGraphTotals({ projects, semanticMap }),
     [projects, semanticMap],
   );
-  const pathSamples = useMemo(() => {
-    const fromDead = deadSymbols.map((row) => row.file).filter(Boolean) as string[];
-    const fromProjects = projects.map((row) => row.root_path).filter(Boolean) as string[];
-    const fromMap = semanticMap.projects.map((row) => row.repo_path).filter(Boolean);
-    return Array.from(new Set([...fromDead, ...fromProjects, ...fromMap]));
-  }, [deadSymbols, projects, semanticMap.projects]);
+  const selectedProjectPath = useMemo(() => {
+    if (!selected || selected.kind !== "project") {
+      return null;
+    }
+    const fromProjects = projects.find((row) => row.name === selected.name)?.root_path;
+    const fromMap = semanticMap.projects.find((row) => row.name === selected.name)?.repo_path;
+    return fromProjects || fromMap || null;
+  }, [projects, selected, semanticMap.projects]);
   const log = useMemo(
     () =>
       sortExperiencesForDisplay(
@@ -534,20 +539,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           data-qa="panel"
           className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2.5 font-body"
         >
-          <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2">
+          <div
+            data-qa="vault-experience-header"
+            className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2"
+          >
             <div className="font-mono text-meta text-on-surface-variant">
-              {vaultS.totalExperiences(log.length)}
+              {vaultS.totalExperiences(experienceTotal)}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setShowArchived((current) => {
-                    const next = !current;
-                    void refreshExperiences(next);
-                    return next;
-                  });
-                }}
+                onClick={() => setShowArchived(!showArchived)}
                 className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
               >
                 {showArchived ? vaultS.hideArchived : vaultS.showArchived}
@@ -563,6 +565,16 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               ) : null}
             </div>
           </div>
+          {selectedProjectPath ? (
+            <div
+              data-qa="vault-project-path"
+              className="mb-2 shrink-0 break-all font-mono text-meta text-on-surface-variant"
+            >
+              <span className="uppercase tracking-label text-outline">{vaultS.projectPath}</span>
+              {" · "}
+              {formatDisplayPath(selectedProjectPath)}
+            </div>
+          ) : null}
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
               <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
@@ -586,12 +598,11 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                         <div className="min-w-0">
                           <div className="truncate font-medium text-error">{symbol.name}</div>
                           <div className="truncate text-meta text-on-surface-variant">
-                            {symbol.detail ||
-                              (symbol.file
-                                ? `${formatDisplayPath(symbol.file)}${
-                                    symbol.line != null ? `:${symbol.line}` : ""
-                                  }`
-                                : symbol.kind)}
+                            {symbol.file
+                              ? `${formatDisplayPath(symbol.file)}${
+                                  symbol.line != null ? `:${symbol.line}` : ""
+                                }`
+                              : symbol.detail || symbol.kind}
                           </div>
                         </div>
                         <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
@@ -623,7 +634,15 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             </span>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body">
-            {logVisible.length === 0 ? (
+            {experiencesLoading && experiences.length === 0 ? (
+              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
+                {vaultS.loading}
+              </div>
+            ) : experiencesError ? (
+              <div className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center text-body text-error">
+                {experiencesError || vaultS.listError}
+              </div>
+            ) : logVisible.length === 0 ? (
               <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
                 {selected
                   ? vaultS.noExperiencesForNode(selected.name)
@@ -713,12 +732,24 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               })
             )}
           </div>
-          <VaultPathReference paths={pathSamples} />
+          {experiences.length < experienceTotal ? (
+            <div className="shrink-0 pt-2">
+              <button
+                type="button"
+                data-qa="vault-load-more"
+                disabled={experiencesLoading}
+                onClick={() => void loadMoreExperiences()}
+                className="min-h-8 w-full rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high disabled:opacity-60"
+              >
+                {vaultS.loadMore}
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
       <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline">
         <span>
-          codebase-memory-mcp · {repoCount} repos · {vaultS.totalExperiences(log.length)}
+          codebase-memory-mcp · {repoCount} repos · {vaultS.totalExperiences(experienceTotal)}
         </span>
         <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
