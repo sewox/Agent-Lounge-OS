@@ -41,11 +41,45 @@ test.describe("HM — health / map empty states", () => {
     await expect(page.getByText("Agent-Lounge-OS").first()).toBeVisible();
     const text = await page.locator("main").innerText();
     expect(text).toMatch(/live|Agent-Lounge/i);
-    const drill = page.locator('[data-qa="health-dead-drilldown"]').first();
+    const drill = page.locator(
+      'a[data-qa="health-dead-drilldown"][href*="Agent-Lounge-OS"]',
+    );
     await expect(drill).toBeVisible();
+    const headline = Number(await drill.getAttribute("data-qa-dead-count"));
+    expect(headline).toBeGreaterThan(0);
     await drill.click();
     await expect(page).toHaveURL(/tab=dead/);
+    await expect(page).toHaveURL(/project=Agent-Lounge-OS/);
     await expect(page.locator('[data-qa="dead-symbol-list"]')).toBeVisible();
+    const listTotal = Number(
+      await page.locator('[data-qa="dead-symbol-total"]').getAttribute("data-qa-total"),
+    );
+    // Project-filtered list total must match the health headline for that project.
+    expect(listTotal).toBe(headline);
+
+    // After ignoring every row, headline and list stay consistent (0, not map.dead fallback).
+    const rows = page.locator('[data-qa="dead-symbol-row"]');
+    let guard = 0;
+    while ((await rows.count()) > 0 && guard < 40) {
+      await rows.first().click();
+      await page.getByRole("button", { name: /^Ignore$/i }).click();
+      await page.waitForTimeout(150);
+      guard += 1;
+    }
+    const emptyTotal = Number(
+      await page.locator('[data-qa="dead-symbol-total"]').getAttribute("data-qa-total"),
+    );
+    expect(emptyTotal).toBe(0);
+    await page
+      .getByRole("navigation", { name: "Health sections" })
+      .getByRole("link", { name: /Project Health/i })
+      .click();
+    await page.waitForTimeout(300);
+    const aloDrill = page.locator(
+      'a[data-qa="health-dead-drilldown"][href*="Agent-Lounge-OS"]',
+    );
+    await expect(aloDrill).toBeVisible();
+    expect(Number(await aloDrill.getAttribute("data-qa-dead-count"))).toBe(0);
   });
 
   test("HM-04 · Re-index only on /health, not in palette", async ({ page }) => {

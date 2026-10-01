@@ -229,7 +229,10 @@ test.describe("DS — dead symbols", () => {
     const rows = page.locator('[data-qa="dead-symbol-row"]');
     await expect(rows.first()).toBeVisible();
     expect(await rows.count()).toBeGreaterThan(8);
-    await expect(page.getByText(/\d+ total/i).first()).toBeVisible();
+    const total = page.locator('[data-qa="dead-symbol-total"]');
+    await expect(total).toBeVisible();
+    const listed = Number(await total.getAttribute("data-qa-total"));
+    expect(listed).toBeGreaterThan(8);
   });
 
   test("DS-02 · Detail on click", async ({ page }) => {
@@ -258,24 +261,68 @@ test.describe("DS — dead symbols", () => {
     ).toBeTruthy();
   });
 
-  test("DS-04 · Copy path", async ({ page }) => {
+  test("DS-04 · Copy path", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openRoute(page, "/health?tab=dead", "full");
     await page.locator('[data-qa="dead-symbol-row"]').first().click();
-    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.getByRole("button", { name: /Copy path/i }).click();
     await expect(page.getByText(/Copy path:/i)).toBeVisible();
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clip).toMatch(/:\d+$/);
+    expect(clip.length).toBeGreaterThan(3);
   });
 
   test("DS-05 · Ignore", async ({ page }) => {
+    await openRoute(page, "/health", "full");
+    const drill = page.locator(
+      'a[data-qa="health-dead-drilldown"][href*="Agent-Lounge-OS"]',
+    );
+    const headlineBefore = Number(await drill.getAttribute("data-qa-dead-count"));
+    expect(headlineBefore).toBeGreaterThan(0);
     await openRoute(page, "/health?tab=dead", "full");
+    const totalEl = page.locator('[data-qa="dead-symbol-total"]');
+    const beforeTotal = Number(await totalEl.getAttribute("data-qa-total"));
+    expect(beforeTotal).toBeGreaterThan(0);
     const rows = page.locator('[data-qa="dead-symbol-row"]');
     const before = await rows.count();
     await rows.first().click();
+    const name = (await rows.first().innerText()).split("\n")[0]?.trim() || "";
     await page.getByRole("button", { name: /^Ignore$/i }).click();
-    await page.waitForTimeout(300);
-    // After ignore the list refreshes via get_dead_symbols; count drops.
+    await page.waitForTimeout(400);
     const after = await rows.count();
     expect(after).toBeLessThan(before);
+    const afterTotal = Number(await totalEl.getAttribute("data-qa-total"));
+    expect(afterTotal).toBe(beforeTotal - 1);
+    expect(afterTotal).toBeLessThan(beforeTotal);
+
+    // Headline/KPI on Project Health must decrement with the list.
+    await page
+      .getByRole("navigation", { name: "Health sections" })
+      .getByRole("link", { name: /Project Health/i })
+      .click();
+    await page.waitForTimeout(300);
+    const headlineAfter = Number(
+      await page
+        .locator('a[data-qa="health-dead-drilldown"][href*="Agent-Lounge-OS"]')
+        .getAttribute("data-qa-dead-count"),
+    );
+    expect(headlineAfter).toBe(headlineBefore - 1);
+
+    // Persist across reload (sessionStorage-backed mock ignore list).
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(500);
+    await openRoute(page, "/health?tab=dead", "full");
+    const reloadedTotal = Number(
+      await page.locator('[data-qa="dead-symbol-total"]').getAttribute("data-qa-total"),
+    );
+    expect(reloadedTotal).toBe(afterTotal);
+    if (name) {
+      const stillThere = await page
+        .locator('[data-qa="dead-symbol-row"]')
+        .filter({ hasText: name })
+        .count();
+      expect(stillThere).toBe(0);
+    }
   });
 
   test("DS-06 · Ignore List tab restore", async ({ page }) => {
@@ -301,19 +348,20 @@ test.describe("DS — dead symbols", () => {
     ).toBeTruthy();
   });
 
-  test("DS-LAYOUT · Dead list + detail fill width/height @ D0/D3/D4", async ({
+  test("DS-LAYOUT · Dead list + detail fill width/height @ D0/D3/D960/D4", async ({
     page,
   }, testInfo) => {
     test.skip(
       testInfo.project.name !== "D0" &&
         testInfo.project.name !== "D3" &&
-        testInfo.project.name !== "D4-scale" &&
-        !testInfo.project.name.includes("960"),
+        testInfo.project.name !== "D960" &&
+        testInfo.project.name !== "D4-scale",
       "viewport matrix",
     );
     await openRoute(page, "/health?tab=dead", "full");
     const m = await measureLayout(page, "/health");
     expect(m.l1_pass, formatLayoutFailure(m)).toBe(true);
-    expect(m.l2_pass || m.l2_sparseInterior === false, formatLayoutFailure(m)).toBeTruthy();
+    expect(m.l2_pass, formatLayoutFailure(m)).toBe(true);
+    expect(m.l3_pass, formatLayoutFailure(m)).toBe(true);
   });
 });

@@ -81,6 +81,15 @@ pub struct LoungeTask {
     pub repo_path: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Structured file path for fix/open tasks (not glued into summary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Structured line for fix/open tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<i64>,
+    /// Structured symbol name for fix tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
     /// Zincirleme workflow: bu görevi tetikleyen tamamlanmış ebeveyn id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
@@ -108,6 +117,9 @@ impl LoungeTask {
             kind: TaskKind::General,
             repo_path: None,
             model: None,
+            file: None,
+            line: None,
+            symbol: None,
             parent_task_id: None,
             workflow_chain: None,
         }

@@ -36,7 +36,24 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
     (window as Window & { __QA_REJECT_QUOTA__?: boolean }).__QA_REJECT_QUOTA__ =
       rejectQuotaExperience;
     (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
-      [];
+      (() => {
+        try {
+          const raw = sessionStorage.getItem("__QA_IGNORED_SYMBOLS__");
+          return raw ? (JSON.parse(raw) as FixtureDataset["deadSymbols"]) : [];
+        } catch {
+          return [];
+        }
+      })();
+
+    function persistIgnored(rows: FixtureDataset["deadSymbols"]) {
+      (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
+        rows;
+      try {
+        sessionStorage.setItem("__QA_IGNORED_SYMBOLS__", JSON.stringify(rows));
+      } catch {
+        /* private mode */
+      }
+    }
 
     type ListenerMap = Map<string, number[]>;
     const listeners: ListenerMap = new Map();
@@ -164,12 +181,12 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         case "ignore_symbol": {
           const symbol = args?.symbol as FixtureDataset["deadSymbols"][number] | undefined;
           if (!symbol) return null;
-          const store =
-            (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] })
-              .__QA_IGNORED_SYMBOLS__ ?? [];
-          store.push(symbol);
-          (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
-            store;
+          const store = [
+            ...((window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] })
+              .__QA_IGNORED_SYMBOLS__ ?? []),
+            symbol,
+          ];
+          persistIgnored(store);
           return null;
         }
         case "unignore_symbol": {
@@ -178,7 +195,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           const store =
             (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ ??
             [];
-          (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
+          persistIgnored(
             store.filter(
               (row) =>
                 !(
@@ -187,7 +204,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
                   row.file === symbol.file &&
                   row.kind === symbol.kind
                 ),
-            );
+            ),
+          );
           return null;
         }
         case "open_dead_symbol_in_editor":

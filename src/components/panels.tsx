@@ -665,7 +665,7 @@ export function HealthPanel() {
           files: String(row.files),
           nodes: String(row.node_count),
           stale: 0,
-          dead: fromList || row.dead.length,
+          dead: fromList,
           sync: "live",
         };
       })
@@ -742,6 +742,7 @@ export function HealthPanel() {
                   <Link
                     href={`/health?tab=dead&project=${encodeURIComponent(repo.name)}`}
                     data-qa="health-dead-drilldown"
+                    data-qa-dead-count={repo.dead}
                     className="font-medium text-error hover:underline"
                   >
                     {dsStrings.deadDrillDown(repo.dead)}

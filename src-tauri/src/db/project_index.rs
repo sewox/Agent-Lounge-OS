@@ -462,22 +462,37 @@ fn list_dead_symbols_blocking(
     conn: &Connection,
     project_id: Option<&str>,
 ) -> Result<Vec<DeadSymbol>> {
+    // Single query with correlated last_ref (keyed by project+name+file, not name alone).
     let sql = r#"
-        SELECT project_id, name, kind, file_path, line, detail
-        FROM project_index
-        WHERE kind IN ('dead', 'broken')
-          AND (?1 IS NULL OR project_id = ?1)
+        SELECT d.project_id, d.name, d.kind, d.file_path, d.line, d.detail,
+          (
+            SELECT CASE
+              WHEN r.file_path IS NULL OR TRIM(r.file_path) = '' THEN NULL
+              WHEN r.line IS NOT NULL AND r.line > 0 THEN r.file_path || ':' || r.line
+              ELSE r.file_path
+            END
+            FROM project_index r
+            WHERE r.project_id = d.project_id
+              AND r.kind = 'reference'
+              AND r.target = d.name
+              AND COALESCE(r.file_path, '') = COALESCE(d.file_path, '')
+            ORDER BY r.indexed_at DESC
+            LIMIT 1
+          ) AS last_ref
+        FROM project_index d
+        WHERE d.kind IN ('dead', 'broken')
+          AND (?1 IS NULL OR d.project_id = ?1)
           AND NOT EXISTS (
             SELECT 1 FROM ignored_symbols i
-            WHERE i.name = project_index.name
-              AND COALESCE(i.project_id, '') = COALESCE(project_index.project_id, '')
-              AND COALESCE(i.file_path, '') = COALESCE(project_index.file_path, '')
+            WHERE i.name = d.name
+              AND COALESCE(i.project_id, '') = COALESCE(d.project_id, '')
+              AND COALESCE(i.file_path, '') = COALESCE(d.file_path, '')
               AND COALESCE(i.kind, '') = CASE
-                    WHEN project_index.kind = 'broken' THEN 'broken'
+                    WHEN d.kind = 'broken' THEN 'broken'
                     ELSE 'unused'
                   END
           )
-        ORDER BY kind, name
+        ORDER BY d.kind, d.name, d.file_path
         "#;
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![project_id], |row| {
@@ -494,17 +509,12 @@ fn list_dead_symbols_blocking(
             file: row.get(3)?,
             line: row.get(4)?,
             detail: row.get(5)?,
-            last_ref: None,
+            last_ref: row.get(6)?,
         })
     })?;
     let mut symbols = Vec::new();
     for row in rows {
-        let mut symbol = row?;
-        let project = symbol.project_id.as_deref().unwrap_or("");
-        if !project.is_empty() {
-            symbol.last_ref = lookup_last_ref_blocking(conn, project, &symbol.name);
-        }
-        symbols.push(symbol);
+        symbols.push(row?);
     }
     Ok(symbols)
 }
@@ -522,18 +532,26 @@ fn lookup_last_ref_blocking(
     conn: &Connection,
     project_id: &str,
     symbol_name: &str,
+    file_path: Option<&str>,
 ) -> Option<String> {
     let sql = r#"
         SELECT file_path, line FROM project_index
-        WHERE project_id = ?1 AND kind = 'reference' AND target = ?2
+        WHERE project_id = ?1
+          AND kind = 'reference'
+          AND target = ?2
+          AND COALESCE(file_path, '') = COALESCE(?3, '')
         ORDER BY indexed_at DESC
         LIMIT 1
         "#;
-    conn.query_row(sql, params![project_id, symbol_name], |row| {
-        let file: Option<String> = row.get(0)?;
-        let line: Option<i64> = row.get(1)?;
-        Ok(format_file_line(file.as_deref(), line))
-    })
+    conn.query_row(
+        sql,
+        params![project_id, symbol_name, file_path.unwrap_or("")],
+        |row| {
+            let file: Option<String> = row.get(0)?;
+            let line: Option<i64> = row.get(1)?;
+            Ok(format_file_line(file.as_deref(), line))
+        },
+    )
     .optional()
     .ok()
     .flatten()
@@ -556,6 +574,84 @@ fn dead_table_kind(symbol_kind: &str) -> &'static str {
     }
 }
 
+/// True when any existing path component (or the final path) is a symlink.
+fn path_contains_symlink(path: &Path) -> bool {
+    let mut cur = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
+            Component::RootDir => cur.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cur.pop();
+            }
+            Component::Normal(part) => cur.push(part),
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
+            if meta.file_type().is_symlink() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Join index file path to repo, reject symlinks/`..` escape, require canonical confinement.
+/// Fail closed on empty repo_path.
+pub(crate) fn confine_index_file_path(repo_path: &str, file_path: &str) -> Result<PathBuf> {
+    let repo_raw = repo_path.trim();
+    if repo_raw.is_empty() {
+        anyhow::bail!("repo_path boş");
+    }
+    let file_raw = file_path.trim();
+    if file_raw.is_empty() {
+        anyhow::bail!("file_path boş");
+    }
+
+    let repo = normalize_path_hint(repo_raw);
+    if repo.as_os_str().is_empty() {
+        anyhow::bail!("repo_path boş");
+    }
+
+    let joined = if Path::new(file_raw).is_absolute() || path_has_windows_drive(file_raw) {
+        normalize_path_hint(file_raw)
+    } else {
+        normalize_path_hint(&repo.join(file_raw).to_string_lossy())
+    };
+
+    if path_contains_symlink(&joined) {
+        anyhow::bail!("symlink rejected");
+    }
+
+    let repo_canon = match repo.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            if path_contains_symlink(&repo) {
+                anyhow::bail!("symlink rejected");
+            }
+            repo.clone()
+        }
+    };
+    if repo_canon.as_os_str().is_empty() {
+        anyhow::bail!("repo_path boş");
+    }
+
+    let file_canon = match joined.canonicalize() {
+        Ok(path) => {
+            if path_contains_symlink(&joined) {
+                anyhow::bail!("symlink rejected");
+            }
+            path
+        }
+        Err(_) => joined,
+    };
+
+    if !path_is_within(&file_canon, &repo_canon) {
+        anyhow::bail!("symbol path repo kökü dışında");
+    }
+    Ok(file_canon)
+}
+
 fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<ResolvedDeadSymbol> {
     let name = key.name.trim();
     if name.is_empty() {
@@ -567,6 +663,12 @@ fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<R
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("project_id gerekli"))?;
+    let file_key = key
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("file_path gerekli"))?;
     let table_kind = dead_table_kind(key.kind.as_str());
 
     let sql = r#"
@@ -575,11 +677,10 @@ fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<R
         WHERE project_id = ?1
           AND name = ?2
           AND kind = ?3
-        ORDER BY indexed_at DESC
-        LIMIT 1
+          AND COALESCE(file_path, '') = ?4
         "#;
     let row = conn
-        .query_row(sql, params![project, name, table_kind], |row| {
+        .query_row(sql, params![project, name, table_kind, file_key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -590,26 +691,14 @@ fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<R
         })
         .optional()
         .context("resolve dead symbol query")?
-        .ok_or_else(|| anyhow::anyhow!("symbol index'te bulunamadı: {name}"))?;
+        .ok_or_else(|| anyhow::anyhow!("symbol index'te bulunamadı: {name} @ {file_key}"))?;
 
     let (repo_path, file_path, line, kind, detail) = row;
     let file_path = file_path
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("symbol için dosya yolu yok: {name}"))?;
 
-    let repo = normalize_path_hint(&repo_path);
-    let absolute_file = if Path::new(&file_path).is_absolute() || path_has_windows_drive(&file_path)
-    {
-        normalize_path_hint(&file_path)
-    } else {
-        normalize_path_hint(&Path::new(&repo_path).join(&file_path).to_string_lossy())
-    };
-    if !repo.as_os_str().is_empty()
-        && repo.as_os_str().len() > 1
-        && !path_is_within(&absolute_file, &repo)
-    {
-        anyhow::bail!("symbol path repo kökü dışında");
-    }
+    let confined = confine_index_file_path(&repo_path, &file_path)?;
 
     let ui_kind = if kind == "broken" { "broken" } else { "unused" };
     let symbol = DeadSymbol {
@@ -619,12 +708,12 @@ fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<R
         file: Some(file_path.clone()),
         line,
         detail,
-        last_ref: lookup_last_ref_blocking(conn, project, name),
+        last_ref: lookup_last_ref_blocking(conn, project, name, Some(file_path.as_str())),
     };
     Ok(ResolvedDeadSymbol {
         symbol,
         repo_path,
-        file_path: absolute_file.to_string_lossy().replace('\\', "/"),
+        file_path: confined.to_string_lossy().replace('\\', "/"),
         line,
     })
 }
@@ -1301,5 +1390,150 @@ mod tests {
             assert!(!norm.contains('\\'));
             assert!(accepts_cross_platform_path(&norm) || path_has_windows_drive(sample));
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_disambiguates_same_name_in_different_files() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = IndexGraph {
+            project: "lounge".into(),
+            repo_path: "/tmp/lounge".into(),
+            ..Default::default()
+        };
+        graph.dead.push(DeadSymbol {
+            project_id: Some("lounge".into()),
+            name: "foo".into(),
+            kind: "unused".into(),
+            file: Some("src/a.rs".into()),
+            line: Some(1),
+            ..Default::default()
+        });
+        graph.dead.push(DeadSymbol {
+            project_id: Some("lounge".into()),
+            name: "foo".into(),
+            kind: "unused".into(),
+            file: Some("src/b.rs".into()),
+            line: Some(2),
+            ..Default::default()
+        });
+        store.save_project_index(graph).await.expect("save");
+
+        let a = store
+            .resolve_dead_symbol(DeadSymbol {
+                project_id: Some("lounge".into()),
+                name: "foo".into(),
+                kind: "unused".into(),
+                file: Some("src/a.rs".into()),
+                line: Some(1),
+                ..Default::default()
+            })
+            .await
+            .expect("resolve a");
+        assert!(a.file_path.ends_with("src/a.rs"), "{}", a.file_path);
+        assert_eq!(a.line, Some(1));
+
+        let b = store
+            .resolve_dead_symbol(DeadSymbol {
+                project_id: Some("lounge".into()),
+                name: "foo".into(),
+                kind: "unused".into(),
+                file: Some("src/b.rs".into()),
+                line: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("resolve b");
+        assert!(b.file_path.ends_with("src/b.rs"), "{}", b.file_path);
+
+        let missing = store
+            .resolve_dead_symbol(DeadSymbol {
+                project_id: Some("lounge".into()),
+                name: "foo".into(),
+                kind: "unused".into(),
+                file: Some("src/missing.rs".into()),
+                ..Default::default()
+            })
+            .await;
+        assert!(
+            missing.is_err(),
+            "wrong file must not resolve by name alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn last_ref_keyed_by_file_not_name_alone() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = IndexGraph {
+            project: "lounge".into(),
+            repo_path: "/tmp/lounge".into(),
+            ..Default::default()
+        };
+        graph.references.push(CodeReference {
+            from_id: "caller_a".into(),
+            to_id: "ghost".into(),
+            file: Some("src/call_a.rs".into()),
+            line: Some(10),
+        });
+        graph.references.push(CodeReference {
+            from_id: "caller_b".into(),
+            to_id: "ghost".into(),
+            file: Some("src/call_b.rs".into()),
+            line: Some(20),
+        });
+        graph.dead.push(DeadSymbol {
+            project_id: Some("lounge".into()),
+            name: "ghost".into(),
+            kind: "broken".into(),
+            file: Some("src/call_a.rs".into()),
+            line: Some(10),
+            ..Default::default()
+        });
+        graph.dead.push(DeadSymbol {
+            project_id: Some("lounge".into()),
+            name: "ghost".into(),
+            kind: "broken".into(),
+            file: Some("src/call_b.rs".into()),
+            line: Some(20),
+            ..Default::default()
+        });
+        store.save_project_index(graph).await.expect("save");
+        let dead = store
+            .list_dead_symbols(Some("lounge".into()))
+            .await
+            .expect("list");
+        let a = dead
+            .iter()
+            .find(|s| s.file.as_deref() == Some("src/call_a.rs"))
+            .unwrap();
+        let b = dead
+            .iter()
+            .find(|s| s.file.as_deref() == Some("src/call_b.rs"))
+            .unwrap();
+        assert_eq!(a.last_ref.as_deref(), Some("src/call_a.rs:10"));
+        assert_eq!(b.last_ref.as_deref(), Some("src/call_b.rs:20"));
+    }
+
+    #[test]
+    fn confine_rejects_empty_repo_and_dotdot_escape() {
+        assert!(confine_index_file_path("", "src/x.rs").is_err());
+        assert!(confine_index_file_path("/tmp/repo", "../etc/passwd").is_err());
+        assert!(confine_index_file_path("/tmp/repo", "src/../../etc/passwd").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confine_rejects_symlink_escaping_repo() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("lounge-confine-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        let outside = root.join("secret.txt");
+        let src = repo.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(&outside, b"secret").unwrap();
+        let leak = src.join("leak.rs");
+        symlink(&outside, &leak).unwrap();
+        let err = confine_index_file_path(repo.to_str().unwrap(), "src/leak.rs");
+        assert!(err.is_err(), "symlink escape must fail: {err:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

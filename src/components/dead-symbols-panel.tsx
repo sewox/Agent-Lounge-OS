@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLounge } from "@/components/lounge-provider";
 import { IndexEmptyState } from "@/components/index-empty-state";
 import { Icon } from "@/components/icons";
@@ -15,6 +15,9 @@ import {
 } from "@/lib/dead-symbols";
 import { hasIndexedWorkspace, type DeadSymbol } from "@/lib/lounge";
 import { deadSymbolStrings as s } from "@/lib/strings/dead-symbols";
+
+const ROW_HEIGHT_PX = 52;
+const OVERSCAN = 8;
 
 type DeadSymbolsPanelProps = {
   projectFilter?: string | null;
@@ -46,6 +49,9 @@ export function DeadSymbolsPanel({
   const [kind, setKind] = useState<"all" | "unused" | "broken">("all");
   const [sort, setSort] = useState<DeadSymbolSort>("name");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(320);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   const filtered = useMemo(
     () => sortDeadSymbols(filterDeadSymbols(source, query, kind, projectFilter), sort),
@@ -56,6 +62,24 @@ export function DeadSymbolsPanel({
     () => filtered.find((row) => deadSymbolKey(row) === selectedKey) ?? filtered[0] ?? null,
     [filtered, selectedKey],
   );
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) {
+      return;
+    }
+    const measure = () => setViewportH(el.clientHeight || 320);
+    measure();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [indexed, filtered.length]);
+
+  const windowStart = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT_PX) - OVERSCAN);
+  const windowCount = Math.ceil(viewportH / ROW_HEIGHT_PX) + OVERSCAN * 2;
+  const windowed = filtered.slice(windowStart, windowStart + windowCount);
+  const topPad = windowStart * ROW_HEIGHT_PX;
+  const bottomPad = Math.max(0, (filtered.length - windowStart - windowed.length) * ROW_HEIGHT_PX);
 
   if (!indexed) {
     return (
@@ -105,41 +129,46 @@ export function DeadSymbolsPanel({
             onSort={setSort}
           />
           <div
+            ref={listRef}
             data-qa="dead-symbol-list"
             className="min-h-0 flex-1 overflow-auto font-mono text-body"
+            onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
           >
             {filtered.length === 0 ? (
               <div className="px-3 py-6 text-center font-body text-body text-on-surface-variant">
                 {mode === "ignored" ? s.noIgnored : s.noSymbols}
               </div>
             ) : (
-              filtered.map((symbol) => {
-                const key = deadSymbolKey(symbol);
-                const active = selected && deadSymbolKey(selected) === key;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    data-qa="dead-symbol-row"
-                    onClick={() => setSelectedKey(key)}
-                    className={`flex w-full items-start justify-between gap-2 border-b border-outline-variant/30 px-2.5 py-2 text-left transition-colors ${
-                      active
-                        ? "bg-primary-container/30"
-                        : "hover:bg-surface-container-high/60"
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate font-medium text-error">{symbol.name}</div>
-                      <div className="truncate text-meta text-on-surface-variant">
-                        {formatSymbolFileLine(symbol)}
+              <div style={{ paddingTop: topPad, paddingBottom: bottomPad }}>
+                {windowed.map((symbol) => {
+                  const key = deadSymbolKey(symbol);
+                  const active = selected && deadSymbolKey(selected) === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      data-qa="dead-symbol-row"
+                      onClick={() => setSelectedKey(key)}
+                      style={{ minHeight: ROW_HEIGHT_PX }}
+                      className={`flex w-full items-start justify-between gap-2 border-b border-outline-variant/30 px-2.5 py-2 text-left transition-colors ${
+                        active
+                          ? "bg-primary-container/30"
+                          : "hover:bg-surface-container-high/60"
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-error">{symbol.name}</div>
+                        <div className="truncate text-meta text-on-surface-variant">
+                          {formatSymbolFileLine(symbol)}
+                        </div>
                       </div>
-                    </div>
-                    <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
-                      {symbol.kind || "dead"}
-                    </span>
-                  </button>
-                );
-              })
+                      <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
+                        {symbol.kind || "dead"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
@@ -181,7 +210,13 @@ function PanelHeader({
           </span>
         ) : null}
       </div>
-      <span className="font-mono text-meta text-outline">{s.total(total)}</span>
+      <span
+        data-qa="dead-symbol-total"
+        data-qa-total={total}
+        className="font-mono text-meta text-outline"
+      >
+        {s.total(total)}
+      </span>
     </div>
   );
 }
