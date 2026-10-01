@@ -287,7 +287,8 @@ test.describe("X — cross-cutting", () => {
     await page.waitForTimeout(300);
     await expect(page.locator("html")).toHaveAttribute("lang", "tr");
     const trShell = await page.locator('[data-qa="sidebar"]').innerText();
-    expect(trShell).toMatch(/Aktif servisler/i);
+    // CSS text-transform:uppercase under lang=tr yields AKTİF (dotted İ) — match that.
+    expect(trShell).toMatch(/Aktif servisler|AKTİF SERVİSLER/);
     expect(trShell).not.toMatch(/Active daemons/i);
     // Translated Index Workspace chrome must flip with the dictionary.
     const indexBtn = page.getByRole("button", { name: /Index Workspace|Çalışma Alanını Tara/i });

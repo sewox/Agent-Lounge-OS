@@ -382,6 +382,15 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               payload: { task_id: taskId, reason: "notification_click" },
             });
           }
+          // Also focus the banner node directly when listeners race (listen is async).
+          const scoped = taskId
+            ? document.querySelector<HTMLElement>(
+                `[data-approval-chrome][data-task-id="${taskId}"] [data-qa="approval-banner"]`,
+              )
+            : null;
+          const banner =
+            scoped ?? document.querySelector<HTMLElement>('[data-qa="approval-banner"]');
+          banner?.focus({ preventScroll: true });
           return null;
         }
         case "load_custom_approval_sound_data_url": {

@@ -3,26 +3,42 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { onAction } from "@tauri-apps/plugin-notification";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { useLounge } from "@/components/lounge-provider";
 import { isTauri } from "@/lib/lounge";
 
 const APPROVAL_BANNER_FOCUS_EVENT = "approval_banner_focus";
 
+/** Post-hydration Tauri flag — server + first client snapshot stay `false`. */
+let tauriHostClient = false;
+const tauriHostListeners = new Set<() => void>();
+
+function subscribeTauriHost(listener: () => void) {
+  tauriHostListeners.add(listener);
+  return () => {
+    tauriHostListeners.delete(listener);
+  };
+}
+
+function getTauriHostSnapshot() {
+  return tauriHostClient;
+}
+
+function getServerTauriHostSnapshot() {
+  return false;
+}
+
 function focusApprovalBanner(taskId?: string): void {
+  const scopedChrome = taskId
+    ? document.querySelector<HTMLElement>(`[data-approval-chrome][data-task-id="${taskId}"]`)
+    : null;
+  // Always focus the tabindex=-1 banner node — outer chrome has no tabIndex.
   const banner =
+    scopedChrome?.querySelector<HTMLElement>('[data-qa="approval-banner"]') ??
     document.querySelector<HTMLElement>('[data-qa="approval-banner"]') ??
-    document.querySelector<HTMLElement>('[data-approval-chrome="routing"]') ??
+    document.querySelector<HTMLElement>('[data-approval-chrome="routing"] [tabindex]') ??
     document.querySelector<HTMLElement>('[data-approval-chrome="security"]') ??
     document.querySelector<HTMLElement>('[data-approval-chrome="quota"]');
-  if (taskId) {
-    const scoped = document.querySelector<HTMLElement>(
-      `[data-approval-chrome][data-task-id="${taskId}"]`,
-    );
-    (scoped ?? banner)?.scrollIntoView({ block: "nearest" });
-    (scoped ?? banner)?.focus({ preventScroll: true });
-    return;
-  }
   banner?.scrollIntoView({ block: "nearest" });
   banner?.focus({ preventScroll: true });
 }
@@ -49,16 +65,26 @@ export function ApprovalNotificationBridge() {
   const { approval } = useLounge();
   const taskId = approval?.task_id;
   const pendingTaskIdRef = useRef<string | undefined>(undefined);
-  // Gate Tauri-only listeners behind post-mount state so SSR HTML matches the
-  // first client render (avoids React #418 when __TAURI_INTERNALS__ is present).
-  const [tauriReady, setTauriReady] = useState(false);
+  const tauriReady = useSyncExternalStore(
+    subscribeTauriHost,
+    getTauriHostSnapshot,
+    getServerTauriHostSnapshot,
+  );
+  const listenersReadyRef = useRef(false);
 
   useEffect(() => {
     pendingTaskIdRef.current = taskId;
   }, [taskId]);
 
   useEffect(() => {
-    setTauriReady(isTauri());
+    // Defer so the first client paint matches SSR (no #418); then flip external store.
+    const id = window.setTimeout(() => {
+      tauriHostClient = isTauri();
+      for (const listener of tauriHostListeners) {
+        listener();
+      }
+    }, 0);
+    return () => window.clearTimeout(id);
   }, []);
 
   useEffect(() => {
@@ -67,6 +93,7 @@ export function ApprovalNotificationBridge() {
     }
 
     const unlisteners: Array<() => void> = [];
+    let cancelled = false;
 
     void (async () => {
       try {
@@ -75,6 +102,12 @@ export function ApprovalNotificationBridge() {
             focusApprovalBanner(event.payload?.task_id);
           }),
         );
+        if (!cancelled) {
+          listenersReadyRef.current = true;
+          document
+            .querySelector('[data-qa="approval-notification"]')
+            ?.setAttribute("data-listeners-ready", "1");
+        }
       } catch (err) {
         console.warn("[ap-10] approval_banner_focus listen failed:", err);
       }
@@ -103,6 +136,8 @@ export function ApprovalNotificationBridge() {
     })();
 
     return () => {
+      cancelled = true;
+      listenersReadyRef.current = false;
       unlisteners.forEach((fn) => fn());
     };
   }, [tauriReady]);
@@ -151,6 +186,7 @@ export function ApprovalNotificationBridge() {
       aria-hidden
       data-platform-note="Desktop: Rust Reopen/Focused + dock attention → focus_app_for_approval. Plugin onAction is mobile-only. See docs/qa/ap-10-notification-click.md."
       data-tauri-ready={tauriReady ? "1" : "0"}
+      data-listeners-ready="0"
     />
   );
 }

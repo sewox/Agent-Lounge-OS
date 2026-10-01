@@ -342,6 +342,9 @@ test.describe("AP / CP / misc", () => {
     await expect
       .poll(async () => marker.getAttribute("data-tauri-ready"), { timeout: 5_000 })
       .toBe("1");
+    await expect
+      .poll(async () => marker.getAttribute("data-listeners-ready"), { timeout: 5_000 })
+      .toBe("1");
 
     await page.evaluate(() => {
       const f = window.__QA_FIXTURE__;
