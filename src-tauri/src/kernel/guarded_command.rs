@@ -79,10 +79,21 @@ impl GuardedCommand {
 
     fn program_base(&self) -> String {
         let raw = self.program.to_string_lossy();
-        raw.rsplit(['/', '\\'])
+        let base = raw
+            .rsplit(['/', '\\'])
             .next()
             .unwrap_or(&raw)
-            .to_ascii_lowercase()
+            .to_ascii_lowercase();
+        base.strip_suffix(".exe")
+            .map(str::to_string)
+            .unwrap_or(base)
+    }
+
+    fn argv_strings(&self) -> Vec<String> {
+        self.args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
 
     fn ensure_daemon_allowlist(&self) -> Result<()> {
@@ -90,19 +101,17 @@ impl GuardedCommand {
             return Ok(());
         }
         let base = self.program_base();
+        // Exact match after stripping `.exe`; target-triple suffix (`name-triple`) still ok.
+        // Must NOT prefix-match bare names (`kill` ↛ `killall`) — F18.
         let allowed = INTERNAL_DAEMON_ALLOWLIST
             .iter()
-            .any(|p| base == *p || base.starts_with(&format!("{p}-")) || base.starts_with(p));
+            .any(|p| base == *p || base.starts_with(&format!("{p}-")));
         if !allowed {
             bail!("internal_daemon not allowlisted for program: {base}");
         }
         // kill/taskkill: pid-only argv
         if base == "kill" || base == "taskkill" {
-            let args: Vec<String> = self
-                .args
-                .iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
+            let args = self.argv_strings();
             let ok = args.iter().all(|a| {
                 a == "/PID"
                     || a == "/F"
@@ -126,18 +135,13 @@ impl GuardedCommand {
         let line = self.command_line();
         let decision = PolicyGate::evaluate(&line, self.source)?;
         if let PolicyDecision::RequireConfirmation { class, .. } = &decision {
-            let hash = {
-                let args: Vec<String> = self
-                    .args
-                    .iter()
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .collect();
-                command_hash(&self.program.to_string_lossy(), &args)
-            };
+            let prog = self.program.to_string_lossy().into_owned();
+            let args = self.argv_strings();
+            let hash = command_hash(&prog, &args);
             if take_confirmed_allowance(&hash) {
                 return Ok(PolicyDecision::Allow);
             }
-            let event = register_pending(&line, *class, self.source);
+            let event = register_pending(&prog, &args, *class, self.source);
             bail!(
                 "destructive operation requires user confirmation ({:?}): {} confirm_id={}",
                 class,
@@ -239,6 +243,22 @@ mod tests {
     }
 
     #[test]
+    fn internal_daemon_rejects_killall_prefix() {
+        let err = GuardedCommand::new("killall")
+            .args(["nats-server"])
+            .internal_daemon()
+            .into_std_command();
+        assert!(err.is_err(), "kill must not admit killall");
+        assert!(format!("{}", err.unwrap_err()).contains("allowlisted"));
+
+        let err = GuardedCommand::new("kill.exe")
+            .args(["1"])
+            .internal_daemon()
+            .into_std_command();
+        assert!(err.is_ok(), "kill.exe should strip .exe and exact-match");
+    }
+
+    #[test]
     fn confirm_destructive_allows_once() {
         reset_for_tests();
         let err = GuardedCommand::new("rm")
@@ -268,5 +288,25 @@ mod tests {
             .into_std_command();
         assert!(again.is_err());
         assert!(confirm_destructive(&id).is_err());
+    }
+
+    #[test]
+    fn confirm_destructive_allows_arg_with_space() {
+        reset_for_tests();
+        let err = GuardedCommand::new("rm")
+            .args(["-rf", "/tmp/has space"])
+            .source(ActionSource::User)
+            .into_std_command();
+        let msg = format!("{}", err.unwrap_err());
+        let id = msg.split("confirm_id=").nth(1).unwrap().trim().to_string();
+        confirm_destructive(&id).unwrap();
+        let cmd = GuardedCommand::new("rm")
+            .args(["-rf", "/tmp/has space"])
+            .source(ActionSource::User)
+            .into_std_command();
+        assert!(
+            cmd.is_ok(),
+            "register_pending and evaluate must hash the same argv"
+        );
     }
 }

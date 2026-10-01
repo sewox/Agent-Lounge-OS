@@ -97,26 +97,24 @@ pub fn command_hash(program: &str, args: &[impl AsRef<str>]) -> String {
         .collect()
 }
 
-pub fn command_hash_line(command_line: &str) -> String {
-    let parts: Vec<&str> = command_line.split_whitespace().collect();
-    if parts.is_empty() {
-        return command_hash("", &[] as &[&str]);
-    }
-    command_hash(parts[0], &parts[1..])
-}
-
 /// Register a blocked destructive command: emit approval_pending + return token id.
+/// Hash uses the same program + argv as [`GuardedCommand`] evaluate (F18).
 pub fn register_pending(
-    command: &str,
+    program: &str,
+    args: &[String],
     class: DestructiveClass,
     source: ActionSource,
 ) -> DestructivePendingEvent {
     let id = Uuid::new_v4().to_string();
-    let hash = command_hash_line(command);
+    let hash = command_hash(program, args);
+    let command = std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
     let event = DestructivePendingEvent {
         id: id.clone(),
         kind: "destructive".into(),
-        command: command.to_string(),
+        command: command.clone(),
         pattern: format!("{class:?}"),
         source: format!("{source:?}").to_ascii_lowercase(),
         class: format!("{class:?}"),
@@ -129,7 +127,7 @@ pub fn register_pending(
             id.clone(),
             PendingToken {
                 command_hash: hash,
-                command: command.to_string(),
+                command,
                 class,
                 source,
                 created: Instant::now(),
@@ -221,8 +219,8 @@ mod tests {
     #[test]
     fn destructive_confirm_flow_single_use() {
         reset_for_tests();
-        let cmd = "rm -rf /tmp/x";
-        let event = register_pending(cmd, DestructiveClass::PosixRm, ActionSource::Agent);
+        let args = vec!["-rf".into(), "/tmp/x".into()];
+        let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
         let emitted = take_emitted_for_tests();
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].kind, "destructive");
@@ -244,5 +242,18 @@ mod tests {
         // Replay allowance denied.
         assert!(!take_confirmed_allowance(&hash));
         assert!(confirm_destructive(&event.id).is_err());
+    }
+
+    #[test]
+    fn confirm_hash_matches_argv_with_spaces() {
+        reset_for_tests();
+        let args = vec!["-rf".into(), "/tmp/my dir".into()];
+        let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::User);
+        assert_eq!(
+            event.command_hash,
+            command_hash("rm", &["-rf", "/tmp/my dir"])
+        );
+        confirm_destructive(&event.id).unwrap();
+        assert!(take_confirmed_allowance(&event.command_hash));
     }
 }

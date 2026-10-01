@@ -71,7 +71,9 @@ fn migrate_ignored_symbols_unique(conn: &Connection) -> Result<()> {
     if !has_line_unique || has_kind_unique {
         return Ok(());
     }
-    conn.execute_batch(
+    // F19: rebuild atomically — crash mid-migration must not drop the table.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let migrated = conn.execute_batch(
         r#"
         CREATE TABLE ignored_symbols_new (
           id TEXT PRIMARY KEY,
@@ -90,8 +92,17 @@ fn migrate_ignored_symbols_unique(conn: &Connection) -> Result<()> {
         DROP TABLE ignored_symbols;
         ALTER TABLE ignored_symbols_new RENAME TO ignored_symbols;
         "#,
-    )?;
-    Ok(())
+    );
+    match migrated {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err.into())
+        }
+    }
 }
 
 /// Normalize raw path strings for cross-platform comparison (PATH-01).
@@ -1020,8 +1031,11 @@ mod tests {
         assert!(!normalized.contains('\\'));
     }
 
+    /// EX-14 backend proof: bridge may declare large totals while the stored list is
+    /// LIMIT-truncated; `COUNT(*)` over rows reflects what was actually persisted.
+    /// UI wiring that reconciles the two is owned by PR-3 (expected-fail in e2e).
     #[tokio::test]
-    async fn count_star_totals_survive_truncated_node_lists() {
+    async fn ex14_declared_bridge_totals_differ_from_count_star_rows() {
         let store = ExperienceStore::memory().expect("memory db");
         let mut graph = sample_graph();
         // Simulate LIMIT-shaped payload: only 1 of 2 nodes in the list, but counts are real.

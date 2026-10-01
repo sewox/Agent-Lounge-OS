@@ -97,13 +97,6 @@ pub fn windows_opener_argv(path: &str) -> Result<(String, Vec<String>)> {
     if !accepts_cross_platform_path(path) {
         bail!("path must include a separator or Windows drive letter");
     }
-    // Reject shell metacharacters that would be dangerous if ever routed through cmd.
-    // With explorer + single argv they are still passed literally; we keep the check
-    // as defense-in-depth for callers that might shell-escape incorrectly.
-    if path.chars().any(|c| matches!(c, '&' | '|' | '^' | '%')) {
-        // Still open via explorer as one argv — do not reject; metacharacters are data.
-        // The important guarantee is we never hand them to `cmd`.
-    }
     Ok(("explorer.exe".into(), vec![path.to_string()]))
 }
 

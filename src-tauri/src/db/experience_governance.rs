@@ -560,7 +560,9 @@ pub fn cleanup_placeholder_projects(conn: &Connection) -> Result<u64> {
             )
             .optional()?
             .unwrap_or(false);
-        if exists && (empty_repo || zero_graph) {
+        // F19: require both empty repo AND zero graph so a real project that
+        // has a repo_path but is not indexed yet is not soft-hidden.
+        if exists && empty_repo && zero_graph {
             conn.execute(
                 r#"
                 INSERT INTO project_flags(project_id, hidden) VALUES (?1, 1)
@@ -855,15 +857,44 @@ mod tests {
         .unwrap();
 
         let first = cleanup_placeholder_projects(&conn).unwrap();
-        // backend-legacy (empty) hidden; frontend-new has valid repo+node so not hidden by zero_graph —
-        // but wait: frontend-new also has empty row AND a real row. Signature is per project_id:
-        // nodes > 0 and repo_path non-empty → should NOT hide.
+        // backend-legacy: empty repo AND zero graph → hidden.
+        // frontend-new: has valid repo + node → not hidden (empty_repo && zero_graph).
         assert!(first >= 1, "should hide at least backend-legacy");
         assert!(is_project_hidden(&conn, "backend-legacy").unwrap());
         assert!(!is_project_hidden(&conn, "frontend-new").unwrap());
 
         let second = cleanup_placeholder_projects(&conn).unwrap();
         assert_eq!(second, 0, "migration must be one-shot");
+
+        // Repo present but not indexed yet must NOT be hidden (F19 AND rule).
+        let conn_repo_only = Connection::open_in_memory().unwrap();
+        conn_repo_only
+            .execute_batch(
+                r#"
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+            CREATE TABLE project_index (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              repo_path TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              name TEXT NOT NULL,
+              file_path TEXT,
+              line INTEGER,
+              target TEXT,
+              ref_count INTEGER NOT NULL DEFAULT 0,
+              detail TEXT,
+              payload_json TEXT NOT NULL DEFAULT '{}',
+              indexed_at TEXT NOT NULL
+            );
+            INSERT INTO project_index (
+                id, project_id, repo_path, kind, name, indexed_at
+            ) VALUES
+                ('r1', 'frontend-new', '/repos/frontend-new', 'meta', 'frontend-new', '2026-01-01T00:00:00Z');
+            "#,
+            )
+            .unwrap();
+        assert_eq!(cleanup_placeholder_projects(&conn_repo_only).unwrap(), 0);
+        assert!(!is_project_hidden(&conn_repo_only, "frontend-new").unwrap());
 
         // Empty-only placeholder without nodes.
         let conn2 = Connection::open_in_memory().unwrap();
