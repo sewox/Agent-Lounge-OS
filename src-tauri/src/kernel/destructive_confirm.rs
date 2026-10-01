@@ -210,6 +210,14 @@ pub fn reset_for_tests() {
     clear_emitter();
 }
 
+/// Serializes tests that share the process-global destructive registry.
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +226,7 @@ mod tests {
 
     #[test]
     fn destructive_confirm_flow_single_use() {
+        let _guard = test_lock();
         reset_for_tests();
         let args = vec!["-rf".into(), "/tmp/x".into()];
         let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
@@ -246,6 +255,7 @@ mod tests {
 
     #[test]
     fn confirm_hash_matches_argv_with_spaces() {
+        let _guard = test_lock();
         reset_for_tests();
         let args = vec!["-rf".into(), "/tmp/my dir".into()];
         let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::User);

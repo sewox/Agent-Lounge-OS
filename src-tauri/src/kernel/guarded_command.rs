@@ -229,11 +229,12 @@ pub fn would_require_confirmation(
 mod tests {
     use super::*;
     use crate::kernel::destructive_confirm::{
-        confirm_destructive, reset_for_tests, take_emitted_for_tests,
+        confirm_destructive, reset_for_tests, take_emitted_for_tests, test_lock,
     };
 
     #[test]
     fn internal_daemon_rejects_rm() {
+        let _guard = test_lock();
         let err = GuardedCommand::new("rm")
             .args(["-rf", "/tmp/x"])
             .internal_daemon()
@@ -244,6 +245,7 @@ mod tests {
 
     #[test]
     fn internal_daemon_rejects_killall_prefix() {
+        let _guard = test_lock();
         let err = GuardedCommand::new("killall")
             .args(["nats-server"])
             .internal_daemon()
@@ -260,6 +262,7 @@ mod tests {
 
     #[test]
     fn confirm_destructive_allows_once() {
+        let _guard = test_lock();
         reset_for_tests();
         let err = GuardedCommand::new("rm")
             .args(["-rf", "/tmp/pr1-confirm-test"])
@@ -292,6 +295,7 @@ mod tests {
 
     #[test]
     fn confirm_destructive_allows_arg_with_space() {
+        let _guard = test_lock();
         reset_for_tests();
         let err = GuardedCommand::new("rm")
             .args(["-rf", "/tmp/has space"])
