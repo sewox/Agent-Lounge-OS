@@ -178,7 +178,8 @@ export const FULL_FIXTURE: FixtureDataset = {
     projects: [
       {
         name: "Agent-Lounge-OS",
-        repo_path: "/Users/sercan/dev/Agent-Lounge-OS",
+        // Windows root — PATH-01; provider maps repo_path → projects.root_path.
+        repo_path: "C:\\Users\\sercan\\dev\\Agent-Lounge-OS",
         files: 9421,
         node_count: 2286,
         edge_count: 7958,
@@ -212,7 +213,7 @@ export const FULL_FIXTURE: FixtureDataset = {
       },
       {
         name: "EchoMind",
-        repo_path: "/Users/sercan/dev/EchoMind",
+        repo_path: "/home/sercan/dev/EchoMind",
         files: 4120,
         node_count: 1940,
         edge_count: 118,

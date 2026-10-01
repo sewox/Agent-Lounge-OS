@@ -1380,9 +1380,16 @@ mod tests {
             .expect("map");
         assert_eq!(map.projects[0].node_count, 2286);
         assert_eq!(map.projects[0].edge_count, 7958);
-        assert_eq!(map.projects[0].nodes.len(), 1, "row list stays LIMIT-shaped");
+        assert_eq!(
+            map.projects[0].nodes.len(),
+            1,
+            "row list stays LIMIT-shaped"
+        );
         let projects = store.list_indexed_projects().await.expect("list");
-        let lounge = projects.iter().find(|p| p.name == "lounge").expect("lounge");
+        let lounge = projects
+            .iter()
+            .find(|p| p.name == "lounge")
+            .expect("lounge");
         assert_eq!(lounge.nodes, 2286);
         assert_eq!(lounge.edges, 7958);
     }
