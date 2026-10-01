@@ -5,8 +5,8 @@
 //! - Linux: `$XDG_DATA_HOME/AgentLounge/models/laya` veya `~/.local/share/AgentLounge/models/laya`
 //! - Windows: `%APPDATA%\AgentLounge\models\laya`
 //!
-//! `LOUNGE_LAYA_DIR` tam Laya dizinini ezer. Repo `data/laya` yalnızca mevcut
-//! yerel kopya varsa dev fallback’tir; varsayılan indirme hedefi app-support’tur.
+//! `LOUNGE_LAYA_DIR` tam Laya dizinini ezer. Repo `data/laya` yalnızca
+//! `cfg!(debug_assertions)` altında ve dosyalar mevcutsa dev fallback’tir.
 
 #![allow(deprecated)]
 
@@ -365,9 +365,13 @@ pub fn resolve_laya_dir(env: &PathEnv) -> PathBuf {
     if artifacts_present(&prod) {
         return prod;
     }
-    let dev = env.repo_root.join("data/laya");
-    if artifacts_present(&dev) {
-        return dev;
+    // F20: repo `data/laya` is a debug/dev fallback only — never probe CI bake paths in release.
+    #[cfg(debug_assertions)]
+    {
+        let dev = env.repo_root.join("data/laya");
+        if artifacts_present(&dev) {
+            return dev;
+        }
     }
     prod
 }

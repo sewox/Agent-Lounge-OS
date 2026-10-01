@@ -22,12 +22,13 @@ use models::{
 };
 use services::autodiscover::discovery_report;
 use services::{
-    api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys,
+    api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys, data_root,
     enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
-    open_or_focus_graph_window, persist_port, record_dead_snapshot, record_whisper_injection,
-    spawn_event_pump, spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport,
-    EfficiencyReportQuery, GraphUiState, GraphUiStatus, LayaEngineStatus, MemoryBridge,
-    ModelManager, ServiceManager, SharedServices, GRAPH_WINDOW_LABEL,
+    open_or_focus_graph_window, open_path_in_editor, persist_port, record_dead_snapshot,
+    record_whisper_injection, resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump,
+    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, GraphUiState,
+    GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    GRAPH_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
@@ -36,7 +37,7 @@ const DASHBOARD_ROUTE: &str = "/dashboard";
 
 /// `connected_tools` boşsa onboarding, doluysa dashboard.
 pub fn initial_window_route() -> &'static str {
-    match ExperienceStore::open(db::default_db_path(workspace_root())) {
+    match ExperienceStore::open(db::default_db_path(data_root())) {
         Ok(store) => window_route_for_store(&store),
         Err(err) => {
             log::warn!("connected_tools okunamadı, onboarding: {err}");
@@ -77,6 +78,7 @@ pub fn run() {
 pub fn run_with_start_route(start_route: &'static str) {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -86,9 +88,15 @@ pub fn run_with_start_route(start_route: &'static str) {
                 )?;
             }
 
-            let workspace = workspace_root();
-            let store = ExperienceStore::open(db::default_db_path(&workspace))
-                .map_err(|err| err.to_string())?;
+            let workspace = resolve_data_root_for_app(app.handle()).map_err(|err| {
+                format!("uygulama veri dizini hazırlanamadı (LOUNGE_DATA_DIR veya app data): {err}")
+            })?;
+            let store = ExperienceStore::open(db::default_db_path(&workspace)).map_err(|err| {
+                format!(
+                    "experience veritabanı açılamadı ({}): {err}",
+                    db::default_db_path(&workspace).display()
+                )
+            })?;
             open_main_window(app, start_route)?;
             let model = default_model_lock();
             let memory = MemoryBridge::discover().unwrap_or_else(|err| {
@@ -112,6 +120,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             .with_decision_cache(gate.cache())
             .with_workers(workers.clone());
             dispatcher.attach_app(app.handle().clone());
+            services::install_destructive_approval_emitter(
+                app.handle().clone(),
+                "nats://127.0.0.1:4222".into(),
+            );
             let workflow = WorkflowEngine::new("nats://127.0.0.1:4222");
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let models = ModelManager::with_nats_url(bus.nats_url());
@@ -121,6 +133,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             let quota_handle = app.handle().clone();
             let quota_services = services.clone();
             let quota_store = store.clone();
+            let auto_archive_store = store.clone();
             let load_gate = gate.clone();
             let load_app = app.handle().clone();
             let load_models = models.clone();
@@ -210,6 +223,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 }
                 spawn_quota_pump(quota_handle, quota_services, quota_store);
                 spawn_supervisor(supervisor_handle, supervisor_services);
+                spawn_auto_archive(auto_archive_store);
                 spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 let workflow_listen = workflow.clone();
@@ -250,6 +264,19 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_experiences,
             search_experiences,
             search_index_nodes,
+            get_experience,
+            update_experience,
+            archive_experience,
+            unarchive_experience,
+            pin_experience,
+            mark_experience_reviewed,
+            count_unreviewed_experiences,
+            ignore_symbol,
+            unignore_symbol,
+            list_ignored_symbols,
+            open_in_editor,
+            focus_app_for_approval,
+            confirm_destructive,
             trigger_grok_test,
             list_projects,
             list_quotas,
@@ -627,11 +654,148 @@ async fn pull_lmr_model(
 async fn list_experiences(
     state: tauri::State<'_, ExperienceStore>,
     limit: Option<usize>,
+    include_archived: Option<bool>,
 ) -> Result<Vec<LoungeExperience>, String> {
     state
-        .latest(limit.unwrap_or(20))
+        .list_experiences(limit.unwrap_or(20), include_archived.unwrap_or(false))
         .await
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+) -> Result<Option<LoungeExperience>, String> {
+    state.get(id).await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn update_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+    patch: db::ExperienceUpdate,
+) -> Result<(), String> {
+    state
+        .update_experience(id, patch)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn archive_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .archive_experience(id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn unarchive_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .unarchive_experience(id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn pin_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    state
+        .pin_experience(id, pinned)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn mark_experience_reviewed(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .mark_experience_reviewed(id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn count_unreviewed_experiences(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<u64, String> {
+    state
+        .count_unreviewed_experiences()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn ignore_symbol(
+    state: tauri::State<'_, ExperienceStore>,
+    symbol: DeadSymbol,
+) -> Result<(), String> {
+    state
+        .ignore_symbol(symbol)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn unignore_symbol(
+    state: tauri::State<'_, ExperienceStore>,
+    symbol: DeadSymbol,
+) -> Result<(), String> {
+    state
+        .unignore_symbol(symbol)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_ignored_symbols(
+    state: tauri::State<'_, ExperienceStore>,
+    project_id: Option<String>,
+) -> Result<Vec<DeadSymbol>, String> {
+    state
+        .list_ignored_symbols(project_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn open_in_editor(
+    store: tauri::State<'_, ExperienceStore>,
+    path: String,
+    line: Option<i64>,
+    editor_command: Option<String>,
+) -> Result<(), String> {
+    open_path_in_editor(&store, path, line, editor_command)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Notification click / tray activate → focus main window + open approval banner.
+#[tauri::command]
+async fn focus_app_for_approval(
+    app: tauri::AppHandle,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    services::focus_app_for_approval(&app, task_id.as_deref());
+    Ok(())
+}
+
+/// One-shot confirm for a PolicyGate-blocked destructive command (F3).
+#[tauri::command]
+async fn confirm_destructive(id: String) -> Result<(), String> {
+    kernel::confirm_destructive(&id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -848,7 +1012,7 @@ async fn get_discovery_report(
             services::system_ollama_endpoint(),
         )
     };
-    discovery_report(workspace_root(), lounge_endpoint, system_endpoint)
+    discovery_report(data_root(), lounge_endpoint, system_endpoint)
         .await
         .map_err(|err| err.to_string())
 }
@@ -980,11 +1144,4 @@ async fn set_graph_ui_port(
         .await
         .map_err(|err| err.to_string())?;
     Ok(port)
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
 }

@@ -106,8 +106,16 @@ impl IndexGraph {
             name: self.project.clone(),
             repo_path: self.repo_path.clone(),
             files: self.files.unwrap_or(0).max(self.unique_file_count()),
-            node_count: self.node_count.max(self.nodes.len() as u64),
-            edge_count: self.edge_count.max(self.references.len() as u64),
+            node_count: if self.node_count > 0 {
+                self.node_count
+            } else {
+                self.nodes.len() as u64
+            },
+            edge_count: if self.edge_count > 0 {
+                self.edge_count
+            } else {
+                self.references.len() as u64
+            },
             nodes: self.nodes.clone(),
             references: self.references.clone(),
             dead: self.dead.clone(),
@@ -135,8 +143,17 @@ impl IndexGraph {
     }
 
     pub fn snapshot(&self) -> IndexSnapshot {
-        let nodes = self.node_count.max(self.nodes.len() as u64);
-        let edges = self.edge_count.max(self.references.len() as u64);
+        // Prefer stored totals when present — LIMIT-truncated vectors must not overwrite.
+        let nodes = if self.node_count > 0 {
+            self.node_count
+        } else {
+            self.nodes.len() as u64
+        };
+        let edges = if self.edge_count > 0 {
+            self.edge_count
+        } else {
+            self.references.len() as u64
+        };
         IndexSnapshot {
             project: self.project.clone(),
             status: self.status.clone(),

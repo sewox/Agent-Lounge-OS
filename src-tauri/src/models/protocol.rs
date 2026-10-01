@@ -168,6 +168,10 @@ impl LoungeExperience {
     }
 }
 
+/// Soft-delete / lifecycle status for experiences (`active` | `archived`).
+pub const EXPERIENCE_STATUS_ACTIVE: &str = "active";
+pub const EXPERIENCE_STATUS_ARCHIVED: &str = "archived";
+
 /// SQLite `experiences` satırı: id, project_id, agent_id, topic, solution_summary, adr_record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExperienceRecord {
@@ -185,22 +189,81 @@ pub struct ExperienceRecord {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub embedding: Vec<f32>,
+    /// `active` | `archived`
+    #[serde(default = "default_experience_status")]
+    pub status: String,
+    /// MCP-written rows start unreviewed (`false`); migration backfills existing as `true` (K4).
+    #[serde(default)]
+    pub reviewed: bool,
+    #[serde(default)]
+    pub use_count: u64,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+    #[serde(default)]
+    pub is_pinned: bool,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    /// First ADR/content snapshot preserved across edits.
+    #[serde(default)]
+    pub original_content: Option<String>,
+}
+
+fn default_experience_status() -> String {
+    EXPERIENCE_STATUS_ACTIVE.to_string()
+}
+
+impl Default for ExperienceRecord {
+    fn default() -> Self {
+        let created = now_rfc3339();
+        Self {
+            id: String::new(),
+            project_id: String::new(),
+            agent_id: String::new(),
+            topic: String::new(),
+            solution_summary: String::new(),
+            adr_record: String::new(),
+            outcome: ExperienceOutcome::Success,
+            related_task_id: None,
+            tags: Vec::new(),
+            created_at: created.clone(),
+            embedding: Vec::new(),
+            status: EXPERIENCE_STATUS_ACTIVE.into(),
+            reviewed: false,
+            use_count: 0,
+            last_used_at: None,
+            archived_at: None,
+            is_pinned: false,
+            updated_at: Some(created),
+            original_content: None,
+        }
+    }
 }
 
 impl ExperienceRecord {
     pub fn from_lounge(experience: &LoungeExperience, topic: impl Into<String>) -> Self {
+        let content = experience.adr_summary.clone();
         Self {
             id: experience.id.clone(),
             project_id: experience.project_id.clone(),
             agent_id: experience.agent.clone(),
             topic: topic.into(),
-            solution_summary: experience.adr_summary.clone(),
-            adr_record: experience.adr_summary.clone(),
+            solution_summary: content.clone(),
+            adr_record: content.clone(),
             outcome: experience.outcome.clone(),
             related_task_id: experience.related_task_id.clone(),
             tags: experience.tags.clone(),
             created_at: experience.created_at.clone(),
             embedding: Vec::new(),
+            status: EXPERIENCE_STATUS_ACTIVE.into(),
+            reviewed: false,
+            use_count: 0,
+            last_used_at: None,
+            archived_at: None,
+            is_pinned: false,
+            updated_at: Some(experience.created_at.clone()),
+            original_content: Some(content),
         }
     }
 
@@ -213,18 +276,31 @@ impl ExperienceRecord {
     ) -> Self {
         let solution_summary = solution_summary.into();
         let adr_record = adr_record.into();
+        let created = now_rfc3339();
         Self {
             id: Uuid::new_v4().to_string(),
             project_id: task.project_id.clone(),
             agent_id: task.source_agent.clone(),
             topic: task.summary.clone(),
-            solution_summary,
-            adr_record,
+            solution_summary: solution_summary.clone(),
+            adr_record: adr_record.clone(),
             outcome,
             related_task_id: Some(task.id.clone()),
             tags,
-            created_at: now_rfc3339(),
+            created_at: created.clone(),
             embedding: Vec::new(),
+            status: EXPERIENCE_STATUS_ACTIVE.into(),
+            reviewed: false,
+            use_count: 0,
+            last_used_at: None,
+            archived_at: None,
+            is_pinned: false,
+            updated_at: Some(created),
+            original_content: Some(if adr_record.is_empty() {
+                solution_summary
+            } else {
+                adr_record
+            }),
         }
     }
 

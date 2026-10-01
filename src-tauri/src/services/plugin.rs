@@ -75,12 +75,7 @@ pub fn lounge_workspace() -> PathBuf {
     std::env::var_os("LOUNGE_WORKSPACE")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-        })
+        .unwrap_or_else(super::probe::data_root)
 }
 
 fn lounge_plugin_dir(workspace: &Path) -> PathBuf {
