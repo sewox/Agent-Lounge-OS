@@ -214,6 +214,7 @@ impl ExperienceStore {
                     related_task_id: None,
                     tags: vec![format!("score:{:.2}", hit.score)],
                     created_at: crate::models::now_rfc3339(),
+                    ..Default::default()
                 });
             }
         }
@@ -601,7 +602,7 @@ fn latest_blocking(
         "SELECT payload_json, {RECORD_SELECT_COLS}
          FROM experiences
          {status_clause}
-         ORDER BY created_at DESC LIMIT ?1"
+         ORDER BY is_pinned DESC, created_at DESC LIMIT ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![limit as i64], |row| {

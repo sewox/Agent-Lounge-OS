@@ -130,6 +130,15 @@ export type LoungeExperience = {
   related_task_id?: string | null;
   tags: string[];
   created_at: string;
+  /** `active` | `archived` */
+  status?: string;
+  reviewed?: boolean;
+  use_count?: number;
+  last_used_at?: string | null;
+  archived_at?: string | null;
+  is_pinned?: boolean;
+  updated_at?: string | null;
+  original_content?: string | null;
 };
 
 export type NatsEvent = {

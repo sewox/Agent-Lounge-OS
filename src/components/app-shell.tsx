@@ -66,6 +66,7 @@ const TITLES: Record<string, string> = {
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const {
+    unreviewedCount,
     report,
     kernel,
     model,
@@ -720,6 +721,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                   <span className={`flex-1 font-body ${active ? "font-medium text-on-surface" : ""}`}>
                     {item.label}
                   </span>
+                  {item.id === "vault" && unreviewedCount > 0 ? (
+                    <span
+                      data-qa="unreviewed-count"
+                      className="tnum min-w-[1.25rem] rounded-full bg-secondary px-1.5 py-0.5 text-center font-mono text-meta text-on-secondary"
+                    >
+                      {unreviewedCount}
+                    </span>
+                  ) : null}
                   {item.id === "stream" ? <span className="h-1.5 w-1.5 animate-ping rounded-full bg-primary" /> : null}
                 </Link>
               );

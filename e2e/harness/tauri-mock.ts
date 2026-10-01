@@ -142,9 +142,92 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           if (rejectLive) {
             throw new Error("list_experiences unavailable");
           }
-          const limit = typeof args?.limit === "number" ? args.limit : f.experiences.length;
-          return f.experiences.slice(0, limit);
+          const limit = typeof args?.limit === "number" ? args.limit : 100;
+          const includeArchived = Boolean(args?.include_archived);
+          const rows = f.experiences
+            .filter((row) => includeArchived || (row.status ?? "active") !== "archived")
+            .slice()
+            .sort((left, right) => {
+              const pinDelta = Number(Boolean(right.is_pinned)) - Number(Boolean(left.is_pinned));
+              if (pinDelta !== 0) {
+                return pinDelta;
+              }
+              return right.created_at.localeCompare(left.created_at);
+            });
+          return rows.slice(0, limit);
         }
+        case "get_experience": {
+          const id = String(args?.id ?? "");
+          return f.experiences.find((row) => row.id === id) ?? null;
+        }
+        case "update_experience": {
+          const id = String(args?.id ?? "");
+          const patch = (args?.patch ?? {}) as Record<string, unknown>;
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row) {
+            throw new Error(`not found: ${id}`);
+          }
+          if (typeof patch.adr_summary === "string") {
+            if (!row.original_content) {
+              row.original_content = row.adr_summary;
+            }
+            row.adr_summary = patch.adr_summary;
+          }
+          if (typeof patch.project_id === "string") {
+            row.project_id = patch.project_id;
+          }
+          if (typeof patch.outcome === "string") {
+            row.outcome = patch.outcome as typeof row.outcome;
+          }
+          if (Array.isArray(patch.tags)) {
+            row.tags = patch.tags.map(String);
+          }
+          row.updated_at = new Date().toISOString();
+          return null;
+        }
+        case "archive_experience": {
+          const id = String(args?.id ?? "");
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row) {
+            throw new Error(`not found: ${id}`);
+          }
+          row.status = "archived";
+          row.archived_at = new Date().toISOString();
+          return null;
+        }
+        case "unarchive_experience": {
+          const id = String(args?.id ?? "");
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row) {
+            throw new Error(`not found: ${id}`);
+          }
+          row.status = "active";
+          row.archived_at = null;
+          return null;
+        }
+        case "pin_experience": {
+          const id = String(args?.id ?? "");
+          const pinned = Boolean(args?.pinned);
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row) {
+            throw new Error(`not found: ${id}`);
+          }
+          row.is_pinned = pinned;
+          return null;
+        }
+        case "mark_experience_reviewed": {
+          const id = String(args?.id ?? "");
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row) {
+            throw new Error(`not found: ${id}`);
+          }
+          row.reviewed = true;
+          return null;
+        }
+        case "count_unreviewed_experiences":
+          return f.experiences.filter(
+            (row) => row.reviewed === false && (row.status ?? "active") === "active",
+          ).length;
         case "search_experiences": {
           if (rejectLive) {
             throw new Error("search_experiences unavailable");
@@ -363,12 +446,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             tasks: 3,
             successes: 2,
           };
-        // PR-1 stubs — expected to be missing today; returning errors surfaces missing UX.
-        case "get_experience":
-        case "update_experience":
+        // PR-4+ stubs — returning errors surfaces missing UX.
         case "delete_experience":
-        case "archive_experience":
-        case "pin_experience":
         case "approve_experience":
         case "open_in_editor":
           return null;

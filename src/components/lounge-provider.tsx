@@ -68,6 +68,11 @@ import {
 import { formatSymbolFullPathLine } from "@/lib/dead-symbols";
 import { deadSymbolStrings as dsStrings } from "@/lib/strings/dead-symbols";
 import {
+  experienceMatchesPatch,
+  sortExperiencesForDisplay,
+  type ExperienceUpdatePatch,
+} from "@/lib/experience";
+import {
   browserEvents,
   browserExperiences,
   browserQuotas,
@@ -104,6 +109,24 @@ type LoungeContextValue = {
   setOpenCommandPalette: Dispatch<SetStateAction<boolean>>;
   switchProject: (name: string | null) => void;
   focusExperience: (experience: LoungeExperience) => void;
+  unreviewedCount: number;
+  showArchived: boolean;
+  setShowArchived: Dispatch<SetStateAction<boolean>>;
+  experienceDrawerOpen: boolean;
+  experienceDetail: LoungeExperience | null;
+  experienceDetailLoading: boolean;
+  experienceDetailError: string | null;
+  experienceEditing: boolean;
+  setExperienceEditing: Dispatch<SetStateAction<boolean>>;
+  openExperience: (id: string) => Promise<void>;
+  closeExperience: () => void;
+  refreshExperiences: (includeArchivedOverride?: boolean) => Promise<void>;
+  updateExperience: (id: string, patch: ExperienceUpdatePatch) => Promise<void>;
+  archiveExperience: (id: string) => Promise<void>;
+  unarchiveExperience: (id: string) => Promise<void>;
+  pinExperience: (id: string, pinned: boolean) => Promise<void>;
+  markExperienceReviewed: (id: string) => Promise<void>;
+  markAllExperiencesReviewed: () => Promise<void>;
   clock: string;
   indexing: boolean;
   indexNotice: IndexNotice | null;
@@ -160,6 +183,13 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [ignoredSymbols, setIgnoredSymbols] = useState<DeadSymbol[]>([]);
   const [deadSymbolNotice, setDeadSymbolNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [unreviewedCount, setUnreviewedCount] = useState(0);
+  const [showArchived, setShowArchived] = useState(false);
+  const [experienceDrawerId, setExperienceDrawerId] = useState<string | null>(null);
+  const [experienceDetail, setExperienceDetail] = useState<LoungeExperience | null>(null);
+  const [experienceDetailLoading, setExperienceDetailLoading] = useState(false);
+  const [experienceDetailError, setExperienceDetailError] = useState<string | null>(null);
+  const [experienceEditing, setExperienceEditing] = useState(false);
   const [openCommandPalette, setOpenCommandPalette] = useState(false);
   const [clock, setClock] = useState("--:--");
   const whisperFocusTimer = useRef<number | null>(null);
@@ -176,17 +206,33 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [decisionMsgTimes, setDecisionMsgTimes] = useState<MsgTick[]>([]);
   const lastTelemetryId = useRef<string | null>(null);
 
+  const refreshExperiences = useCallback(async (includeArchivedOverride?: boolean) => {
+    if (!isTauri()) {
+      return;
+    }
+    const includeArchived = includeArchivedOverride ?? showArchived;
+    try {
+      const rows = await invoke<LoungeExperience[]>("list_experiences", {
+        limit: 100,
+        include_archived: includeArchived,
+      });
+      setExperiences(sortExperiencesForDisplay(rows));
+    } catch {
+      setExperiences([]);
+    }
+    try {
+      const count = await invoke<number>("count_unreviewed_experiences");
+      setUnreviewedCount(Number(count));
+    } catch {
+      setUnreviewedCount(0);
+    }
+  }, [showArchived]);
+
   const refreshSemantic = useCallback(async () => {
     if (!isTauri()) {
       return;
     }
-    try {
-      const rows = await invoke<LoungeExperience[]>("list_experiences", { limit: 12 });
-      setExperiences(rows);
-    } catch {
-      /* Live mode: never keep browser fixtures — show empty vault. */
-      setExperiences([]);
-    }
+    await refreshExperiences();
     try {
       const map = await invoke<SemanticMap>("get_semantic_map");
       if (map.projects.length > 0) {
@@ -233,7 +279,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     } catch {
       setIgnoredSymbols([]);
     }
-  }, []);
+  }, [refreshExperiences]);
 
   const syncInstalledModels = useCallback(async () => {
     if (!isTauri()) {
@@ -509,26 +555,158 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     setSelectedProject(name);
   }, []);
 
-  const focusExperience = useCallback((experience: LoungeExperience) => {
-    setSelectedProject(experience.project_id || null);
-    setQuery(experience.adr_summary.slice(0, 64));
-    setExperiences((current) => {
-      if (current.some((row) => row.id === experience.id)) {
-        return current;
-      }
-      return [experience, ...current];
-    });
-    setWhisperedExperienceIds([experience.id]);
-    if (whisperFocusTimer.current != null) {
-      window.clearTimeout(whisperFocusTimer.current);
-    }
-    whisperFocusTimer.current = window.setTimeout(() => {
-      setWhisperedExperienceIds((ids) =>
-        ids.length === 1 && ids[0] === experience.id ? [] : ids,
-      );
-      whisperFocusTimer.current = null;
-    }, WHISPER_FOCUS_MS);
+  const closeExperience = useCallback(() => {
+    setExperienceDrawerId(null);
+    setExperienceDetail(null);
+    setExperienceDetailLoading(false);
+    setExperienceDetailError(null);
+    setExperienceEditing(false);
   }, []);
+
+  const openExperience = useCallback(
+    async (id: string) => {
+      setExperienceDrawerId(id);
+      setExperienceEditing(false);
+      setExperienceDetailLoading(true);
+      setExperienceDetailError(null);
+      try {
+        const row = await invoke<LoungeExperience | null>("get_experience", { id });
+        if (!row) {
+          setExperienceDetail(null);
+          setExperienceDetailError("Experience not found");
+          return;
+        }
+        setExperienceDetail(row);
+        if (row.reviewed === false) {
+          await invoke("mark_experience_reviewed", { id });
+          setUnreviewedCount((current) => Math.max(0, current - 1));
+          setExperiences((current) =>
+            current.map((item) => (item.id === id ? { ...item, reviewed: true } : item)),
+          );
+          setExperienceDetail({ ...row, reviewed: true });
+        }
+      } catch (error) {
+        setExperienceDetailError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setExperienceDetailLoading(false);
+      }
+    },
+    [],
+  );
+
+  const updateExperience = useCallback(
+    async (id: string, patch: ExperienceUpdatePatch) => {
+      await invoke("update_experience", { id, patch });
+      const refreshed = await invoke<LoungeExperience | null>("get_experience", { id });
+      if (refreshed) {
+        setExperienceDetail(refreshed);
+        setExperiences((current) =>
+          sortExperiencesForDisplay(
+            current.map((row) => (row.id === id ? refreshed : row)),
+          ),
+        );
+      } else {
+        setExperiences((current) =>
+          sortExperiencesForDisplay(
+            current.map((row) => (row.id === id ? experienceMatchesPatch(row, patch) : row)),
+          ),
+        );
+      }
+    },
+    [],
+  );
+
+  const archiveExperience = useCallback(
+    async (id: string) => {
+      await invoke("archive_experience", { id });
+      if (!showArchived) {
+        setExperiences((current) => current.filter((row) => row.id !== id));
+        closeExperience();
+      } else {
+        setExperiences((current) =>
+          current.map((row) =>
+            row.id === id ? { ...row, status: "archived", archived_at: new Date().toISOString() } : row,
+          ),
+        );
+        setExperienceDetail((current) =>
+          current?.id === id
+            ? { ...current, status: "archived", archived_at: new Date().toISOString() }
+            : current,
+        );
+      }
+      await refreshExperiences();
+    },
+    [closeExperience, refreshExperiences, showArchived],
+  );
+
+  const unarchiveExperience = useCallback(
+    async (id: string) => {
+      await invoke("unarchive_experience", { id });
+      await refreshExperiences();
+      const refreshed = await invoke<LoungeExperience | null>("get_experience", { id });
+      if (refreshed) {
+        setExperienceDetail(refreshed);
+      }
+    },
+    [refreshExperiences],
+  );
+
+  const pinExperience = useCallback(async (id: string, pinned: boolean) => {
+    await invoke("pin_experience", { id, pinned });
+    const patch = { is_pinned: pinned };
+    setExperiences((current) =>
+      sortExperiencesForDisplay(
+        current.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+      ),
+    );
+    setExperienceDetail((current) => (current?.id === id ? { ...current, ...patch } : current));
+  }, []);
+
+  const markExperienceReviewed = useCallback(async (id: string) => {
+    await invoke("mark_experience_reviewed", { id });
+    setUnreviewedCount((current) => Math.max(0, current - 1));
+    setExperiences((current) =>
+      current.map((row) => (row.id === id ? { ...row, reviewed: true } : row)),
+    );
+    setExperienceDetail((current) =>
+      current?.id === id ? { ...current, reviewed: true } : current,
+    );
+  }, []);
+
+  const markAllExperiencesReviewed = useCallback(async () => {
+    const pending = experiences.filter((row) => row.reviewed === false && row.status !== "archived");
+    await Promise.all(
+      pending.map((row) => invoke("mark_experience_reviewed", { id: row.id })),
+    );
+    setUnreviewedCount(0);
+    setExperiences((current) => current.map((row) => ({ ...row, reviewed: true })));
+    setExperienceDetail((current) => (current ? { ...current, reviewed: true } : current));
+  }, [experiences]);
+
+  const focusExperience = useCallback(
+    (experience: LoungeExperience) => {
+      setSelectedProject(experience.project_id || null);
+      setQuery("");
+      setExperiences((current) => {
+        if (current.some((row) => row.id === experience.id)) {
+          return current;
+        }
+        return sortExperiencesForDisplay([experience, ...current]);
+      });
+      setWhisperedExperienceIds([experience.id]);
+      void openExperience(experience.id);
+      if (whisperFocusTimer.current != null) {
+        window.clearTimeout(whisperFocusTimer.current);
+      }
+      whisperFocusTimer.current = window.setTimeout(() => {
+        setWhisperedExperienceIds((ids) =>
+          ids.length === 1 && ids[0] === experience.id ? [] : ids,
+        );
+        whisperFocusTimer.current = null;
+      }, WHISPER_FOCUS_MS);
+    },
+    [openExperience],
+  );
 
   useEffect(() => {
     approvalRef.current = approval;
@@ -932,6 +1110,24 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setOpenCommandPalette,
       switchProject,
       focusExperience,
+      unreviewedCount,
+      showArchived,
+      setShowArchived,
+      experienceDrawerOpen: experienceDrawerId != null,
+      experienceDetail,
+      experienceDetailLoading,
+      experienceDetailError,
+      experienceEditing,
+      setExperienceEditing,
+      openExperience,
+      closeExperience,
+      refreshExperiences,
+      updateExperience,
+      archiveExperience,
+      unarchiveExperience,
+      pinExperience,
+      markExperienceReviewed,
+      markAllExperiencesReviewed,
       clock,
       indexing,
       indexNotice,
@@ -983,6 +1179,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       openCommandPalette,
       switchProject,
       focusExperience,
+      unreviewedCount,
+      showArchived,
+      experienceDrawerId,
+      experienceDetail,
+      experienceDetailLoading,
+      experienceDetailError,
+      experienceEditing,
+      openExperience,
+      closeExperience,
+      refreshExperiences,
+      updateExperience,
+      archiveExperience,
+      unarchiveExperience,
+      pinExperience,
+      markExperienceReviewed,
+      markAllExperiencesReviewed,
       clock,
       indexing,
       indexNotice,

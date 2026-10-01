@@ -6,7 +6,16 @@ import { GraphUiButton } from "@/components/graph-ui-button";
 import { GraphUiSettings } from "@/components/graph-ui-settings";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
+import { ExperienceDrawer, VaultPathReference } from "@/components/experience-drawer";
 import { SemanticMap } from "@/components/SemanticMap";
+import {
+  formatDisplayPath,
+  formatExperienceLogSummary,
+  isExperienceArchived,
+  resolveGraphTotals,
+  sortExperiencesForDisplay,
+} from "@/lib/experience";
+import { vaultStrings as vaultS } from "@/lib/strings/vault";
 import { useUiScale } from "@/components/ui-scale-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
@@ -32,7 +41,6 @@ import {
   PAGE_SIZE,
   pageCount,
   pageSlice,
-  pathBasename,
   quotaBarClass,
   quotaToneClass,
   resolveDeadSymbolCount,
@@ -409,13 +417,23 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     experiences,
     projects,
     query,
-    lastIndex,
     semanticMap,
     deadSymbols,
     whisperedExperienceIds,
     selectedProject,
     switchProject,
     markWhisperUseful,
+    showArchived,
+    setShowArchived,
+    unreviewedCount,
+    markAllExperiencesReviewed,
+    refreshExperiences,
+    openExperience,
+    experienceDrawerOpen,
+    experienceDetail,
+    experienceDetailLoading,
+    experienceDetailError,
+    closeExperience,
   } = useLounge();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const [selectionProject, setSelectionProject] = useState(selectedProject);
@@ -434,16 +452,21 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     }
   }
 
-  const fileTotal =
-    semanticMap.projects.reduce((sum, row) => sum + row.files, 0) ||
-    projects.reduce((sum, row) => sum + (row.files ?? 0), 0) ||
-    lastIndex?.files ||
-    0;
-  const edgeTotal =
-    semanticMap.projects.reduce((sum, row) => sum + row.edge_count, 0) ||
-    projects.reduce((sum, row) => sum + row.edges, 0);
+  const graphTotals = useMemo(
+    () => resolveGraphTotals({ projects, semanticMap }),
+    [projects, semanticMap],
+  );
+  const pathSamples = useMemo(() => {
+    const fromDead = deadSymbols.map((row) => row.file).filter(Boolean) as string[];
+    const fromProjects = projects.map((row) => row.root_path).filter(Boolean) as string[];
+    const fromMap = semanticMap.projects.map((row) => row.repo_path).filter(Boolean);
+    return Array.from(new Set([...fromDead, ...fromProjects, ...fromMap]));
+  }, [deadSymbols, projects, semanticMap.projects]);
   const log = useMemo(
-    () => experiencesMatchingSelection(experiences, selected, query),
+    () =>
+      sortExperiencesForDisplay(
+        experiencesMatchingSelection(experiences, selected, query),
+      ),
     [experiences, selected, query],
   );
   const deadForNode = useMemo(
@@ -494,8 +517,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <SemanticMap
             semanticMap={semanticMap}
             projects={projects}
-            fileTotal={fileTotal}
-            edgeTotal={edgeTotal}
+            graphTotals={graphTotals}
             selected={selected}
             onSelect={(next) => {
               setSelected(next);
@@ -512,12 +534,41 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           data-qa="panel"
           className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2.5 font-body"
         >
+          <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2">
+            <div className="font-mono text-meta text-on-surface-variant">
+              {vaultS.totalExperiences(log.length)}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowArchived((current) => {
+                    const next = !current;
+                    void refreshExperiences(next);
+                    return next;
+                  });
+                }}
+                className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
+              >
+                {showArchived ? vaultS.hideArchived : vaultS.showArchived}
+              </button>
+              {unreviewedCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void markAllExperiencesReviewed()}
+                  className="min-h-8 rounded border border-secondary/40 px-2 py-1 font-body text-meta text-secondary hover:bg-secondary/10"
+                >
+                  {vaultS.markAllReviewed}
+                </button>
+              ) : null}
+            </div>
+          </div>
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
               <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
-                <span>Dead Symbols</span>
+                <span>{vaultS.deadSymbols}</span>
                 <span className={deadForNode.length > 0 ? "text-error" : "text-outline"}>
-                  {deadForNode.length > 0 ? `${deadForNode.length} uyarı` : "temiz"}
+                  {deadForNode.length > 0 ? vaultS.warnings(deadForNode.length) : vaultS.clean}
                 </span>
               </div>
               {deadForNode.length === 0 ? (
@@ -537,7 +588,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                           <div className="truncate text-meta text-on-surface-variant">
                             {symbol.detail ||
                               (symbol.file
-                                ? `${pathBasename(symbol.file) || symbol.file}${
+                                ? `${formatDisplayPath(symbol.file)}${
                                     symbol.line != null ? `:${symbol.line}` : ""
                                   }`
                                 : symbol.kind)}
@@ -558,37 +609,44 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             </div>
           ) : null}
           <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
-            <span>Experience Log</span>
+            <span>{vaultS.experienceLog}</span>
             <span
               className={
                 whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
               }
             >
               {whispered.size > 0
-                ? `fısıltı · ${whispered.size}`
+                ? vaultS.whisperLive(whispered.size)
                 : selected
-                  ? `filter · ${selected.name}`
-                  : "Synced"}
+                  ? vaultS.filter(selected.name)
+                  : vaultS.synced}
             </span>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body">
             {logVisible.length === 0 ? (
               <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
                 {selected
-                  ? `Bu düğüm için experience yok · ${selected.name}`
-                  : "Experience kaydı yok"}
+                  ? vaultS.noExperiencesForNode(selected.name)
+                  : vaultS.noExperiences}
               </div>
             ) : (
               logVisible.map((item) => {
                 const isWhisper = whispered.has(item.id);
                 const alreadyUseful = markedUseful.has(item.id);
+                const archived = isExperienceArchived(item);
+                const summary = formatExperienceLogSummary(item.adr_summary);
                 return (
-                  <div
+                  <button
                     key={item.id}
-                    className={`space-y-1 rounded border p-1.5 transition-colors ${
+                    type="button"
+                    data-qa="experience-card"
+                    onClick={() => void openExperience(item.id)}
+                    className={`w-full space-y-1 rounded border p-1.5 text-left transition-colors ${
                       isWhisper
                         ? "border-primary bg-primary-container/20 shadow-[0_0_0_1px_var(--color-primary)]"
-                        : "border-outline-variant/40 bg-surface-container-high/60"
+                        : archived
+                          ? "border-outline-variant/30 bg-surface-container-high/30 opacity-70"
+                          : "border-outline-variant/40 bg-surface-container-high/60 hover:bg-surface-container-high"
                     }`}
                   >
                     <div className="flex items-center justify-between">
@@ -596,9 +654,24 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                         {formatExperienceTime(item.created_at)}
                       </span>
                       <span className="flex items-center gap-1">
+                        {item.is_pinned ? (
+                          <span className="rounded border border-primary/40 px-1 text-meta text-primary">
+                            PIN
+                          </span>
+                        ) : null}
+                        {archived ? (
+                          <span className="rounded border border-outline-variant px-1 text-meta text-outline uppercase">
+                            {vaultS.archivedLabel}
+                          </span>
+                        ) : null}
+                        {item.reviewed === false ? (
+                          <span className="rounded border border-secondary/40 px-1 text-meta text-secondary uppercase">
+                            {vaultS.unreviewed}
+                          </span>
+                        ) : null}
                         {isWhisper ? (
                           <span className="rounded border border-primary/50 px-1 text-meta text-primary">
-                            WHISPER
+                            {vaultS.whisper}
                           </span>
                         ) : null}
                         <span
@@ -615,9 +688,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                     <div className="break-words font-mono text-body font-medium text-on-surface">
                       {item.project_id}
                     </div>
-                    <div className="line-clamp-3 font-body text-body leading-normal text-outline">
-                      “{item.adr_summary}”
-                    </div>
+                    <div className="font-body text-body leading-normal text-outline">{summary}</div>
                     {isWhisper ? (
                       <div className="flex justify-end pt-0.5">
                         <button
@@ -633,21 +704,32 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                           className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
                           aria-label="Bu fısıltıyı faydalı olarak işaretle"
                         >
-                          {alreadyUseful ? "Faydalı ✓" : "Faydalı"}
+                          {alreadyUseful ? vaultS.usefulDone : vaultS.useful}
                         </button>
                       </div>
                     ) : null}
-                  </div>
+                  </button>
                 );
               })
             )}
           </div>
+          <VaultPathReference paths={pathSamples} />
         </div>
       </div>
       <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline">
-        <span>codebase-memory-mcp · {repoCount} repos</span>
+        <span>
+          codebase-memory-mcp · {repoCount} repos · {vaultS.totalExperiences(log.length)}
+        </span>
         <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
+      <ExperienceDrawer
+        key={experienceDetail?.id ?? "closed"}
+        open={experienceDrawerOpen}
+        experience={experienceDetail}
+        loading={experienceDetailLoading}
+        error={experienceDetailError}
+        onClose={closeExperience}
+      />
     </section>
   );
 }

@@ -4,6 +4,8 @@ import { useMemo, useState } from "react";
 import { Icon } from "@/components/icons";
 import { IndexEmptyState } from "@/components/index-empty-state";
 import { Pager } from "@/components/ui";
+import { formatDisplayPath } from "@/lib/experience";
+import { vaultStrings as vaultS } from "@/lib/strings/vault";
 import {
   pageCount,
   pageSlice,
@@ -28,14 +30,27 @@ type MapRow = {
   depth: number;
 };
 
+type GraphTotals = {
+  nodes: number;
+  edges: number;
+  files: number;
+};
+
 type SemanticMapProps = {
   semanticMap: SemanticMapData;
   projects: ProjectSummary[];
-  fileTotal: number;
-  edgeTotal: number;
+  graphTotals: GraphTotals;
   selected: SemanticMapSelection | null;
   onSelect: (next: SemanticMapSelection | null) => void;
 };
+
+function projectTotals(name: string, projects: ProjectSummary[], fallbackNodes: number, fallbackEdges: number) {
+  const summary = projects.find((row) => row.name === name);
+  if (summary) {
+    return { nodes: summary.nodes, edges: summary.edges };
+  }
+  return { nodes: fallbackNodes, edges: fallbackEdges };
+}
 
 function buildRows(
   semanticMap: SemanticMapData,
@@ -45,6 +60,12 @@ function buildRows(
   if (semanticMap.projects.length > 0) {
     const rows: MapRow[] = [];
     for (const project of semanticMap.projects) {
+      const totals = projectTotals(
+        project.name,
+        projects,
+        project.node_count,
+        project.edge_count,
+      );
       rows.push({
         key: `proj:${project.name}:${project.repo_path}`,
         selection: {
@@ -55,7 +76,7 @@ function buildRows(
           project: project.name,
         },
         label: project.name || "unnamed",
-        meta: `${project.edge_count} edges · ${project.node_count} nodes`,
+        meta: `${totals.edges} edges · ${totals.nodes} AST nodes`,
         kind: "project",
         depth: 0,
       });
@@ -122,7 +143,7 @@ function buildRows(
         project: row.name,
       },
       label: row.name || "unnamed",
-      meta: `${row.edges} edges · ${row.nodes} nodes`,
+      meta: `${row.edges} edges · ${row.nodes} AST nodes`,
       kind: "project" as const,
       depth: 0,
     }));
@@ -132,7 +153,7 @@ function buildRows(
 }
 
 function nodeRow(project: string, node: AstNode): MapRow {
-  const file = pathBasename(node.file) || node.file || "—";
+  const file = formatDisplayPath(pathBasename(node.file) || node.file);
   return {
     key: `node:${project}:${node.id || node.name}:${node.line ?? ""}`,
     selection: {
@@ -169,8 +190,7 @@ function selectionKey(row: SemanticMapSelection | null): string | null {
 export function SemanticMap({
   semanticMap,
   projects,
-  fileTotal,
-  edgeTotal,
+  graphTotals,
   selected,
   onSelect,
 }: SemanticMapProps) {
@@ -201,9 +221,9 @@ export function SemanticMap({
       <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
         <span>Indexed Files</span>
         <span className="text-on-surface-variant">
-          {fileTotal > 0
-            ? `${fileTotal} files · ${edgeTotal} edges`
-            : `${edgeTotal} edges · ${repoCount} repos`}
+          {graphTotals.files > 0
+            ? `${vaultS.files(graphTotals.files)} · ${repoCount} repos`
+            : `${repoCount} repos`}
         </span>
       </div>
       <div className="min-h-0 flex-1 space-y-1 overflow-auto font-body text-body">

@@ -397,6 +397,7 @@ fn map_lounge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::Lo
         related_task_id: row.get(7)?,
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
         created_at: row.get(9)?,
+        ..Default::default()
     })
 }
 

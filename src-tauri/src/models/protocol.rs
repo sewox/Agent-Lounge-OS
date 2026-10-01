@@ -157,6 +157,51 @@ pub struct LoungeExperience {
     #[serde(default)]
     pub tags: Vec<String>,
     pub created_at: String,
+    /// `active` | `archived`
+    #[serde(default = "default_experience_status")]
+    pub status: String,
+    #[serde(default = "default_reviewed_true")]
+    pub reviewed: bool,
+    #[serde(default)]
+    pub use_count: u64,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+    #[serde(default)]
+    pub is_pinned: bool,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub original_content: Option<String>,
+}
+
+fn default_reviewed_true() -> bool {
+    true
+}
+
+impl Default for LoungeExperience {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            msg_type: "experience".into(),
+            agent: String::new(),
+            project_id: String::new(),
+            adr_summary: String::new(),
+            outcome: ExperienceOutcome::Success,
+            related_task_id: None,
+            tags: Vec::new(),
+            created_at: now_rfc3339(),
+            status: default_experience_status(),
+            reviewed: default_reviewed_true(),
+            use_count: 0,
+            last_used_at: None,
+            archived_at: None,
+            is_pinned: false,
+            updated_at: None,
+            original_content: None,
+        }
+    }
 }
 
 impl LoungeExperience {
@@ -176,6 +221,7 @@ impl LoungeExperience {
             related_task_id: Some(task.id.clone()),
             tags,
             created_at: now_rfc3339(),
+            ..Default::default()
         }
     }
 }
@@ -338,6 +384,14 @@ impl ExperienceRecord {
             related_task_id: self.related_task_id.clone(),
             tags: self.tags.clone(),
             created_at: self.created_at.clone(),
+            status: self.status.clone(),
+            reviewed: self.reviewed,
+            use_count: self.use_count,
+            last_used_at: self.last_used_at.clone(),
+            archived_at: self.archived_at.clone(),
+            is_pinned: self.is_pinned,
+            updated_at: self.updated_at.clone(),
+            original_content: self.original_content.clone(),
         }
     }
 }

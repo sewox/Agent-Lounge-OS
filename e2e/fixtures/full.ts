@@ -17,6 +17,30 @@ const mkHealth = (
 
 const deadSymbols: FixtureDataset["deadSymbols"] = [
   {
+    name: "path_sample_win",
+    kind: "unused",
+    file: "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src\\main.rs",
+    line: 1,
+    detail: "PATH-01 Windows sample",
+    project_id: "Agent-Lounge-OS",
+  },
+  {
+    name: "path_sample_posix",
+    kind: "unused",
+    file: "/home/sercan/dev/Agent-Lounge-OS/src/main.rs",
+    line: 1,
+    detail: "PATH-01 POSIX sample",
+    project_id: "Agent-Lounge-OS",
+  },
+  {
+    name: "path_sample_mixed",
+    kind: "unused",
+    file: "mixed/path\\with\\both",
+    line: 1,
+    detail: "PATH-01 mixed separators",
+    project_id: "Agent-Lounge-OS",
+  },
+  {
     name: "orphan_dispatch",
     kind: "unused",
     file: "src-tauri/src/kernel/dispatcher.rs",
@@ -114,6 +138,14 @@ const experiences: FixtureDataset["experiences"] = Array.from({ length: 16 }, (_
   related_task_id: i % 4 === 0 ? `task-${i}` : null,
   tags: i % 2 === 0 ? ["nats", "routing"] : ["index", "vault"],
   created_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
+  status: i === 15 ? "archived" : "active",
+  reviewed: i !== 0,
+  use_count: i === 15 ? 0 : i,
+  last_used_at: i === 15 ? null : new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
+  archived_at: i === 15 ? new Date(Date.UTC(2026, 8, 1, 12, 0, 0)).toISOString() : null,
+  is_pinned: i === 2,
+  updated_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
+  original_content: null,
 }));
 
 const quotas: FixtureDataset["quotas"] = [
@@ -171,8 +203,8 @@ export const FULL_FIXTURE: FixtureDataset = {
         name: "Agent-Lounge-OS",
         repo_path: "/Users/sercan/dev/Agent-Lounge-OS",
         files: 9421,
-        node_count: 4810,
-        edge_count: 42,
+        node_count: 2286,
+        edge_count: 7958,
         nodes: [
           {
             id: "n1",
@@ -242,13 +274,12 @@ export const FULL_FIXTURE: FixtureDataset = {
     ],
   },
   projects: [
-    // Live S2 saw LIMIT-shaped 400/800 while bridge text said 2286/7958 — fixture mirrors that mismatch for EX-14.
     {
       name: "Agent-Lounge-OS",
-      root_path: "/Users/macbookpro/Developer/Agent-Lounge-OS",
-      nodes: 400,
-      edges: 800,
-      files: 66,
+      root_path: "C:\\Users\\sercan\\dev\\Agent-Lounge-OS",
+      nodes: 2286,
+      edges: 7958,
+      files: 9421,
     },
     { name: "EchoMind", root_path: "/Users/sercan/dev/EchoMind", nodes: 1940, edges: 118, files: 4120 },
     { name: "codebase-memory-mcp", root_path: "/Users/sercan/dev/codebase-memory-mcp", nodes: 2210, edges: 87, files: 4861 },

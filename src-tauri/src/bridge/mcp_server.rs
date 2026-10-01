@@ -435,6 +435,8 @@ impl McpServer {
             related_task_id: None,
             tags: vec!["mcp".into(), "external".into()],
             created_at: now_rfc3339(),
+            reviewed: false,
+            ..Default::default()
         };
         let experience_json = serde_json::to_value(&experience)?;
         validate_schema(SchemaKind::Experience, &experience_json).map_err(|e| anyhow!(e))?;
