@@ -76,6 +76,9 @@ pub struct DeadSymbol {
     pub detail: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Last known reference site (`file:line`) from index edges; absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -3,6 +3,7 @@
 pub mod approval_notify;
 pub mod auto_archive;
 pub mod autodiscover;
+pub mod dead_symbol_actions;
 pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
@@ -31,6 +32,9 @@ pub use approval_notify::{
     APPROVAL_PENDING_EVENT, APPROVAL_PENDING_NATS, APPROVAL_RESOLVED_EVENT,
 };
 pub use auto_archive::spawn_auto_archive;
+pub use dead_symbol_actions::{
+    fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
+};
 pub use graph_ui::{
     enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
     open_or_focus_graph_window, persist_port, resolve_cbm_project_name, GraphUiState,

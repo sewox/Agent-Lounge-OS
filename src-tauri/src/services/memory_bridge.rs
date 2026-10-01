@@ -1171,6 +1171,7 @@ fn dead_symbol_from_value(value: &Value, default_kind: &str) -> Option<DeadSymbo
         line: json_i64(value, &["line", "lineno", "loc"]),
         detail: json_str(value, &["detail", "reason", "message"]),
         project_id: json_str(value, &["project_id", "project"]),
+        last_ref: json_str(value, &["last_ref", "lastRef", "reference"]),
     })
 }
 
@@ -1224,6 +1225,7 @@ pub fn derive_dead(
             line: edge.line,
             detail: Some(format!("{} → {} hedefi yok", edge.from_id, edge.to_id)),
             project_id: Some(project.to_string()),
+            last_ref: None,
         });
     }
 
@@ -1243,6 +1245,7 @@ pub fn derive_dead(
                 line: node.line,
                 detail: Some("gelen referans yok".into()),
                 project_id: Some(project.to_string()),
+                last_ref: None,
             });
         }
     }

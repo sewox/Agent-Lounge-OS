@@ -224,57 +224,144 @@ test.describe("EX — vault experiences", () => {
 });
 
 test.describe("DS — dead symbols", () => {
-  test("DS-01 · Full list beyond 8 [expected-fail until PR-4]", async ({ page }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "slice(0,8)" });
-    await openRoute(page, "/vault", "full");
-    await page.getByText(/Agent-Lounge-OS/i).first().click().catch(() => undefined);
+  test("DS-01 · Full list beyond 8", async ({ page }) => {
+    await openRoute(page, "/health?tab=dead", "full");
+    const rows = page.locator('[data-qa="dead-symbol-row"]');
+    await expect(rows.first()).toBeVisible();
+    expect(await rows.count()).toBeGreaterThan(8);
+    const total = page.locator('[data-qa="dead-symbol-total"]');
+    await expect(total).toBeVisible();
+    const listed = Number(await total.getAttribute("data-qa-total"));
+    expect(listed).toBeGreaterThan(8);
+  });
+
+  test("DS-02 · Detail on click", async ({ page }) => {
+    await openRoute(page, "/health?tab=dead", "full");
+    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    const detail = page.locator('[data-qa="dead-symbol-detail"]');
+    await expect(detail).toBeVisible();
+    await expect(detail.getByText(/last_ref/i)).toBeVisible();
+    await expect(detail.getByText(/orphan_dispatch|referans yok/i)).toBeVisible();
+  });
+
+  test("DS-03 · Open in editor (index-backed; Settings Editor preference is PR-5)", async ({
+    page,
+  }) => {
+    // Automated: button + IPC. Manual per-OS checklist: open / start / xdg-open via guarded wrapper.
+    await openRoute(page, "/health?tab=dead", "full");
+    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    const openBtn = page.getByRole("button", { name: /Open in Editor/i });
+    await expect(openBtn).toBeVisible();
+    const before = await getIpcLog(page);
+    await openBtn.click();
+    await page.waitForTimeout(200);
+    const after = await getIpcLog(page);
+    expect(
+      after.slice(before.length).some((e) => e.cmd === "open_dead_symbol_in_editor"),
+    ).toBeTruthy();
+  });
+
+  test("DS-04 · Copy path", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openRoute(page, "/health?tab=dead", "full");
+    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    await page.getByRole("button", { name: /Copy path/i }).click();
+    await expect(page.getByText(/Copy path:/i)).toBeVisible();
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clip).toMatch(/:\d+$/);
+    expect(clip.length).toBeGreaterThan(3);
+  });
+
+  test("DS-05 · Ignore", async ({ page }) => {
+    await openRoute(page, "/health", "full");
+    const drill = page.locator(
+      'a[data-qa="health-dead-drilldown"][href*="Agent-Lounge-OS"]',
+    );
+    const headlineBefore = Number(await drill.getAttribute("data-qa-dead-count"));
+    expect(headlineBefore).toBeGreaterThan(0);
+    await openRoute(page, "/health?tab=dead", "full");
+    const totalEl = page.locator('[data-qa="dead-symbol-total"]');
+    const beforeTotal = Number(await totalEl.getAttribute("data-qa-total"));
+    expect(beforeTotal).toBeGreaterThan(0);
+    const rows = page.locator('[data-qa="dead-symbol-row"]');
+    const before = await rows.count();
+    await rows.first().click();
+    const name = (await rows.first().innerText()).split("\n")[0]?.trim() || "";
+    await page.getByRole("button", { name: /^Ignore$/i }).click();
+    await page.waitForTimeout(400);
+    const after = await rows.count();
+    expect(after).toBeLessThan(before);
+    const afterTotal = Number(await totalEl.getAttribute("data-qa-total"));
+    expect(afterTotal).toBe(beforeTotal - 1);
+    expect(afterTotal).toBeLessThan(beforeTotal);
+
+    // Headline/KPI on Project Health must decrement with the list.
+    await page
+      .getByRole("navigation", { name: "Health sections" })
+      .getByRole("link", { name: /Project Health/i })
+      .click();
     await page.waitForTimeout(300);
-    const rows = page.locator("text=Dead Symbols").locator("..").locator("..").locator(".truncate.font-medium");
-    const count = await rows.count();
-    if (count <= 8) {
-      test.fail(true, `Only ${count} dead rows shown`);
+    const headlineAfter = Number(
+      await page
+        .locator('a[data-qa="health-dead-drilldown"][href*="Agent-Lounge-OS"]')
+        .getAttribute("data-qa-dead-count"),
+    );
+    expect(headlineAfter).toBe(headlineBefore - 1);
+
+    // Persist across reload (sessionStorage-backed mock ignore list).
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(500);
+    await openRoute(page, "/health?tab=dead", "full");
+    const reloadedTotal = Number(
+      await page.locator('[data-qa="dead-symbol-total"]').getAttribute("data-qa-total"),
+    );
+    expect(reloadedTotal).toBe(afterTotal);
+    if (name) {
+      const stillThere = await page
+        .locator('[data-qa="dead-symbol-row"]')
+        .filter({ hasText: name })
+        .count();
+      expect(stillThere).toBe(0);
     }
-    expect(count).toBeGreaterThan(8);
   });
 
-  test("DS-02 · Detail on click [expected-fail until PR-4]", async ({ page }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "rows are non-interactive divs" });
-    test.fail(true, "No detail panel");
-    await openRoute(page, "/vault", "full");
-    expect(await page.getByText(/last_ref/i).count()).toBeGreaterThan(0);
+  test("DS-06 · Ignore List tab restore", async ({ page }) => {
+    await openRoute(page, "/health?tab=dead", "full");
+    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    await page.getByRole("button", { name: /^Ignore$/i }).click();
+    await page.waitForTimeout(200);
+    await page.getByRole("link", { name: /Ignore List/i }).click();
+    await expect(page.locator('[data-qa-dead-symbols="ignored"]')).toBeVisible();
+    await expect(page.locator('[data-qa="dead-symbol-row"]').first()).toBeVisible();
+    await page.getByRole("button", { name: /Unignore/i }).click();
   });
 
-  test("DS-03 · Open in editor (open / start / xdg-open or opener) + Settings Editor [expected-fail until PR-4/5]", async ({
+  test("DS-07 · Fix with agent publishes task", async ({ page }) => {
+    await openRoute(page, "/health?tab=dead", "full");
+    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    const before = await getIpcLog(page);
+    await page.getByRole("button", { name: /Fix with agent/i }).click();
+    await page.waitForTimeout(200);
+    const after = await getIpcLog(page);
+    expect(
+      after.slice(before.length).some((e) => e.cmd === "fix_dead_symbol_with_agent"),
+    ).toBeTruthy();
+  });
+
+  test("DS-LAYOUT · Dead list + detail fill width/height @ D0/D3/D960/D4", async ({
     page,
   }, testInfo) => {
-    // O3 / §10.2: macOS `open`, Windows `start`, Linux `xdg-open`, or Tauri opener plugin.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "open_in_editor + Settings Editor missing (O3 / §10.2)",
-    });
-    test.fail(true, "Editor open / Settings Editor preference missing");
-    await openRoute(page, "/settings", "full");
-    const editorPref = page.getByText(
-      /Editor|Editör|VS Code|Cursor|system default|sistem varsayılan|xdg-open|opener/i,
+    test.skip(
+      testInfo.project.name !== "D0" &&
+        testInfo.project.name !== "D3" &&
+        testInfo.project.name !== "D960" &&
+        testInfo.project.name !== "D4-scale",
+      "viewport matrix",
     );
-    expect(await editorPref.count(), "Settings Editor selection").toBeGreaterThan(0);
-    await openRoute(page, "/vault", "full");
-    expect(
-      await page.getByRole("button", { name: /Open in Editor|Editörde aç|OPEN_IN_EDITOR/i }).count(),
-    ).toBeGreaterThan(0);
-  });
-
-  test("DS-04 · Copy path [expected-fail until PR-4]", async ({ page }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "no copy action" });
-    test.fail(true, "No copy button");
-    await openRoute(page, "/vault", "full");
-    expect(await page.getByRole("button", { name: /Copy|Kopyala/i }).count()).toBeGreaterThan(0);
-  });
-
-  test("DS-05 · Ignore [expected-fail until PR-1/4]", async ({ page }, testInfo) => {
-    testInfo.annotations.push({ type: "expected-fail", description: "ignore missing" });
-    test.fail(true, "No ignore action");
-    await openRoute(page, "/vault", "full");
-    expect(await page.getByRole("button", { name: /Ignore|Yoksay/i }).count()).toBeGreaterThan(0);
+    await openRoute(page, "/health?tab=dead", "full");
+    const m = await measureLayout(page, "/health");
+    expect(m.l1_pass, formatLayoutFailure(m)).toBe(true);
+    expect(m.l2_pass, formatLayoutFailure(m)).toBe(true);
+    expect(m.l3_pass, formatLayoutFailure(m)).toBe(true);
   });
 });

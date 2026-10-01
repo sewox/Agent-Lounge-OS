@@ -23,6 +23,7 @@ const deadSymbols: FixtureDataset["deadSymbols"] = [
     line: 142,
     detail: "fn never referenced",
     project_id: "Agent-Lounge-OS",
+    last_ref: "src-tauri/src/kernel/workflow_engine.rs:168",
   },
   {
     name: "stale_bridge_helper",
@@ -190,7 +191,14 @@ export const FULL_FIXTURE: FixtureDataset = {
             ref_count: 8,
           },
         ],
-        references: [],
+        references: [
+          {
+            from_id: "workflow_engine",
+            to_id: "orphan_dispatch",
+            file: "src-tauri/src/kernel/workflow_engine.rs",
+            line: 168,
+          },
+        ],
         dead: deadSymbols.filter((d) => d.project_id === "Agent-Lounge-OS"),
       },
       {

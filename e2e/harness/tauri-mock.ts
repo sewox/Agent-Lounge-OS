@@ -35,6 +35,25 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
     window.__QA_FIXTURE__ = data;
     (window as Window & { __QA_REJECT_QUOTA__?: boolean }).__QA_REJECT_QUOTA__ =
       rejectQuotaExperience;
+    (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
+      (() => {
+        try {
+          const raw = sessionStorage.getItem("__QA_IGNORED_SYMBOLS__");
+          return raw ? (JSON.parse(raw) as FixtureDataset["deadSymbols"]) : [];
+        } catch {
+          return [];
+        }
+      })();
+
+    function persistIgnored(rows: FixtureDataset["deadSymbols"]) {
+      (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
+        rows;
+      try {
+        sessionStorage.setItem("__QA_IGNORED_SYMBOLS__", JSON.stringify(rows));
+      } catch {
+        /* private mode */
+      }
+    }
 
     type ListenerMap = Map<string, number[]>;
     const listeners: ListenerMap = new Map();
@@ -138,8 +157,72 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               .includes(q),
           );
         }
-        case "get_dead_symbols":
-          return f.deadSymbols;
+        case "get_dead_symbols": {
+          const ignored =
+            (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] })
+              .__QA_IGNORED_SYMBOLS__ ?? [];
+          const ignoredKeys = new Set(
+            ignored.map((row) =>
+              [row.project_id ?? "", row.name, row.kind, row.file ?? "", String(row.line ?? "")].join("|"),
+            ),
+          );
+          return f.deadSymbols.filter(
+            (row) =>
+              !ignoredKeys.has(
+                [row.project_id ?? "", row.name, row.kind, row.file ?? "", String(row.line ?? "")].join("|"),
+              ),
+          );
+        }
+        case "list_ignored_symbols":
+          return (
+            (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] })
+              .__QA_IGNORED_SYMBOLS__ ?? []
+          );
+        case "ignore_symbol": {
+          const symbol = args?.symbol as FixtureDataset["deadSymbols"][number] | undefined;
+          if (!symbol) return null;
+          const store = [
+            ...((window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] })
+              .__QA_IGNORED_SYMBOLS__ ?? []),
+            symbol,
+          ];
+          persistIgnored(store);
+          return null;
+        }
+        case "unignore_symbol": {
+          const symbol = args?.symbol as FixtureDataset["deadSymbols"][number] | undefined;
+          if (!symbol) return null;
+          const store =
+            (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ ??
+            [];
+          persistIgnored(
+            store.filter(
+              (row) =>
+                !(
+                  row.name === symbol.name &&
+                  row.project_id === symbol.project_id &&
+                  row.file === symbol.file &&
+                  row.kind === symbol.kind
+                ),
+            ),
+          );
+          return null;
+        }
+        case "open_dead_symbol_in_editor":
+          return null;
+        case "fix_dead_symbol_with_agent": {
+          const hasAgent = f.workers.some((w) => w.is_active && w.enabled);
+          if (!hasAgent) {
+            throw new Error("No agent available — connect Grok Bot or another worker in Fleet");
+          }
+          const symbol = args?.symbol as FixtureDataset["deadSymbols"][number] | undefined;
+          return {
+            task_id: `fix-${Date.now()}`,
+            subject: "lounge.task.requested",
+            target_agent: "grok_bot",
+            message: `Task queued for ${symbol?.name ?? "symbol"}`,
+          };
+        }
         case "get_semantic_map":
           return f.semanticMap;
         case "list_projects":
@@ -287,10 +370,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         case "archive_experience":
         case "pin_experience":
         case "approve_experience":
-        case "ignore_dead_symbol":
         case "open_in_editor":
-        case "create_task_from_dead_symbol":
-          throw new Error(`command not found: ${cmd}`);
+          return null;
         default:
           console.warn(`[qa-tauri-mock] unhandled invoke: ${cmd}`, args);
           return null;

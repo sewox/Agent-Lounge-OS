@@ -24,12 +24,14 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys, data_root,
-    enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
-    open_or_focus_graph_window, open_path_in_editor, persist_port, record_dead_snapshot,
-    record_whisper_injection, resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump,
-    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, GraphUiState,
-    GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
-    GRAPH_WINDOW_LABEL,
+    enable_graph_ui, fix_dead_symbol_with_agent as publish_fix_dead_symbol, graph_ui_status,
+    load_port_from_store, on_main_window_closed,
+    open_dead_symbol_in_editor as open_indexed_dead_symbol, open_or_focus_graph_window,
+    open_path_in_editor, persist_port, record_dead_snapshot, record_whisper_injection,
+    resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
+    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, FixDeadSymbolResult,
+    GraphUiState, GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
+    SharedServices, GRAPH_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
@@ -276,6 +278,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             unignore_symbol,
             list_ignored_symbols,
             open_in_editor,
+            open_dead_symbol_in_editor,
+            fix_dead_symbol_with_agent,
             focus_app_for_approval,
             confirm_destructive,
             trigger_grok_test,
@@ -780,6 +784,30 @@ async fn open_in_editor(
     editor_command: Option<String>,
 ) -> Result<(), String> {
     open_path_in_editor(&store, path, line, editor_command)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Open a dead symbol using index-backed path (symbol identity only from webview).
+#[tauri::command]
+async fn open_dead_symbol_in_editor(
+    store: tauri::State<'_, ExperienceStore>,
+    symbol: DeadSymbol,
+    editor_command: Option<String>,
+) -> Result<(), String> {
+    open_indexed_dead_symbol(&store, symbol, editor_command)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Queue a NATS cleanup task for a dead symbol (DS-07).
+#[tauri::command]
+async fn fix_dead_symbol_with_agent(
+    store: tauri::State<'_, ExperienceStore>,
+    bus: tauri::State<'_, BusManager>,
+    symbol: DeadSymbol,
+) -> Result<FixDeadSymbolResult, String> {
+    publish_fix_dead_symbol(&store, bus.nats_url(), symbol)
         .await
         .map_err(|err| err.to_string())
 }

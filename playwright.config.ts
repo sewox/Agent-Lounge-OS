@@ -48,6 +48,11 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], viewport: { width: 1080, height: 1920 }, deviceScaleFactor: 1 },
     },
     {
+      name: "D960",
+      testMatch: /vault-dashboard|health-settings/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 960, height: 800 }, deviceScaleFactor: 1 },
+    },
+    {
       name: "D4-scale",
       testMatch: /ui-scale|settings|layout/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 },
