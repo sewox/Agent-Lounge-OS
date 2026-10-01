@@ -159,7 +159,11 @@ pub fn confirm_destructive(id: &str) -> Result<()> {
         let mut reg = registry().lock().expect("registry");
         if !reg.pending.contains_key(id) {
             Err("unknown")
-        } else if reg.pending.get(id).is_some_and(|t| t.created.elapsed() > TOKEN_TTL) {
+        } else if reg
+            .pending
+            .get(id)
+            .is_some_and(|t| t.created.elapsed() > TOKEN_TTL)
+        {
             reg.pending.remove(id);
             Err("expired")
         } else if reg.pending.get(id).is_some_and(|t| t.consumed) {
