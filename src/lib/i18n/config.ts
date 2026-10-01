@@ -32,6 +32,8 @@ const resources = {
   en: {
     shell: enShell,
     dashboard: enDashboard,
+    // vault/health/fleet/quotas intentionally share shell chrome copy until those
+    // surfaces get dedicated dictionaries (see PR body "not translated" list).
     vault: enShell,
     health: enShell,
     fleet: enShell,

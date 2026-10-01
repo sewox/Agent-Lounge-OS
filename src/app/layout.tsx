@@ -96,20 +96,17 @@ export const metadata: Metadata = {
   },
 };
 
-const localeBootstrapScript = `(function(){try{var k=localStorage.getItem("lounge.locale")||localStorage.getItem("locale");var lang="en";if(k&&String(k).toLowerCase().indexOf("tr")===0){lang="tr";}else if(!k&&typeof navigator!=="undefined"&&String(navigator.language||"").toLowerCase().indexOf("tr")===0){lang="tr";}document.documentElement.lang=lang;}catch(e){}})();`;
-
 export default function RootLayout({ children }: LayoutProps<"/">) {
+  // LocaleProvider owns <html lang> after hydration (useSyncExternalStore).
+  // Avoid mutating lang in a blocking bootstrap script — that caused React #418
+  // when OS/stored locale differed from SSR lang="en".
   return (
     <html
       lang="en"
       suppressHydrationWarning
       className={`${geistSans.variable} ${ibmPlex.variable} ${jetbrains.variable} ${publicSans.variable} h-full antialiased`}
     >
-      <head>
-        {/* First-paint lang hint only; React LocaleProvider owns lang after mount. */}
-        <script dangerouslySetInnerHTML={{ __html: localeBootstrapScript }} />
-      </head>
-      <body className="h-full overflow-hidden bg-surface text-on-surface font-body" suppressHydrationWarning>
+      <body className="h-full overflow-hidden bg-surface text-on-surface font-body">
         <UiScaleProvider>
           <LocaleProvider>
             <LoungeProvider>

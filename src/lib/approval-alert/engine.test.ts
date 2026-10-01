@@ -8,6 +8,9 @@ import {
   DEFAULT_APPROVAL_SOUND_SETTINGS,
   parseApprovalSoundSettings,
   resolveAlertSoundSrc,
+  resolveAlertSoundSrcAsync,
+  sanitizeCustomSoundFileName,
+  writeApprovalSoundSettings,
   type ApprovalSoundSettings,
 } from "./settings.ts";
 
@@ -40,6 +43,48 @@ describe("approval sound settings", () => {
 
   it("resolves bundled wav src", () => {
     assert.match(resolveAlertSoundSrc(DEFAULT_APPROVAL_SOUND_SETTINGS), /\.wav$/);
+  });
+
+  it("custom bare name is not a playable sync URL; async loader supplies data URL", async () => {
+    const settings: ApprovalSoundSettings = {
+      ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+      soundId: "custom",
+      customFileName: "custom-alert.wav",
+    };
+    assert.equal(resolveAlertSoundSrc(settings), "");
+    const src = await resolveAlertSoundSrcAsync(settings, async (name) => {
+      assert.equal(name, "custom-alert.wav");
+      return "data:audio/wav;base64,AAAA";
+    });
+    assert.equal(src, "data:audio/wav;base64,AAAA");
+  });
+
+  it("writeApprovalSoundSettings never persists URLs", () => {
+    const store = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+    };
+    writeApprovalSoundSettings(
+      {
+        ...DEFAULT_APPROVAL_SOUND_SETTINGS,
+        soundId: "custom",
+        customFileName: "asset://localhost/custom-alert.wav",
+      },
+      storage,
+    );
+    const raw = store.get("lounge.approvalSound") ?? "";
+    assert.ok(!raw.includes("asset://"));
+    assert.ok(!raw.includes("custom-alert.wav") || JSON.parse(raw).customFileName === null);
+  });
+
+  it("sanitize keeps bare names only", () => {
+    assert.equal(sanitizeCustomSoundFileName("custom-alert.wav"), "custom-alert.wav");
+    assert.equal(sanitizeCustomSoundFileName("data:audio/wav;base64,xx"), null);
+    assert.equal(sanitizeCustomSoundFileName("https://evil/x.wav"), null);
+    assert.equal(sanitizeCustomSoundFileName("../x.wav"), null);
   });
 });
 

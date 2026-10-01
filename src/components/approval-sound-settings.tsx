@@ -1,12 +1,13 @@
 "use client";
 
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ApprovalAlertEngine } from "@/lib/approval-alert/engine";
 import {
   BUILTIN_SOUND_IDS,
   readApprovalSoundSettings,
+  sanitizeCustomSoundFileName,
   writeApprovalSoundSettings,
   type ApprovalSoundSettings,
   type BuiltinSoundId,
@@ -17,31 +18,19 @@ import { isTauri } from "@/lib/lounge";
 export function ApprovalSoundSettingsPanel() {
   const { t } = useTranslation("settings");
   const [settings, setSettings] = useState<ApprovalSoundSettings>(() => readApprovalSoundSettings());
-  const [customLabel, setCustomLabel] = useState<string | null>(settings.customFileName);
+  const [customLabel, setCustomLabel] = useState<string | null>(
+    sanitizeCustomSoundFileName(settings.customFileName),
+  );
   const [error, setError] = useState<string | null>(null);
 
   const persist = useCallback((next: ApprovalSoundSettings) => {
-    setSettings(next);
-    writeApprovalSoundSettings(next);
-  }, []);
-
-  useEffect(() => {
-    const stored = readApprovalSoundSettings().customFileName;
-    if (!stored || stored.startsWith("http") || stored.includes("/") || !isTauri()) {
-      return;
-    }
-    void invoke<string>("resolve_custom_approval_sound", { fileName: stored })
-      .then((absolute) => {
-        setCustomLabel(stored);
-        setSettings((current) => ({
-          ...current,
-          soundId: "custom",
-          customFileName: convertFileSrc(absolute),
-        }));
-      })
-      .catch(() => {
-        /* file missing */
-      });
+    const safe: ApprovalSoundSettings = {
+      ...next,
+      customFileName: sanitizeCustomSoundFileName(next.customFileName),
+    };
+    setSettings(safe);
+    writeApprovalSoundSettings(safe);
+    setCustomLabel(safe.customFileName);
   }, []);
 
   const pickCustom = async () => {
@@ -52,16 +41,18 @@ export function ApprovalSoundSettingsPanel() {
     setError(null);
     try {
       const fileName = await invoke<string>("pick_custom_approval_sound");
-      const absolute = await invoke<string>("resolve_custom_approval_sound", { fileName });
-      const src = convertFileSrc(absolute);
-      setCustomLabel(fileName);
-      const next: ApprovalSoundSettings = {
+      const bare = sanitizeCustomSoundFileName(fileName);
+      if (!bare) {
+        setError("invalid custom sound file name");
+        return;
+      }
+      // Verify the file is loadable before persisting the bare name.
+      await invoke<string>("load_custom_approval_sound_data_url", { fileName: bare });
+      persist({
         ...settings,
         soundId: "custom",
-        customFileName: fileName,
-      };
-      writeApprovalSoundSettings(next);
-      setSettings({ ...next, customFileName: src });
+        customFileName: bare,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message !== "cancelled") {
@@ -71,7 +62,11 @@ export function ApprovalSoundSettingsPanel() {
   };
 
   const preview = () => {
-    const engine = new ApprovalAlertEngine({ readSettings: () => settings });
+    const engine = new ApprovalAlertEngine({
+      readSettings: () => settings,
+      loadCustomSound: async (fileName) =>
+        invoke<string>("load_custom_approval_sound_data_url", { fileName }),
+    });
     engine.preview();
   };
 

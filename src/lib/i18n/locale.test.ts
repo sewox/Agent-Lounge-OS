@@ -28,11 +28,24 @@ describe("locale helpers", () => {
     };
     writeStoredLocale("en", storage);
     assert.equal(readStoredLocale(storage), "en");
-    assert.equal(detectInitialLocale(storage), "en");
+    assert.equal(detectInitialLocale(storage, { language: "tr-TR", languages: ["tr-TR"] }), "en");
+  });
+
+  it("first launch follows OS language tr-TR → tr", () => {
+    const empty = {
+      getItem: () => null,
+      setItem: () => undefined,
+    };
+    assert.equal(
+      detectInitialLocale(empty, { language: "tr-TR", languages: ["tr-TR", "en-US"] }),
+      "tr",
+    );
+    assert.equal(detectOsLocale({ language: "tr-TR", languages: ["tr-TR"] }), "tr");
   });
 
   it("falls back to EN when OS language unsupported", () => {
+    assert.equal(detectOsLocale({ language: "de-DE", languages: ["de-DE"] }), "en");
     // Without a navigator mock, detectOsLocale returns en in Node.
-    assert.equal(detectOsLocale(), "en");
+    assert.equal(detectOsLocale(null), "en");
   });
 });

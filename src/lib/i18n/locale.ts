@@ -22,11 +22,15 @@ export function normalizeLocaleTag(raw: string | null | undefined): AppLocale | 
   return null;
 }
 
-export function detectOsLocale(): AppLocale {
-  if (typeof navigator === "undefined") {
+export function detectOsLocale(
+  nav?: Pick<Navigator, "language" | "languages"> | null,
+): AppLocale {
+  const source =
+    nav === undefined ? (typeof navigator !== "undefined" ? navigator : null) : nav;
+  if (!source) {
     return "en";
   }
-  const candidates = [navigator.language, ...(navigator.languages ?? [])];
+  const candidates = [source.language, ...(source.languages ?? [])];
   for (const tag of candidates) {
     const locale = normalizeLocaleTag(tag);
     if (locale) {
@@ -47,8 +51,11 @@ export function readStoredLocale(storage?: Pick<Storage, "getItem"> | null): App
   }
 }
 
-export function detectInitialLocale(storage?: Pick<Storage, "getItem"> | null): AppLocale {
-  return readStoredLocale(storage) ?? detectOsLocale();
+export function detectInitialLocale(
+  storage?: Pick<Storage, "getItem"> | null,
+  nav?: Pick<Navigator, "language" | "languages"> | null,
+): AppLocale {
+  return readStoredLocale(storage) ?? detectOsLocale(nav);
 }
 
 export function writeStoredLocale(

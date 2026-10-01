@@ -47,14 +47,20 @@ export function parseApprovalSoundSettings(raw: string | null | undefined): Appr
   }
   try {
     const parsed = JSON.parse(raw) as Partial<ApprovalSoundSettings>;
+    const customFileName = sanitizeCustomSoundFileName(
+      typeof parsed.customFileName === "string" ? parsed.customFileName : null,
+    );
+    let soundId: ApprovalSoundSettings["soundId"] =
+      parsed.soundId === "custom" || isBuiltinSoundId(parsed.soundId)
+        ? parsed.soundId
+        : DEFAULT_APPROVAL_SOUND_SETTINGS.soundId;
+    if (soundId === "custom" && !customFileName) {
+      soundId = DEFAULT_APPROVAL_SOUND_SETTINGS.soundId;
+    }
     return {
       enabled: parsed.enabled ?? DEFAULT_APPROVAL_SOUND_SETTINGS.enabled,
-      soundId:
-        parsed.soundId === "custom" || isBuiltinSoundId(parsed.soundId)
-          ? parsed.soundId
-          : DEFAULT_APPROVAL_SOUND_SETTINGS.soundId,
-      customFileName:
-        typeof parsed.customFileName === "string" ? parsed.customFileName : null,
+      soundId,
+      customFileName,
       volume: clampVolume(parsed.volume ?? DEFAULT_APPROVAL_SOUND_SETTINGS.volume),
       intervalSecs: clampIntervalSecs(
         parsed.intervalSecs ?? DEFAULT_APPROVAL_SOUND_SETTINGS.intervalSecs,
@@ -87,27 +93,92 @@ export function writeApprovalSoundSettings(
 ): void {
   const store =
     storage === undefined && typeof localStorage !== "undefined" ? localStorage : storage;
+  const customFileName = sanitizeCustomSoundFileName(settings.customFileName);
+  const payload: ApprovalSoundSettings = {
+    ...settings,
+    customFileName,
+    soundId:
+      settings.soundId === "custom" && !customFileName
+        ? DEFAULT_APPROVAL_SOUND_SETTINGS.soundId
+        : settings.soundId,
+  };
   try {
-    store?.setItem(APPROVAL_SOUND_STORAGE_KEY, JSON.stringify(settings));
+    store?.setItem(APPROVAL_SOUND_STORAGE_KEY, JSON.stringify(payload));
   } catch {
     /* ignore */
   }
+}
+
+/** Bare file name only — never a path, URL, or data URI. */
+export function isBareCustomSoundFileName(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  if (/[/:\\?#]/.test(value) || value.includes("..")) {
+    return false;
+  }
+  return /\.(wav|mp3|ogg)$/i.test(value);
+}
+
+/** Strip accidental URLs/paths; persist only a safe basename under app data. */
+export function sanitizeCustomSoundFileName(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  if (value.startsWith("data:") || value.includes("://")) {
+    return null;
+  }
+  // Reject anything that looks like a path — callers must pass a bare file name.
+  if (value.includes("/") || value.includes("\\") || value.includes("..")) {
+    return null;
+  }
+  const base = value.trim();
+  return isBareCustomSoundFileName(base) ? base : null;
 }
 
 export function builtinSoundSrc(id: BuiltinSoundId): string {
   return `/sounds/alerts/${id}.wav`;
 }
 
+/**
+ * Sync resolver for bundled sounds (and in-memory data: URLs used in tests).
+ * Custom bare names require [`resolveAlertSoundSrcAsync`] (Rust data URL).
+ */
 export function resolveAlertSoundSrc(settings: ApprovalSoundSettings): string {
   if (settings.soundId === "custom" && settings.customFileName) {
-    // Persisted value is a bare file name; runtime may also pass an asset:// URL.
-    if (settings.customFileName.includes("/") || settings.customFileName.includes(":")) {
+    if (settings.customFileName.startsWith("data:audio/")) {
       return settings.customFileName;
     }
-    return settings.customFileName;
+    // Bare name is not a playable URL — async Rust load is required.
+    return "";
   }
   const id = isBuiltinSoundId(settings.soundId) ? settings.soundId : "chime-soft";
   return builtinSoundSrc(id);
+}
+
+export type CustomSoundLoader = (fileName: string) => Promise<string>;
+
+export async function resolveAlertSoundSrcAsync(
+  settings: ApprovalSoundSettings,
+  loadCustom?: CustomSoundLoader,
+): Promise<string> {
+  const sync = resolveAlertSoundSrc(settings);
+  if (sync) {
+    return sync;
+  }
+  const bare = sanitizeCustomSoundFileName(settings.customFileName);
+  if (settings.soundId !== "custom" || !bare) {
+    return builtinSoundSrc("chime-soft");
+  }
+  if (loadCustom) {
+    return loadCustom(bare);
+  }
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<string>("load_custom_approval_sound_data_url", { fileName: bare });
+  } catch {
+    return "";
+  }
 }
 
 export type TimerLike = {
@@ -125,6 +196,7 @@ export type ApprovalAlertEngineDeps = {
   createAudio?: AudioFactory;
   readSettings?: () => ApprovalSoundSettings;
   now?: () => number;
+  loadCustomSound?: CustomSoundLoader;
 };
 
 /** Repeating HTML Audio alert while an approval is pending (AP-08 / AP-09 engine). */
@@ -137,6 +209,7 @@ export class ApprovalAlertEngine {
   private readonly timer: TimerLike;
   private readonly createAudio: AudioFactory;
   private readonly readSettings: () => ApprovalSoundSettings;
+  private readonly loadCustomSound?: CustomSoundLoader;
 
   constructor(deps: ApprovalAlertEngineDeps = {}) {
     this.timer = deps.timer ?? {
@@ -158,6 +231,7 @@ export class ApprovalAlertEngine {
         return new Audio();
       });
     this.readSettings = deps.readSettings ?? (() => readApprovalSoundSettings());
+    this.loadCustomSound = deps.loadCustomSound;
   }
 
   get isPending(): boolean {
@@ -196,7 +270,7 @@ export class ApprovalAlertEngine {
     if (!settings.enabled) {
       return;
     }
-    this.play(settings);
+    this.play(settings, true);
   }
 
   dispose(): void {
@@ -241,17 +315,42 @@ export class ApprovalAlertEngine {
     if (!this.pending || !settings.enabled) {
       return;
     }
-    this.play(settings);
+    this.play(settings, false);
   }
 
-  private play(settings: ApprovalSoundSettings): void {
+  private play(settings: ApprovalSoundSettings, allowWhenIdle: boolean): void {
+    this.stopAudio();
     const audio = this.createAudio();
-    audio.src = resolveAlertSoundSrc(settings);
     audio.volume = settings.volume;
     this.lastVolume = settings.volume;
     this.audio = audio;
-    void audio.play().catch(() => {
-      /* autoplay policy / missing asset */
-    });
+
+    const applySrc = (src: string) => {
+      if (!src) {
+        return;
+      }
+      if (this.audio !== audio) {
+        return;
+      }
+      if (!allowWhenIdle && !this.pending) {
+        return;
+      }
+      audio.src = src;
+      void audio.play().catch(() => {
+        /* autoplay policy / missing asset */
+      });
+    };
+
+    const syncSrc = resolveAlertSoundSrc(settings);
+    if (syncSrc) {
+      applySrc(syncSrc);
+      return;
+    }
+
+    void resolveAlertSoundSrcAsync(settings, this.loadCustomSound)
+      .then(applySrc)
+      .catch(() => {
+        /* missing custom file */
+      });
   }
 }

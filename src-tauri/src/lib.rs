@@ -285,6 +285,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             focus_app_for_approval,
             services::approval_sound::pick_custom_approval_sound,
             services::approval_sound::resolve_custom_approval_sound,
+            services::approval_sound::load_custom_approval_sound_data_url,
             confirm_destructive,
             trigger_grok_test,
             list_projects,

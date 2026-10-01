@@ -1,7 +1,9 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect } from "react";
+import { onAction } from "@tauri-apps/plugin-notification";
+import { useEffect, useRef } from "react";
 import { useLounge } from "@/components/lounge-provider";
 import { isTauri } from "@/lib/lounge";
 
@@ -25,13 +27,28 @@ function focusApprovalBanner(taskId?: string): void {
   banner?.focus({ preventScroll: true });
 }
 
+function taskIdFromNotificationExtra(extra: Record<string, unknown> | undefined): string | null {
+  if (!extra) {
+    return null;
+  }
+  const raw = extra.task_id ?? extra.taskId;
+  return typeof raw === "string" && raw.length > 0 ? raw : null;
+}
+
 /**
  * Desktop notification click → focus main window + approval banner (AP-10).
- * Some platforms cannot deliver click events; window focus + Rust emit is the fallback.
+ * Uses `@tauri-apps/plugin-notification` `onAction` where the OS delivers clicks;
+ * when click events are unavailable, falls back to focusing the banner on the next
+ * window/visibility focus while a pending approval exists.
  */
 export function ApprovalNotificationBridge() {
   const { approval } = useLounge();
   const taskId = approval?.task_id;
+  const pendingTaskIdRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    pendingTaskIdRef.current = taskId;
+  }, [taskId]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -50,10 +67,51 @@ export function ApprovalNotificationBridge() {
       } catch {
         /* event plugin unavailable in harness */
       }
+
+      try {
+        const actionListener = await onAction((notification) => {
+          const fromExtra = taskIdFromNotificationExtra(
+            notification.extra as Record<string, unknown> | undefined,
+          );
+          const id = fromExtra ?? pendingTaskIdRef.current ?? null;
+          void invoke("focus_app_for_approval", { taskId: id }).catch(() => {
+            focusApprovalBanner(id ?? undefined);
+          });
+        });
+        unlisteners.push(() => {
+          void actionListener.unregister();
+        });
+      } catch {
+        /* notification action API unavailable on this platform / harness */
+      }
     })();
 
     return () => {
       unlisteners.forEach((fn) => fn());
+    };
+  }, []);
+
+  // Fallback when OS cannot deliver click events: next window focus with a pending approval.
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    const onFocus = () => {
+      const id = pendingTaskIdRef.current;
+      if (id) {
+        focusApprovalBanner(id);
+      }
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        onFocus();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
@@ -72,7 +130,7 @@ export function ApprovalNotificationBridge() {
       data-qa="approval-notification"
       hidden
       aria-hidden
-      data-platform-note="Native OS notification click is verified manually on macOS, Windows, and Linux (AP-10)."
+      data-platform-note="Native OS notification click → focus_app_for_approval via plugin onAction; window-focus fallback when click events are unavailable (AP-10)."
     />
   );
 }
