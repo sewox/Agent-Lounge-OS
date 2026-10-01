@@ -145,6 +145,7 @@ async fn dead_symbol_actions_scaffolding() {
         file: Some("src/x.rs".into()),
         line: Some(10),
         detail: None,
+        last_ref: None,
     });
     store.save_project_index(graph).await.expect("index");
     let dead = store

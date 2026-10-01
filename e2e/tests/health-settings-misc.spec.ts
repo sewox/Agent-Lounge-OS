@@ -36,11 +36,16 @@ test.describe("HM — health / map empty states", () => {
     expect(historyText).not.toMatch(/Claude\s*\d+%/i);
   });
 
-  test("HM-03 · Full DB shows live health rows", async ({ page }) => {
+  test("HM-03 · Full DB shows live health rows + dead drill-down", async ({ page }) => {
     await openRoute(page, "/health", "full");
     await expect(page.getByText("Agent-Lounge-OS").first()).toBeVisible();
     const text = await page.locator("main").innerText();
     expect(text).toMatch(/live|Agent-Lounge/i);
+    const drill = page.locator('[data-qa="health-dead-drilldown"]').first();
+    await expect(drill).toBeVisible();
+    await drill.click();
+    await expect(page).toHaveURL(/tab=dead/);
+    await expect(page.locator('[data-qa="dead-symbol-list"]')).toBeVisible();
   });
 
   test("HM-04 · Re-index only on /health, not in palette", async ({ page }) => {
@@ -51,6 +56,9 @@ test.describe("HM — health / map empty states", () => {
     const palText = await dialog.innerText();
     expect(palText).not.toMatch(/Re-?index/i);
     expect(palText).not.toMatch(/Clear Cache/i);
+    await page.keyboard.press("Escape");
+    await openRoute(page, "/health", "full");
+    await expect(page.locator('[data-qa="health-reindex"]')).toBeVisible();
   });
 });
 

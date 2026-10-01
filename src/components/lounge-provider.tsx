@@ -65,6 +65,8 @@ import {
   type ServiceReport,
   type ToolQuota,
 } from "@/lib/lounge";
+import { formatSymbolFullPathLine } from "@/lib/dead-symbols";
+import { deadSymbolStrings as dsStrings } from "@/lib/strings/dead-symbols";
 import {
   browserEvents,
   browserExperiences,
@@ -94,6 +96,8 @@ type LoungeContextValue = {
   lastIndex: IndexSnapshot | null;
   semanticMap: SemanticMap;
   deadSymbols: DeadSymbol[];
+  ignoredSymbols: DeadSymbol[];
+  deadSymbolNotice: string | null;
   query: string;
   setQuery: (value: string) => void;
   openCommandPalette: boolean;
@@ -120,6 +124,12 @@ type LoungeContextValue = {
   resolveApproval: (vote: RoutingVote, taskId?: string) => Promise<void>;
   /** Context Whisper satırını açıkça "faydalı" olarak işaretle (Feedback Loop). */
   markWhisperUseful: (experienceId: string, projectId?: string) => Promise<void>;
+  ignoreDeadSymbol: (symbol: DeadSymbol) => Promise<void>;
+  unignoreDeadSymbol: (symbol: DeadSymbol) => Promise<void>;
+  openDeadSymbolInEditor: (symbol: DeadSymbol) => Promise<void>;
+  copyDeadSymbolPath: (symbol: DeadSymbol) => Promise<void>;
+  fixDeadSymbolWithAgent: (symbol: DeadSymbol) => Promise<void>;
+  clearDeadSymbolNotice: () => void;
   ingestBusMessage: (message: LoungeMessage) => void;
   probeBus: () => Promise<void>;
 };
@@ -147,6 +157,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [lastIndex, setLastIndex] = useState<IndexSnapshot | null>(null);
   const [semanticMap, setSemanticMap] = useState<SemanticMap>({ projects: [] });
   const [deadSymbols, setDeadSymbols] = useState<DeadSymbol[]>([]);
+  const [ignoredSymbols, setIgnoredSymbols] = useState<DeadSymbol[]>([]);
+  const [deadSymbolNotice, setDeadSymbolNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [openCommandPalette, setOpenCommandPalette] = useState(false);
   const [clock, setClock] = useState("--:--");
@@ -215,6 +227,11 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setDeadSymbols(await invoke<DeadSymbol[]>("get_dead_symbols"));
     } catch {
       setDeadSymbols([]);
+    }
+    try {
+      setIgnoredSymbols(await invoke<DeadSymbol[]>("list_ignored_symbols"));
+    } catch {
+      setIgnoredSymbols([]);
     }
   }, []);
 
@@ -792,6 +809,102 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
 
   const decisionMsgPerMin = decisionMsgTimes.length;
 
+  const refreshDeadLists = useCallback(async () => {
+    if (!isTauri()) {
+      return;
+    }
+    try {
+      setDeadSymbols(await invoke<DeadSymbol[]>("get_dead_symbols"));
+    } catch {
+      setDeadSymbols([]);
+    }
+    try {
+      setIgnoredSymbols(await invoke<DeadSymbol[]>("list_ignored_symbols"));
+    } catch {
+      setIgnoredSymbols([]);
+    }
+  }, []);
+
+  const ignoreDeadSymbol = useCallback(
+    async (symbol: DeadSymbol) => {
+      if (isTauri()) {
+        await invoke("ignore_symbol", { symbol });
+        await refreshDeadLists();
+        return;
+      }
+      setDeadSymbols((current) =>
+        current.filter(
+          (row) =>
+            !(
+              row.name === symbol.name &&
+              row.project_id === symbol.project_id &&
+              row.file === symbol.file &&
+              row.kind === symbol.kind
+            ),
+        ),
+      );
+      setIgnoredSymbols((current) => [...current, symbol]);
+    },
+    [refreshDeadLists],
+  );
+
+  const unignoreDeadSymbol = useCallback(
+    async (symbol: DeadSymbol) => {
+      if (isTauri()) {
+        await invoke("unignore_symbol", { symbol });
+        await refreshDeadLists();
+        return;
+      }
+      setIgnoredSymbols((current) =>
+        current.filter(
+          (row) =>
+            !(
+              row.name === symbol.name &&
+              row.project_id === symbol.project_id &&
+              row.file === symbol.file &&
+              row.kind === symbol.kind
+            ),
+        ),
+      );
+      setDeadSymbols((current) => [...current, symbol]);
+    },
+    [refreshDeadLists],
+  );
+
+  const openDeadSymbolInEditor = useCallback(async (symbol: DeadSymbol) => {
+    if (isTauri()) {
+      await invoke("open_dead_symbol_in_editor", { symbol, editorCommand: null });
+      return;
+    }
+    setDeadSymbolNotice(`${dsStrings.openInEditor}: ${formatSymbolFullPathLine(symbol)}`);
+  }, []);
+
+  const copyDeadSymbolPath = useCallback(async (symbol: DeadSymbol) => {
+    const text = formatSymbolFullPathLine(symbol);
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    }
+    setDeadSymbolNotice(`${dsStrings.copyPath}: ${text}`);
+  }, []);
+
+  const fixDeadSymbolWithAgent = useCallback(async (symbol: DeadSymbol) => {
+    if (isTauri()) {
+      try {
+        const result = await invoke<{ message: string }>("fix_dead_symbol_with_agent", { symbol });
+        setDeadSymbolNotice(dsStrings.taskQueued(result.message));
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        setDeadSymbolNotice(text.includes("No agent") ? dsStrings.noAgent : text);
+      }
+      return;
+    }
+    setDeadSymbolNotice(dsStrings.taskQueued(symbol.name));
+  }, []);
+
+  const clearDeadSymbolNotice = useCallback(() => {
+    setDeadSymbolNotice(null);
+  }, []);
+
   const value = useMemo<LoungeContextValue>(
     () => ({
       report,
@@ -811,6 +924,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       lastIndex,
       semanticMap,
       deadSymbols,
+      ignoredSymbols,
+      deadSymbolNotice,
       query,
       setQuery,
       openCommandPalette,
@@ -836,6 +951,12 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       savePolicy,
       resolveApproval,
       markWhisperUseful,
+      ignoreDeadSymbol,
+      unignoreDeadSymbol,
+      openDeadSymbolInEditor,
+      copyDeadSymbolPath,
+      fixDeadSymbolWithAgent,
+      clearDeadSymbolNotice,
       ingestBusMessage,
       probeBus,
     }),
@@ -856,6 +977,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       lastIndex,
       semanticMap,
       deadSymbols,
+      ignoredSymbols,
+      deadSymbolNotice,
       query,
       openCommandPalette,
       switchProject,
@@ -879,6 +1002,12 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       savePolicy,
       resolveApproval,
       markWhisperUseful,
+      ignoreDeadSymbol,
+      unignoreDeadSymbol,
+      openDeadSymbolInEditor,
+      copyDeadSymbolPath,
+      fixDeadSymbolWithAgent,
+      clearDeadSymbolNotice,
       ingestBusMessage,
       probeBus,
     ],

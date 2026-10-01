@@ -247,6 +247,17 @@ impl ExperienceStore {
         .await
         .context("list_ignored_symbols join")?
     }
+
+    /// Resolve a dead symbol from the SQLite index (path comes from DB, not webview).
+    pub async fn resolve_dead_symbol(&self, symbol: DeadSymbol) -> Result<ResolvedDeadSymbol> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            resolve_dead_symbol_blocking(&conn, &symbol)
+        })
+        .await
+        .context("resolve_dead_symbol join")?
+    }
 }
 
 fn resolve_project_id_blocking(conn: &Connection, path_hint: &str) -> Result<Option<String>> {
@@ -483,13 +494,139 @@ fn list_dead_symbols_blocking(
             file: row.get(3)?,
             line: row.get(4)?,
             detail: row.get(5)?,
+            last_ref: None,
         })
     })?;
     let mut symbols = Vec::new();
     for row in rows {
-        symbols.push(row?);
+        let mut symbol = row?;
+        let project = symbol.project_id.as_deref().unwrap_or("");
+        if !project.is_empty() {
+            symbol.last_ref = lookup_last_ref_blocking(conn, project, &symbol.name);
+        }
+        symbols.push(symbol);
     }
     Ok(symbols)
+}
+
+/// Index-backed dead symbol with repo-confined file path (P8 / DS-03).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDeadSymbol {
+    pub symbol: DeadSymbol,
+    pub repo_path: String,
+    pub file_path: String,
+    pub line: Option<i64>,
+}
+
+fn lookup_last_ref_blocking(
+    conn: &Connection,
+    project_id: &str,
+    symbol_name: &str,
+) -> Option<String> {
+    let sql = r#"
+        SELECT file_path, line FROM project_index
+        WHERE project_id = ?1 AND kind = 'reference' AND target = ?2
+        ORDER BY indexed_at DESC
+        LIMIT 1
+        "#;
+    conn.query_row(sql, params![project_id, symbol_name], |row| {
+        let file: Option<String> = row.get(0)?;
+        let line: Option<i64> = row.get(1)?;
+        Ok(format_file_line(file.as_deref(), line))
+    })
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+}
+
+fn format_file_line(file: Option<&str>, line: Option<i64>) -> Option<String> {
+    let path = file.filter(|value| !value.trim().is_empty())?;
+    Some(match line {
+        Some(n) if n > 0 => format!("{path}:{n}"),
+        _ => path.to_string(),
+    })
+}
+
+fn dead_table_kind(symbol_kind: &str) -> &'static str {
+    if symbol_kind == "broken" {
+        "broken"
+    } else {
+        "dead"
+    }
+}
+
+fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<ResolvedDeadSymbol> {
+    let name = key.name.trim();
+    if name.is_empty() {
+        anyhow::bail!("symbol name boş");
+    }
+    let project = key
+        .project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("project_id gerekli"))?;
+    let table_kind = dead_table_kind(key.kind.as_str());
+
+    let sql = r#"
+        SELECT repo_path, file_path, line, kind, detail
+        FROM project_index
+        WHERE project_id = ?1
+          AND name = ?2
+          AND kind = ?3
+        ORDER BY indexed_at DESC
+        LIMIT 1
+        "#;
+    let row = conn
+        .query_row(sql, params![project, name, table_kind], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .optional()
+        .context("resolve dead symbol query")?
+        .ok_or_else(|| anyhow::anyhow!("symbol index'te bulunamadı: {name}"))?;
+
+    let (repo_path, file_path, line, kind, detail) = row;
+    let file_path = file_path
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("symbol için dosya yolu yok: {name}"))?;
+
+    let repo = normalize_path_hint(&repo_path);
+    let absolute_file = if Path::new(&file_path).is_absolute() || path_has_windows_drive(&file_path)
+    {
+        normalize_path_hint(&file_path)
+    } else {
+        normalize_path_hint(&Path::new(&repo_path).join(&file_path).to_string_lossy())
+    };
+    if !repo.as_os_str().is_empty()
+        && repo.as_os_str().len() > 1
+        && !path_is_within(&absolute_file, &repo)
+    {
+        anyhow::bail!("symbol path repo kökü dışında");
+    }
+
+    let ui_kind = if kind == "broken" { "broken" } else { "unused" };
+    let symbol = DeadSymbol {
+        project_id: Some(project.to_string()),
+        name: name.to_string(),
+        kind: ui_kind.into(),
+        file: Some(file_path.clone()),
+        line,
+        detail,
+        last_ref: lookup_last_ref_blocking(conn, project, name),
+    };
+    Ok(ResolvedDeadSymbol {
+        symbol,
+        repo_path,
+        file_path: absolute_file.to_string_lossy().replace('\\', "/"),
+        line,
+    })
 }
 
 fn ignore_symbol_blocking(conn: &Connection, symbol: &DeadSymbol) -> Result<()> {
@@ -560,6 +697,7 @@ fn list_ignored_symbols_blocking(
             file: row.get(3)?,
             line: row.get(4)?,
             detail: Some("ignored".into()),
+            last_ref: None,
         })
     })?;
     let mut out = Vec::new();
@@ -778,6 +916,7 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
                         line: row.line,
                         detail: row.detail,
                         project_id: Some(row.project_id),
+                        last_ref: None,
                     });
                 }
                 _ => {}
@@ -884,6 +1023,7 @@ mod tests {
                     line: Some(4),
                     detail: Some("gelen referans yok".into()),
                     project_id: Some("lounge".into()),
+                    last_ref: None,
                 },
                 DeadSymbol {
                     name: "ghost".into(),
@@ -892,6 +1032,7 @@ mod tests {
                     line: Some(12),
                     detail: Some("foo → ghost hedefi yok".into()),
                     project_id: Some("lounge".into()),
+                    last_ref: None,
                 },
             ],
         }

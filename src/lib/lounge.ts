@@ -1309,6 +1309,7 @@ export type DeadSymbol = {
   line?: number | null;
   detail?: string | null;
   project_id?: string | null;
+  last_ref?: string | null;
 };
 
 export type AstNode = {

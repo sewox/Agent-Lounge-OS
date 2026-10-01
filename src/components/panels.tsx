@@ -42,7 +42,9 @@ import {
   type SemanticMapSelection,
 } from "@/lib/lounge";
 import { selectCriticalQuotas, type UiScale } from "@/lib/ui-prefs";
+import { DeadSymbolsVaultLink } from "@/components/dead-symbols-panel";
 import { IndexEmptyState } from "@/components/index-empty-state";
+import { deadSymbolStrings as dsStrings } from "@/lib/strings/dead-symbols";
 
 type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
@@ -523,28 +525,34 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   Bu düğüm için dead symbol yok · {selected.name}
                 </div>
               ) : (
-                <div className="max-h-24 space-y-1 overflow-auto font-mono text-meta">
-                  {deadForNode.slice(0, 8).map((symbol) => (
-                    <div
-                      key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
-                      className="flex items-start justify-between gap-2 rounded border border-error/30 bg-error/5 px-1.5 py-1"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate font-medium text-error">{symbol.name}</div>
-                        <div className="truncate text-meta text-on-surface-variant">
-                          {symbol.detail ||
-                            (symbol.file
-                              ? `${pathBasename(symbol.file) || symbol.file}${
-                                  symbol.line != null ? `:${symbol.line}` : ""
-                                }`
-                              : symbol.kind)}
+                <div className="space-y-1">
+                  <div className="max-h-24 space-y-1 overflow-auto font-mono text-meta">
+                    {deadForNode.slice(0, 3).map((symbol) => (
+                      <div
+                        key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
+                        className="flex items-start justify-between gap-2 rounded border border-error/30 bg-error/5 px-1.5 py-1"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-error">{symbol.name}</div>
+                          <div className="truncate text-meta text-on-surface-variant">
+                            {symbol.detail ||
+                              (symbol.file
+                                ? `${pathBasename(symbol.file) || symbol.file}${
+                                    symbol.line != null ? `:${symbol.line}` : ""
+                                  }`
+                                : symbol.kind)}
+                          </div>
                         </div>
+                        <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
+                          {symbol.kind || "dead"}
+                        </span>
                       </div>
-                      <span className="shrink-0 rounded border border-error/40 px-1 text-meta text-error uppercase">
-                        {symbol.kind || "dead"}
-                      </span>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                  <DeadSymbolsVaultLink
+                    count={deadForNode.length}
+                    project={selected.kind === "project" ? selected.name : selected.project}
+                  />
                 </div>
               )}
             </div>
@@ -645,33 +653,38 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
 }
 
 export function HealthPanel() {
-  const { projects, deadSymbols, semanticMap } = useLounge();
+  const { projects, deadSymbols, semanticMap, indexing, indexWorkspace } = useLounge();
   const rows = semanticMap.projects.length
-    ? semanticMap.projects.map((row) => ({
-        name: row.name || "unnamed",
-        indexed: row.node_count > 0 || row.files > 0 ? 100 : 0,
-        files: String(row.files),
-        nodes: String(row.node_count),
-        stale: 0,
-        dead: row.dead.length,
-        sync: "live",
-      }))
+    ? semanticMap.projects.map((row) => {
+        const fromList = deadSymbols.filter(
+          (symbol) => !symbol.project_id || symbol.project_id === row.name,
+        ).length;
+        return {
+          name: row.name || "unnamed",
+          indexed: row.node_count > 0 || row.files > 0 ? 100 : 0,
+          files: String(row.files),
+          nodes: String(row.node_count),
+          stale: 0,
+          dead: fromList || row.dead.length,
+          sync: "live",
+        };
+      })
     : projects.length
-    ? projects.map((row) => ({
-        name: row.name || "unnamed",
-        indexed: row.nodes > 0 || (row.files ?? 0) > 0 ? 100 : 0,
-        files: String(row.files ?? 0),
-        nodes: String(row.nodes),
-        stale: 0,
-        dead: deadSymbols.filter(
-          (symbol) =>
-            !symbol.project_id ||
-            symbol.project_id === row.name ||
-            symbol.project_id === row.root_path,
-        ).length,
-        sync: "live",
-      }))
-    : [];
+      ? projects.map((row) => ({
+          name: row.name || "unnamed",
+          indexed: row.nodes > 0 || (row.files ?? 0) > 0 ? 100 : 0,
+          files: String(row.files ?? 0),
+          nodes: String(row.nodes),
+          stale: 0,
+          dead: deadSymbols.filter(
+            (symbol) =>
+              !symbol.project_id ||
+              symbol.project_id === row.name ||
+              symbol.project_id === row.root_path,
+          ).length,
+          sync: "live",
+        }))
+      : [];
 
   const [page, setPage] = useState(0);
   const pages = pageCount(rows.length);
@@ -692,7 +705,18 @@ export function HealthPanel() {
             PROJECT HEALTH: INDEXING + DEAD CODE
           </h3>
         </div>
-        <span className="font-mono text-meta text-outline">memory_bridge</span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void indexWorkspace()}
+            disabled={indexing}
+            data-qa="health-reindex"
+            className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-meta font-medium text-primary hover:bg-primary-container/20 disabled:opacity-60"
+          >
+            {indexing ? "Scanning..." : dsStrings.reindex}
+          </button>
+          <span className="font-mono text-meta text-outline">memory_bridge · live</span>
+        </div>
       </div>
       <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-body">
         {rows.length === 0 ? (
@@ -715,7 +739,13 @@ export function HealthPanel() {
                 </div>
                 <div className="flex items-center gap-2 text-meta text-on-surface-variant">
                   <span>sync: {repo.sync}</span>
-                  <span className="font-medium text-error">{repo.dead} dead symbols</span>
+                  <Link
+                    href={`/health?tab=dead&project=${encodeURIComponent(repo.name)}`}
+                    data-qa="health-dead-drilldown"
+                    className="font-medium text-error hover:underline"
+                  >
+                    {dsStrings.deadDrillDown(repo.dead)}
+                  </Link>
                 </div>
               </div>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest">
