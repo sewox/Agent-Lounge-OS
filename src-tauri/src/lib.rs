@@ -283,6 +283,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             open_dead_symbol_in_editor,
             fix_dead_symbol_with_agent,
             focus_app_for_approval,
+            services::approval_sound::pick_custom_approval_sound,
+            services::approval_sound::resolve_custom_approval_sound,
             confirm_destructive,
             trigger_grok_test,
             list_projects,

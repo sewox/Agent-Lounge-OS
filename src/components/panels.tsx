@@ -2,11 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { GraphUiButton } from "@/components/graph-ui-button";
 import { GraphUiSettings } from "@/components/graph-ui-settings";
 import { Icon } from "@/components/icons";
 import { useLounge } from "@/components/lounge-provider";
 import { ExperienceDrawer } from "@/components/experience-drawer";
+import { LocaleSwitch } from "@/components/locale-switch";
+import { ApprovalSoundSettingsPanel } from "@/components/approval-sound-settings";
 import { SemanticMap } from "@/components/SemanticMap";
 import {
   formatDisplayPath,
@@ -71,6 +74,7 @@ function quotaKindClass(mode: string): string {
 }
 
 export function OverviewKpis() {
+  const { t } = useTranslation("dashboard");
   const {
     experiences,
     projects,
@@ -111,13 +115,13 @@ export function OverviewKpis() {
             className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-transparent border-t-primary"
             aria-hidden
           />
-          <span className="font-semibold tracking-label uppercase">Scanning...</span>
-          <span className="text-outline">Index Workspace</span>
+          <span className="font-semibold tracking-label uppercase">{t("scanning")}</span>
+          <span className="text-outline">{t("indexWorkspace")}</span>
         </div>
       ) : null}
       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
       <Kpi
-        label="LATENCY"
+        label={t("kpi.latency")}
         value={latencyValue}
         live={latencyLive}
         hint={
@@ -130,13 +134,13 @@ export function OverviewKpis() {
             <LatencySparkline values={decisionLatencyHistory} />
           ) : (
             <span className="font-mono text-meta text-on-surface-variant">
-              {decisionGate?.phase === "ready" ? "idle" : "cold"}
+              {decisionGate?.phase === "ready" ? t("idle") : t("cold")}
             </span>
           )
         }
       />
       <Kpi
-        label="MSG / MIN"
+        label={t("kpi.msgPerMin")}
         value={String(decisionMsgPerMin)}
         live={msgLive}
         hint="NATS / 60s"
@@ -148,35 +152,39 @@ export function OverviewKpis() {
                 : "border-outline-variant bg-surface-container-high text-on-surface-variant"
             }`}
           >
-            {msgLive ? "live" : "idle"}
+            {msgLive ? t("live") : t("idle")}
           </span>
         }
       />
       <Kpi
-        label="INDEXED FILES"
-        value={indexedFiles.toLocaleString("tr-TR")}
+        label={t("kpi.indexedFiles")}
+        value={indexedFiles.toLocaleString()}
         hint={lastIndex?.project ? `${lastIndex.project} · memory_bridge` : "memory_bridge"}
-        badge={<span className="font-mono text-meta text-on-surface-variant">{projects.length} repos</span>}
+        badge={
+          <span className="font-mono text-meta text-on-surface-variant">
+            {t("repos", { count: projects.length })}
+          </span>
+        }
       />
       <Kpi
-        label="EXPERIENCES"
+        label={t("kpi.experiences")}
         value={String(experiences.length)}
         hint="vault persistence: sqlite"
-        badge={<span className="font-body text-meta text-secondary">synced</span>}
+        badge={<span className="font-body text-meta text-secondary">{t("synced")}</span>}
       />
       <Kpi
-        label="DEAD SYMBOLS"
+        label={t("kpi.deadSymbols")}
         value={deadDisplay}
-        hint={indexed ? "unreachable fn/struct refs" : "Index Workspace"}
+        hint={indexed ? t("unreachableRefs") : t("indexWorkspace")}
         valueClass={indexed && deadCount > 0 ? "text-error" : undefined}
         badge={
           indexed && deadCount > 0 ? (
             <span className="flex items-center gap-0.5 rounded border border-error-container bg-error-container/40 px-1.5 py-0.5 font-body text-meta font-medium text-error-dim">
-              ▼ amber alert
+              {t("amberAlert")}
             </span>
           ) : (
             <span className="font-mono text-meta text-on-surface-variant">
-              {indexed ? "clean" : "no index"}
+              {indexed ? t("clean") : t("noIndex")}
             </span>
           )
         }
@@ -306,8 +314,13 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full table-fixed border-collapse text-left font-body text-body">
           <thead className="sticky top-0 z-10">
-            <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 font-body text-meta tracking-label text-outline uppercase">
-              <th className="w-[6.5rem] px-2.5 py-1.5 font-medium">Time</th>
+            <tr
+              lang="en"
+              className="select-none border-b border-outline-variant bg-surface-container-low/95 font-body text-meta tracking-label text-outline uppercase"
+            >
+              <th lang="en" className="w-[6.5rem] px-2.5 py-1.5 font-medium">
+                Time
+              </th>
               <th className="px-2 py-1.5 font-medium">Subject</th>
               <th className="w-[11rem] px-2 py-1.5 font-medium">Route</th>
               <th className="w-14 px-2 py-1.5 text-right font-medium">Payload</th>
@@ -413,6 +426,7 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
 }
 
 export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
+  const { t } = useTranslation("dashboard");
   const {
     experiences,
     projects,
@@ -499,7 +513,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           </span>
           {embedded ? null : (
             <h3 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-              SEMANTIC MAP + EXPERIENCES
+              {t("panels.vault")}
             </h3>
           )}
         </div>
@@ -1129,6 +1143,9 @@ const QUOTA_ACTIONS: { id: QuotaExhaustedAction; title: string; hint: string }[]
 export function SettingsPanel() {
   const { policy, savePolicy, model } = useLounge();
   const { scale, setScale, scales } = useUiScale();
+  const { t } = useTranslation("settings");
+  const { t: tc } = useTranslation("common");
+  const { t: ts } = useTranslation("shell");
 
   const scaleLabel = (value: UiScale) => `${Math.round(value * 100)}%`;
 
@@ -1137,9 +1154,23 @@ export function SettingsPanel() {
       <div className="w-full space-y-3">
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
-          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">Routing Policy</h2>
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+            {ts("language")}
+          </h2>
           <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
-            Ajanlar arası otomatik geçiş kilitli. Dispatcher her görev öncesi bu politikayı ve kotaları kontrol eder.
+            {ts("languageLabel")}
+          </p>
+        </div>
+        <div className="p-3">
+          <LocaleSwitch />
+        </div>
+      </div>
+      <ApprovalSoundSettingsPanel />
+      <div className="rounded-lg border border-outline-variant bg-surface-container">
+        <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">{t("routingPolicy")}</h2>
+          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
+            {t("routingDesc")}
           </p>
         </div>
         <div className="space-y-3 p-3">
@@ -1147,7 +1178,7 @@ export function SettingsPanel() {
             className="flex items-center justify-between rounded border border-outline-variant bg-surface-container-high px-3 py-2 font-body text-body"
             title="Always required — cannot be disabled (security)"
           >
-            <span>Ajan geçişinde kullanıcı onayı (kilitli)</span>
+            <span>{t("agentSwitchLocked")}</span>
             <input
               type="checkbox"
               checked
@@ -1178,7 +1209,7 @@ export function SettingsPanel() {
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <label className="space-y-1 font-body text-meta text-on-surface-variant">
-              Yerel fallback ajan
+              {t("localFallbackAgent")}
               <input
                 value={policy.local_fallback_agent}
                 onChange={(event) => void savePolicy({ ...policy, local_fallback_agent: event.target.value })}
@@ -1186,7 +1217,7 @@ export function SettingsPanel() {
               />
             </label>
             <label className="space-y-1 font-body text-meta text-on-surface-variant">
-              Yerel fallback model
+              {t("localFallbackModel")}
               <input
                 value={policy.local_fallback_model || model}
                 onChange={(event) => void savePolicy({ ...policy, local_fallback_model: event.target.value })}
@@ -1201,9 +1232,9 @@ export function SettingsPanel() {
             <table className="w-full text-left font-body text-body">
               <thead className="sticky top-0 z-[1]">
                 <tr className="border-b border-outline-variant bg-surface-container-low text-meta tracking-label text-outline uppercase">
-                  <th className="px-2.5 py-1.5">Ajan</th>
-                  <th className="px-2 py-1.5">Tetik</th>
-                  <th className="px-2.5 py-1.5 text-right">Enabled</th>
+                  <th className="px-2.5 py-1.5">{tc("agent")}</th>
+                  <th className="px-2 py-1.5">{tc("trigger")}</th>
+                  <th className="px-2.5 py-1.5 text-right">{tc("enabled")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -1236,14 +1267,13 @@ export function SettingsPanel() {
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
           <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-            UI ölçeği / UI scale
+            {t("uiScale")}
           </h2>
           <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
-            Kök font boyutunu (rem) ölçekler. Kısayollar: Cmd/Ctrl + büyüt, Cmd/Ctrl − küçült,
-            Cmd/Ctrl 0 → %100.
+            {t("uiScaleDesc")}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2 p-3" role="radiogroup" aria-label="UI ölçeği">
+        <div className="flex flex-wrap gap-2 p-3" role="radiogroup" aria-label={t("uiScaleLabel")}>
           {scales.map((value) => {
             const selected = scale === value;
             return (
@@ -1268,17 +1298,16 @@ export function SettingsPanel() {
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
           <div>
-            <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">Bağlı araçlar</h2>
+            <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">{t("connectedTools")}</h2>
             <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
-              Claude Desktop, Cursor uygulaması + plugin’leri, Antigravity, LMR ve Ollama yeniden taranır;
-              seçim connected_tools tablosuna yazılır.
+              Claude Desktop, Cursor, Antigravity, LMR, Ollama → connected_tools
             </p>
           </div>
           <Link
             href="/onboarding"
             className="min-h-8 rounded bg-primary-container px-2.5 py-1.5 font-body text-body font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed"
           >
-            Yeniden tara
+            {t("rescan")}
           </Link>
         </div>
       </div>
@@ -1525,7 +1554,9 @@ export function FleetPanel() {
                 <dd className="text-on-surface-variant">{selected.pid}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">Uptime</dt>
+                <dt lang="en" className="text-meta text-outline uppercase">
+                  Uptime
+                </dt>
                 <dd className="text-on-surface-variant">{selected.uptime}</dd>
               </div>
               <div>
@@ -1657,7 +1688,9 @@ export function TelemetryPanel() {
     <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div className="text-meta tracking-wider text-outline uppercase">Laya Decision</div>
+          <div lang="en" className="text-meta tracking-wider text-outline uppercase">
+            Laya Decision
+          </div>
           <div
             key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
             className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"

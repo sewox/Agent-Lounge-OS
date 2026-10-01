@@ -72,8 +72,9 @@ pub struct ApprovalResolvedPayload {
 /// Emit `approval_pending` to the frontend and show an OS notification when possible.
 ///
 /// No volume/interval escalation while backgrounded — a single OS toast + event.
-/// Notification click → focus is handled by [`focus_app_for_approval`] (FE `onAction`
-/// or OS activate); desktop `tauri-plugin-notification` has no Rust click callback.
+/// Desktop click delivery varies by OS (macOS Notification Center, Windows toast,
+/// Linux libnotify/D-Bus). When click callbacks are unavailable, focusing the app
+/// (or calling [`focus_app_for_approval`]) still raises the window and banner.
 pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPendingPayload) {
     let _ = app.emit(APPROVAL_PENDING_EVENT, &payload);
     let title = "Approval required";
