@@ -38,9 +38,8 @@ pub(crate) fn validate_markdown_save_path(path: &Path) -> Result<PathBuf, String
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let parent_canon = fs::canonicalize(parent).map_err(|err| {
-        format!("parent directory must exist (refusing to create): {err}")
-    })?;
+    let parent_canon = fs::canonicalize(parent)
+        .map_err(|err| format!("parent directory must exist (refusing to create): {err}"))?;
     if parent_canon.is_symlink() {
         return Err("symlink parent rejected".into());
     }
