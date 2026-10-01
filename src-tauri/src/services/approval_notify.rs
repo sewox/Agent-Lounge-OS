@@ -215,12 +215,23 @@ pub fn install_destructive_approval_emitter<R: Runtime>(app: AppHandle<R>, nats_
     });
 }
 
+/// Process-wide pending-slot test lock (shared with dispatcher tests).
+#[cfg(test)]
+pub(crate) fn pending_slot_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn pending_slot_round_trips_and_clears() {
+        let _guard = pending_slot_test_lock();
         set_pending_approval_task_id(Some("task-1".into()));
         assert_eq!(pending_approval_task_id().as_deref(), Some("task-1"));
         set_pending_approval_task_id(None);
@@ -229,6 +240,7 @@ mod tests {
 
     #[test]
     fn clear_pending_if_matches_only_matching_id() {
+        let _guard = pending_slot_test_lock();
         set_pending_approval_task_id(Some("task-keep".into()));
         assert!(!clear_pending_approval_if_matches("task-other"));
         assert_eq!(pending_approval_task_id().as_deref(), Some("task-keep"));
@@ -241,6 +253,7 @@ mod tests {
 
     #[test]
     fn resolve_paths_clear_slot_so_activation_is_inert() {
+        let _guard = pending_slot_test_lock();
         // Mirrors resolve_vote / await_approval (Approve, Deny, ApproveLocal, routing).
         for (id, _vote) in [
             ("approve-1", "Approve"),
@@ -261,6 +274,7 @@ mod tests {
 
     #[test]
     fn mismatched_clear_leaves_pending_so_activation_still_armed() {
+        let _guard = pending_slot_test_lock();
         set_pending_approval_task_id(Some("live-approval".into()));
         assert!(!clear_pending_approval_if_matches("stale-other"));
         assert_eq!(pending_approval_task_id().as_deref(), Some("live-approval"));

@@ -234,11 +234,7 @@ mod tests {
 
     #[test]
     fn destructive_confirm_flow_single_use() {
-<<<<<<< HEAD
-        let _guard = test_lock();
-=======
         let _guard = test_lock().lock().expect("destructive confirm test lock");
->>>>>>> eba97eb (fix(ci): align Tauri npm pins, serialize destructive tests, harden i18n)
         reset_for_tests();
         let args = vec!["-rf".into(), "/tmp/x".into()];
         let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
@@ -267,11 +263,7 @@ mod tests {
 
     #[test]
     fn confirm_hash_matches_argv_with_spaces() {
-<<<<<<< HEAD
-        let _guard = test_lock();
-=======
         let _guard = test_lock().lock().expect("destructive confirm test lock");
->>>>>>> eba97eb (fix(ci): align Tauri npm pins, serialize destructive tests, harden i18n)
         reset_for_tests();
         let args = vec!["-rf".into(), "/tmp/my dir".into()];
         let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::User);

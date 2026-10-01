@@ -1389,9 +1389,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_vote_clears_notification_pending_slot() {
         use crate::services::{
-            clear_pending_approval_if_matches, pending_approval_task_id,
-            set_pending_approval_task_id, should_focus_on_activation,
+            approval_notify::pending_slot_test_lock, clear_pending_approval_if_matches,
+            pending_approval_task_id, set_pending_approval_task_id, should_focus_on_activation,
         };
+        let _slot_guard = pending_slot_test_lock();
 
         let dispatcher = live_dispatcher(Duration::from_secs(5));
         dispatcher.set_gate_ready(true);

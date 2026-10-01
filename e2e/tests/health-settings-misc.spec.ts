@@ -327,13 +327,13 @@ test.describe("AP / CP / misc", () => {
   test("AP-10 · Native OS notification → focus_app_for_approval + banner focus", async ({
     page,
   }, testInfo) => {
-    // Desktop: plugin onAction never fires. Harness verifies the real desktop path —
-    // invoke focus_app_for_approval (Rust/mock emits approval_banner_focus) + window-focus
-    // fallback while a pending approval is shown. S2 live covers real OS toasts.
+    // Front-end contract only: the harness mock of focus_app_for_approval emits
+    // approval_banner_focus and focuses the banner. Rust raise/slot behaviour is
+    // covered by unit tests; live OS toast click is S2 manual (NOT YET RUN).
     testInfo.annotations.push({
       type: "manual",
       description:
-        "S2 live: toast/dock activates app → focus_app_for_approval on macOS/Windows/Linux. Plugin onAction is mobile-only; see docs/qa/ap-10-notification-click.md.",
+        "S2 live NOT YET RUN: real OS toast → activate → banner. Automated AP-10 = front-end contract via mock; see docs/qa/ap-10-notification-click.md.",
     });
     await openRoute(page, "/dashboard", "full");
     expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();
