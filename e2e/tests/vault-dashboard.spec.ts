@@ -259,13 +259,24 @@ test.describe("EX — vault experiences", () => {
   });
 
   test("EX-LAYOUT · Semantic Map + Experiences fill ≥85%", async ({ page }, testInfo) => {
+    if (testInfo.project.name === "D4-scale") {
+      await openRoute(page, "/settings", "full");
+      const scale130 = page
+        .getByRole("radio", { name: /130/i })
+        .or(page.getByRole("button", { name: /130%/ }));
+      if (await scale130.count()) {
+        await scale130.first().click();
+      } else if (await page.getByText("130%").count()) {
+        await page.getByText("130%").first().click();
+      }
+    }
     await openRoute(page, "/vault", "full");
     const m = await measureLayout(page, "/vault");
     const fail = formatLayoutFailure(m);
     testInfo.annotations.push({ type: "layout", description: fail });
     expect(m.l1_pass && m.l3_pass && !m.l2_sparseInterior, fail).toBe(true);
 
-    // Drawer + footer must remain fully visible at 960px / D4-scale as well as D0–D3.
+    // Drawer + footer must remain fully visible at 960px / D4-scale (130%) as well as D0–D3.
     await page.locator('[data-qa="experience-card"]').first().click();
     const drawer = page.locator("[data-qa=experience-drawer]");
     await expect(drawer).toBeVisible();
