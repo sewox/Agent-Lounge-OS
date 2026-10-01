@@ -114,7 +114,10 @@ test.describe("ST — settings", () => {
     await openRoute(page, "/settings", "full");
     const before = await getIpcLog(page);
     // Policy autosaves on trigger checkbox toggle (no Graph Kaydet / native dialog).
-    const trigger = page.locator('input[type="checkbox"]:not([disabled])').first();
+    // Scope to routing table so approval-sound / other prefs checkboxes are ignored.
+    const trigger = page
+      .locator('[data-qa="routing-table"] input[type="checkbox"]:not([disabled])')
+      .first();
     if ((await trigger.count()) === 0) {
       test.skip(true, "No editable trigger checkbox");
       return;

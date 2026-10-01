@@ -639,7 +639,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </button>
             </>
           )}
-          <LocaleSwitch compact className="hidden xl:flex" />
+          <LocaleSwitch compact className="flex shrink-0" />
           <div className="relative shrink-0" ref={alertRef}>
             <button
               type="button"

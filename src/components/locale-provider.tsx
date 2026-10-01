@@ -6,7 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { I18nextProvider } from "react-i18next";
@@ -24,25 +24,48 @@ type LocaleContextValue = {
 
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 
-// Eager init so first paint already has dictionaries (OS language or stored).
-initI18n(detectInitialLocale());
+const listeners = new Set<() => void>();
+
+function emitLocaleChange() {
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+function subscribeLocale(listener: () => void) {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function getLocaleSnapshot(): AppLocale {
+  return detectInitialLocale(typeof window !== "undefined" ? window.localStorage : null);
+}
+
+function getServerLocaleSnapshot(): AppLocale {
+  return "en";
+}
+
+// SSR-safe default — client snapshot applies OS / stored locale after hydration.
+initI18n("en");
 
 export function LocaleProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<AppLocale>(() => detectInitialLocale());
+  const locale = useSyncExternalStore(subscribeLocale, getLocaleSnapshot, getServerLocaleSnapshot);
 
   useEffect(() => {
+    void i18n.changeLanguage(locale);
     document.documentElement.lang = locale;
-    if (i18n.language !== locale) {
-      void i18n.changeLanguage(locale);
-    }
   }, [locale]);
 
   const setLocale = useCallback((next: AppLocale) => {
-    setLocaleState(next);
     writeStoredLocale(next);
     persistLocale(next);
     void i18n.changeLanguage(next);
-    document.documentElement.lang = next;
+    if (typeof document !== "undefined") {
+      document.documentElement.lang = next;
+    }
+    emitLocaleChange();
   }, []);
 
   const value = useMemo(() => ({ locale, setLocale }), [locale, setLocale]);

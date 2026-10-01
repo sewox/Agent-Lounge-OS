@@ -16,9 +16,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-dialog": "^2.7.3",
-    "@tauri-apps/plugin-notification": "^2.5.1",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.3",
+    "@tauri-apps/plugin-notification": "2.4.0",
     "i18next": "^26.4.2",
     "next": "16.3.5",
     "react": "19.3.0",
@@ -36,5 +36,8 @@
     "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "@tauri-apps/api": "2.11.1"
   }
 }

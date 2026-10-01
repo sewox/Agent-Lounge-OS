@@ -223,10 +223,22 @@ mod tests {
     use super::*;
     use crate::kernel::guarded_command::GuardedCommand;
     use crate::kernel::policy_gate::ActionSource;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Global registry is process-wide; serialize these tests to avoid races under
+    /// `cargo test` parallelism (seen as flaky `emitted.len() == 2` on macOS CI).
+    fn test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn destructive_confirm_flow_single_use() {
+<<<<<<< HEAD
         let _guard = test_lock();
+=======
+        let _guard = test_lock().lock().expect("destructive confirm test lock");
+>>>>>>> eba97eb (fix(ci): align Tauri npm pins, serialize destructive tests, harden i18n)
         reset_for_tests();
         let args = vec!["-rf".into(), "/tmp/x".into()];
         let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
@@ -255,7 +267,11 @@ mod tests {
 
     #[test]
     fn confirm_hash_matches_argv_with_spaces() {
+<<<<<<< HEAD
         let _guard = test_lock();
+=======
+        let _guard = test_lock().lock().expect("destructive confirm test lock");
+>>>>>>> eba97eb (fix(ci): align Tauri npm pins, serialize destructive tests, harden i18n)
         reset_for_tests();
         let args = vec!["-rf".into(), "/tmp/my dir".into()];
         let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::User);

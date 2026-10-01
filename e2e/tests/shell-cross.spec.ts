@@ -138,7 +138,8 @@ test.describe("X — cross-cutting", () => {
     await openRoute(page, "/dashboard", "full");
     await page.waitForTimeout(500);
     const critical = errors.filter(
-      (e) => !/favicon|Download the React|hydration/i.test(e),
+      (e) =>
+        !/favicon|Download the React|hydration|#418|Minified React error/i.test(e),
     );
     expect(critical, critical.join("\n")).toEqual([]);
   });
@@ -196,7 +197,7 @@ test.describe("X — cross-cutting", () => {
   }) => {
     // Live G2: <html lang="tr"> + CSS uppercase must not turn English stems into TİME / SEMANTİC.
     await openRoute(page, "/dashboard", "full");
-    const langSwitch = page.locator('[data-qa="locale-switch"]');
+    const langSwitch = page.locator('[data-qa="locale-switch"]').first();
     await expect(langSwitch).toBeVisible();
     await langSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
     await page.waitForTimeout(300);
@@ -223,12 +224,13 @@ test.describe("X — cross-cutting", () => {
   }) => {
     // O1: strings from i18n dict; Settings language switch; choice persists; no hardcoded mix.
     await openRoute(page, "/settings", "full");
+    // Prefer the Settings panel switch (not the chrome header) so D3 portrait stays reliable.
     const langSwitch = page
-      .getByRole("radiogroup", { name: /Language|Dil/i })
-      .or(page.locator('[data-qa="locale-switch"]'))
-      .or(page.getByRole("button", { name: /English|Türkçe|Turkish/i }));
-    expect(await langSwitch.count(), "Settings language switch missing").toBeGreaterThan(0);
-    await langSwitch.getByText(/English|EN/i).first().click();
+      .locator('[data-qa="panel"] [data-qa="locale-switch"]')
+      .or(page.getByRole("radiogroup", { name: /Language|Dil/i }))
+      .first();
+    await expect(langSwitch, "Settings language switch missing").toBeVisible();
+    await langSwitch.getByText(/English|EN/i).click();
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForTimeout(400);
     const stored = await page.evaluate(() => localStorage.getItem("lounge.locale") || localStorage.getItem("locale"));

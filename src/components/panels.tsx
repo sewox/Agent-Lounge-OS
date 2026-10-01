@@ -1154,20 +1154,6 @@ export function SettingsPanel() {
       <div className="w-full space-y-3">
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
-          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-            {ts("language")}
-          </h2>
-          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
-            {ts("languageLabel")}
-          </p>
-        </div>
-        <div className="p-3">
-          <LocaleSwitch />
-        </div>
-      </div>
-      <ApprovalSoundSettingsPanel />
-      <div className="rounded-lg border border-outline-variant bg-surface-container">
-        <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
           <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">{t("routingPolicy")}</h2>
           <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
             {t("routingDesc")}
@@ -1263,6 +1249,20 @@ export function SettingsPanel() {
           <p className="font-body text-meta text-outline">Scroll · routing triggers</p>
         </div>
       </div>
+      <div className="rounded-lg border border-outline-variant bg-surface-container">
+        <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+            {ts("language")}
+          </h2>
+          <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
+            {ts("languageLabel")}
+          </p>
+        </div>
+        <div className="p-3">
+          <LocaleSwitch />
+        </div>
+      </div>
+      <ApprovalSoundSettingsPanel />
       <GraphUiSettings />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
