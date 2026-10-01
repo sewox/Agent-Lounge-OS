@@ -50,6 +50,35 @@
     "created_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "archived"]
+    },
+    "reviewed": {
+      "type": "boolean"
+    },
+    "use_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_used_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "archived_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "is_pinned": {
+      "type": "boolean"
+    },
+    "updated_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "original_content": {
+      "type": ["string", "null"]
     }
   }
 }
