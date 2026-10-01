@@ -574,23 +574,59 @@ fn dead_table_kind(symbol_kind: &str) -> &'static str {
     }
 }
 
-/// True when any existing path component (or the final path) is a symlink.
-fn path_contains_symlink(path: &Path) -> bool {
-    let mut cur = PathBuf::new();
-    for component in path.components() {
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Resolve to a canonical absolute path when possible.
+/// If the full path does not exist, canonicalize the deepest existing ancestor and
+/// append the remaining lexical suffix (so macOS `/tmp` → `/private/tmp` works).
+fn resolve_path_preserving_missing(path: &Path) -> PathBuf {
+    if let Ok(canon) = path.canonicalize() {
+        return canon;
+    }
+    let mut cur = path.to_path_buf();
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    while let Some(name) = cur.file_name() {
+        missing.push(name.to_os_string());
+        if !cur.pop() {
+            break;
+        }
+        if let Ok(canon) = cur.canonicalize() {
+            let mut out = canon;
+            for part in missing.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        if cur.as_os_str().is_empty() {
+            break;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// True when the final path or any component *at or under* `root` is a symlink.
+/// Ancestors of the repo root (e.g. macOS `/tmp` → `/private/tmp`) are allowed;
+/// only in-repo symlink components / the final node are rejected.
+fn path_contains_symlink_under(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return is_symlink(path);
+    };
+    let mut cur = root.to_path_buf();
+    for component in rel.components() {
         match component {
-            Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
-            Component::RootDir => cur.push(Component::RootDir.as_os_str()),
-            Component::CurDir => {}
+            Component::Normal(part) => cur.push(part),
+            Component::CurDir => continue,
             Component::ParentDir => {
                 cur.pop();
             }
-            Component::Normal(part) => cur.push(part),
+            Component::RootDir | Component::Prefix(_) => continue,
         }
-        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
-            if meta.file_type().is_symlink() {
-                return true;
-            }
+        if is_symlink(&cur) {
+            return true;
         }
     }
     false
@@ -613,43 +649,29 @@ pub(crate) fn confine_index_file_path(repo_path: &str, file_path: &str) -> Resul
         anyhow::bail!("repo_path boş");
     }
 
-    let joined = if Path::new(file_raw).is_absolute() || path_has_windows_drive(file_raw) {
-        normalize_path_hint(file_raw)
-    } else {
-        normalize_path_hint(&repo.join(file_raw).to_string_lossy())
-    };
-
-    if path_contains_symlink(&joined) {
-        anyhow::bail!("symlink rejected");
-    }
-
-    let repo_canon = match repo.canonicalize() {
-        Ok(path) => path,
-        Err(_) => {
-            if path_contains_symlink(&repo) {
-                anyhow::bail!("symlink rejected");
-            }
-            repo.clone()
-        }
-    };
+    let repo_canon = resolve_path_preserving_missing(&repo);
     if repo_canon.as_os_str().is_empty() {
         anyhow::bail!("repo_path boş");
     }
 
-    let file_canon = match joined.canonicalize() {
-        Ok(path) => {
-            if path_contains_symlink(&joined) {
-                anyhow::bail!("symlink rejected");
-            }
-            path
-        }
-        Err(_) => joined,
+    let joined = if Path::new(file_raw).is_absolute() || path_has_windows_drive(file_raw) {
+        normalize_path_hint(file_raw)
+    } else {
+        normalize_path_hint(&repo_canon.join(file_raw).to_string_lossy())
     };
 
-    if !path_is_within(&file_canon, &repo_canon) {
+    let file_resolved = resolve_path_preserving_missing(&joined);
+
+    if path_contains_symlink_under(&repo_canon, &joined)
+        || path_contains_symlink_under(&repo_canon, &file_resolved)
+    {
+        anyhow::bail!("symlink rejected");
+    }
+
+    if !path_is_within(&file_resolved, &repo_canon) {
         anyhow::bail!("symbol path repo kökü dışında");
     }
-    Ok(file_canon)
+    Ok(file_resolved)
 }
 
 fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<ResolvedDeadSymbol> {
@@ -1534,6 +1556,31 @@ mod tests {
         symlink(&outside, &leak).unwrap();
         let err = confine_index_file_path(repo.to_str().unwrap(), "src/leak.rs");
         assert!(err.is_err(), "symlink escape must fail: {err:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// macOS maps `/tmp` → `/private/tmp`. Ancestors of the repo root may be
+    /// symlinks; that must not reject a normal in-repo resolve.
+    #[cfg(unix)]
+    #[test]
+    fn confine_allows_symlink_ancestor_of_repo() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("lounge-tmp-sym-{}", Uuid::new_v4()));
+        let real = root.join("real");
+        let via = root.join("via");
+        std::fs::create_dir_all(real.join("repo").join("src")).unwrap();
+        std::fs::write(real.join("repo").join("src").join("ok.rs"), b"fn ok() {}").unwrap();
+        symlink(&real, &via).unwrap();
+        let repo_via = via.join("repo");
+        let ok = confine_index_file_path(repo_via.to_str().unwrap(), "src/ok.rs");
+        assert!(
+            ok.is_ok(),
+            "symlink ancestor of repo must be allowed: {ok:?}"
+        );
+        // Also when the leaf dirs do not exist yet (index-only path).
+        let missing_repo = via.join("missing-repo");
+        let ok2 = confine_index_file_path(missing_repo.to_str().unwrap(), "src/x.rs");
+        assert!(ok2.is_ok(), "missing path under symlink ancestor: {ok2:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
