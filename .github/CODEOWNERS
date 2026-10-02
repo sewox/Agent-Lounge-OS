@@ -1,0 +1,9 @@
+# Bilgi amaçlı sahiplik — branch korumasında "Require code owner review" kapalı.
+# Informational ownership only — "Require code owner review" is not enabled.
+
+SECURITY.md @sewox
+src-tauri/src/kernel/guarded_command.rs @sewox
+src-tauri/src/kernel/policy_gate.rs @sewox
+.github/ @sewox
+src-tauri/Cargo.toml @sewox
+package.json @sewox
