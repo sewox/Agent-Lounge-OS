@@ -111,6 +111,15 @@ export type ProjectPageRow = {
   lastUpdated: string | null;
 };
 
+export type FileSymbolRow = {
+  name: string;
+  kind: string;
+  file: string | null;
+  line: number | null;
+  refCount: number;
+  isDead: boolean;
+};
+
 export type PageSortKey = "path" | "-path" | "title" | "-title" | "updated" | "symbols";
 
 export function parseVaultFilters(raw: unknown): VaultProjectFilters {
@@ -535,4 +544,47 @@ export function mapProjectPage(raw: Record<string, unknown>): ProjectPageRow {
       (typeof raw.lastUpdated === "string" && raw.lastUpdated) ||
       null,
   };
+}
+
+export function mapFileSymbol(raw: Record<string, unknown>): FileSymbolRow {
+  return {
+    name: String(raw.name ?? ""),
+    kind: String(raw.kind ?? "node"),
+    file:
+      (typeof raw.file === "string" && raw.file) ||
+      (typeof raw.file_path === "string" && raw.file_path) ||
+      null,
+    line:
+      typeof raw.line === "number" && Number.isFinite(raw.line)
+        ? raw.line
+        : Number(raw.line) || null,
+    refCount: Number(raw.ref_count ?? raw.refCount ?? 0) || 0,
+    isDead: Boolean(raw.is_dead ?? raw.isDead),
+  };
+}
+
+/** Client fallback: symbols for a file from the semantic map. */
+export function symbolsFromSemanticFile(
+  project: SemanticProject | null | undefined,
+  filePath: string,
+  deadNames?: Set<string>,
+): FileSymbolRow[] {
+  if (!project || !filePath) {
+    return [];
+  }
+  const dead = deadNames ?? new Set(
+    project.dead
+      .filter((d) => (d.file || "").replace(/\\/g, "/") === filePath.replace(/\\/g, "/"))
+      .map((d) => d.name),
+  );
+  return project.nodes
+    .filter((node) => (node.file || "").replace(/\\/g, "/") === filePath.replace(/\\/g, "/"))
+    .map((node) => ({
+      name: node.name,
+      kind: node.kind || "node",
+      file: node.file ?? null,
+      line: node.line ?? null,
+      refCount: node.ref_count || 0,
+      isDead: dead.has(node.name),
+    }));
 }

@@ -58,9 +58,11 @@ import {
 } from "@/lib/lounge";
 import {
   buildVaultProjectRows,
+  mapFileSymbol,
   mapProjectPage,
   mapVaultAggregate,
   VAULT_PAGE_WINDOW,
+  type FileSymbolRow,
   type PageSortKey,
   type ProjectPageRow,
   type VaultProjectRow,
@@ -488,6 +490,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const [pagesLoading, setPagesLoading] = useState(false);
   const [pagesError, setPagesError] = useState<string | null>(null);
   const [pageQueryState, setPageQueryState] = useState({ query: "", sort: "path" as PageSortKey });
+  const [fileSymbols, setFileSymbols] = useState<FileSymbolRow[] | null>(null);
+  const [fileSymbolsLoading, setFileSymbolsLoading] = useState(false);
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
 
   if (selectionProject !== selectedProject) {
@@ -601,6 +605,39 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     serverPagesTotal,
   ]);
 
+  const fetchFileSymbols = useCallback(
+    async (filePath: string) => {
+      if (!tauriReady || !openProjectName || !filePath) {
+        return;
+      }
+      setFileSymbolsLoading(true);
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const rows = await invoke<Record<string, unknown>[]>("list_file_symbols", {
+          projectId: openProjectName,
+          filePath,
+        });
+        setFileSymbols(rows.map((row) => mapFileSymbol(row)));
+      } catch {
+        setFileSymbols(null);
+      } finally {
+        setFileSymbolsLoading(false);
+      }
+    },
+    [openProjectName, tauriReady],
+  );
+
+  const handleOpenPage = useCallback(
+    (path: string) => {
+      void fetchFileSymbols(path);
+    },
+    [fetchFileSymbols],
+  );
+
+  const handleClosePage = useCallback(() => {
+    setFileSymbols(null);
+  }, []);
+
   const graphTotals = useMemo(
     () => resolveGraphTotals({ projects, semanticMap }),
     [projects, semanticMap],
@@ -701,12 +738,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             onRetryPages={() =>
               void fetchProjectPages(pageQueryState.query, pageQueryState.sort, 0, false)
             }
+            fileSymbols={fileSymbols}
+            fileSymbolsLoading={fileSymbolsLoading}
+            onOpenPage={handleOpenPage}
+            onClosePage={handleClosePage}
             openProjectName={openProjectName}
             onOpenProject={(name) => {
               setOpenProjectName(name);
               setServerPages(null);
               setServerPagesTotal(null);
               setPagesError(null);
+              setFileSymbols(null);
               if (name) {
                 setSelected({
                   id: `project:${name}`,

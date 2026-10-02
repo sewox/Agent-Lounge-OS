@@ -302,6 +302,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_semantic_map,
             list_vault_projects,
             list_project_pages,
+            list_file_symbols,
             get_kernel_model,
             set_kernel_model,
             list_ollama_models,
@@ -609,6 +610,26 @@ async fn list_project_pages(
     }
     store
         .list_project_pages(project_id, query, sort, offset, limit)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_file_symbols(
+    store: tauri::State<'_, ExperienceStore>,
+    project_id: String,
+    file_path: String,
+) -> Result<Vec<crate::models::FileSymbol>, String> {
+    let project_id = project_id.trim().to_string();
+    let file_path = file_path.trim().to_string();
+    if project_id.is_empty() {
+        return Err("project_id gerekli".into());
+    }
+    if file_path.is_empty() {
+        return Err("file_path gerekli".into());
+    }
+    store
+        .list_file_symbols(project_id, file_path)
         .await
         .map_err(|err| err.to_string())
 }

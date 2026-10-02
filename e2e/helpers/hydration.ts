@@ -53,9 +53,7 @@ export type HydrationConsoleEntry = {
   text: string;
 };
 
-export function isHydrationConsoleMessage(text: string): boolean {
-  return /hydrat/i.test(text);
-}
+export { isHydrationConsoleMessage } from "../../src/lib/hydration-console";
 
 export function attachHydrationConsoleCollector(page: Page): HydrationConsoleEntry[] {
   const entries: HydrationConsoleEntry[] = [];

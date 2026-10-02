@@ -52,7 +52,7 @@ export default defineConfig({
     },
     {
       name: "D960",
-      testMatch: /vault-dashboard|health-settings|shell-cross/,
+      testMatch: /vault-dashboard|vault-projects|health-settings|shell-cross/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 960, height: 800 }, deviceScaleFactor: 1 },
     },
     {

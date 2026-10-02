@@ -3,6 +3,7 @@ import { openRoute } from "../helpers/nav";
 import { measureLayout, formatLayoutFailure } from "../helpers/layout";
 import {
   attachHydrationConsoleCollector,
+  isHydrationConsoleMessage,
   withHydrationProfile,
   openRouteHydration,
 } from "../helpers/hydration";
@@ -225,6 +226,34 @@ test.describe("VP — vault project grouping", () => {
     );
   });
 
+  test("VP-12 · Page expand shows symbols + dead-only filter", async ({ page }) => {
+    await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
+    // Prefer a real indexed file from the semantic map (unshifted ahead of generated pages).
+    const dispatcher = page
+      .locator('[data-qa="vault-page-row"]')
+      .filter({ hasText: /dispatcher\.rs/i })
+      .first();
+    if (await dispatcher.count()) {
+      await dispatcher.click();
+    } else {
+      await page.locator('[data-qa="vault-page-row"]').first().click();
+    }
+    await expect(page.locator('[data-qa="vault-page-symbols"]')).toBeVisible();
+    const symbols = page.locator('[data-qa="vault-file-symbol"]');
+    await expect(symbols.first()).toBeVisible();
+    const before = await symbols.count();
+    expect(before).toBeGreaterThan(0);
+    await page.locator('[data-qa="vault-dead-only"]').check();
+    const after = await symbols.count();
+    expect(after).toBeLessThanOrEqual(before);
+    await expect(page.locator('[data-qa="vault-file-symbol"][data-dead="true"]').first()).toBeVisible();
+    await page.locator('[data-qa="vault-file-symbol"][data-dead="true"]').first().click();
+    await expect(page.locator('[data-qa="vault-project-path"], main')).toBeVisible();
+    // Virtualization must still be intact under the symbols panel.
+    expect(await page.locator('[data-qa="vault-page-row"]').count()).toBeLessThan(80);
+  });
+
   test("VP-HYDRATION · TR locale /dashboard has no vault hydration noise", async ({
     browser,
   }) => {
@@ -247,7 +276,7 @@ test.describe("VP — vault project grouping", () => {
         await page.setViewportSize(size);
         await page.waitForTimeout(300);
       }
-      const noise = entries.filter((e) => /hydrat/i.test(e.text));
+      const noise = entries.filter((e) => isHydrationConsoleMessage(e.text));
       expect(noise, noise.map((e) => e.text).join("\n")).toEqual([]);
     });
   });

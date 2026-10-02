@@ -273,6 +273,23 @@ pub struct ProjectPageList {
     pub limit: u64,
 }
 
+/// One AST / index symbol inside a project page (file) — drill-down expand row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FileSymbol {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub line: Option<i64>,
+    #[serde(default)]
+    pub ref_count: u64,
+    #[serde(default)]
+    pub is_dead: bool,
+}
+
 /// `get_semantic_map` UI yükü — SQLite `project_index` satırlarından.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SemanticProject {

@@ -13,6 +13,7 @@ import {
   readVaultFilters,
   resetVaultFilters,
   subscribeVaultFilters,
+  symbolsFromSemanticFile,
   VAULT_FILTERS_KEY,
   windowSlice,
   writeVaultFilters,
@@ -240,6 +241,26 @@ describe("project page list", () => {
     assert.ok(win.totalHeight === 800 * 28);
     assert.ok(win.end - win.start < 30);
     assert.ok(win.start >= 0);
+  });
+
+  it("symbolsFromSemanticFile marks dead names", () => {
+    const project = {
+      ...semanticMap.projects[0],
+      dead: [
+        {
+          name: "foo",
+          kind: "unused",
+          file: "src/a.rs",
+          line: 1,
+          detail: null,
+          project_id: "Alpha",
+        },
+      ],
+    };
+    const rows = symbolsFromSemanticFile(project, "src/a.rs");
+    assert.equal(rows.length, 2);
+    assert.equal(rows.find((r) => r.name === "foo")?.isDead, true);
+    assert.equal(rows.find((r) => r.name === "baz")?.isDead, false);
   });
 });
 

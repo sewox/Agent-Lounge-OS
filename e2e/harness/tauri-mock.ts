@@ -396,6 +396,17 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               };
             }
           ).__QA_VAULT_MOCK__!.listPages(f, args as Record<string, unknown> | undefined);
+        case "list_file_symbols":
+          return (
+            window as Window & {
+              __QA_VAULT_MOCK__?: {
+                listFileSymbols: (
+                  f: FixtureDataset,
+                  args: Record<string, unknown> | undefined,
+                ) => unknown;
+              };
+            }
+          ).__QA_VAULT_MOCK__!.listFileSymbols(f, args as Record<string, unknown> | undefined);
         // --- VAULT_MOCK_END ---
         case "ensure_services":
           return f.serviceReport;

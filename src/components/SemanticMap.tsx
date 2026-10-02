@@ -31,8 +31,10 @@ import {
   pagesFromSemanticProject,
   resetVaultFilters,
   subscribeVaultFilters,
+  symbolsFromSemanticFile,
   windowSlice,
   writeVaultFilters,
+  type FileSymbolRow,
   type PageSortKey,
   type ProjectPageRow,
   type VaultProjectFilters,
@@ -74,6 +76,11 @@ type SemanticMapProps = {
   onPageSearch?: (query: string, sort: PageSortKey) => void;
   onLoadMorePages?: () => void;
   onRetryPages?: () => void;
+  /** Symbols for the expanded page (list_file_symbols). */
+  fileSymbols?: FileSymbolRow[] | null;
+  fileSymbolsLoading?: boolean;
+  onOpenPage?: (path: string) => void;
+  onClosePage?: () => void;
 };
 
 function formatStamp(iso: string | null): string {
@@ -262,11 +269,15 @@ function VirtualPageList({
   query,
   loading,
   onNearEnd,
+  activePath,
+  onOpenPage,
 }: {
   pages: ProjectPageRow[];
   query: string;
   loading?: boolean;
   onNearEnd?: () => void;
+  activePath?: string | null;
+  onOpenPage?: (path: string) => void;
 }) {
   const { t } = useTranslation("vault");
   const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
@@ -325,27 +336,38 @@ function VirtualPageList({
     >
       <div style={{ height: win.totalHeight, position: "relative" }}>
         <div style={{ transform: `translateY(${win.offsetY}px)` }}>
-          {visible.map((page) => (
-            <div
-              key={page.path}
-              data-qa="vault-page-row"
-              className="flex items-start justify-between gap-2 border-b border-outline-variant/30 px-1.5 py-1.5 font-body text-body"
-              style={{ height: PAGE_ROW_HEIGHT }}
-            >
-              <span className="min-w-0">
-                <span className="block truncate font-mono font-medium text-on-surface">
-                  {page.title}
+          {visible.map((page) => {
+            const active = activePath === page.path;
+            return (
+              <button
+                type="button"
+                key={page.path}
+                data-qa="vault-page-row"
+                data-path={page.path}
+                data-active={active ? "true" : "false"}
+                onClick={() => onOpenPage?.(page.path)}
+                className={`flex w-full items-start justify-between gap-2 border-b border-outline-variant/30 px-1.5 py-1.5 text-left font-body text-body ${
+                  active
+                    ? "bg-primary-container/20 text-primary"
+                    : "text-on-surface hover:bg-surface-container-high/70"
+                }`}
+                style={{ height: PAGE_ROW_HEIGHT }}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-mono font-medium">
+                    {page.title}
+                  </span>
+                  <span className="block truncate font-mono text-meta text-outline">
+                    {formatDisplayPath(page.path)}
+                    {page.snippet ? ` · ${page.snippet}` : ""}
+                  </span>
                 </span>
-                <span className="block truncate font-mono text-meta text-outline">
-                  {formatDisplayPath(page.path)}
-                  {page.snippet ? ` · ${page.snippet}` : ""}
+                <span className="shrink-0 font-mono text-meta text-outline">
+                  {t("symbols", { count: page.symbolCount })}
                 </span>
-              </span>
-              <span className="shrink-0 font-mono text-meta text-outline">
-                {t("symbols", { count: page.symbolCount })}
-              </span>
-            </div>
-          ))}
+              </button>
+            );
+          })}
         </div>
       </div>
       {loading ? (
@@ -356,6 +378,100 @@ function VirtualPageList({
           {t("pagesLoading")}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function PageSymbolsPanel({
+  filePath,
+  symbols,
+  loading,
+  deadOnly,
+  onDeadOnlyChange,
+  onClose,
+  onSelectSymbol,
+  selectedName,
+}: {
+  filePath: string;
+  symbols: FileSymbolRow[];
+  loading: boolean;
+  deadOnly: boolean;
+  onDeadOnlyChange: (next: boolean) => void;
+  onClose: () => void;
+  onSelectSymbol: (symbol: FileSymbolRow) => void;
+  selectedName: string | null;
+}) {
+  const { t } = useTranslation("vault");
+  const visible = deadOnly ? symbols.filter((s) => s.isDead) : symbols;
+  const title = filePath.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || filePath;
+  return (
+    <div
+      data-qa="vault-page-symbols"
+      className="mb-2 max-h-48 shrink-0 overflow-auto rounded border border-outline-variant/50 bg-surface-container-high/40 p-1.5"
+    >
+      <div className="mb-1 flex flex-wrap items-center gap-2 font-body text-meta">
+        <span className="min-w-0 flex-1 truncate font-mono text-on-surface">
+          {t("pageSymbols", { file: title })}
+        </span>
+        <label className="flex items-center gap-1 text-on-surface-variant">
+          <input
+            data-qa="vault-dead-only"
+            type="checkbox"
+            checked={deadOnly}
+            onChange={(event) => onDeadOnlyChange(event.target.checked)}
+          />
+          <span>{t("deadOnly")}</span>
+        </label>
+        <button
+          type="button"
+          data-qa="vault-page-symbols-close"
+          onClick={onClose}
+          className="min-h-8 rounded border border-outline-variant px-2 py-1 text-on-surface-variant hover:bg-surface-container-high"
+        >
+          {t("closePageSymbols")}
+        </button>
+      </div>
+      {loading ? (
+        <div className="px-1 py-2 text-on-surface-variant">{t("loading")}</div>
+      ) : visible.length === 0 ? (
+        <div className="px-1 py-2 text-on-surface-variant">
+          {deadOnly ? t("noDeadInPage") : t("noSymbolsInPage")}
+        </div>
+      ) : (
+        <ul className="space-y-0.5" role="list">
+          {visible.map((symbol) => {
+            const active = selectedName === symbol.name;
+            return (
+              <li key={`${symbol.name}:${symbol.line ?? ""}:${symbol.kind}`}>
+                <button
+                  type="button"
+                  data-qa="vault-file-symbol"
+                  data-dead={symbol.isDead ? "true" : "false"}
+                  onClick={() => onSelectSymbol(symbol)}
+                  className={`flex w-full items-center justify-between gap-2 rounded px-1.5 py-1 text-left font-mono text-meta ${
+                    active
+                      ? "bg-primary-container/25 text-primary"
+                      : "text-on-surface hover:bg-surface-container-high"
+                  }`}
+                >
+                  <span className="min-w-0 truncate">
+                    {symbol.name}
+                    {symbol.line != null ? `:${symbol.line}` : ""}
+                    <span className="text-outline"> · {symbol.kind}</span>
+                  </span>
+                  {symbol.isDead ? (
+                    <span className="shrink-0 rounded border border-error/40 px-1 text-error">
+                      dead
+                    </span>
+                  ) : (
+                    <span className="shrink-0 text-outline">{symbol.refCount}</span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
@@ -380,6 +496,10 @@ export function SemanticMap({
   onPageSearch,
   onLoadMorePages,
   onRetryPages,
+  fileSymbols = null,
+  fileSymbolsLoading = false,
+  onOpenPage,
+  onClosePage,
 }: SemanticMapProps) {
   const { t } = useTranslation("vault");
   const filters = useSyncExternalStore(
@@ -394,6 +514,9 @@ export function SemanticMap({
   const [pageQuery, setPageQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [sort, setSort] = useState<PageSortKey>("path");
+  const [deadOnly, setDeadOnly] = useState(false);
+  const expandedPath =
+    selected?.kind === "file" || selected?.kind === "node" ? selected.file || null : null;
 
   useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedQuery(pageQuery), debounceMs());
@@ -468,10 +591,22 @@ export function SemanticMap({
   );
 
   const goBack = useCallback(() => {
+    onClosePage?.();
     onOpenProject(null);
     setPageQuery("");
     setDebouncedQuery("");
-  }, [onOpenProject]);
+    setDeadOnly(false);
+  }, [onClosePage, onOpenProject]);
+
+  const clientFileSymbols = useMemo(() => {
+    if (!expandedPath) {
+      return [] as FileSymbolRow[];
+    }
+    if (fileSymbols && fileSymbols.length > 0) {
+      return fileSymbols;
+    }
+    return symbolsFromSemanticFile(semanticProject, expandedPath);
+  }, [expandedPath, fileSymbols, semanticProject]);
 
   if (aggregatesLoading && allProjects.length === 0) {
     return (
@@ -587,11 +722,46 @@ export function SemanticMap({
             ) : null}
           </div>
         ) : null}
+        {expandedPath ? (
+          <PageSymbolsPanel
+            filePath={expandedPath}
+            symbols={clientFileSymbols}
+            loading={fileSymbolsLoading}
+            deadOnly={deadOnly}
+            onDeadOnlyChange={setDeadOnly}
+            onClose={() => {
+              setDeadOnly(false);
+              onClosePage?.();
+            }}
+            selectedName={selected?.kind === "node" ? selected.name : null}
+            onSelectSymbol={(symbol) => {
+              onSelect({
+                id: `node:${symbol.name}:${symbol.file ?? ""}`,
+                name: symbol.name,
+                kind: "node",
+                project: openProjectName,
+                file: symbol.file ?? expandedPath,
+              });
+            }}
+          />
+        ) : null}
         <VirtualPageList
           pages={clientPages}
           query={debouncedQuery}
           loading={pagesLoading}
           onNearEnd={onLoadMorePages}
+          activePath={expandedPath}
+          onOpenPage={(path) => {
+            setDeadOnly(false);
+            onOpenPage?.(path);
+            onSelect({
+              id: `file:${path}`,
+              name: path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || path,
+              kind: "file",
+              project: openProjectName,
+              file: path,
+            });
+          }}
         />
       </div>
     );

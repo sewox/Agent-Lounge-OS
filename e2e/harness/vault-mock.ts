@@ -160,6 +160,65 @@ window.__QA_VAULT_MOCK__ = {
       limit,
     };
   },
+  listFileSymbols(f, args) {
+    if (window.__QA_VAULT_FAIL__) throw new Error("list_file_symbols unavailable");
+    const projectId = String(args?.projectId ?? args?.project_id ?? "");
+    const filePath = String(args?.filePath ?? args?.file_path ?? "");
+    const norm = (p) => String(p || "").replace(/\\\\/g, "/").toLowerCase();
+    const target = norm(filePath);
+    const baseName = target.split("/").filter(Boolean).at(-1) || target;
+    const sameFile = (p) => {
+      const n = norm(p);
+      return n === target || n.endsWith("/" + baseName) || n.endsWith(baseName);
+    };
+    const project = (f.semanticMap?.projects || []).find((row) => row.name === projectId);
+    const deadForFile = (f.deadSymbols || []).filter(
+      (d) => (!d.project_id || d.project_id === projectId) && sameFile(d.file),
+    );
+    const deadNames = new Set(deadForFile.map((d) => d.name));
+    const fromMap = (project?.nodes || [])
+      .filter((node) => node.file && sameFile(node.file))
+      .map((node) => ({
+        name: node.name,
+        kind: node.kind || "fn",
+        file: node.file,
+        line: node.line ?? null,
+        ref_count: node.ref_count || 0,
+        is_dead: deadNames.has(node.name),
+      }));
+    for (const d of deadForFile) {
+      if (fromMap.some((s) => s.name === d.name)) continue;
+      fromMap.push({
+        name: d.name,
+        kind: d.kind || "dead",
+        file: d.file,
+        line: d.line ?? null,
+        ref_count: 0,
+        is_dead: true,
+      });
+    }
+    if (fromMap.length > 0) return fromMap;
+    const base = filePath.split(/[/\\\\]/).filter(Boolean).at(-1) || "page";
+    const stem = base.replace(/\\.rs$/i, "").replace(/\\.py$/i, "");
+    return [
+      {
+        name: "sym_" + stem,
+        kind: "fn",
+        file: filePath,
+        line: 1,
+        ref_count: 1,
+        is_dead: false,
+      },
+      {
+        name: "dead_" + stem,
+        kind: "fn",
+        file: filePath,
+        line: 2,
+        ref_count: 0,
+        is_dead: true,
+      },
+    ];
+  },
 };
 `;
 }

@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectPage,
-    ProjectPageList, ProjectSummary, SemanticMap, SemanticProject, VaultProjectAggregate,
+    now_rfc3339, AstNode, CodeReference, DeadSymbol, FileSymbol, IndexGraph, IndexSnapshot,
+    ProjectPage, ProjectPageList, ProjectSummary, SemanticMap, SemanticProject,
+    VaultProjectAggregate,
 };
 
 pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
@@ -229,6 +230,21 @@ impl ExperienceStore {
         })
         .await
         .context("project pages join")?
+    }
+
+    /// Symbols (nodes) for one file inside a project — drill-down expand.
+    pub async fn list_file_symbols(
+        &self,
+        project_id: String,
+        file_path: String,
+    ) -> Result<Vec<FileSymbol>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_file_symbols_blocking(&conn, &project_id, &file_path)
+        })
+        .await
+        .context("file symbols join")?
     }
 
     /// Tarama sonrası hemen UI'da görünsün diye proje kaydı (indeks öncesi).
@@ -1313,6 +1329,23 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
     Ok(projects)
 }
 
+/// Escape `%`, `_`, and `\` for SQLite `LIKE … ESCAPE '\'`.
+fn like_pattern(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for ch in needle.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('%');
+    out
+}
+
 fn list_project_pages_blocking(
     conn: &Connection,
     project_id: &str,
@@ -1323,7 +1356,7 @@ fn list_project_pages_blocking(
 ) -> Result<ProjectPageList> {
     register_path_basename_fn(conn);
     let needle = query.trim().to_ascii_lowercase();
-    let like = format!("%{needle}%");
+    let like = like_pattern(&needle);
     let order_by = match sort {
         "updated" | "last_updated" => "last_updated DESC, path ASC",
         "-updated" => "last_updated ASC, path ASC",
@@ -1367,14 +1400,14 @@ fn list_project_pages_blocking(
             AND file_path IS NOT NULL
             AND TRIM(file_path) != ''
           GROUP BY file_path
-          HAVING lower(file_path) LIKE ?2
-              OR lower(al_path_basename(file_path)) LIKE ?2
+          HAVING lower(file_path) LIKE ?2 ESCAPE '\'
+              OR lower(al_path_basename(file_path)) LIKE ?2 ESCAPE '\'
               OR EXISTS (
                 SELECT 1 FROM project_index n
                 WHERE n.project_id = ?1 COLLATE NOCASE
                   AND n.kind = 'node'
                   AND n.file_path = project_index.file_path
-                  AND lower(n.name) LIKE ?2
+                  AND lower(n.name) LIKE ?2 ESCAPE '\'
               )
         )
         "#
@@ -1473,6 +1506,49 @@ fn page_snippet(conn: &Connection, project_id: &str, path: &str) -> Result<Strin
         parts.push(name?);
     }
     Ok(parts.join(", ").chars().take(160).collect())
+}
+
+fn list_file_symbols_blocking(
+    conn: &Connection,
+    project_id: &str,
+    file_path: &str,
+) -> Result<Vec<FileSymbol>> {
+    let sql = r#"
+        SELECT
+          n.name,
+          n.kind,
+          n.file_path,
+          n.line,
+          n.ref_count,
+          CASE WHEN EXISTS (
+            SELECT 1 FROM project_index d
+            WHERE d.project_id = n.project_id COLLATE NOCASE
+              AND d.kind IN ('dead', 'broken')
+              AND d.name = n.name
+              AND COALESCE(d.file_path, '') = COALESCE(n.file_path, '')
+          ) THEN 1 ELSE 0 END AS is_dead
+        FROM project_index n
+        WHERE n.project_id = ?1 COLLATE NOCASE
+          AND n.kind = 'node'
+          AND n.file_path = ?2
+        ORDER BY n.name, n.line
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![project_id, file_path], |row| {
+        Ok(FileSymbol {
+            name: row.get(0)?,
+            kind: row.get(1)?,
+            file: row.get(2)?,
+            line: row.get(3)?,
+            ref_count: row.get::<_, i64>(4)?.max(0) as u64,
+            is_dead: row.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 fn path_basename(path: &str) -> String {
@@ -2365,5 +2441,82 @@ mod tests {
             .expect("tail");
         assert_eq!(last.pages.len(), 6);
         assert_eq!(last.pages.last().unwrap().title, "page_0805.rs");
+    }
+
+    #[test]
+    fn like_pattern_escapes_wildcards() {
+        assert_eq!(like_pattern("a_b%c\\d"), "%a\\_b\\%c\\\\d%");
+        assert_eq!(like_pattern("plain"), "%plain%");
+    }
+
+    #[tokio::test]
+    async fn list_project_pages_treats_like_wildcards_literally() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = sample_graph();
+        graph.nodes.push(AstNode {
+            id: "wild".into(),
+            name: "has_underscore".into(),
+            kind: "fn".into(),
+            file: Some("src/has_percent%name.rs".into()),
+            line: Some(1),
+            ref_count: 0,
+        });
+        graph.nodes.push(AstNode {
+            id: "plain".into(),
+            name: "plain".into(),
+            kind: "fn".into(),
+            file: Some("src/hasXpercentXname.rs".into()),
+            line: Some(1),
+            ref_count: 0,
+        });
+        store.save_project_index(graph).await.expect("save");
+
+        // `%` in the query must not match arbitrary characters.
+        let by_percent = store
+            .list_project_pages(
+                "lounge".into(),
+                Some("percent%name".into()),
+                Some("path".into()),
+                Some(0),
+                Some(20),
+            )
+            .await
+            .expect("search");
+        assert_eq!(by_percent.total, 1);
+        assert!(by_percent.pages[0].path.contains("percent%name"));
+
+        let by_under = store
+            .list_project_pages(
+                "lounge".into(),
+                Some("has_underscore".into()),
+                Some("path".into()),
+                Some(0),
+                Some(20),
+            )
+            .await
+            .expect("name search");
+        assert_eq!(by_under.total, 1);
+    }
+
+    #[tokio::test]
+    async fn list_file_symbols_marks_dead() {
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_project_index(sample_graph())
+            .await
+            .expect("save");
+        let symbols = store
+            .list_file_symbols("lounge".into(), "src/dead.rs".into())
+            .await
+            .expect("symbols");
+        assert!(!symbols.is_empty());
+        let bar = symbols.iter().find(|s| s.name == "bar").expect("bar");
+        assert!(bar.is_dead, "bar is unused dead symbol");
+        let lib = store
+            .list_file_symbols("lounge".into(), "src/lib.rs".into())
+            .await
+            .expect("lib");
+        let foo = lib.iter().find(|s| s.name == "foo").expect("foo");
+        assert!(!foo.is_dead);
     }
 }
