@@ -578,6 +578,11 @@ fn hash_artifacts(dir: &Path) -> Result<HashMap<String, String>> {
     Ok(files)
 }
 
+/// Lowercase hex encoding for a SHA-256 digest (sha2 0.11 dropped `LowerHex`).
+fn sha256_hex_digest(digest: impl AsRef<[u8]>) -> String {
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn sha256_file(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("oku {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -590,7 +595,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(sha256_hex_digest(hasher.finalize()))
 }
 
 fn load_manifest(path: &Path) -> Result<ChecksumManifest> {
@@ -879,6 +884,23 @@ mod tests {
             64
         );
         assert!(parse_sha256_line("not-a-hash").is_none());
+    }
+
+    #[test]
+    fn sha256_hex_digest_is_lowercase_64_for_known_input() {
+        let mut hasher = Sha256::new();
+        hasher.update(b"agent-lounge");
+        let hex = sha256_hex_digest(hasher.finalize());
+        assert_eq!(hex.len(), 64);
+        assert!(
+            hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "expected lowercase hex, got {hex}"
+        );
+        // echo -n agent-lounge | sha256sum
+        assert_eq!(
+            hex,
+            "5dc8f5e826c933861ae36c7203385f15503abaa8fed32ac53820c57239ad557d"
+        );
     }
 
     #[test]

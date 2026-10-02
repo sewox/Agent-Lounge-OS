@@ -8,6 +8,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # eslint 10 / typescript 7 are blocked until eslint-config-next and
+      # typescript-eslint support them. Revisit when those peers catch up.
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
