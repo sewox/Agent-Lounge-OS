@@ -4,5 +4,7 @@
   "cancel": "Cancel",
   "enabled": "Enabled",
   "agent": "Agent",
-  "trigger": "Trigger"
+  "trigger": "Trigger",
+  "prev": "Prev",
+  "next": "Next"
 }
