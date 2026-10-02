@@ -1,6 +1,9 @@
 import type { Browser, Page } from "@playwright/test";
+import { isHydrationConsoleMessage } from "../../src/lib/hydration-console";
 import { installTauriMock, waitForAppReady, type FixtureName } from "../harness/tauri-mock";
 import { ROUTES } from "./nav";
+
+export { isHydrationConsoleMessage };
 
 export type HydrationProfile = {
   id: string;
@@ -52,10 +55,6 @@ export type HydrationConsoleEntry = {
   type: string;
   text: string;
 };
-
-export function isHydrationConsoleMessage(text: string): boolean {
-  return /hydrat/i.test(text);
-}
 
 export function attachHydrationConsoleCollector(page: Page): HydrationConsoleEntry[] {
   const entries: HydrationConsoleEntry[] = [];

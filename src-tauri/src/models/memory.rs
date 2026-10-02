@@ -220,6 +220,76 @@ pub struct ProjectList {
     pub projects: Vec<ProjectSummary>,
 }
 
+/// Vault UI: one row per project (aggregates — never expand every page).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VaultProjectAggregate {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub repo_path: Option<String>,
+    #[serde(default)]
+    pub page_count: u64,
+    #[serde(default)]
+    pub node_count: u64,
+    #[serde(default)]
+    pub edge_count: u64,
+    #[serde(default)]
+    pub experience_count: u64,
+    #[serde(default)]
+    pub unreviewed_count: u64,
+    #[serde(default)]
+    pub last_updated: Option<String>,
+    /// `indexed` | `discovered` | `imported`
+    #[serde(default)]
+    pub source_type: String,
+}
+
+/// One indexed page (unique file) inside a project — drill-down row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProjectPage {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub snippet: String,
+    #[serde(default)]
+    pub symbol_count: u64,
+    #[serde(default)]
+    pub last_updated: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProjectPageList {
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub pages: Vec<ProjectPage>,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default)]
+    pub limit: u64,
+}
+
+/// One AST / index symbol inside a project page (file) — drill-down expand row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FileSymbol {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub line: Option<i64>,
+    #[serde(default)]
+    pub ref_count: u64,
+    #[serde(default)]
+    pub is_dead: bool,
+}
+
 /// `get_semantic_map` UI yükü — SQLite `project_index` satırlarından.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SemanticProject {

@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import type { FixtureDataset } from "../fixtures/types";
 import { FULL_FIXTURE } from "../fixtures/full";
 import { EMPTY_FIXTURE } from "../fixtures/empty";
+import { vaultMockBrowserSource } from "./vault-mock";
 
 export type FixtureName = "full" | "empty" | "browser" | "reject";
 
@@ -40,6 +41,9 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
 
   const fixture = fixtureName === "empty" || fixtureName === "reject" ? EMPTY_FIXTURE : FULL_FIXTURE;
   const rejectQuotaExperience = fixtureName === "reject";
+
+  // Vault mock helpers (separate file — keeps this switch smaller for PR #71 rebases).
+  await page.addInitScript({ content: vaultMockBrowserSource() });
 
   await page.addInitScript(({ data, rejectQuotaExperience }: { data: FixtureDataset; rejectQuotaExperience: boolean }) => {
     window.__QA_IPC_LOG__ = [];
@@ -377,6 +381,33 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.semanticMap;
         case "list_projects":
           return f.projects;
+        // --- VAULT_MOCK_BEGIN (logic in e2e/harness/vault-mock.ts) ---
+        case "list_vault_projects":
+          return (
+            window as Window & {
+              __QA_VAULT_MOCK__?: { listProjects: (f: FixtureDataset) => unknown };
+            }
+          ).__QA_VAULT_MOCK__!.listProjects(f);
+        case "list_project_pages":
+          return (
+            window as Window & {
+              __QA_VAULT_MOCK__?: {
+                listPages: (f: FixtureDataset, args: Record<string, unknown> | undefined) => unknown;
+              };
+            }
+          ).__QA_VAULT_MOCK__!.listPages(f, args as Record<string, unknown> | undefined);
+        case "list_file_symbols":
+          return (
+            window as Window & {
+              __QA_VAULT_MOCK__?: {
+                listFileSymbols: (
+                  f: FixtureDataset,
+                  args: Record<string, unknown> | undefined,
+                ) => unknown;
+              };
+            }
+          ).__QA_VAULT_MOCK__!.listFileSymbols(f, args as Record<string, unknown> | undefined);
+        // --- VAULT_MOCK_END ---
         case "ensure_services":
           return f.serviceReport;
         case "service_status":

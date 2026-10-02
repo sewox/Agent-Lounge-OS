@@ -148,4 +148,97 @@ export const vaultStrings = {
   },
   filter: (name: string) => t("filter", { name }),
   whisperLive: (n: number) => t("whisperLive", { count: n }),
+  get projects() {
+    return t("projects");
+  },
+  projectCount: (n: number) => t("projectCount", { count: n }),
+  pages: (n: number) => t("pages", { count: n }),
+  pageCountMeta: (pages: number, experiences: number) =>
+    t("pageCountMeta", { pages, experiences }),
+  lastUpdated: (value: string) => t("lastUpdated", { value }),
+  get openProject() {
+    return t("openProject");
+  },
+  get backToProjects() {
+    return t("backToProjects");
+  },
+  get breadcrumbProjects() {
+    return t("breadcrumbProjects");
+  },
+  get searchPages() {
+    return t("searchPages");
+  },
+  get searchProjects() {
+    return t("searchProjects");
+  },
+  get filters() {
+    return t("filters");
+  },
+  get resetFilters() {
+    return t("resetFilters");
+  },
+  get minPages() {
+    return t("minPages");
+  },
+  get recentAll() {
+    return t("recentAll");
+  },
+  get recent7d() {
+    return t("recent7d");
+  },
+  get recent30d() {
+    return t("recent30d");
+  },
+  get statusAll() {
+    return t("statusAll");
+  },
+  get statusHasExperiences() {
+    return t("statusHasExperiences");
+  },
+  get statusReviewed() {
+    return t("statusReviewed");
+  },
+  get statusUnreviewed() {
+    return t("statusUnreviewed");
+  },
+  get sourceAll() {
+    return t("sourceAll");
+  },
+  get sourceIndexed() {
+    return t("sourceIndexed");
+  },
+  get sourceDiscovered() {
+    return t("sourceDiscovered");
+  },
+  get sourceImported() {
+    return t("sourceImported");
+  },
+  get sortPath() {
+    return t("sortPath");
+  },
+  get sortTitle() {
+    return t("sortTitle");
+  },
+  get sortUpdated() {
+    return t("sortUpdated");
+  },
+  get sortSymbols() {
+    return t("sortSymbols");
+  },
+  get noProjects() {
+    return t("noProjects");
+  },
+  get noPages() {
+    return t("noPages");
+  },
+  get noPagesMatch() {
+    return t("noPagesMatch");
+  },
+  experiencesForProject: (name: string) => t("experiencesForProject", { name }),
+  symbols: (n: number) => t("symbols", { count: n }),
+  get indexedFiles() {
+    return t("indexedFiles");
+  },
+  selected: (name: string) => t("selected", { name }),
+  nodesRefs: (n: number) => t("nodesRefs", { count: n }),
 } as const;

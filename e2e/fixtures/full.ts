@@ -100,31 +100,78 @@ const deadSymbols: FixtureDataset["deadSymbols"] = [
   },
 ];
 
-const experiences: FixtureDataset["experiences"] = Array.from({ length: 16 }, (_, i) => ({
-  id: `exp-${i + 1}`,
-  type: "experience",
-  agent: i % 3 === 0 ? "lounge-kernel" : i % 3 === 1 ? "cursor-agent" : "grok-bot",
-  project_id: ["Agent-Lounge-OS", "EchoMind", "codebase-memory-mcp"][i % 3],
-  adr_summary:
-    i === 0
-      ? "## Cross-Project Memory ### Tecrübeler - [e2e-verify|Agent-Lounge-OS] (score=0.33)\nmemory_bridge hata: repo_path çözümlenemedi: agent-lounge-os\nnodes=2286 edges=7958 dead=0\nIndexed dispatcher.rs + NATS subjects."
-      : i === 1
-        ? "Raw prompt dump should not appear in the Experience Log UI:\n```\n## Internal\n### Tecrübeler\n```"
-        : `Experience ADR #${i + 1}: solved routing edge case and documented fallback path for local LMR.`,
-  outcome: (["success", "partial", "failure"] as const)[i % 3],
-  related_task_id: i % 4 === 0 ? `task-${i}` : null,
-  tags: i % 2 === 0 ? ["nats", "routing"] : ["index", "vault"],
-  created_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
-  status: i === 15 ? "archived" : "active",
-  reviewed: i !== 0,
-  use_count: i === 15 ? 0 : i,
-  last_used_at: i === 15 ? null : new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
-  archived_at: i === 15 ? new Date(Date.UTC(2026, 8, 1, 12, 0, 0)).toISOString() : null,
-  archived_by: i === 15 ? "ttl" : null,
-  is_pinned: i === 2,
-  updated_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
-  original_content: null,
-}));
+const experiences: FixtureDataset["experiences"] = [
+  ...Array.from({ length: 16 }, (_, i) => ({
+    id: `exp-${i + 1}`,
+    type: "experience",
+    agent: i % 3 === 0 ? "lounge-kernel" : i % 3 === 1 ? "cursor-agent" : "grok-bot",
+    project_id: ["Agent-Lounge-OS", "EchoMind", "codebase-memory-mcp"][i % 3],
+    adr_summary:
+      i === 0
+        ? "## Cross-Project Memory ### Tecrübeler - [e2e-verify|Agent-Lounge-OS] (score=0.33)\nmemory_bridge hata: repo_path çözümlenemedi: agent-lounge-os\nnodes=2286 edges=7958 dead=0\nIndexed dispatcher.rs + NATS subjects."
+        : i === 1
+          ? "Raw prompt dump should not appear in the Experience Log UI:\n```\n## Internal\n### Tecrübeler\n```"
+          : `Experience ADR #${i + 1}: solved routing edge case and documented fallback path for local LMR.`,
+    outcome: (["success", "partial", "failure"] as const)[i % 3],
+    related_task_id: i % 4 === 0 ? `task-${i}` : null,
+    tags: i % 2 === 0 ? ["nats", "routing"] : ["index", "vault"],
+    created_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
+    status: i === 15 ? "archived" : "active",
+    reviewed: i !== 0,
+    use_count: i === 15 ? 0 : i,
+    last_used_at: i === 15 ? null : new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
+    archived_at: i === 15 ? new Date(Date.UTC(2026, 8, 1, 12, 0, 0)).toISOString() : null,
+    archived_by: i === 15 ? "ttl" : null,
+    is_pinned: i === 2,
+    updated_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
+    original_content: null,
+  })),
+  // Extra Agent-Lounge-OS experiences so drill-down lists stay >12 (EX-08).
+  ...Array.from({ length: 12 }, (_, i) => ({
+    id: `exp-alo-${i + 1}`,
+    type: "experience",
+    agent: "lounge-kernel",
+    project_id: "Agent-Lounge-OS",
+    adr_summary: `Experience ADR #ALO-${i + 1}: vault grouping regression seed.`,
+    outcome: "success" as const,
+    related_task_id: null,
+    tags: ["vault", "group"],
+    created_at: new Date(Date.UTC(2026, 8, 19, 9, i, 0)).toISOString(),
+    status: "active",
+    reviewed: true,
+    use_count: i + 1,
+    last_used_at: new Date(Date.UTC(2026, 8, 19, 9, i, 0)).toISOString(),
+    archived_at: null,
+    archived_by: null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 8, 19, 9, i, 0)).toISOString(),
+    original_content: null,
+  })),
+  // Experiences-only project (no project_index / projects row) — source_type imported.
+  {
+    id: "exp-solo-import",
+    type: "experience",
+    agent: "cursor-agent",
+    project_id: "solo-import",
+    adr_summary: "Imported experience without indexed project row.",
+    outcome: "success" as const,
+    related_task_id: null,
+    tags: ["import"],
+    created_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
+    status: "active",
+    reviewed: true,
+    use_count: 1,
+    last_used_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
+    archived_at: null,
+    archived_by: null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
+    original_content: null,
+  },
+];
+
+/** Re-export page counts from vault mock (single source of truth). */
+export { VAULT_PAGE_COUNTS } from "../harness/vault-mock";
 
 const quotas: FixtureDataset["quotas"] = [
   {

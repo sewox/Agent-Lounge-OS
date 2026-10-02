@@ -14,8 +14,9 @@ pub use discovery::{
 };
 pub use hf::{DeviceProfile, HfModelOffer, PullProgress, RecommendedModels, MODEL_PULL_EVENT};
 pub use memory::{
-    merge_project_summaries, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot,
-    ProjectList, ProjectSummary, SemanticMap, SemanticProject,
+    merge_project_summaries, AstNode, CodeReference, DeadSymbol, FileSymbol, IndexGraph,
+    IndexSnapshot, ProjectList, ProjectPage, ProjectPageList, ProjectSummary, SemanticMap,
+    SemanticProject, VaultProjectAggregate,
 };
 pub use policy::{
     decide_route, is_kernel, AgentTrigger, ApprovalKind, ApprovalRequest, QuotaExhaustedAction,

@@ -520,10 +520,10 @@ test.describe("AP / CP / misc", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
-    // Real project root (Windows) appears when the project is selected — not a fake Path reference box.
+    // Select project row (not drill-down Open) so the path strip appears.
     await page
-      .locator('[data-qa="panel"]')
-      .getByRole("button", { name: /Agent-Lounge-OS/i })
+      .locator('[data-qa="vault-project-row"]')
+      .filter({ hasText: /Agent-Lounge-OS/i })
       .first()
       .click();
     const winRoot = "C:\\Users\\sercan\\dev\\Agent-Lounge-OS";
@@ -534,8 +534,8 @@ test.describe("AP / CP / misc", () => {
     );
     // POSIX project root from another indexed repo.
     await page
-      .locator('[data-qa="panel"]')
-      .getByRole("button", { name: /EchoMind/i })
+      .locator('[data-qa="vault-project-row"]')
+      .filter({ hasText: /EchoMind/i })
       .first()
       .click();
     await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(
