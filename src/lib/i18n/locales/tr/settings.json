@@ -42,5 +42,16 @@
   "useCountThresholdHint": ">0 iken yalnızca use_count ≤ eşik olan kayıtlar TTL sonrası arşivlenir.",
   "destructiveTitle": "Yıkıcı işlemler",
   "destructiveDesc": "Bu kalıplar her zaman açık onay gerektirir. Never Ask atlanamaz.",
-  "destructiveNeverAsk": "Her zaman onay — Never Ask yıkıcı işlemleri atlayamaz (ajan ve kullanıcı)."
+  "destructiveNeverAsk": "Her zaman onay — Never Ask yıkıcı işlemleri atlayamaz (ajan ve kullanıcı).",
+  "graphUiTitle": "Graph UI",
+  "graphUiDesc": "codebase-memory-mcp 3D Graph UI dinleme portu (varsayılan {{port}}). Port başka bir süreçte doluysa buradan değiştirin.",
+  "graphUiLifecycle": "Etkinleştir, ayarlanan portta Graph UI'yi başlatır. Aç, Graph penceresine odaklanır. Lounge kapanınca yalnızca Lounge'un başlattığı süreç durur; kalıcı etkinleştirme bayrağı Graph kontrollerinden kapatılana kadar kalır.",
+  "graphPort": "Port",
+  "graphPortSave": "Kaydet",
+  "graphPortInvalid": "Geçerli bir port girin (1–65535).",
+  "graphPortSaved": "Graph UI port kaydedildi: {{port}}. Açık Graph pencereleri yeni portla yeniden yaratılır.",
+  "graphStateUnknown": "Durum: bilinmiyor (tarayıcıda masaüstü probe yok).",
+  "graphStateEnabled": "Durum: etkin · {{port}} portunda dinliyor",
+  "graphStateDisabled": "Durum: kapalı · etkinleştirilince {{port}} portu kullanılır",
+  "graphStateConflict": "Durum: {{port}} port çakışması — portu değiştirin veya süreci serbest bırakın"
 }

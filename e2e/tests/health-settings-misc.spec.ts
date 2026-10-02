@@ -97,17 +97,29 @@ test.describe("HM — health / map empty states", () => {
 });
 
 test.describe("ST — settings", () => {
-  test("ST-01 · Routing table not clipped @ D0", async ({
-    page,
-  }, testInfo) => {
-    test.skip(testInfo.project.name !== "D0" && testInfo.project.name !== "D4-scale", "D0/D4");
+  test("ST-01 · Routing table not clipped", async ({ page }) => {
     await openRoute(page, "/settings", "full");
-    const vp = page.viewportSize()!;
     const region = page.locator('[data-qa="routing-table"]');
     await expect(region).toBeVisible();
+    await region.scrollIntoViewIfNeeded();
     const box = await region.boundingBox();
-    const clipped = Boolean(box && box.y + box.height > vp.height - 4);
-    expect(clipped, "routing controls must fit in viewport or scroll").toBe(false);
+    expect(box, "routing table must have a layout box").toBeTruthy();
+    // Table may scroll inside Settings; clipping without a scroll parent is the failure.
+    const scrollable = await region.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return (
+        el.scrollHeight > el.clientHeight + 1 ||
+        style.overflowY === "auto" ||
+        style.overflowY === "scroll" ||
+        style.overflow === "auto" ||
+        style.overflow === "scroll"
+      );
+    });
+    const vp = page.viewportSize()!;
+    const clippedWithoutScroll = Boolean(
+      box && box.y + box.height > vp.height - 4 && !scrollable,
+    );
+    expect(clippedWithoutScroll, "routing controls must fit or scroll").toBe(false);
   });
 
   test("ST-02 · Routing policy save calls set_routing_policy", async ({ page }) => {
@@ -118,10 +130,7 @@ test.describe("ST — settings", () => {
     const trigger = page
       .locator('[data-qa="routing-table"] input[type="checkbox"]:not([disabled])')
       .first();
-    if ((await trigger.count()) === 0) {
-      test.skip(true, "No editable trigger checkbox");
-      return;
-    }
+    await expect(trigger, "editable routing trigger must exist").toBeVisible();
     await trigger.click({ timeout: 5_000 });
     await page.waitForTimeout(400);
     const after = await getIpcLog(page);
@@ -146,19 +155,34 @@ test.describe("ST — settings", () => {
   test("ST-05 · Locked approval checkbox explained", async ({ page }) => {
     await openRoute(page, "/settings", "full");
     const locked = page.locator('input[type="checkbox"][disabled]');
-    if ((await locked.count()) === 0) {
-      test.skip(true, "No locked checkbox found");
-      return;
-    }
+    await expect(locked.first(), "locked approval checkbox must exist").toBeVisible();
     const el = locked.first();
     const title =
       (await el.getAttribute("title")) ||
       (await el.evaluate((node) => node.parentElement?.textContent || ""));
-    const explained = /kilit|lock|always|onay|disabled|zorunlu/i.test(title || "");
-    if (!explained) {
-      test.fail(true, "Disabled approval checkbox lacks explanation");
-    }
-    expect(explained).toBeTruthy();
+    expect(title || "", "disabled approval checkbox lacks explanation").toMatch(
+      /kilit|lock|always|onay|disabled|zorunlu/i,
+    );
+  });
+
+  test("EX-13 · Settings TTL + use-count controls persist", async ({ page }) => {
+    await openRoute(page, "/settings", "full");
+    const panel = page.locator('[data-qa="experience-governance"]');
+    await expect(panel).toBeVisible();
+    await panel.scrollIntoViewIfNeeded();
+    const ttlExact = panel.locator('input[type="number"]').first();
+    await expect(ttlExact).toBeVisible();
+    await ttlExact.fill("120");
+    await ttlExact.blur();
+    await page.waitForTimeout(300);
+    const useCount = panel.locator('[data-qa="use-count-threshold"]');
+    await expect(useCount).toBeVisible();
+    await useCount.fill("3");
+    await useCount.blur();
+    await page.waitForTimeout(300);
+    const log = await getIpcLog(page);
+    expect(log.some((e) => e.cmd === "set_experience_ttl_days")).toBeTruthy();
+    expect(log.some((e) => e.cmd === "set_experience_use_count_threshold")).toBeTruthy();
   });
 
   test("ST-06 · Yeniden tara → /onboarding", async ({ page }) => {
@@ -275,19 +299,19 @@ test.describe("AP / CP / misc", () => {
     expect(afterResolve, "must stop repeating after approve/deny").toBe(atDecision);
   });
 
-  test("AP-09 · Settings sound options (engine prefs; full Settings UI in PR-5)", async ({
+  test("AP-09 · Settings sound options (on/off, builtins, volume, interval, Listen)", async ({
     page,
   }) => {
-    // Engine + minimal control for PR-2b; full Settings polish is PR-5.
     await openRoute(page, "/settings", "full");
     const section = page.locator('[data-qa="approval-sound"]');
     await expect(section, "sound settings section").toBeVisible();
     await section.scrollIntoViewIfNeeded();
     await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play|Listen|Test/i })).toBeVisible();
-    await expect(section.getByText(/wav|mp3|ogg|aiff|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
+    await expect(section.getByText(/wav|mp3|ogg|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
     await expect(section.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
-    // Persist: toggle off writes lounge.approvalSound so PR-5 Settings can reuse it.
-    // Scope to this panel only — outer Settings <section> also contains locked routing checkboxes.
+    await expect(section.getByText(/background|arka plan|escalat|artırılmaz/i).first()).toBeVisible();
+    await expect(section.getByText(/OS notification|OS bildirimi/i).first()).toBeVisible();
+    // Persist: toggle off writes lounge.approvalSound
     const toggle = section.locator('input[type="checkbox"]:not([disabled]), [role="switch"]:not([disabled])').first();
     await expect(toggle).toBeVisible();
     await expect(toggle).toBeEnabled();
@@ -300,6 +324,24 @@ test.describe("AP / CP / misc", () => {
         "",
     );
     expect(stored.length).toBeGreaterThan(0);
+    // Volume + interval controls
+    const volume = section.locator('input[type="range"]').first();
+    await expect(volume).toBeVisible();
+    await volume.fill("40");
+    const interval = section.locator('input[type="number"]').first();
+    await expect(interval).toBeVisible();
+    await interval.fill("30");
+    await page.waitForTimeout(150);
+    const after = await page.evaluate(() => {
+      const raw = localStorage.getItem("lounge.approvalSound") || "";
+      try {
+        return JSON.parse(raw) as { volume?: number; intervalSecs?: number };
+      } catch {
+        return {};
+      }
+    });
+    expect(after.volume).toBeCloseTo(0.4, 1);
+    expect(after.intervalSecs).toBe(30);
   });
 
   test("AP-10 · Native OS notification → focus_app_for_approval + banner focus", async ({

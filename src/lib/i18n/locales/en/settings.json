@@ -42,5 +42,16 @@
   "useCountThresholdHint": "When >0, only archive rows with use_count ≤ threshold after TTL.",
   "destructiveTitle": "Destructive operations",
   "destructiveDesc": "These patterns always require explicit confirmation. Never Ask cannot bypass them.",
-  "destructiveNeverAsk": "Always confirm — Never Ask cannot skip destructive operations (agent and user initiated)."
+  "destructiveNeverAsk": "Always confirm — Never Ask cannot skip destructive operations (agent and user initiated).",
+  "graphUiTitle": "Graph UI",
+  "graphUiDesc": "codebase-memory-mcp 3D Graph UI listen port (default {{port}}). Change the port here if another process already uses it.",
+  "graphUiLifecycle": "Enable starts Graph UI on the configured port. Open focuses the Graph window. Closing Lounge stops only the process Lounge started; the persistent enable flag is unchanged until you disable it from Graph controls.",
+  "graphPort": "Port",
+  "graphPortSave": "Save",
+  "graphPortInvalid": "Enter a valid port (1–65535).",
+  "graphPortSaved": "Graph UI port saved: {{port}}. Open Graph windows recreate on the new port.",
+  "graphStateUnknown": "Status: unknown (desktop probe unavailable in browser).",
+  "graphStateEnabled": "Status: enabled · listening on port {{port}}",
+  "graphStateDisabled": "Status: disabled · will use port {{port}} when enabled",
+  "graphStateConflict": "Status: port {{port}} conflict — change port or free the process"
 }

@@ -1482,15 +1482,15 @@ export function FleetPanel() {
       </div>
       <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden lg:flex-row">
         <div className="min-h-0 min-w-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[36rem] border-collapse text-left font-mono text-body">
+          <table className="w-full table-fixed border-collapse text-left font-mono text-body">
             <thead>
               <tr className="sticky top-0 border-b border-outline-variant bg-surface-container-low/95 text-meta text-outline uppercase">
-                <th className="px-3 py-2 font-medium">Worker</th>
-                <th className="px-2 py-2 font-medium">Status</th>
-                <th className="hidden px-2 py-2 font-medium sm:table-cell">Heartbeat</th>
-                <th className="hidden px-2 py-2 font-medium md:table-cell">PID</th>
-                <th className="hidden px-2 py-2 font-medium md:table-cell">Uptime</th>
-                <th className="hidden px-2 py-2 font-medium lg:table-cell">Restarts</th>
+                <th className="w-[22%] px-3 py-2 font-medium">Worker</th>
+                <th className="w-[12%] px-2 py-2 font-medium">Status</th>
+                <th className="hidden w-[12%] px-2 py-2 font-medium sm:table-cell">Heartbeat</th>
+                <th className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">PID</th>
+                <th className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">Uptime</th>
+                <th className="hidden w-[10%] px-2 py-2 font-medium lg:table-cell">Restarts</th>
                 <th className="px-3 py-2 font-medium">Endpoint</th>
               </tr>
             </thead>
@@ -1503,7 +1503,9 @@ export function FleetPanel() {
                     className={`cursor-pointer ${active ? "bg-surface-container-highest/70" : "hover:bg-surface-container-high/50"}`}
                     onClick={() => setSelectedId(row.id)}
                   >
-                    <td className="truncate px-3 py-2.5 font-medium text-on-surface">{row.label}</td>
+                    <td className="truncate px-3 py-2.5 font-medium text-on-surface" title={row.label}>
+                      {row.label}
+                    </td>
                     <td
                       className={`px-2 py-2.5 ${
                         row.tone === "down"
@@ -1527,8 +1529,18 @@ export function FleetPanel() {
                     <td className="hidden px-2 py-2.5 text-on-surface-variant lg:table-cell">
                       {row.restarts}
                     </td>
-                    <td className="truncate px-3 py-2.5 text-on-surface-variant" title={row.endpoint}>
-                      {row.endpoint}
+                    <td className="px-3 py-2.5 text-on-surface-variant">
+                      <button
+                        type="button"
+                        title={row.endpoint}
+                        className="block w-full truncate text-left hover:underline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void navigator.clipboard?.writeText(row.endpoint);
+                        }}
+                      >
+                        {row.endpoint}
+                      </button>
                     </td>
                   </tr>
                 );

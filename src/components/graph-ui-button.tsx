@@ -94,12 +94,21 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
       return;
     }
     const confirmed = await ask(
-      `Bu işlem codebase-memory-mcp Graph UI'yi kalıcı olarak etkinleştirir (--ui=true) ve port ${status.port} üzerinde çalıştırır.\n\nAyar TÜM codebase-memory oturumları için geçerlidir (Claude, Cursor vb.). Lounge kapanınca yalnızca Lounge'un başlattığı süreç durdurulur; kalıcı ayar geri alınmaz.\n\nDevam edilsin mi?`,
+      [
+        `What starts: codebase-memory-mcp Graph UI (--ui=true).`,
+        `Port: ${status.port} (change in Settings → Graph UI if busy).`,
+        `How to stop: close the Graph window, or quit Lounge (stops only the process Lounge started).`,
+        `Disable: the persistent enable flag is not auto-reverted — re-run enable flow / MCP settings to turn UI off.`,
+        ``,
+        `This setting applies to ALL codebase-memory sessions (Claude, Cursor, etc.).`,
+        ``,
+        `Continue?`,
+      ].join("\n"),
       {
-        title: "Graph UI'yi etkinleştir",
+        title: "Enable Graph UI",
         kind: "warning",
-        okLabel: "Etkinleştir",
-        cancelLabel: "İptal",
+        okLabel: "Enable",
+        cancelLabel: "Cancel",
       },
     );
     if (!confirmed) {
