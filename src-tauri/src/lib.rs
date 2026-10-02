@@ -949,11 +949,12 @@ async fn focus_app_for_approval(
 /// One-shot confirm for a PolicyGate-blocked destructive command (F3).
 /// Optional `command_hash` is validated when provided (UI/QA assert path).
 #[tauri::command]
-async fn confirm_destructive(
-    id: String,
-    command_hash: Option<String>,
-) -> Result<(), String> {
-    if let Some(hash) = command_hash.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+async fn confirm_destructive(id: String, command_hash: Option<String>) -> Result<(), String> {
+    if let Some(hash) = command_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
         kernel::assert_destructive_hash(&id, hash).map_err(|err| err.to_string())?;
     }
     kernel::confirm_destructive(&id).map_err(|err| err.to_string())
@@ -961,11 +962,12 @@ async fn confirm_destructive(
 
 /// Reject / dismiss a pending destructive confirmation (clears notification slot).
 #[tauri::command]
-async fn reject_destructive(
-    id: String,
-    command_hash: Option<String>,
-) -> Result<(), String> {
-    if let Some(hash) = command_hash.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+async fn reject_destructive(id: String, command_hash: Option<String>) -> Result<(), String> {
+    if let Some(hash) = command_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
         kernel::assert_destructive_hash(&id, hash).map_err(|err| err.to_string())?;
     }
     kernel::reject_destructive(&id).map_err(|err| err.to_string())

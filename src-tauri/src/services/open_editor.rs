@@ -415,8 +415,7 @@ mod tests {
     #[test]
     fn default_opener_never_appends_line_on_any_os() {
         for os in [OsFamily::Linux, OsFamily::Macos, OsFamily::Windows] {
-            let (prog, args) =
-                build_preset_argv(os, EditorPreset::Default, "/tmp/x.rs", Some(42));
+            let (prog, args) = build_preset_argv(os, EditorPreset::Default, "/tmp/x.rs", Some(42));
             assert!(!prog.is_empty());
             assert_eq!(args, vec!["/tmp/x.rs".to_string()], "os={os:?}");
             assert!(
@@ -500,7 +499,12 @@ mod tests {
         ] {
             let (prog, args) = preset_argv_template(preset);
             assert!(!prog.is_empty());
-            assert!(args.contains("{path}") || prog == "open" || prog == "xdg-open" || prog == "explorer.exe");
+            assert!(
+                args.contains("{path}")
+                    || prog == "open"
+                    || prog == "xdg-open"
+                    || prog == "explorer.exe"
+            );
         }
     }
 }
