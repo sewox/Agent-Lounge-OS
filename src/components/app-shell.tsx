@@ -4,8 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
+import { LocaleSwitch } from "@/components/locale-switch";
 import { useLounge } from "@/components/lounge-provider";
 import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 import {
@@ -14,7 +16,6 @@ import {
   approvalRemainingSecs,
   SECURITY_OVERLAY_PROMPT,
   QUOTA_ALERT_PROMPT,
-  QUOTA_CONTINUE_LOCAL_LABEL,
   coreServicesDegraded,
   degradedCoreServiceNames,
   resolveDegradedRestart,
@@ -40,31 +41,21 @@ export type NavId =
   | "quotas"
   | "settings";
 
-const NAV: { id: NavId; href: string; label: string; icon: string }[] = [
-  { id: "dashboard", href: "/dashboard", label: "Dashboard", icon: "dashboard" },
-  { id: "stream", href: "/stream", label: "Event Stream", icon: "stream" },
-  { id: "vault", href: "/vault", label: "Knowledge Vault", icon: "db" },
-  { id: "health", href: "/health", label: "Project Health", icon: "health" },
-  { id: "fleet", href: "/fleet", label: "Worker Fleet", icon: "chip" },
-  { id: "telemetry", href: "/telemetry", label: "Telemetry", icon: "chart" },
-  { id: "quotas", href: "/quotas", label: "Quotas", icon: "pie" },
-  { id: "settings", href: "/settings", label: "Settings", icon: "gear" },
+const NAV: { id: NavId; href: string; labelKey: string; icon: string }[] = [
+  { id: "dashboard", href: "/dashboard", labelKey: "nav.dashboard", icon: "dashboard" },
+  { id: "stream", href: "/stream", labelKey: "nav.stream", icon: "stream" },
+  { id: "vault", href: "/vault", labelKey: "nav.vault", icon: "db" },
+  { id: "health", href: "/health", labelKey: "nav.health", icon: "health" },
+  { id: "fleet", href: "/fleet", labelKey: "nav.fleet", icon: "chip" },
+  { id: "telemetry", href: "/telemetry", labelKey: "nav.telemetry", icon: "chart" },
+  { id: "quotas", href: "/quotas", labelKey: "nav.quotas", icon: "pie" },
+  { id: "settings", href: "/settings", labelKey: "nav.settings", icon: "gear" },
 ];
-
-const TITLES: Record<string, string> = {
-  "/stream": "Event Stream",
-  "/vault": "Knowledge Vault",
-  "/health": "Project Health",
-  "/fleet": "Worker Fleet",
-  "/telemetry": "Telemetry",
-  "/quotas": "Quotas",
-  "/settings": "Settings",
-  "/onboarding": "Onboarding",
-  "/dashboard": "Dashboard",
-};
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const { t } = useTranslation("shell");
+  const { t: ta } = useTranslation("approvals");
   const {
     unreviewedCount,
     report,
@@ -92,7 +83,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     setOpenCommandPalette,
   } = useLounge();
 
-  const crumb = TITLES[pathname] ?? "Lounge";
+  const crumb = t(`titles.${pathname}`, { defaultValue: t("titles.default") });
   const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
   const onboarding = pathname === "/onboarding";
   const [layaDismissed, setLayaDismissed] = useState(false);
@@ -253,7 +244,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onClick={() => void resolveApproval("deny", approval.task_id)}
                 className={`${BANNER_BTN} border border-error bg-error-container text-on-error-container`}
               >
-                Reddet
+                {ta("deny")}
               </button>
               <button
                 type="button"
@@ -261,7 +252,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onClick={() => void resolveApproval("approve", approval.task_id)}
                 className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
               >
-                Onayla
+                {ta("approve")}
               </button>
             </div>
           </div>
@@ -302,7 +293,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onClick={() => void resolveApproval("deny", approval.task_id)}
                 className={`${BANNER_BTN} border border-outline-variant bg-surface-container text-on-surface`}
               >
-                Kapat
+                {ta("close")}
               </button>
               {approval.kind === "quota_local_fallback" ? (
                 <button
@@ -311,7 +302,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   onClick={() => void resolveApproval("approve_local", approval.task_id)}
                   className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
                 >
-                  {QUOTA_CONTINUE_LOCAL_LABEL}
+                  {ta("continueLocal")}
                 </button>
               ) : null}
             </div>
@@ -366,11 +357,17 @@ export function AppShell({ children }: { children: ReactNode }) {
           ref={attachBannerRef}
           className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
           data-approval-chrome="routing"
+          data-task-id={approval.task_id}
         >
-          <div className="flex min-w-0 flex-wrap items-start justify-between gap-2 px-4 font-body text-body">
+          <div
+            data-qa="approval-banner"
+            tabIndex={-1}
+            className="flex min-w-0 flex-wrap items-start justify-between gap-2 px-4 font-body text-body outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
             <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
               <span className="font-semibold tracking-label text-error-dim uppercase">
-                Routing onayı{countdownLabel} ·{" "}
+                {ta("routingApproval")}
+                {countdownLabel} ·{" "}
               </span>
               <span className="font-mono">
                 {approval.from_agent} → {approval.to_agent}
@@ -386,7 +383,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   onClick={() => void resolveApproval("approve_local", approval.task_id)}
                   className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
                 >
-                  Yerel modele geç
+                  {ta("switchLocal")}
                 </button>
               ) : null}
               <button
@@ -395,7 +392,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onClick={() => void resolveApproval("approve", approval.task_id)}
                 className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
               >
-                Onayla
+                {ta("approve")}
               </button>
               <button
                 type="button"
@@ -403,7 +400,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onClick={() => void resolveApproval("deny", approval.task_id)}
                 className={`${BANNER_BTN} border border-error bg-error-container text-on-error-container`}
               >
-                Reddet
+                {ta("deny")}
               </button>
             </div>
           </div>
@@ -418,7 +415,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-transparent border-t-primary"
               aria-hidden
             />
-            <span className="shrink-0 font-semibold tracking-label uppercase">Scanning...</span>
+            <span className="shrink-0 font-semibold tracking-label uppercase">{t("scanning")}</span>
             <span className="whitespace-normal break-words text-outline">
               memory_bridge · index_workspace
             </span>
@@ -638,16 +635,17 @@ export function AppShell({ children }: { children: ReactNode }) {
                 className="flex shrink-0 items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
               >
                 <Icon name="terminal" />
-                <span className="whitespace-nowrap">{indexing ? "Scanning..." : "Index Workspace"}</span>
+                <span className="whitespace-nowrap">{indexing ? t("scanning") : t("indexWorkspace")}</span>
               </button>
             </>
           )}
+          <LocaleSwitch compact className="flex shrink-0" />
           <div className="relative shrink-0" ref={alertRef}>
             <button
               type="button"
               className="rounded-lg p-1 text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
-              title="Alert history · critical security/quota"
-              aria-label="Alert history"
+              title={t("alertHistory")}
+              aria-label={t("alertHistory")}
               aria-expanded={alertOpen}
               aria-haspopup="dialog"
               onClick={() => setAlertOpen((open) => !open)}
@@ -658,14 +656,14 @@ export function AppShell({ children }: { children: ReactNode }) {
               <div
                 data-qa="alert-history"
                 role="dialog"
-                aria-label="Alert history"
+                aria-label={t("alertHistory")}
                 className="absolute top-full right-0 z-50 mt-1 w-72 rounded-lg border border-outline-variant bg-surface-container shadow-lg"
               >
                 <div className="border-b border-outline-variant px-3 py-2 font-body text-meta font-semibold tracking-label text-on-surface uppercase">
-                  Alert history
+                  {t("alertHistory")}
                 </div>
                 {criticalAlerts.length === 0 ? (
-                  <p className="px-3 py-4 font-body text-body text-on-surface-variant">Uyarı yok</p>
+                  <p className="px-3 py-4 font-body text-body text-on-surface-variant">{t("noAlerts")}</p>
                 ) : (
                   <ul className="max-h-64 divide-y divide-outline-variant/40 overflow-auto py-1">
                     {criticalAlerts.map((alert) => (
@@ -695,7 +693,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <BrandMark size={20} />
               <div className="min-w-0">
                 <div className="truncate font-headline text-panel font-black tracking-label text-on-surface uppercase">
-                  AL-OS CORE
+                  {t("brand")}
                 </div>
                 <div className="font-mono text-meta text-on-surface-variant">
                   v0.1.0 · {serviceDegraded ? "degraded" : kernel}
@@ -719,7 +717,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 >
                   <Icon name={item.icon} />
                   <span className={`flex-1 font-body ${active ? "font-medium text-on-surface" : ""}`}>
-                    {item.label}
+                    {t(item.labelKey)}
                   </span>
                   {item.id === "vault" && unreviewedCount > 0 ? (
                     <span
@@ -742,14 +740,14 @@ export function AppShell({ children }: { children: ReactNode }) {
               className="rounded border border-error-container/70 bg-error-container/15 px-2 py-1.5 font-mono text-meta text-error-dim"
               role="status"
             >
-              <div className="font-bold tracking-wider uppercase">Service Degraded</div>
+              <div className="font-bold tracking-wider uppercase">{t("serviceDegraded")}</div>
               <div className="mt-0.5 truncate text-on-surface-variant">
                 {degradedNames.join(" · ")} down
               </div>
             </div>
           ) : null}
           <div className="space-y-1.5 rounded border border-outline-variant/40 bg-surface-container-lowest/60 p-2">
-            <div className="mb-1 font-mono text-meta tracking-wider text-outline uppercase">Active daemons</div>
+            <div className="mb-1 font-mono text-meta tracking-wider text-outline uppercase">{t("activeDaemons")}</div>
             {(
               [
                 { name: "LMR", health: report?.ollama },
@@ -968,10 +966,11 @@ function DaemonRow({
   onRestart: () => void;
   restarting: boolean;
 }) {
+  const { t } = useTranslation("shell");
   const running = health?.running === true;
   const label = !checked
-    ? "Checking services…"
-    : daemonLabel(health, "Disconnected");
+    ? t("checkingServices")
+    : daemonLabel(health, t("disconnected"));
   // Short label keeps "Memory Bridge" readable at 1280; status wraps below.
   const shortName = name === "Memory Bridge" ? "Memory" : name;
   return (
@@ -989,7 +988,7 @@ function DaemonRow({
             disabled={restarting}
             className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface hover:bg-surface-bright disabled:opacity-60"
           >
-            {restarting ? "Restarting…" : "Restart Service"}
+            {restarting ? t("restarting") : t("restartService")}
           </button>
         ) : null}
       </div>

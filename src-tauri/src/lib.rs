@@ -283,7 +283,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             open_dead_symbol_in_editor,
             fix_dead_symbol_with_agent,
             focus_app_for_approval,
+            services::approval_sound::pick_custom_approval_sound,
+            services::approval_sound::load_custom_approval_sound_data_url,
             confirm_destructive,
+            reject_destructive,
             trigger_grok_test,
             list_projects,
             list_quotas,
@@ -311,16 +314,28 @@ pub fn run_with_start_route(start_route: &'static str) {
         .expect("error while building tauri application")
         .run(|app_handle, event| match &event {
             RunEvent::WindowEvent { label, event, .. } if label == "main" => {
-                if matches!(
-                    event,
-                    WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
-                ) {
-                    if let Some(state) = app_handle.try_state::<GraphUiState>() {
-                        on_main_window_closed(app_handle, state.inner());
-                    } else if let Some(window) = app_handle.get_webview_window(GRAPH_WINDOW_LABEL) {
-                        let _ = window.destroy();
+                match event {
+                    WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
+                        if let Some(state) = app_handle.try_state::<GraphUiState>() {
+                            on_main_window_closed(app_handle, state.inner());
+                        } else if let Some(window) =
+                            app_handle.get_webview_window(GRAPH_WINDOW_LABEL)
+                        {
+                            let _ = window.destroy();
+                        }
                     }
+                    // Desktop notification plugins do not deliver onAction. When the OS
+                    // activates/focuses the app (toast click, Alt-Tab, taskbar), raise the
+                    // pending-approval banner via focus_app_for_approval.
+                    WindowEvent::Focused(true) => {
+                        services::on_app_activated_for_pending_approval(app_handle);
+                    }
+                    _ => {}
                 }
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                services::on_app_activated_for_pending_approval(app_handle);
             }
             RunEvent::Exit | RunEvent::ExitRequested { .. } => {
                 if let Some(state) = app_handle.try_state::<GraphUiState>() {
@@ -854,6 +869,12 @@ async fn focus_app_for_approval(
 #[tauri::command]
 async fn confirm_destructive(id: String) -> Result<(), String> {
     kernel::confirm_destructive(&id).map_err(|err| err.to_string())
+}
+
+/// Reject / dismiss a pending destructive confirmation (clears notification slot).
+#[tauri::command]
+async fn reject_destructive(id: String) -> Result<(), String> {
+    kernel::reject_destructive(&id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

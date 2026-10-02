@@ -1,0 +1,22 @@
+{
+  "routingPolicy": "Yönlendirme Politikası",
+  "routingDesc": "Ajanlar arası otomatik geçiş kilitli. Dispatcher her görev öncesi bu politikayı ve kotaları kontrol eder.",
+  "agentSwitchLocked": "Ajan geçişinde kullanıcı onayı (kilitli)",
+  "localFallbackAgent": "Yerel fallback ajan",
+  "localFallbackModel": "Yerel fallback model",
+  "uiScale": "UI ölçeği",
+  "uiScaleDesc": "Kök font boyutunu (rem) ölçekler. Kısayollar: Cmd/Ctrl + büyüt, Cmd/Ctrl − küçült, Cmd/Ctrl 0 → %100.",
+  "uiScaleLabel": "UI ölçeği",
+  "connectedTools": "Bağlı araçlar",
+  "rescan": "Yeniden tara",
+  "alertSound": "Onay sesi",
+  "alertSoundDesc": "Onay beklerken tekrarlayan ses. Tam kontroller sonraki sürümde Ayarlar sayfasına taşınacak.",
+  "soundEnabled": "Uyarı sesini aç",
+  "soundPreset": "Hazır ses",
+  "customSound": "Özel ses (≤5 MB, wav/mp3/ogg)",
+  "pickCustomSound": "Dosya seç…",
+  "volume": "Ses seviyesi",
+  "interval": "Tekrar aralığı (saniye)",
+  "preview": "Önizleme",
+  "testListen": "Dinle"
+}

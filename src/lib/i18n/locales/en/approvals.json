@@ -1,0 +1,13 @@
+{
+  "approve": "Approve",
+  "deny": "Deny",
+  "close": "Close",
+  "continueLocal": "Continue locally",
+  "switchLocal": "Switch to local model",
+  "routingApproval": "Routing approval",
+  "securityPending": "Security · {{level}} · PENDING_APPROVAL",
+  "quotaBlocked": "Quota Alert · QUOTA_BLOCKED",
+  "noPending": "No pending approval",
+  "cleared": "Pending approval cleared — banner closed",
+  "resolveFailed": "Could not process approval"
+}

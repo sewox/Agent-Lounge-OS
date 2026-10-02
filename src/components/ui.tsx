@@ -115,6 +115,7 @@ export function Kpi({
   badge,
   valueClass = "text-on-surface",
   live = false,
+  labelLang,
 }: {
   label: string;
   value: string;
@@ -122,11 +123,18 @@ export function Kpi({
   badge: ReactNode;
   valueClass?: string;
   live?: boolean;
+  /** Neutral Latin labels use lang=en so CSS uppercase never dotted-İ under tr. */
+  labelLang?: string;
 }) {
   return (
     <div className="flex flex-col justify-between rounded-lg border border-outline-variant bg-surface-container p-3">
       <div className="flex items-center justify-between text-on-surface-variant">
-        <span className="font-body text-meta tracking-label uppercase">{label}</span>
+        <span
+          lang={labelLang ?? "en"}
+          className="font-body text-meta tracking-label uppercase"
+        >
+          {label}
+        </span>
       </div>
       <div className="mt-1 flex items-baseline justify-between gap-2">
         <div

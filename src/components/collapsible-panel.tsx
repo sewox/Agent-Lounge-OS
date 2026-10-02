@@ -96,7 +96,9 @@ export function CollapsiblePanel({
           >
             {collapsed ? "+" : "−"}
           </span>
-          <span className="truncate tracking-label uppercase">{title}</span>
+          <span lang="en" className="truncate tracking-label uppercase">
+            {title}
+          </span>
         </button>
         {trailer ? <div className="shrink-0">{trailer}</div> : null}
       </div>

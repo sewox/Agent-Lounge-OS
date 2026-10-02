@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { ApprovalAlertBridge } from "@/components/approval-alert-bridge";
+import { ApprovalNotificationBridge } from "@/components/approval-notification-bridge";
 import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
+import { LocaleProvider } from "@/components/locale-provider";
 import { LoungeProvider } from "@/components/lounge-provider";
 import { UiScaleProvider } from "@/components/ui-scale-provider";
 import "./globals.css";
@@ -94,17 +97,25 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
+  // LocaleProvider owns <html lang> after hydration (useSyncExternalStore).
+  // Avoid mutating lang in a blocking bootstrap script — that caused React #418
+  // when OS/stored locale differed from SSR lang="en".
   return (
     <html
-      lang="tr"
+      lang="en"
+      suppressHydrationWarning
       className={`${geistSans.variable} ${ibmPlex.variable} ${jetbrains.variable} ${publicSans.variable} h-full antialiased`}
     >
       <body className="h-full overflow-hidden bg-surface text-on-surface font-body">
         <UiScaleProvider>
-          <LoungeProvider>
-            <AppShell>{children}</AppShell>
-            <CommandPalette />
-          </LoungeProvider>
+          <LocaleProvider>
+            <LoungeProvider>
+              <ApprovalAlertBridge />
+              <ApprovalNotificationBridge />
+              <AppShell>{children}</AppShell>
+              <CommandPalette />
+            </LoungeProvider>
+          </LocaleProvider>
         </UiScaleProvider>
       </body>
     </html>

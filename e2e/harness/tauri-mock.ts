@@ -370,6 +370,38 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.layaEngine;
         case "pending_approvals":
           return f.pendingApprovals;
+        case "focus_app_for_approval": {
+          // Mirrors Rust focus_app_for_approval: emit approval_banner_focus so the
+          // bridge can focus the banner (AP-10 desktop path in the harness).
+          const taskId = String(args?.taskId ?? args?.task_id ?? "");
+          const handlers = listeners.get("approval_banner_focus") || [];
+          for (const handler of handlers) {
+            runCallback(handler, {
+              event: "approval_banner_focus",
+              id: Math.floor(Math.random() * 1e9),
+              payload: { task_id: taskId, reason: "notification_click" },
+            });
+          }
+          // Also focus the banner node directly when listeners race (listen is async).
+          const scoped = taskId
+            ? document.querySelector<HTMLElement>(
+                `[data-approval-chrome][data-task-id="${taskId}"] [data-qa="approval-banner"]`,
+              )
+            : null;
+          const banner =
+            scoped ?? document.querySelector<HTMLElement>('[data-qa="approval-banner"]');
+          banner?.focus({ preventScroll: true });
+          return null;
+        }
+        case "load_custom_approval_sound_data_url": {
+          const name = String(args?.fileName ?? args?.file_name ?? "");
+          if (!name || /[/:\\]/.test(name)) {
+            throw new Error("invalid custom sound file name");
+          }
+          return `data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=`;
+        }
+        case "pick_custom_approval_sound":
+          return "custom-alert.wav";
         case "resolve_routing": {
           const taskId = String(args?.taskId ?? "");
           f.pendingApprovals = f.pendingApprovals.filter((a) => a.task_id !== taskId);
