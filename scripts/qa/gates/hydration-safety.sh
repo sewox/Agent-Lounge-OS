@@ -26,7 +26,7 @@ if [[ -n "$ZERO_ARG_PALETTE" ]]; then
 fi
 
 # 2) detectPlatform() only in platform.ts / hooks / tests.
-DETECT_OUTSIDE="$(qa_search_hits 'detectPlatform\(\)' src 2>/dev/null | grep -Ev '(^|/)src/lib/platform\.ts|(^|/)src/hooks/use-platform\.ts|(^|/)src/lib/platform\.test\.ts' || true)"
+DETECT_OUTSIDE="$(qa_search_hits 'detectPlatform\(\)' src 2>/dev/null | grep -Ev '(^|/)src/lib/platform\.ts|(^|/)src/hooks/use-platform\.ts|(^|/)src/lib/platform\.test\.ts|(^|/)src/hooks/hydration-hooks\.test\.ts' || true)"
 if [[ -n "$DETECT_OUTSIDE" ]]; then
   echo "FAIL: detectPlatform() used outside platform module/hook:"
   echo "$DETECT_OUTSIDE"

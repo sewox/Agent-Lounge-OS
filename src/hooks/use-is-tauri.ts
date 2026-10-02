@@ -1,64 +1,31 @@
 "use client";
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import { isTauri } from "@/lib/lounge";
 
-const listeners = new Set<() => void>();
-
-/** Post-hydration Tauri flag — server + first client snapshot stay `false`. */
-let clientTauriHost = false;
-let hydrated = false;
-
-function subscribeTauriHost(listener: () => void) {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
-}
-
-function getTauriHostSnapshot(): boolean {
-  return clientTauriHost;
+/**
+ * Tauri host presence is fixed for a webview session; empty subscribe is enough.
+ * Server + hydration assume browser (`false`); client snapshot reads
+ * `window.__TAURI_INTERNALS__` via {@link isTauri}.
+ */
+function subscribeTauriHost(_onStoreChange: () => void): () => void {
+  void _onStoreChange;
+  return () => {};
 }
 
 function getServerTauriHostSnapshot(): boolean {
   return false;
 }
 
-function emitTauriHostChange() {
-  for (const listener of listeners) {
-    listener();
-  }
-}
-
 /**
- * SSR-stable Tauri host detection. Server and first client paint assume
- * browser; Tauri webview is detected after mount.
+ * SSR-stable Tauri host detection. Server and hydration assume browser;
+ * after hydration the client snapshot reports the real host (StrictMode-safe —
+ * no module-level hydrated flag).
  */
 export function useIsTauri(): boolean {
-  const tauriHost = useSyncExternalStore(
+  return useSyncExternalStore(
     subscribeTauriHost,
-    getTauriHostSnapshot,
+    isTauri,
     getServerTauriHostSnapshot,
   );
-
-  useEffect(() => {
-    if (hydrated) {
-      return;
-    }
-    hydrated = true;
-    const id = window.setTimeout(() => {
-      clientTauriHost = isTauri();
-      emitTauriHostChange();
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, []);
-
-  return tauriHost;
-}
-
-/** Reset module state for unit tests. */
-export function resetTauriHostStoreForTests(): void {
-  clientTauriHost = false;
-  hydrated = false;
-  listeners.clear();
 }
