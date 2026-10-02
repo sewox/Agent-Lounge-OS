@@ -4,19 +4,22 @@ import { initReactI18next } from "react-i18next";
 import enApprovals from "./locales/en/approvals.json";
 import enCommon from "./locales/en/common.json";
 import enDashboard from "./locales/en/dashboard.json";
+import enHealth from "./locales/en/health.json";
 import enSettings from "./locales/en/settings.json";
 import enShell from "./locales/en/shell.json";
+import enVault from "./locales/en/vault.json";
 import trApprovals from "./locales/tr/approvals.json";
 import trCommon from "./locales/tr/common.json";
 import trDashboard from "./locales/tr/dashboard.json";
+import trHealth from "./locales/tr/health.json";
 import trSettings from "./locales/tr/settings.json";
 import trShell from "./locales/tr/shell.json";
+import trVault from "./locales/tr/vault.json";
 import { detectInitialLocale, LOCALE_KEY, type AppLocale } from "./locale";
 
 /**
- * Only real dictionaries — no aliased namespaces that hide untranslated surfaces.
- * vault / health / fleet / quotas / telemetry / onboarding / palette leftovers
- * are still hardcoded; listed honestly in the PR body.
+ * Real dictionaries for all primary namespaces.
+ * fleet / quotas / telemetry / onboarding leftovers may still have mixed copy.
  */
 export const I18N_NAMESPACES = [
   "shell",
@@ -24,6 +27,8 @@ export const I18N_NAMESPACES = [
   "settings",
   "approvals",
   "common",
+  "vault",
+  "health",
 ] as const;
 
 export type I18nNamespace = (typeof I18N_NAMESPACES)[number];
@@ -35,6 +40,8 @@ const resources = {
     settings: enSettings,
     approvals: enApprovals,
     common: enCommon,
+    vault: enVault,
+    health: enHealth,
   },
   tr: {
     shell: trShell,
@@ -42,6 +49,8 @@ const resources = {
     settings: trSettings,
     approvals: trApprovals,
     common: trCommon,
+    vault: trVault,
+    health: trHealth,
   },
 } as const;
 
