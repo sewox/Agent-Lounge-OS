@@ -27,7 +27,7 @@ import trTelemetry from "./locales/tr/telemetry.json";
 import trVault from "./locales/tr/vault.json";
 import { detectInitialLocale, LOCALE_KEY, type AppLocale } from "./locale";
 
-/** Primary UI namespaces — TR/EN dictionaries must stay in parity (PR-5). */
+/** Primary UI namespaces — TR/EN dictionaries must stay in parity (PR-5 zero-failure). */
 export const I18N_NAMESPACES = [
   "shell",
   "dashboard",
