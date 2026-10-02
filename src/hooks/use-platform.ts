@@ -1,66 +1,35 @@
 "use client";
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import {
   detectPlatform,
   SSR_DEFAULT_PLATFORM,
   type LoungePlatform,
 } from "@/lib/platform";
 
-const listeners = new Set<() => void>();
-let clientPlatform: LoungePlatform = SSR_DEFAULT_PLATFORM;
-let hydrated = false;
-
-function subscribePlatform(listener: () => void) {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
-}
-
-function getPlatformSnapshot(): LoungePlatform {
-  return clientPlatform;
+/**
+ * Platform does not change during a session; an empty subscribe is enough.
+ * Server + hydration use {@link getServerPlatformSnapshot}; the client
+ * snapshot reads the real OS via {@link detectPlatform}.
+ */
+function subscribePlatform(_onStoreChange: () => void): () => void {
+  void _onStoreChange;
+  return () => {};
 }
 
 function getServerPlatformSnapshot(): LoungePlatform {
   return SSR_DEFAULT_PLATFORM;
 }
 
-function emitPlatformChange() {
-  for (const listener of listeners) {
-    listener();
-  }
-}
-
 /**
- * SSR-stable platform detection. Server and first client paint use
- * {@link SSR_DEFAULT_PLATFORM}; real OS is applied after mount.
+ * SSR-stable platform detection. Server and hydration stay on
+ * {@link SSR_DEFAULT_PLATFORM}; after hydration the client snapshot
+ * reports the real OS (StrictMode-safe — no module-level hydrated flag).
  */
 export function usePlatform(): LoungePlatform {
-  const platform = useSyncExternalStore(
+  return useSyncExternalStore(
     subscribePlatform,
-    getPlatformSnapshot,
+    detectPlatform,
     getServerPlatformSnapshot,
   );
-
-  useEffect(() => {
-    if (hydrated) {
-      return;
-    }
-    hydrated = true;
-    const id = window.setTimeout(() => {
-      clientPlatform = detectPlatform();
-      emitPlatformChange();
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, []);
-
-  return platform;
-}
-
-/** Reset module state for unit tests. */
-export function resetPlatformStoreForTests(): void {
-  clientPlatform = SSR_DEFAULT_PLATFORM;
-  hydrated = false;
-  listeners.clear();
 }
