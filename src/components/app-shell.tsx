@@ -316,7 +316,82 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      {serviceDegraded && degradedRestart ? (
+      {indexing || indexProgressActive(indexProgress) ? (
+        <div
+          ref={attachBannerRef}
+          className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
+          data-qa="index-progress-banner"
+        >
+          <div className="flex min-w-0 flex-col gap-1 px-4 font-body text-body text-on-surface">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span
+                className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-transparent border-t-primary"
+                aria-hidden
+              />
+              <span className="shrink-0 font-semibold tracking-label uppercase">{t("scanning")}</span>
+              <span className="whitespace-normal break-words text-outline">
+                {t("indexingProgress", {
+                  done: indexProgress.done,
+                  total: Math.max(indexProgress.total, 1),
+                })}
+              </span>
+              <span className="text-outline">
+                {t("scanOverallProgress", {
+                  done: indexProgress.done,
+                  failed: indexProgress.failed,
+                  active: indexProgress.queued + indexProgress.indexing,
+                })}
+              </span>
+            </div>
+            {indexJobs.length > 0 ? (
+              <ul className="m-0 flex max-h-24 list-none flex-col gap-0.5 overflow-y-auto p-0 text-meta text-on-surface-variant">
+                {indexJobs.slice(0, 8).map((job) => (
+                  <li key={job.id} className="flex min-w-0 items-center gap-2" data-qa="index-job-row">
+                    <span className="shrink-0 font-semibold uppercase tracking-label">
+                      {job.status === "queued"
+                        ? t("indexStatusQueued")
+                        : job.status === "indexing"
+                          ? t("indexStatusIndexing")
+                          : job.status === "done"
+                            ? t("indexStatusDone")
+                            : job.status === "failed"
+                              ? t("indexStatusFailed")
+                              : t("indexStatusCancelled")}
+                    </span>
+                    <span className="min-w-0 truncate">{job.project}</span>
+                    {job.error ? (
+                      <span className="min-w-0 truncate text-error-dim">{job.error}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        </div>
+      ) : indexNotice ? (
+        <div
+          ref={attachBannerRef}
+          className={`${bannerPos} border-b py-2 px-4 ${
+            indexNotice.tone === "error"
+              ? "border-error-container bg-error-container/20"
+              : "border-secondary-container bg-secondary-container/30"
+          }`}
+          data-qa="index-notice-banner"
+        >
+          <div
+            className={`whitespace-normal break-words px-4 font-body text-body font-semibold leading-normal ${
+              indexNotice.tone === "error" ? "text-error-dim" : "text-secondary-dim"
+            }`}
+          >
+            {indexNotice.i18nKey
+              ? t(indexNotice.i18nKey, {
+                  ...(indexNotice.i18nParams ?? {}),
+                  defaultValue: indexNotice.text,
+                })
+              : indexNotice.text}
+          </div>
+        </div>
+      ) : serviceDegraded && degradedRestart ? (
         <div
           ref={attachBannerRef}
           className={`${bannerPos} border-b border-error-container bg-error-container/25 py-2 px-4`}
@@ -409,81 +484,6 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {ta("deny")}
               </button>
             </div>
-          </div>
-        </div>
-      ) : indexing || indexProgressActive(indexProgress) ? (
-        <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
-          data-qa="index-progress-banner"
-        >
-          <div className="flex min-w-0 flex-col gap-1 px-4 font-body text-body text-on-surface">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span
-                className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-transparent border-t-primary"
-                aria-hidden
-              />
-              <span className="shrink-0 font-semibold tracking-label uppercase">{t("scanning")}</span>
-              <span className="whitespace-normal break-words text-outline">
-                {t("indexingProgress", {
-                  done: indexProgress.done,
-                  total: Math.max(indexProgress.total, 1),
-                })}
-              </span>
-              <span className="text-outline">
-                {t("scanOverallProgress", {
-                  done: indexProgress.done,
-                  failed: indexProgress.failed,
-                  active: indexProgress.queued + indexProgress.indexing,
-                })}
-              </span>
-            </div>
-            {indexJobs.length > 0 ? (
-              <ul className="m-0 flex max-h-24 list-none flex-col gap-0.5 overflow-y-auto p-0 text-meta text-on-surface-variant">
-                {indexJobs.slice(0, 8).map((job) => (
-                  <li key={job.id} className="flex min-w-0 items-center gap-2" data-qa="index-job-row">
-                    <span className="shrink-0 font-semibold uppercase tracking-label">
-                      {job.status === "queued"
-                        ? t("indexStatusQueued")
-                        : job.status === "indexing"
-                          ? t("indexStatusIndexing")
-                          : job.status === "done"
-                            ? t("indexStatusDone")
-                            : job.status === "failed"
-                              ? t("indexStatusFailed")
-                              : t("indexStatusCancelled")}
-                    </span>
-                    <span className="min-w-0 truncate">{job.project}</span>
-                    {job.error ? (
-                      <span className="min-w-0 truncate text-error-dim">{job.error}</span>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-        </div>
-      ) : indexNotice ? (
-        <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b py-2 px-4 ${
-            indexNotice.tone === "error"
-              ? "border-error-container bg-error-container/20"
-              : "border-secondary-container bg-secondary-container/30"
-          }`}
-          data-qa="index-notice-banner"
-        >
-          <div
-            className={`whitespace-normal break-words px-4 font-body text-body font-semibold leading-normal ${
-              indexNotice.tone === "error" ? "text-error-dim" : "text-secondary-dim"
-            }`}
-          >
-            {indexNotice.i18nKey
-              ? t(indexNotice.i18nKey, {
-                  ...(indexNotice.i18nParams ?? {}),
-                  defaultValue: indexNotice.text,
-                })
-              : indexNotice.text}
           </div>
         </div>
       ) : approvalError ? (

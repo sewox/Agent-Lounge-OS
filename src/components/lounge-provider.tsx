@@ -1103,6 +1103,14 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
                 setLastIndex(payload.job.snapshot);
               }
               void refreshSemantic();
+              if (!indexProgressActive(payload.progress) && payload.progress.done > 0) {
+                setIndexNotice({
+                  tone: "success",
+                  text: `Imported ${payload.progress.done} project(s)`,
+                  i18nKey: "scanImported",
+                  i18nParams: { count: payload.progress.done },
+                });
+              }
             } else if (payload.job.status === "failed") {
               const mapped = scanErrorI18nKey(payload.job.error || payload.job.error_code || "index_failed");
               setIndexNotice({
