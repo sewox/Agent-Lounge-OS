@@ -61,12 +61,16 @@ test.describe("DB — dashboard", () => {
     await openRoute(page, "/dashboard", "full");
     const vaultTitle = page.getByText(/Semantic Map \+ Experiences/i).first();
     await expect(vaultTitle).toBeVisible();
-    await vaultTitle.scrollIntoViewIfNeeded();
+    // Tightened: first-fold means visible without scrolling the page first.
     const box = await vaultTitle.boundingBox();
-    expect(box).toBeTruthy();
+    expect(box, "vault title must have a layout box").toBeTruthy();
     const vp = page.viewportSize()!;
-    // Allow one viewport height of scroll for tall portrait; title must be reachable without endless scroll.
-    expect(box!.y, "vault title should be near the top of the page").toBeLessThan(vp.height * 1.15);
+    expect(box!.y, "vault title top must be on-screen in first fold").toBeGreaterThanOrEqual(-2);
+    expect(box!.y, "vault title must start within the first viewport").toBeLessThan(vp.height);
+    expect(
+      box!.y + Math.min(box!.height, 24),
+      "vault title text must intersect the first viewport",
+    ).toBeLessThanOrEqual(vp.height);
   });
 
   test("DB-05 · Critical Quotas link to /quotas", async ({ page }) => {

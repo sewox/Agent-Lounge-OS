@@ -16,7 +16,8 @@ pub use decision_engine::{
     InferMeter, LoungeTelemetry, UserBiasStats, DECISION_GATE_EVENT, USER_BIAS_APPROVE_THRESHOLD,
 };
 pub use destructive_confirm::{
-    confirm_destructive, list_pending_destructive, reject_destructive, DestructivePendingEvent,
+    assert_destructive_hash, confirm_destructive, list_pending_destructive, reject_destructive,
+    DestructivePendingEvent,
 };
 pub use dispatcher::{default_model_lock, Dispatcher};
 pub use guarded_command::GuardedCommand;

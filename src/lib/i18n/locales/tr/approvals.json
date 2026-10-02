@@ -15,5 +15,8 @@
   "destructiveSource": "Kaynak",
   "destructiveQueueNote": "Ek yıkıcı istekler kuyrukta (FIFO). Önce bunu çözün.",
   "confirmDestructive": "Onayla",
-  "rejectDestructive": "Reddet"
+  "rejectDestructive": "Reddet",
+  "destructiveNoPending": "Bekleyen yıkıcı onay yok",
+  "destructiveRejected": "Yıkıcı komut reddedildi",
+  "destructiveResolveFailed": "Yıkıcı onay işlenemedi"
 }

@@ -1,6 +1,31 @@
 import { test, expect } from "@playwright/test";
 import { openRoute } from "../helpers/nav";
-import { getIpcLog } from "../harness/tauri-mock";
+import {
+  getIpcLog,
+  seedDestructiveQueue,
+  type QaDestructiveRow,
+} from "../harness/tauri-mock";
+
+const DESTRUCTIVE_FIFO: QaDestructiveRow[] = [
+  {
+    id: "dest-fifo-1",
+    kind: "destructive",
+    command: "rm -rf /tmp/agent-lounge-demo",
+    pattern: "RmRf",
+    source: "agent",
+    class: "RmRf",
+    command_hash: "hash-fifo-1",
+  },
+  {
+    id: "dest-fifo-2",
+    kind: "destructive",
+    command: "git reset --hard HEAD",
+    pattern: "GitResetHard",
+    source: "agent",
+    class: "GitResetHard",
+    command_hash: "hash-fifo-2",
+  },
+];
 
 test.describe("HM — health / map empty states", () => {
   test("HM-01 · Empty DB must not show MOCK_HEALTH 12/41/74", async ({
@@ -104,22 +129,34 @@ test.describe("ST — settings", () => {
     await region.scrollIntoViewIfNeeded();
     const box = await region.boundingBox();
     expect(box, "routing table must have a layout box").toBeTruthy();
-    // Table may scroll inside Settings; clipping without a scroll parent is the failure.
-    const scrollable = await region.evaluate((el) => {
-      const style = window.getComputedStyle(el);
-      return (
-        el.scrollHeight > el.clientHeight + 1 ||
-        style.overflowY === "auto" ||
-        style.overflowY === "scroll" ||
-        style.overflow === "auto" ||
-        style.overflow === "scroll"
-      );
-    });
     const vp = page.viewportSize()!;
-    const clippedWithoutScroll = Boolean(
-      box && box.y + box.height > vp.height - 4 && !scrollable,
-    );
-    expect(clippedWithoutScroll, "routing controls must fit or scroll").toBe(false);
+    // Tightened: after scrollIntoView, the table top must sit in the viewport
+    // and either fully fit or have an explicit scroll container.
+    expect(box!.y, "routing table top must be in viewport").toBeGreaterThanOrEqual(-2);
+    expect(box!.y, "routing table top must not sit below the fold").toBeLessThan(vp.height);
+    const scrollable = await region.evaluate((el) => {
+      let node: HTMLElement | null = el;
+      while (node) {
+        const style = window.getComputedStyle(node);
+        const oy = style.overflowY;
+        if (
+          (oy === "auto" || oy === "scroll" || style.overflow === "auto" || style.overflow === "scroll") &&
+          node.scrollHeight > node.clientHeight + 1
+        ) {
+          return true;
+        }
+        node = node.parentElement;
+      }
+      return el.scrollHeight > el.clientHeight + 1;
+    });
+    const bottom = box!.y + box!.height;
+    if (bottom > vp.height - 4) {
+      expect(scrollable, "overflowing routing table must scroll inside a parent").toBe(true);
+    }
+    // Controls inside the table must be interactable (not zero-size / opacity-0 clipped).
+    const firstControl = region.locator("input, select, button, [role='checkbox']").first();
+    await expect(firstControl, "routing table must expose a control").toBeVisible();
+    await expect(firstControl).toBeEnabled();
   });
 
   test("ST-02 · Routing policy save calls set_routing_policy", async ({ page }) => {
@@ -205,19 +242,91 @@ test.describe("AP / CP / misc", () => {
   test("AP-06 · Destructive ops always require confirmation UI (POSIX + Windows)", async ({
     page,
   }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, DESTRUCTIVE_FIFO);
+    const dialog = page.locator('[data-qa="destructive-dialog"]');
+    await expect(dialog, "destructive confirm alertdialog").toBeVisible({ timeout: 5_000 });
+    await expect(dialog).toHaveAttribute("data-task-id", DESTRUCTIVE_FIFO[0]!.id);
+    await expect(dialog).toHaveAttribute("data-command-hash", DESTRUCTIVE_FIFO[0]!.command_hash);
+    await expect(page.locator('[data-qa="destructive-command"]')).toHaveText(
+      DESTRUCTIVE_FIFO[0]!.command,
+    );
+    await expect(page.locator('[data-qa="destructive-queue-note"]')).toBeVisible();
+    await expect(page.locator('[data-qa="destructive-confirm"]')).toBeVisible();
+    await expect(page.locator('[data-qa="destructive-reject"]')).toBeVisible();
+    // Settings copy still documents Never Ask cannot skip (static gate panel).
     await openRoute(page, "/settings", "full");
     const gate = page.locator('[data-qa="destructive-gate"]');
     await expect(gate, "destructive gate panel").toBeVisible();
     await expect(gate.getByText(/Never Ask|atlanamaz|cannot skip/i).first()).toBeVisible();
-    await expect(gate.getByText(/rm -rf|git reset|Remove-Item|format/i).first()).toBeVisible();
   });
 
-  test("AP-07 · Never Ask cannot skip destructive confirmation", async ({ page }) => {
-    await openRoute(page, "/dashboard?demo=destructive-reset", "browser");
-    const dialog = page.getByRole("alertdialog");
-    await expect(dialog, "destructive confirm alertdialog").toBeVisible();
-    await expect(dialog).toContainText(/confirm|onay|reset|git reset|yıkıcı|destructive/i);
-    await expect(dialog.getByRole("button", { name: /Confirm|Onayla|Reject|Reddet/i }).first()).toBeVisible();
+  test("AP-07 · FIFO reject then confirm with correct id/hash IPC", async ({ page }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, DESTRUCTIVE_FIFO);
+    const dialog = page.locator('[data-qa="destructive-dialog"]');
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('[data-qa="destructive-command"]')).toHaveText(
+      DESTRUCTIVE_FIFO[0]!.command,
+    );
+
+    const beforeReject = await getIpcLog(page);
+    await page.locator('[data-qa="destructive-reject"]').click();
+    await expect(page.locator('[data-qa="destructive-command"]')).toHaveText(
+      DESTRUCTIVE_FIFO[1]!.command,
+      { timeout: 5_000 },
+    );
+    await expect(dialog).toHaveAttribute("data-task-id", DESTRUCTIVE_FIFO[1]!.id);
+    await expect(dialog).toHaveAttribute("data-command-hash", DESTRUCTIVE_FIFO[1]!.command_hash);
+
+    const afterReject = await getIpcLog(page);
+    const rejectCall = afterReject
+      .slice(beforeReject.length)
+      .find((e) => e.cmd === "reject_destructive");
+    expect(rejectCall, "reject_destructive IPC").toBeTruthy();
+    const rejectArgs = rejectCall!.args as { id?: string; commandHash?: string };
+    expect(rejectArgs.id).toBe(DESTRUCTIVE_FIFO[0]!.id);
+    expect(rejectArgs.commandHash).toBe(DESTRUCTIVE_FIFO[0]!.command_hash);
+
+    const beforeConfirm = await getIpcLog(page);
+    await page.locator('[data-qa="destructive-confirm"]').click();
+    await expect(dialog).toBeHidden({ timeout: 5_000 });
+
+    const afterConfirm = await getIpcLog(page);
+    const confirmCall = afterConfirm
+      .slice(beforeConfirm.length)
+      .find((e) => e.cmd === "confirm_destructive");
+    expect(confirmCall, "confirm_destructive IPC").toBeTruthy();
+    const confirmArgs = confirmCall!.args as { id?: string; commandHash?: string };
+    expect(confirmArgs.id).toBe(DESTRUCTIVE_FIFO[1]!.id);
+    expect(confirmArgs.commandHash).toBe(DESTRUCTIVE_FIFO[1]!.command_hash);
+  });
+
+  test("AP-07b · Destructive dialog focus trap and Esc rejects", async ({ page }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, [DESTRUCTIVE_FIFO[0]!]);
+    const dialog = page.locator('[data-qa="destructive-dialog"]');
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
+    const rejectBtn = page.locator('[data-qa="destructive-reject"]');
+    const confirmBtn = page.locator('[data-qa="destructive-confirm"]');
+    await expect(rejectBtn).toBeFocused({ timeout: 2_000 });
+
+    await page.keyboard.press("Tab");
+    await expect(confirmBtn).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(rejectBtn).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(confirmBtn).toBeFocused();
+
+    const beforeEsc = await getIpcLog(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden({ timeout: 5_000 });
+    const afterEsc = await getIpcLog(page);
+    const rejectCall = afterEsc
+      .slice(beforeEsc.length)
+      .find((e) => e.cmd === "reject_destructive");
+    expect(rejectCall, "Esc must reject via reject_destructive").toBeTruthy();
+    expect((rejectCall!.args as { id?: string }).id).toBe(DESTRUCTIVE_FIFO[0]!.id);
   });
 
   test("AP-08 · Pending approval plays alert sound (HTML Audio; wav/mp3/ogg)", async ({

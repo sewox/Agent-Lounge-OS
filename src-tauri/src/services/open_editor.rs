@@ -9,6 +9,25 @@ use crate::kernel::{ActionSource, GuardedCommand};
 const SETTING_EDITOR_COMMAND: &str = "editor_command";
 const SETTING_EDITOR_PRESET: &str = "editor_preset";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsFamily {
+    Macos,
+    Windows,
+    Linux,
+}
+
+impl OsFamily {
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Macos
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EditorPreset {
@@ -57,46 +76,77 @@ impl Default for EditorSettings {
     }
 }
 
-/// Resolve preset → argv template for the current OS (no shell).
+/// Resolve preset → display template for the current OS (settings UI / legacy key).
 pub fn preset_argv_template(preset: EditorPreset) -> (String, String) {
+    let (prog, args) = build_preset_argv(OsFamily::current(), preset, "{path}", None);
+    (prog, args.join(" "))
+}
+
+/// Structured argv for a preset. Spaced macOS app names stay a single argv element.
+/// Default opener never appends `:line` to the path.
+pub fn build_preset_argv(
+    os: OsFamily,
+    preset: EditorPreset,
+    path: &str,
+    line: Option<i64>,
+) -> (String, Vec<String>) {
     match preset {
-        EditorPreset::Default => platform_default_editor_argv(),
-        EditorPreset::VsCode => platform_vscode_argv(),
-        EditorPreset::Cursor => platform_cursor_argv(),
-        EditorPreset::Custom => (String::new(), "{path}".into()),
+        EditorPreset::Default => build_default_argv(os, path),
+        EditorPreset::VsCode => build_vscode_argv(os, path, line),
+        EditorPreset::Cursor => build_cursor_argv(os, path, line),
+        EditorPreset::Custom => (String::new(), vec!["{path}".into()]),
     }
 }
 
-fn platform_default_editor_argv() -> (String, String) {
-    if cfg!(target_os = "macos") {
-        ("open".into(), "{path}".into())
-    } else if cfg!(target_os = "windows") {
-        ("explorer.exe".into(), "{path}".into())
-    } else {
-        ("xdg-open".into(), "{path}".into())
+fn goto_target(path: &str, line: Option<i64>) -> String {
+    match line {
+        Some(n) if n > 0 => format!("{path}:{n}:1"),
+        _ => path.to_string(),
     }
 }
 
-fn platform_vscode_argv() -> (String, String) {
-    if cfg!(target_os = "windows") {
-        ("code.cmd".into(), "-g {path}".into())
-    } else if cfg!(target_os = "macos") {
-        (
+fn build_default_argv(os: OsFamily, path: &str) -> (String, Vec<String>) {
+    // Default OS opener: path only — never `path:line`.
+    match os {
+        OsFamily::Macos => ("open".into(), vec![path.to_string()]),
+        OsFamily::Windows => ("explorer.exe".into(), vec![path.to_string()]),
+        OsFamily::Linux => ("xdg-open".into(), vec![path.to_string()]),
+    }
+}
+
+fn build_vscode_argv(os: OsFamily, path: &str, line: Option<i64>) -> (String, Vec<String>) {
+    let target = goto_target(path, line);
+    match os {
+        OsFamily::Windows => ("code.cmd".into(), vec!["--goto".into(), target]),
+        OsFamily::Macos => (
             "open".into(),
-            "-a Visual Studio Code --args -g {path}".into(),
-        )
-    } else {
-        ("code".into(), "-g {path}".into())
+            vec![
+                "-a".into(),
+                "Visual Studio Code".into(),
+                "--args".into(),
+                "--goto".into(),
+                target,
+            ],
+        ),
+        OsFamily::Linux => ("code".into(), vec!["--goto".into(), target]),
     }
 }
 
-fn platform_cursor_argv() -> (String, String) {
-    if cfg!(target_os = "windows") {
-        ("Cursor.exe".into(), "-g {path}".into())
-    } else if cfg!(target_os = "macos") {
-        ("open".into(), "-a Cursor --args -g {path}".into())
-    } else {
-        ("cursor".into(), "-g {path}".into())
+fn build_cursor_argv(os: OsFamily, path: &str, line: Option<i64>) -> (String, Vec<String>) {
+    let target = goto_target(path, line);
+    match os {
+        OsFamily::Windows => ("Cursor.exe".into(), vec!["--goto".into(), target]),
+        OsFamily::Macos => (
+            "open".into(),
+            vec![
+                "-a".into(),
+                "Cursor".into(),
+                "--args".into(),
+                "--goto".into(),
+                target,
+            ],
+        ),
+        OsFamily::Linux => ("cursor".into(), vec!["--goto".into(), target]),
     }
 }
 
@@ -136,7 +186,8 @@ pub fn validate_custom_editor(program: &str, args_template: &str) -> Result<()> 
     Ok(())
 }
 
-fn expand_template(template: &str, path: &str, line: Option<i64>) -> Vec<String> {
+/// Expand a custom argument template. Line is attached as `path:line` only for custom editors.
+fn expand_custom_template(template: &str, path: &str, line: Option<i64>) -> Vec<String> {
     let target = match line {
         Some(n) if n > 0 => format!("{path}:{n}"),
         _ => path.to_string(),
@@ -156,14 +207,14 @@ fn spawn_editor_argv(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn spawn_from_template(
+fn spawn_from_custom_template(
     program: &str,
     args_template: &str,
     path: &str,
     line: Option<i64>,
 ) -> Result<()> {
     validate_custom_editor(program, args_template)?;
-    let args = expand_template(args_template, path, line);
+    let args = expand_custom_template(args_template, path, line);
     spawn_editor_argv(program, &args)
 }
 
@@ -223,8 +274,8 @@ pub async fn save_editor_settings(
             )
         }
         other => {
-            let (prog, args) = preset_argv_template(other);
-            format!("{prog} {args}")
+            let (prog, args) = build_preset_argv(OsFamily::current(), other, "{path}", None);
+            format!("{prog} {}", args.join(" "))
         }
     };
     store
@@ -243,15 +294,15 @@ pub async fn test_editor_open(
 
 fn open_with_settings(settings: &EditorSettings, path: &str, line: Option<i64>) -> Result<()> {
     match settings.preset {
-        EditorPreset::Custom => spawn_from_template(
+        EditorPreset::Custom => spawn_from_custom_template(
             &settings.custom_program,
             &settings.custom_args_template,
             path,
             line,
         ),
         preset => {
-            let (program, args_template) = preset_argv_template(preset);
-            spawn_from_template(&program, &args_template, path, line)
+            let (program, args) = build_preset_argv(OsFamily::current(), preset, path, line);
+            spawn_editor_argv(&program, &args)
         }
     }
 }
@@ -288,7 +339,7 @@ pub async fn open_in_editor(
         } else {
             rest.join(" ")
         };
-        spawn_from_template(program, &template, &normalized, line)?;
+        spawn_from_custom_template(program, &template, &normalized, line)?;
         return Ok(());
     }
 
@@ -298,13 +349,7 @@ pub async fn open_in_editor(
 
 /// Pure argv builder for the platform default opener (testable without spawning).
 pub fn platform_opener_argv(path: &str) -> Result<(String, Vec<String>)> {
-    if cfg!(target_os = "macos") {
-        Ok(("open".into(), vec![path.to_string()]))
-    } else if cfg!(target_os = "windows") {
-        windows_opener_argv(path)
-    } else {
-        Ok(("xdg-open".into(), vec![path.to_string()]))
-    }
+    Ok(build_default_argv(OsFamily::current(), path))
 }
 
 /// Windows: `explorer.exe` with the path as a single argv element (never `cmd /C start`).
@@ -312,7 +357,7 @@ pub fn windows_opener_argv(path: &str) -> Result<(String, Vec<String>)> {
     if !accepts_cross_platform_path(path) {
         bail!("path must include a separator or Windows drive letter");
     }
-    Ok(("explorer.exe".into(), vec![path.to_string()]))
+    Ok(build_default_argv(OsFamily::Windows, path))
 }
 
 #[cfg(test)]
@@ -362,9 +407,88 @@ mod tests {
     }
 
     #[test]
-    fn expand_template_includes_line() {
-        let args = expand_template("-g {path}", "/tmp/x.rs", Some(42));
+    fn custom_expand_template_includes_line() {
+        let args = expand_custom_template("-g {path}", "/tmp/x.rs", Some(42));
         assert_eq!(args, vec!["-g", "/tmp/x.rs:42"]);
+    }
+
+    #[test]
+    fn default_opener_never_appends_line_on_any_os() {
+        for os in [OsFamily::Linux, OsFamily::Macos, OsFamily::Windows] {
+            let (prog, args) =
+                build_preset_argv(os, EditorPreset::Default, "/tmp/x.rs", Some(42));
+            assert!(!prog.is_empty());
+            assert_eq!(args, vec!["/tmp/x.rs".to_string()], "os={os:?}");
+            assert!(
+                !args.iter().any(|a| a.contains(":42")),
+                "default must not use path:line (os={os:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn vscode_uses_goto_path_line_col_on_all_oses() {
+        for os in [OsFamily::Linux, OsFamily::Macos, OsFamily::Windows] {
+            let (_, args) = build_preset_argv(os, EditorPreset::VsCode, "/tmp/x.rs", Some(42));
+            assert!(
+                args.iter().any(|a| a == "--goto"),
+                "missing --goto on {os:?}: {args:?}"
+            );
+            assert!(
+                args.iter().any(|a| a == "/tmp/x.rs:42:1"),
+                "missing goto target on {os:?}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_uses_goto_path_line_col_on_all_oses() {
+        for os in [OsFamily::Linux, OsFamily::Macos, OsFamily::Windows] {
+            let (_, args) = build_preset_argv(os, EditorPreset::Cursor, "/tmp/x.rs", Some(7));
+            assert!(args.iter().any(|a| a == "--goto"), "{os:?}: {args:?}");
+            assert!(
+                args.iter().any(|a| a == "/tmp/x.rs:7:1"),
+                "{os:?}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_vscode_keeps_spaced_app_name_as_single_argv() {
+        let (prog, args) =
+            build_preset_argv(OsFamily::Macos, EditorPreset::VsCode, "/tmp/x.rs", Some(10));
+        assert_eq!(prog, "open");
+        assert_eq!(args[0], "-a");
+        assert_eq!(args[1], "Visual Studio Code");
+        assert!(!args.iter().any(|a| a == "Visual"));
+        assert!(!args.iter().any(|a| a == "Studio"));
+        assert!(!args.iter().any(|a| a == "Code"));
+        assert!(args.iter().any(|a| a == "--args"));
+        assert!(args.iter().any(|a| a == "--goto"));
+    }
+
+    #[test]
+    fn macos_cursor_app_name_is_single_argv() {
+        let (prog, args) =
+            build_preset_argv(OsFamily::Macos, EditorPreset::Cursor, "/tmp/y.rs", None);
+        assert_eq!(prog, "open");
+        assert_eq!(args[0], "-a");
+        assert_eq!(args[1], "Cursor");
+        assert_eq!(
+            args.iter().filter(|a| a.as_str() == "Cursor").count(),
+            1,
+            "Cursor must appear once as app name, not split"
+        );
+    }
+
+    #[test]
+    fn linux_and_windows_vscode_programs() {
+        let (linux_prog, _) =
+            build_preset_argv(OsFamily::Linux, EditorPreset::VsCode, "/tmp/x.rs", None);
+        let (win_prog, _) =
+            build_preset_argv(OsFamily::Windows, EditorPreset::VsCode, r"C:\x.rs", None);
+        assert_eq!(linux_prog, "code");
+        assert_eq!(win_prog, "code.cmd");
     }
 
     #[test]
@@ -376,7 +500,7 @@ mod tests {
         ] {
             let (prog, args) = preset_argv_template(preset);
             assert!(!prog.is_empty());
-            assert!(args.contains("{path}"));
+            assert!(args.contains("{path}") || prog == "open" || prog == "xdg-open" || prog == "explorer.exe");
         }
     }
 }

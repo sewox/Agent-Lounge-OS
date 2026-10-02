@@ -924,36 +924,11 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timer);
   }, []);
 
-  // Browser-only demo: ?demo=destructive-reset shows destructive confirm dialog (AP-07).
-  useEffect(() => {
-    if (isTauri() || typeof window === "undefined") {
-      return;
-    }
-    const demo = new URLSearchParams(window.location.search).get("demo");
-    if (demo !== "destructive-reset") {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setDestructiveQueue([
-        {
-          id: "demo-destructive-reset",
-          kind: "destructive",
-          command: "git reset --hard HEAD",
-          pattern: "GitResetHard",
-          source: "agent",
-          class: "GitResetHard",
-          command_hash: "demo-hash",
-        },
-      ]);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-
   const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
     const current = approvalRef.current;
     const id = (taskId ?? current?.task_id ?? "").trim();
     if (!id) {
-      setApprovalError("Bekleyen onay yok");
+      setApprovalError(i18n.t("noPending", { ns: "approvals" }));
       return;
     }
     setApprovalError(null);
@@ -966,12 +941,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       const missing =
-        text.toLowerCase().includes("bekleyen") || text.toLowerCase().includes("yok");
+        text.toLowerCase().includes("bekleyen") ||
+        text.toLowerCase().includes("yok") ||
+        text.toLowerCase().includes("pending") ||
+        text.toLowerCase().includes("unknown");
       if (missing) {
         setApproval((prev) => (prev?.task_id === id ? null : prev));
-        setApprovalError("Bekleyen onay kalmamış — banner kapatıldı");
+        setApprovalError(i18n.t("cleared", { ns: "approvals" }));
       } else {
-        setApprovalError(text || "Onay işlenemedi");
+        setApprovalError(text || i18n.t("resolveFailed", { ns: "approvals" }));
       }
     }
   }, []);
@@ -979,27 +957,30 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const resolveDestructive = useCallback(
     async (id: string, confirmed: boolean) => {
       const trimmed = id.trim();
+      const row = destructiveRef.current.find((item) => item.id === trimmed);
       if (!trimmed) {
-        setApprovalError("Bekleyen yıkıcı onay yok");
+        setApprovalError(i18n.t("destructiveNoPending", { ns: "approvals" }));
         return;
       }
       setApprovalError(null);
       try {
         if (isTauri()) {
+          // Pass commandHash so QA can assert id+hash; Rust uses id only.
+          const args = { id: trimmed, commandHash: row?.command_hash ?? null };
           if (confirmed) {
-            await invoke("confirm_destructive", { id: trimmed });
+            await invoke("confirm_destructive", args);
           } else {
-            await invoke("reject_destructive", { id: trimmed });
+            await invoke("reject_destructive", args);
           }
         }
-        setDestructiveQueue((current) => current.filter((row) => row.id !== trimmed));
+        setDestructiveQueue((current) => current.filter((item) => item.id !== trimmed));
         if (!confirmed) {
-          setApprovalError("Yıkıcı komut reddedildi");
+          setApprovalError(i18n.t("destructiveRejected", { ns: "approvals" }));
         }
         await syncDestructiveQueue();
       } catch (error) {
         const text = error instanceof Error ? error.message : String(error);
-        setApprovalError(text || "Yıkıcı onay işlenemedi");
+        setApprovalError(text || i18n.t("destructiveResolveFailed", { ns: "approvals" }));
         await syncDestructiveQueue();
       }
     },

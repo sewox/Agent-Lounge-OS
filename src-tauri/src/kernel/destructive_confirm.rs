@@ -197,6 +197,18 @@ pub fn list_pending_destructive() -> Vec<DestructivePendingEvent> {
         .collect()
 }
 
+/// Optional UI/QA check: pending id must carry the expected command hash.
+pub fn assert_destructive_hash(id: &str, command_hash: &str) -> Result<()> {
+    let reg = registry().lock().expect("registry");
+    let Some(token) = reg.pending.get(id) else {
+        bail!("unknown destructive confirmation id");
+    };
+    if token.command_hash != command_hash {
+        bail!("destructive confirmation hash mismatch");
+    }
+    Ok(())
+}
+
 /// User confirmed the destructive approval — token becomes single-use runnable.
 pub fn confirm_destructive(id: &str) -> Result<()> {
     let outcome: Result<(), &'static str> = {
@@ -352,6 +364,19 @@ mod tests {
         // Replay allowance denied.
         assert!(!take_confirmed_allowance(&hash));
         assert!(confirm_destructive(&event.id).is_err());
+    }
+
+    #[test]
+    fn assert_destructive_hash_accepts_match_and_rejects_mismatch() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let args = vec!["-rf".into(), "/tmp/y".into()];
+        let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
+        assert_destructive_hash(&event.id, &event.command_hash).unwrap();
+        let err = assert_destructive_hash(&event.id, "wrong-hash").unwrap_err();
+        assert!(err.to_string().contains("hash mismatch"));
+        let missing = assert_destructive_hash("no-such-id", "x").unwrap_err();
+        assert!(missing.to_string().contains("unknown"));
     }
 
     #[test]

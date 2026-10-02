@@ -15,5 +15,8 @@
   "destructiveSource": "Source",
   "destructiveQueueNote": "Additional destructive requests are queued (FIFO). Resolve this one first.",
   "confirmDestructive": "Confirm",
-  "rejectDestructive": "Reject"
+  "rejectDestructive": "Reject",
+  "destructiveNoPending": "No pending destructive confirmation",
+  "destructiveRejected": "Destructive command rejected",
+  "destructiveResolveFailed": "Could not process destructive confirmation"
 }

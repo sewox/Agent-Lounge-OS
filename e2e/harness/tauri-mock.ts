@@ -5,10 +5,21 @@ import { EMPTY_FIXTURE } from "../fixtures/empty";
 
 export type FixtureName = "full" | "empty" | "browser" | "reject";
 
+export type QaDestructiveRow = {
+  id: string;
+  kind: string;
+  command: string;
+  pattern: string;
+  source: string;
+  class: string;
+  command_hash: string;
+};
+
 declare global {
   interface Window {
     __QA_IPC_LOG__?: { cmd: string; args: unknown }[];
     __QA_FIXTURE__?: FixtureDataset;
+    __QA_SEED_DESTRUCTIVE__?: (rows: QaDestructiveRow[]) => void;
     __TAURI_INTERNALS__?: Record<string, unknown>;
     __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
   }
@@ -55,16 +66,6 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       }
     }
 
-    type QaDestructiveRow = {
-      id: string;
-      kind: string;
-      command: string;
-      pattern: string;
-      source: string;
-      class: string;
-      command_hash: string;
-    };
-
     const qaSettings = {
       editor: {
         preset: "default" as string,
@@ -76,6 +77,15 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
     };
     const qaDestructiveQueue: QaDestructiveRow[] = [];
 
+    type ListenerMap = Map<string, number[]>;
+    const listeners: ListenerMap = new Map();
+    const callbacks = new Map<number, (data: unknown) => void>();
+
+    function runCallback(id: number, payload: unknown) {
+      const cb = callbacks.get(id);
+      if (cb) cb(payload);
+    }
+
     function emitPluginEvent(event: string, payload: unknown) {
       for (const handler of listeners.get(event) || []) {
         runCallback(handler, {
@@ -86,9 +96,20 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       }
     }
 
-    type ListenerMap = Map<string, number[]>;
-    const listeners: ListenerMap = new Map();
-    const callbacks = new Map<number, (data: unknown) => void>();
+    window.__QA_SEED_DESTRUCTIVE__ = (rows: QaDestructiveRow[]) => {
+      qaDestructiveQueue.length = 0;
+      for (const row of rows) {
+        qaDestructiveQueue.push({ ...row, kind: row.kind || "destructive" });
+      }
+      const head = qaDestructiveQueue[0];
+      if (head) {
+        emitPluginEvent("approval_pending", {
+          kind: "destructive",
+          confirm_id: head.id,
+          task_id: head.id,
+        });
+      }
+    };
 
     function registerCallback(callback: (data: unknown) => void, once = false) {
       const id = window.crypto.getRandomValues(new Uint32Array(1))[0]!;
@@ -101,11 +122,6 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
 
     function unregisterCallback(id: number) {
       callbacks.delete(id);
-    }
-
-    function runCallback(id: number, payload: unknown) {
-      const cb = callbacks.get(id);
-      if (cb) cb(payload);
     }
 
     function seedBusEvents(handler: number) {
@@ -442,9 +458,13 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return qaDestructiveQueue.slice();
         case "confirm_destructive": {
           const id = String(args?.id ?? "");
+          const hash = args?.commandHash != null ? String(args.commandHash) : "";
           const idx = qaDestructiveQueue.findIndex((row) => row.id === id);
           if (idx < 0) {
             throw new Error("unknown destructive confirmation id");
+          }
+          if (hash && qaDestructiveQueue[idx]!.command_hash !== hash) {
+            throw new Error("destructive confirmation hash mismatch");
           }
           qaDestructiveQueue.splice(idx, 1);
           emitPluginEvent("approval_resolved", { task_id: id, reason: "confirmed" });
@@ -452,9 +472,13 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "reject_destructive": {
           const id = String(args?.id ?? "");
+          const hash = args?.commandHash != null ? String(args.commandHash) : "";
           const idx = qaDestructiveQueue.findIndex((row) => row.id === id);
           if (idx < 0) {
             throw new Error("unknown destructive confirmation id");
+          }
+          if (hash && qaDestructiveQueue[idx]!.command_hash !== hash) {
+            throw new Error("destructive confirmation hash mismatch");
           }
           qaDestructiveQueue.splice(idx, 1);
           emitPluginEvent("approval_resolved", { task_id: id, reason: "rejected" });
@@ -746,6 +770,17 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
 
 export async function getIpcLog(page: Page) {
   return page.evaluate(() => window.__QA_IPC_LOG__ ?? []);
+}
+
+/** Seed the mock destructive FIFO queue and notify the app (Tauri mock only). */
+export async function seedDestructiveQueue(page: Page, rows: QaDestructiveRow[]) {
+  await page.evaluate((seed) => {
+    const fn = window.__QA_SEED_DESTRUCTIVE__;
+    if (!fn) {
+      throw new Error("__QA_SEED_DESTRUCTIVE__ missing — use a Tauri mock fixture, not browser");
+    }
+    fn(seed);
+  }, rows);
 }
 
 export async function waitForAppReady(page: Page) {
