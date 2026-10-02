@@ -1,0 +1,22 @@
+{
+  "routingPolicy": "Routing Policy",
+  "routingDesc": "Automatic agent switching is locked. The dispatcher checks this policy and quotas before each task.",
+  "agentSwitchLocked": "User approval on agent switch (locked)",
+  "localFallbackAgent": "Local fallback agent",
+  "localFallbackModel": "Local fallback model",
+  "uiScale": "UI scale",
+  "uiScaleDesc": "Scales root font size (rem). Shortcuts: Cmd/Ctrl + enlarge, Cmd/Ctrl − shrink, Cmd/Ctrl 0 → 100%.",
+  "uiScaleLabel": "UI scale",
+  "connectedTools": "Connected tools",
+  "rescan": "Rescan",
+  "alertSound": "Alert sound",
+  "alertSoundDesc": "Repeating audio while an approval is pending. Full controls move to Settings in a later release.",
+  "soundEnabled": "Enable alert sound",
+  "soundPreset": "Built-in sound",
+  "customSound": "Custom sound (≤5 MB, wav/mp3/ogg)",
+  "pickCustomSound": "Pick file…",
+  "volume": "Volume",
+  "interval": "Repeat interval (seconds)",
+  "preview": "Preview",
+  "testListen": "Listen"
+}

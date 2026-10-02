@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useTranslation } from "react-i18next";
 import { CollapsiblePanel } from "@/components/collapsible-panel";
 import { EventStreamPanel, OverviewKpis, QuotaMiniCard, VaultPanel } from "@/components/panels";
 
 export default function DashboardPage() {
+  const { t } = useTranslation("dashboard");
   return (
     <div className="flex min-h-[calc(100vh-4.5rem)] w-full min-h-0 flex-col gap-3 pb-4">
       <div className="w-full shrink-0">
@@ -14,7 +16,7 @@ export default function DashboardPage() {
       <div className="grid w-full flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] xl:items-stretch">
         <CollapsiblePanel
           id="dash-event-stream"
-          title="NATS Event Stream"
+          title={t("panels.eventStream")}
           className="flex h-full min-h-[20rem] w-full flex-col"
           bodyClassName="flex min-h-[16rem] flex-1 flex-col xl:min-h-[var(--panel-min-h)]"
         >
@@ -23,7 +25,7 @@ export default function DashboardPage() {
         <div className="flex h-full w-full min-w-0 flex-col gap-3">
           <CollapsiblePanel
             id="dash-vault"
-            title="Semantic Map + Experiences"
+            title={t("panels.vault")}
             className="flex min-h-[var(--panel-min-h)] w-full flex-1 flex-col"
             bodyClassName="flex min-h-[var(--panel-min-h)] flex-1 flex-col"
           >
@@ -31,14 +33,14 @@ export default function DashboardPage() {
           </CollapsiblePanel>
           <CollapsiblePanel
             id="dash-quota"
-            title="Critical Quotas"
+            title={t("panels.quotas")}
             className="w-full shrink-0"
             trailer={
               <Link
                 href="/quotas"
                 className="font-body text-meta font-medium text-primary hover:underline"
               >
-                Tüm kotalar →
+                {t("panels.allQuotas")}
               </Link>
             }
             bodyClassName="flex flex-col"

@@ -114,7 +114,10 @@ test.describe("ST — settings", () => {
     await openRoute(page, "/settings", "full");
     const before = await getIpcLog(page);
     // Policy autosaves on trigger checkbox toggle (no Graph Kaydet / native dialog).
-    const trigger = page.locator('input[type="checkbox"]:not([disabled])').first();
+    // Scope to routing table so approval-sound / other prefs checkboxes are ignored.
+    const trigger = page
+      .locator('[data-qa="routing-table"] input[type="checkbox"]:not([disabled])')
+      .first();
     if ((await trigger.count()) === 0) {
       test.skip(true, "No editable trigger checkbox");
       return;
@@ -220,16 +223,11 @@ test.describe("AP / CP / misc", () => {
     await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil|Remove-Item|del \/s/i);
   });
 
-  test("AP-08 · Pending approval plays alert sound (HTML Audio / rodio; wav/mp3/ogg) [expected-fail until PR-1/5]", async ({
+  test("AP-08 · Pending approval plays alert sound (HTML Audio; wav/mp3/ogg)", async ({
     page,
-  }, testInfo) => {
-    // §10.1 / §10.2: webview HTMLAudioElement or Rust rodio; bundled wav/mp3/ogg;
-    // plays when hidden; default 60s repeat until decision.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "Approval alert sound missing (§10.1 / §10.2)",
-    });
-    test.fail(true, "Approval alert audio not implemented");
+  }) => {
+    // §10.1 / §10.2: webview HTMLAudioElement; bundled wav/mp3/ogg;
+    // plays when hidden; configured interval repeat until decision. No background escalation.
     await page.addInitScript(() => {
       type PlayLog = { src: string; t: number };
       const g = window as Window & { __QA_AUDIO_PLAYS__?: PlayLog[] };
@@ -237,82 +235,161 @@ test.describe("AP / CP / misc", () => {
       const proto = HTMLAudioElement.prototype;
       const origPlay = proto.play;
       proto.play = function playSpy(this: HTMLAudioElement, ...args: unknown[]) {
-        g.__QA_AUDIO_PLAYS__!.push({ src: this.currentSrc || this.src || "", t: Date.now() });
+        g.__QA_AUDIO_PLAYS__!.push({
+          src: this.currentSrc || this.src || "",
+          t: Date.now(),
+        });
         return origPlay.apply(this, args as []).catch(() => undefined as unknown as void);
       };
+      localStorage.setItem(
+        "lounge.approvalSound",
+        JSON.stringify({
+          enabled: true,
+          soundId: "chime-soft",
+          customFileName: null,
+          volume: 0.7,
+          intervalSecs: 5,
+        }),
+      );
     });
     await openRoute(page, "/dashboard?demo=routing-banner", "browser");
     await page.waitForTimeout(800);
-    // Simulate background/hidden: document.hidden cannot be set; blur + visibility stub.
     await page.evaluate(() => {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    await page.waitForTimeout(500);
-    const plays = await page.evaluate(() => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__ ?? []);
-    expect(plays.length, "audio play spy should see ≥1 alert while approval pending").toBeGreaterThan(0);
-    const bundled = /\.(wav|mp3|ogg)(\?|$)/i;
-    const srcOk = (plays as { src: string }[]).some((p) => !p.src || bundled.test(p.src));
-    expect(srcOk, "bundled alert should be wav/mp3/ogg (or empty until asset wired)").toBeTruthy();
+    await page.waitForTimeout(400);
+
+    const firstBatch = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: { src: string }[] }).__QA_AUDIO_PLAYS__ ?? [],
+    );
+    expect(firstBatch.length, "audio play spy should see ≥1 alert while approval pending").toBeGreaterThan(0);
+    for (const p of firstBatch) {
+      expect(p.src, "alert src must be non-empty").toBeTruthy();
+      expect(p.src, `expected bundled chime-soft wav, got ${p.src}`).toMatch(/chime-soft\.wav/i);
+    }
+    const beforeRepeat = firstBatch.length;
+
+    await page.waitForTimeout(5_200);
+    const afterRepeat = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+    );
+    expect(afterRepeat, "should repeat at least once over the configured interval").toBeGreaterThan(
+      beforeRepeat,
+    );
+
+    const allPlays = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: { src: string }[] }).__QA_AUDIO_PLAYS__ ?? [],
+    );
+    const uniqueSrc = [...new Set(allPlays.map((p) => p.src))];
+    expect(uniqueSrc.length, "must not escalate to a different sound").toBe(1);
+
     const decide = page.getByRole("button", { name: /Onayla|Approve|Reddet|Deny/i }).first();
-    if (await decide.count()) {
-      await decide.click();
-      const after = await page.evaluate(
-        () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
-      );
-      expect(after).toBeGreaterThan(0);
-    }
+    await expect(decide).toBeVisible();
+    const atDecision = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+    );
+    await decide.click();
+    await page.waitForTimeout(5_500);
+    const afterResolve = await page.evaluate(
+      () => (window as Window & { __QA_AUDIO_PLAYS__?: unknown[] }).__QA_AUDIO_PLAYS__?.length ?? 0,
+    );
+    expect(afterResolve, "must stop repeating after approve/deny").toBe(atDecision);
   });
 
-  test("AP-09 · Settings sound options (on/off, built-ins, wav/mp3/ogg/aiff, volume, interval, Dinle) [expected-fail until PR-5]", async ({
+  test("AP-09 · Settings sound options (engine prefs; full Settings UI in PR-5)", async ({
     page,
-  }, testInfo) => {
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "Approval sound Settings UI missing (§10.1 / §10.2)",
-    });
-    test.fail(true, "Sound prefs UI not in Settings");
+  }) => {
+    // Engine + minimal control for PR-2b; full Settings polish is PR-5.
     await openRoute(page, "/settings", "full");
-    const section = page.locator('[data-qa="approval-sound"], section').filter({
-      hasText: /Alert sound|Onay sesi|Approval sound|Dinle/i,
-    });
-    expect(await section.count(), "sound settings section").toBeGreaterThan(0);
-    await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play/i })).toBeVisible();
-    await expect(page.getByText(/wav|mp3|ogg|aiff|upload|yükle/i).first()).toBeVisible();
-    await expect(page.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
-    // Persist + immediate effect: toggle off, reload, still off.
-    const toggle = section.getByRole("switch").or(section.locator('input[type="checkbox"]')).first();
-    if (await toggle.count()) {
-      await toggle.click();
-      await page.reload({ waitUntil: "domcontentloaded" });
-      await page.waitForTimeout(400);
-      const stored = await page.evaluate(
-        () =>
-          localStorage.getItem("lounge.approvalSound") ||
-          localStorage.getItem("approval-sound") ||
-          "",
-      );
-      expect(stored.length).toBeGreaterThan(0);
-    }
+    const section = page.locator('[data-qa="approval-sound"]');
+    await expect(section, "sound settings section").toBeVisible();
+    await section.scrollIntoViewIfNeeded();
+    await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play|Listen|Test/i })).toBeVisible();
+    await expect(section.getByText(/wav|mp3|ogg|aiff|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
+    await expect(section.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
+    // Persist: toggle off writes lounge.approvalSound so PR-5 Settings can reuse it.
+    // Scope to this panel only — outer Settings <section> also contains locked routing checkboxes.
+    const toggle = section.locator('input[type="checkbox"]:not([disabled]), [role="switch"]:not([disabled])').first();
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toBeEnabled();
+    await toggle.click();
+    await page.waitForTimeout(200);
+    const stored = await page.evaluate(
+      () =>
+        localStorage.getItem("lounge.approvalSound") ||
+        localStorage.getItem("approval-sound") ||
+        "",
+    );
+    expect(stored.length).toBeGreaterThan(0);
   });
 
-  test("AP-10 · Native OS notification (macOS/Windows/Linux) on pending approval [expected-fail / manual]", async ({
+  test("AP-10 · Native OS notification → focus_app_for_approval + banner focus", async ({
     page,
   }, testInfo) => {
-    // §10.1 / §10.2: Tauri notification plugin on all three OSes; click focuses app + banner.
+    // Front-end contract only: the harness mock of focus_app_for_approval emits
+    // approval_banner_focus and focuses the banner. Rust raise/slot behaviour is
+    // covered by unit tests; live OS toast click is S2 manual (NOT YET RUN).
     testInfo.annotations.push({
       type: "manual",
       description:
-        "S2 live: notification click focuses app + banner on macOS / Windows / Linux (§10.2)",
+        "S2 live NOT YET RUN: real OS toast → activate → banner. Automated AP-10 = front-end contract via mock; see docs/qa/ap-10-notification-click.md.",
     });
-    test.fail(
-      true,
-      "Native notification path not automatable in Playwright browser harness (use scripts/qa/{mac,windows,linux})",
-    );
     await openRoute(page, "/dashboard", "full");
     expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();
-    // Plugin surface stub until PR-1 wires @tauri-apps/plugin-notification.
-    expect(await page.locator('[data-qa="approval-notification"]').count()).toBeGreaterThan(0);
+    const marker = page.locator('[data-qa="approval-notification"]');
+    await expect(marker).toHaveCount(1);
+    await expect
+      .poll(async () => marker.getAttribute("data-tauri-ready"), { timeout: 5_000 })
+      .toBe("1");
+    await expect
+      .poll(async () => marker.getAttribute("data-listeners-ready"), { timeout: 5_000 })
+      .toBe("1");
+
+    await page.evaluate(() => {
+      const f = window.__QA_FIXTURE__;
+      if (!f) throw new Error("missing fixture");
+      f.pendingApprovals = [
+        {
+          task_id: "ap10-focus-task",
+          summary: "AP-10 focus test approval",
+          from_agent: "claude",
+          to_agent: "lmr",
+          kind: "agent_switch",
+          reason: "harness",
+          expires_at: new Date(Date.now() + 90_000).toISOString(),
+          timeout_secs: 90,
+        },
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const banner = page.locator('[data-qa="approval-banner"]');
+    await expect(banner).toBeVisible({ timeout: 5_000 });
+
+    await page.evaluate(async () => {
+      const internals = window.__TAURI_INTERNALS__ as {
+        invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      await internals.invoke("focus_app_for_approval", { taskId: "ap10-focus-task" });
+    });
+    const log = await getIpcLog(page);
+    expect(
+      log.some((e) => e.cmd === "focus_app_for_approval"),
+      "focus_app_for_approval must be invoked",
+    ).toBeTruthy();
+    await expect(banner).toBeFocused({ timeout: 3_000 });
+
+    await page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+    });
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect(banner).toBeFocused({ timeout: 3_000 });
+    const log2 = await getIpcLog(page);
+    expect(
+      log2.filter((e) => e.cmd === "focus_app_for_approval").length,
+    ).toBeGreaterThanOrEqual(2);
   });
 
   test("PATH-01 · Path handling accepts / \\ and Windows drive letters", async ({

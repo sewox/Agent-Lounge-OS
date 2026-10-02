@@ -1,7 +1,9 @@
 //! OS + frontend notifications when approvals are pending or resolved.
 
+use std::sync::{Mutex, OnceLock};
+
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime, UserAttentionType};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::models::ApprovalRequest;
@@ -69,12 +71,60 @@ pub struct ApprovalResolvedPayload {
     pub reason: String,
 }
 
+fn pending_slot() -> &'static Mutex<Option<String>> {
+    static SLOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Remember the latest pending approval so activation / focus can raise the banner.
+pub fn set_pending_approval_task_id(task_id: Option<String>) {
+    *pending_slot().lock().expect("pending approval lock") = task_id;
+}
+
+pub fn pending_approval_task_id() -> Option<String> {
+    pending_slot()
+        .lock()
+        .expect("pending approval lock")
+        .clone()
+}
+
+/// Clear the pending-approval slot only when it still holds `task_id`.
+/// Returns true if the slot was cleared.
+pub fn clear_pending_approval_if_matches(task_id: &str) -> bool {
+    let mut slot = pending_slot().lock().expect("pending approval lock");
+    if slot.as_deref() == Some(task_id) {
+        *slot = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether app activation should raise + emit the approval banner.
+pub fn should_focus_on_activation() -> bool {
+    pending_approval_task_id().is_some()
+}
+
+fn request_dock_attention<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next())
+    {
+        // Bounce dock / flash taskbar so the user notices even when click
+        // callbacks are unavailable on desktop.
+        let _ = window.request_user_attention(Some(UserAttentionType::Critical));
+    }
+}
+
 /// Emit `approval_pending` to the frontend and show an OS notification when possible.
 ///
-/// No volume/interval escalation while backgrounded — a single OS toast + event.
-/// Notification click → focus is handled by [`focus_app_for_approval`] (FE `onAction`
-/// or OS activate); desktop `tauri-plugin-notification` has no Rust click callback.
+/// Desktop note: `@tauri-apps/plugin-notification` `onAction` is **mobile-only**.
+/// On Win/mac/Linux we: (1) show a toast, (2) request dock/taskbar attention,
+/// (3) raise + focus the banner when the app is activated (`RunEvent::Reopen` on
+/// macOS / `WindowEvent::Focused(true)` on all desktop) while a pending approval
+/// is recorded. See `docs/qa/ap-10-notification-click.md`.
 pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPendingPayload) {
+    set_pending_approval_task_id(Some(payload.task_id.clone()));
     let _ = app.emit(APPROVAL_PENDING_EVENT, &payload);
     let title = "Approval required";
     let body = if payload.summary.trim().is_empty() {
@@ -91,12 +141,16 @@ pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPe
         .extra("event", APPROVAL_PENDING_EVENT)
         .show()
     {
-        log::debug!("OS notification skipped: {err}");
+        log::warn!("OS notification skipped: {err}");
     }
+    request_dock_attention(app);
 }
 
 /// Focus the main window and ask the UI to open the approval banner.
 pub fn focus_app_for_approval<R: Runtime>(app: &AppHandle<R>, task_id: Option<&str>) {
+    let resolved = task_id
+        .map(str::to_string)
+        .or_else(pending_approval_task_id);
     if let Some(window) = app
         .get_webview_window("main")
         .or_else(|| app.webview_windows().into_values().next())
@@ -104,18 +158,32 @@ pub fn focus_app_for_approval<R: Runtime>(app: &AppHandle<R>, task_id: Option<&s
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        // Clear attention once the user is looking at the app.
+        let _ = window.request_user_attention(None);
     }
     let _ = app.emit(
         APPROVAL_BANNER_FOCUS_EVENT,
         &ApprovalResolvedPayload {
-            task_id: task_id.unwrap_or("").to_string(),
+            task_id: resolved.unwrap_or_default(),
             reason: "notification_click".to_string(),
         },
     );
 }
 
+/// Called from the Tauri run loop when the app is activated (dock/taskbar/reopen)
+/// or the main window gains focus while an approval is still pending.
+pub fn on_app_activated_for_pending_approval<R: Runtime>(app: &AppHandle<R>) {
+    if should_focus_on_activation() {
+        focus_app_for_approval(app, None);
+    }
+}
+
 /// Emit `approval_resolved` when a pending approval is cleared.
+///
+/// Slot clear is **id-matched only**: a different `task_id` must not wipe the
+/// current pending approval.
 pub fn emit_approval_resolved<R: Runtime>(app: &AppHandle<R>, task_id: &str, reason: &str) {
+    clear_pending_approval_if_matches(task_id);
     let payload = ApprovalResolvedPayload {
         task_id: task_id.to_string(),
         reason: reason.to_string(),
@@ -145,4 +213,73 @@ pub fn install_destructive_approval_emitter<R: Runtime>(app: AppHandle<R>, nats_
                 }
             });
     });
+}
+
+/// Process-wide pending-slot test lock (shared with dispatcher tests).
+#[cfg(test)]
+pub(crate) fn pending_slot_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_slot_round_trips_and_clears() {
+        let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(Some("task-1".into()));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("task-1"));
+        set_pending_approval_task_id(None);
+        assert_eq!(pending_approval_task_id(), None);
+    }
+
+    #[test]
+    fn clear_pending_if_matches_only_matching_id() {
+        let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(Some("task-keep".into()));
+        assert!(!clear_pending_approval_if_matches("task-other"));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("task-keep"));
+        assert!(clear_pending_approval_if_matches("task-keep"));
+        assert_eq!(pending_approval_task_id(), None);
+        // Clearing again / clearing empty is a no-op.
+        assert!(!clear_pending_approval_if_matches("task-keep"));
+        assert!(!should_focus_on_activation());
+    }
+
+    #[test]
+    fn resolve_paths_clear_slot_so_activation_is_inert() {
+        let _guard = pending_slot_test_lock();
+        // Mirrors resolve_vote / await_approval (Approve, Deny, ApproveLocal, routing).
+        for (id, _vote) in [
+            ("approve-1", "Approve"),
+            ("deny-1", "Deny"),
+            ("local-1", "ApproveLocal"),
+            ("route-1", "routing"),
+        ] {
+            set_pending_approval_task_id(Some(id.into()));
+            assert!(should_focus_on_activation());
+            assert!(clear_pending_approval_if_matches(id));
+            assert_eq!(pending_approval_task_id(), None);
+            assert!(
+                !should_focus_on_activation(),
+                "after {id} resolution, activation must not raise/emit"
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_clear_leaves_pending_so_activation_still_armed() {
+        let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(Some("live-approval".into()));
+        assert!(!clear_pending_approval_if_matches("stale-other"));
+        assert_eq!(pending_approval_task_id().as_deref(), Some("live-approval"));
+        assert!(should_focus_on_activation());
+        // Clean up for other tests sharing the process-wide slot.
+        assert!(clear_pending_approval_if_matches("live-approval"));
+    }
 }
