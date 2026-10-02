@@ -521,8 +521,6 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const handlePageSearch = useCallback(
     (pageQuery: string, sort: PageSortKey) => {
       if (!tauriReady || !openProjectName) {
-        setServerPages(null);
-        setServerPagesTotal(null);
         return;
       }
       void (async () => {

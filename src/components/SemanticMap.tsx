@@ -348,8 +348,11 @@ export function SemanticMap({
   }, [pageQuery]);
 
   useEffect(() => {
+    if (!openProjectName) {
+      return;
+    }
     onPageSearch?.(debouncedQuery, sort);
-  }, [debouncedQuery, sort, onPageSearch]);
+  }, [debouncedQuery, sort, onPageSearch, openProjectName]);
 
   const allProjects = useMemo(
     () =>

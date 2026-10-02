@@ -36,10 +36,7 @@ test.describe("DB — dashboard", () => {
   test("DB-02 · KPI vs vault selection consistency", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     // Prefer Semantic Map project row — avoid experience cards that also mention the name.
-    const node = page
-      .locator('[data-qa="panel"]')
-      .getByRole("button", { name: /Agent-Lounge-OS/i })
-      .first();
+    const node = page.locator('[data-qa="vault-project-row"]').filter({ hasText: /Agent-Lounge-OS/i }).first();
     if (await node.count()) {
       await node.click();
       await page.waitForTimeout(300);
@@ -299,13 +296,17 @@ test.describe("EX — vault experiences", () => {
       }
     }
     await openRoute(page, "/vault", "full");
+    const mTop = await measureLayout(page, "/vault");
+    expect(mTop.l1_pass && mTop.l3_pass, formatLayoutFailure(mTop)).toBe(true);
+
+    // After project drill-down, page list + experience cards must fill the panels.
+    await openVaultProject(page, "Agent-Lounge-OS");
     const m = await measureLayout(page, "/vault");
     const fail = formatLayoutFailure(m);
     testInfo.annotations.push({ type: "layout", description: fail });
     expect(m.l1_pass && m.l3_pass && !m.l2_sparseInterior, fail).toBe(true);
 
     // Drawer + footer must remain fully visible at 960px / D4-scale (130%) as well as D0–D3.
-    await openVaultProject(page, "Agent-Lounge-OS");
     await page.locator('[data-qa="experience-card"]').first().click();
     const drawer = page.locator("[data-qa=experience-drawer]");
     await expect(drawer).toBeVisible();

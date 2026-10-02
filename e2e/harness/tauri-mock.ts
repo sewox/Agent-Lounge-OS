@@ -378,30 +378,33 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         case "list_projects":
           return f.projects;
         case "list_vault_projects": {
-          return f.semanticMap.projects.map((project) => {
-            const pages = new Set(
-              project.nodes.map((n) => n.file).filter((p): p is string => Boolean(p?.trim())),
-            );
+          const pageCounts: Record<string, number> = {
+            "Agent-Lounge-OS": 420,
+            EchoMind: 220,
+            "codebase-memory-mcp": 180,
+          };
+          return f.projects.map((project) => {
             const exps = f.experiences.filter(
               (row) =>
                 row.project_id === project.name && (row.status ?? "active") === "active",
             );
             const unreviewed = exps.filter((row) => row.reviewed === false).length;
-            const lastUpdated = exps
-              .map((row) => row.updated_at || row.created_at)
-              .filter(Boolean)
-              .sort()
-              .at(-1) ?? null;
+            const lastUpdated =
+              exps
+                .map((row) => row.updated_at || row.created_at)
+                .filter(Boolean)
+                .sort()
+                .at(-1) ?? null;
             return {
               name: project.name,
-              repo_path: project.repo_path,
-              page_count: pages.size || project.files,
-              node_count: project.node_count,
-              edge_count: project.edge_count,
+              repo_path: project.root_path,
+              page_count: pageCounts[project.name] ?? project.files ?? 0,
+              node_count: project.nodes,
+              edge_count: project.edges,
               experience_count: exps.length,
               unreviewed_count: unreviewed,
               last_updated: lastUpdated,
-              source_type: pages.size > 0 ? "indexed" : "discovered",
+              source_type: "indexed",
             };
           });
         }
@@ -411,32 +414,40 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           const sort = String(args?.sort ?? "path");
           const offset = typeof args?.offset === "number" ? args.offset : 0;
           const limit = typeof args?.limit === "number" ? args.limit : 50;
+          const pageCounts: Record<string, number> = {
+            "Agent-Lounge-OS": 420,
+            EchoMind: 220,
+            "codebase-memory-mcp": 180,
+          };
+          const prefixes: Record<string, string> = {
+            "Agent-Lounge-OS": "src",
+            EchoMind: "workers",
+            "codebase-memory-mcp": "bridge",
+          };
+          const count = pageCounts[projectId] ?? 0;
+          const prefix = prefixes[projectId] ?? "src";
+          let pages = Array.from({ length: count }, (_, i) => {
+            const path = `${prefix}/page_${String(i).padStart(3, "0")}.rs`;
+            return {
+              path,
+              title: path.split("/").at(-1) || path,
+              snippet: `sym_${projectId}_${i}`,
+              symbol_count: 1 + (i % 5),
+              last_updated: null as string | null,
+            };
+          });
+          // Include a couple of real index files from the semantic map for search realism.
           const project = f.semanticMap.projects.find((row) => row.name === projectId);
-          const byPath = new Map<
-            string,
-            { path: string; title: string; snippet: string; symbol_count: number; last_updated: string | null }
-          >();
           for (const node of project?.nodes ?? []) {
-            const path = node.file?.trim();
-            if (!path) continue;
-            const prev = byPath.get(path);
-            const title = path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || path;
-            if (!prev) {
-              byPath.set(path, {
-                path,
-                title,
-                snippet: node.name || "",
-                symbol_count: 1,
-                last_updated: null,
-              });
-            } else {
-              prev.symbol_count += 1;
-              if (node.name && !prev.snippet.includes(node.name)) {
-                prev.snippet = `${prev.snippet}, ${node.name}`.slice(0, 160);
-              }
-            }
+            if (!node.file) continue;
+            pages.unshift({
+              path: node.file,
+              title: node.file.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || node.file,
+              snippet: node.name,
+              symbol_count: node.ref_count || 1,
+              last_updated: null,
+            });
           }
-          let pages = [...byPath.values()];
           if (query) {
             pages = pages.filter((page) =>
               `${page.path} ${page.title} ${page.snippet}`.toLowerCase().includes(query),

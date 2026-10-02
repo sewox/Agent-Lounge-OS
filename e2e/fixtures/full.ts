@@ -149,25 +149,12 @@ const experiences: FixtureDataset["experiences"] = [
   })),
 ];
 
-/** Hundreds of unique file pages across projects for vault grouping e2e. */
-function seedProjectPages(
-  project: string,
-  count: number,
-  prefix: string,
-): FixtureDataset["semanticMap"]["projects"][number]["nodes"] {
-  return Array.from({ length: count }, (_, i) => ({
-    id: `${project}-page-${i}`,
-    name: `sym_${prefix}_${i}`,
-    kind: "fn",
-    file: `${prefix}/page_${String(i).padStart(3, "0")}.rs`,
-    line: 1 + (i % 40),
-    ref_count: i % 7,
-  }));
-}
-
-const aloPages = seedProjectPages("Agent-Lounge-OS", 420, "src");
-const echoPages = seedProjectPages("EchoMind", 220, "workers");
-const cbmPages = seedProjectPages("codebase-memory-mcp", 180, "bridge");
+/** Page counts for vault grouping e2e (generated on demand in the mock, not in init payload). */
+export const VAULT_PAGE_COUNTS: Record<string, number> = {
+  "Agent-Lounge-OS": 420,
+  EchoMind: 220,
+  "codebase-memory-mcp": 180,
+};
 
 const quotas: FixtureDataset["quotas"] = [
   {
@@ -244,7 +231,6 @@ export const FULL_FIXTURE: FixtureDataset = {
             line: 1,
             ref_count: 8,
           },
-          ...aloPages,
         ],
         references: [
           {
@@ -271,7 +257,6 @@ export const FULL_FIXTURE: FixtureDataset = {
             line: 1,
             ref_count: 4,
           },
-          ...echoPages,
         ],
         references: [],
         dead: deadSymbols.filter((d) => d.project_id === "EchoMind"),
@@ -291,7 +276,6 @@ export const FULL_FIXTURE: FixtureDataset = {
             line: 1,
             ref_count: 6,
           },
-          ...cbmPages,
         ],
         references: [],
         dead: deadSymbols.filter((d) => d.project_id === "codebase-memory-mcp"),

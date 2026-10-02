@@ -9,7 +9,32 @@ import type {
 
 export const VAULT_FILTERS_KEY = "al-os-vault-project-filters";
 
+export type VaultSourceType = "indexed" | "discovered" | "imported" | "all";
+
+export type VaultReviewStatus = "all" | "reviewed" | "unreviewed" | "has_experiences";
+
+export type VaultRecentWindow = "all" | "7d" | "30d";
+
+export type VaultProjectFilters = {
+  nameQuery: string;
+  minPageCount: number;
+  recent: VaultRecentWindow;
+  reviewStatus: VaultReviewStatus;
+  sourceType: VaultSourceType;
+};
+
+/** Stable defaults — never return a fresh object from getServerSnapshot. */
+export const DEFAULT_VAULT_FILTERS: VaultProjectFilters = {
+  nameQuery: "",
+  minPageCount: 0,
+  recent: "all",
+  reviewStatus: "all",
+  sourceType: "all",
+};
+
 const filterListeners = new Set<() => void>();
+let cachedFilterJson: string | null = null;
+let cachedFilters: VaultProjectFilters = DEFAULT_VAULT_FILTERS;
 
 function emitVaultFilterChange() {
   for (const listener of filterListeners) {
@@ -37,34 +62,23 @@ export function subscribeVaultFilters(listener: () => void): () => void {
 }
 
 export function getVaultFiltersSnapshot(): VaultProjectFilters {
-  return readVaultFilters(typeof window !== "undefined" ? window.localStorage : null);
+  let raw: string | null = null;
+  try {
+    raw = typeof window !== "undefined" ? window.localStorage.getItem(VAULT_FILTERS_KEY) : null;
+  } catch {
+    raw = null;
+  }
+  if (raw === cachedFilterJson) {
+    return cachedFilters;
+  }
+  cachedFilterJson = raw;
+  cachedFilters = raw ? parseVaultFilters(JSON.parse(raw) as unknown) : DEFAULT_VAULT_FILTERS;
+  return cachedFilters;
 }
 
 export function getServerVaultFiltersSnapshot(): VaultProjectFilters {
-  return { ...DEFAULT_VAULT_FILTERS };
+  return DEFAULT_VAULT_FILTERS;
 }
-
-export type VaultSourceType = "indexed" | "discovered" | "imported" | "all";
-
-export type VaultReviewStatus = "all" | "reviewed" | "unreviewed" | "has_experiences";
-
-export type VaultRecentWindow = "all" | "7d" | "30d";
-
-export type VaultProjectFilters = {
-  nameQuery: string;
-  minPageCount: number;
-  recent: VaultRecentWindow;
-  reviewStatus: VaultReviewStatus;
-  sourceType: VaultSourceType;
-};
-
-export const DEFAULT_VAULT_FILTERS: VaultProjectFilters = {
-  nameQuery: "",
-  minPageCount: 0,
-  recent: "all",
-  reviewStatus: "all",
-  sourceType: "all",
-};
 
 export type VaultProjectRow = {
   name: string;
@@ -138,7 +152,10 @@ export function writeVaultFilters(
   storage?: Pick<Storage, "setItem"> | null,
 ): void {
   try {
-    storage?.setItem(VAULT_FILTERS_KEY, JSON.stringify(filters));
+    const json = JSON.stringify(filters);
+    storage?.setItem(VAULT_FILTERS_KEY, json);
+    cachedFilterJson = json;
+    cachedFilters = filters;
     emitVaultFilterChange();
   } catch {
     /* ignore quota / private mode */
@@ -153,9 +170,8 @@ export function resetVaultFilters(
   } catch {
     /* ignore */
   }
-  const next = { ...DEFAULT_VAULT_FILTERS };
-  writeVaultFilters(next, storage);
-  return next;
+  writeVaultFilters(DEFAULT_VAULT_FILTERS, storage);
+  return DEFAULT_VAULT_FILTERS;
 }
 
 function pathBasename(path: string): string {
