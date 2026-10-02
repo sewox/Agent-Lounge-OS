@@ -226,32 +226,43 @@ test.describe("VP — vault project grouping", () => {
     );
   });
 
-  test("VP-12 · Page expand shows symbols + dead-only filter", async ({ page }) => {
-    await openRoute(page, "/vault", "full");
-    await openVaultProject(page, "Agent-Lounge-OS");
-    // Prefer a real indexed file from the semantic map (unshifted ahead of generated pages).
-    const dispatcher = page
-      .locator('[data-qa="vault-page-row"]')
-      .filter({ hasText: /dispatcher\.rs/i })
-      .first();
-    if (await dispatcher.count()) {
-      await dispatcher.click();
-    } else {
-      await page.locator('[data-qa="vault-page-row"]').first().click();
+  test("VP-12 · Page expand shows symbols + dead-only filter (TR/EN)", async ({
+    browser,
+  }) => {
+    for (const [locale, deadLabel] of [
+      ["tr-TR", /Sadece ölü semboller/i],
+      ["en-US", /Dead symbols only/i],
+    ] as const) {
+      const context = await browser.newContext({ locale });
+      const page = await context.newPage();
+      await openRoute(page, "/vault", "full");
+      await openVaultProject(page, "Agent-Lounge-OS");
+      const dispatcher = page
+        .locator('[data-qa="vault-page-row"]')
+        .filter({ hasText: /dispatcher\.rs/i })
+        .first();
+      if (await dispatcher.count()) {
+        await dispatcher.click();
+      } else {
+        await page.locator('[data-qa="vault-page-row"]').first().click();
+      }
+      await expect(page.locator('[data-qa="vault-page-symbols"]')).toBeVisible();
+      await expect(page.locator('[data-qa="vault-page-symbols"]')).toContainText(deadLabel);
+      const symbols = page.locator('[data-qa="vault-file-symbol"]');
+      await expect(symbols.first()).toBeVisible();
+      const before = await symbols.count();
+      expect(before).toBeGreaterThan(0);
+      await page.locator('[data-qa="vault-dead-only"]').check();
+      const after = await symbols.count();
+      expect(after).toBeLessThanOrEqual(before);
+      await expect(
+        page.locator('[data-qa="vault-file-symbol"][data-dead="true"]').first(),
+      ).toBeVisible();
+      await page.locator('[data-qa="vault-file-symbol"][data-dead="true"]').first().click();
+      // Virtualization must still be intact under the symbols panel.
+      expect(await page.locator('[data-qa="vault-page-row"]').count()).toBeLessThan(80);
+      await context.close();
     }
-    await expect(page.locator('[data-qa="vault-page-symbols"]')).toBeVisible();
-    const symbols = page.locator('[data-qa="vault-file-symbol"]');
-    await expect(symbols.first()).toBeVisible();
-    const before = await symbols.count();
-    expect(before).toBeGreaterThan(0);
-    await page.locator('[data-qa="vault-dead-only"]').check();
-    const after = await symbols.count();
-    expect(after).toBeLessThanOrEqual(before);
-    await expect(page.locator('[data-qa="vault-file-symbol"][data-dead="true"]').first()).toBeVisible();
-    await page.locator('[data-qa="vault-file-symbol"][data-dead="true"]').first().click();
-    await expect(page.locator('[data-qa="vault-project-path"], main')).toBeVisible();
-    // Virtualization must still be intact under the symbols panel.
-    expect(await page.locator('[data-qa="vault-page-row"]').count()).toBeLessThan(80);
   });
 
   test("VP-HYDRATION · TR locale /dashboard has no vault hydration noise", async ({
