@@ -12,9 +12,7 @@ use super::hf_catalog::{
     gguf_filename_for, hf_gguf_resolve_url, is_hf_redirect_block, is_installed,
     normalize_pull_name, strip_hf_prefix, with_quant_tag,
 };
-use super::lmr_runtime::{
-    ensure_lmr_runtime, lmr_not_installed_detail, lmr_runtime_present,
-};
+use super::lmr_runtime::{ensure_lmr_runtime, lmr_not_installed_detail, lmr_runtime_present};
 use super::probe::{
     http_endpoint, lounge_lmr_dir, lounge_ollama_host, lounge_ollama_models_dir,
     lounge_ollama_port, wait_until,

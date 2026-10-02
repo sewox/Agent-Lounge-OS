@@ -287,11 +287,11 @@ pub fn max_restart_attempts() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::AVAIL_NOT_INSTALLED;
     use crate::services::memory_bridge::MemoryBridge;
     use crate::services::nats_manager::{NatsConfig, NatsService};
     use crate::services::ollama::{OllamaConfig, OllamaService};
     use crate::services::ServiceManager;
-    use crate::models::AVAIL_NOT_INSTALLED;
 
     /// Gerçek crash yok: ensure sonuçlarını sayarak restart denemesini doğrula.
     fn probe_restart_attempt(healthy: bool, backoff: &mut Backoff, ensure_ok: bool) -> (bool, u32) {

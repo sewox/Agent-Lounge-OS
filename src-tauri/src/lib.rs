@@ -106,10 +106,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                     ])
                     .build(),
             )?;
-            log::info!(
-                "kernel log → {}",
-                log_dir.join("kernel.log").display()
-            );
+            log::info!("kernel log → {}", log_dir.join("kernel.log").display());
 
             let store = ExperienceStore::open(db::default_db_path(&workspace)).map_err(|err| {
                 format!(
@@ -244,11 +241,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                             .ollama
                             .availability
                             .as_deref()
-                            .unwrap_or(if report.ollama.running {
-                                "up"
-                            } else {
-                                "down"
-                            }),
+                            .unwrap_or(if report.ollama.running { "up" } else { "down" }),
                         report.nats.running,
                         report
                             .nats

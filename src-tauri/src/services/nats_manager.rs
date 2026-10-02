@@ -479,11 +479,7 @@ mod tests {
         assert!(!health.running);
         assert!(health.is_not_installed());
         assert!(health.error.is_none());
-        assert!(health
-            .detail
-            .as_deref()
-            .unwrap_or("")
-            .contains("optional"));
+        assert!(health.detail.as_deref().unwrap_or("").contains("optional"));
     }
 
     #[test]
