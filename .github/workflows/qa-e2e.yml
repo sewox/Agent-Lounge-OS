@@ -1,6 +1,6 @@
-# Non-blocking Playwright e2e + static QA gates (PR-0).
-# Existing CI gate (Frontend / Rust / Workers) stays green; this workflow
-# is informational until the suite becomes blocking (post PR-2+).
+# Playwright e2e + static QA companion (hydration regression + baseline).
+# Hydration-safety static gate lives in ci.yml → static-gates (required).
+# This workflow must stay green on PRs (no continue-on-error).
 
 name: QA e2e
 
@@ -18,11 +18,10 @@ permissions:
   contents: read
 
 jobs:
-  # mock-ban + small-font are required via ci.yml → static-gates (no continue-on-error).
+  # mock-ban + small-font + hydration-safety are required via ci.yml → static-gates.
   e2e:
-    name: Playwright e2e (non-blocking)
+    name: Playwright e2e
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
