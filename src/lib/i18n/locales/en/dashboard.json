@@ -1,0 +1,26 @@
+{
+  "kpi": {
+    "latency": "LATENCY",
+    "msgPerMin": "MSG / MIN",
+    "indexedFiles": "INDEXED FILES",
+    "experiences": "EXPERIENCES",
+    "deadSymbols": "DEAD SYMBOLS"
+  },
+  "scanning": "Scanning…",
+  "indexWorkspace": "Index Workspace",
+  "idle": "idle",
+  "cold": "cold",
+  "live": "live",
+  "repos": "{{count}} repos",
+  "synced": "synced",
+  "clean": "clean",
+  "noIndex": "no index",
+  "unreachableRefs": "unreachable fn/struct refs",
+  "amberAlert": "▼ amber alert",
+  "panels": {
+    "eventStream": "NATS Event Stream",
+    "vault": "Semantic Map + Experiences",
+    "quotas": "Critical Quotas",
+    "allQuotas": "All quotas →"
+  }
+}

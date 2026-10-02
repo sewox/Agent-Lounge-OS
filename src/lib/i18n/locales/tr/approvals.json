@@ -1,0 +1,13 @@
+{
+  "approve": "Onayla",
+  "deny": "Reddet",
+  "close": "Kapat",
+  "continueLocal": "Yerel devam et",
+  "switchLocal": "Yerel modele geç",
+  "routingApproval": "Routing onayı",
+  "securityPending": "Güvenlik · {{level}} · ONAY BEKLİYOR",
+  "quotaBlocked": "Kota Uyarısı · KOTA_BLOKE",
+  "noPending": "Bekleyen onay yok",
+  "cleared": "Bekleyen onay kalmamış — banner kapatıldı",
+  "resolveFailed": "Onay işlenemedi"
+}

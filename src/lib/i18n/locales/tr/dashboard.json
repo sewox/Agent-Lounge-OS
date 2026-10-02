@@ -1,0 +1,26 @@
+{
+  "kpi": {
+    "latency": "GECİKME",
+    "msgPerMin": "MESAJ / DK",
+    "indexedFiles": "TARANAN DOSYA",
+    "experiences": "TECRÜBE",
+    "deadSymbols": "ÖLÜ SEMBOL"
+  },
+  "scanning": "Taranıyor…",
+  "indexWorkspace": "Çalışma Alanını Tara",
+  "idle": "boşta",
+  "cold": "soğuk",
+  "live": "canlı",
+  "repos": "{{count}} depo",
+  "synced": "senkron",
+  "clean": "temiz",
+  "noIndex": "indeks yok",
+  "unreachableRefs": "erişilemeyen fn/struct referansları",
+  "amberAlert": "▼ amber uyarı",
+  "panels": {
+    "eventStream": "NATS Olay Akışı",
+    "vault": "Anlamsal Harita + Tecrübeler",
+    "quotas": "Kritik Kotalar",
+    "allQuotas": "Tüm kotalar →"
+  }
+}
