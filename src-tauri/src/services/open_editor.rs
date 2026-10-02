@@ -241,11 +241,7 @@ pub async fn test_editor_open(
     open_with_settings(settings, path, None)
 }
 
-fn open_with_settings(
-    settings: &EditorSettings,
-    path: &str,
-    line: Option<i64>,
-) -> Result<()> {
+fn open_with_settings(settings: &EditorSettings, path: &str, line: Option<i64>) -> Result<()> {
     match settings.preset {
         EditorPreset::Custom => spawn_from_template(
             &settings.custom_program,
