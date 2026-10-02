@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "🔒 Güvenlik açığı bildir / Report a security vulnerability"
+    url: https://github.com/sewox/Agent-Lounge-OS/security/advisories/new
+    about: "Güvenlik açıklarını herkese açık issue yerine gizli olarak bildirin. / Report vulnerabilities privately, not as public issues."
+  - name: "📖 README ve kurulum / README & setup"
+    url: https://github.com/sewox/Agent-Lounge-OS#readme
+    about: "Mimari, kurulum ve çalışma zamanı bağımlılıkları. / Architecture, setup and runtime dependencies."
+  - name: "🔌 MCP entegrasyonu / MCP integration guide"
+    url: https://github.com/sewox/Agent-Lounge-OS/blob/main/docs/mcp.md
+    about: "Cursor / Claude Desktop ile lounge-mcp kullanımı. / Using lounge-mcp with Cursor / Claude Desktop."
