@@ -160,6 +160,79 @@ export function resolveDegradedRestart(
   return { names, phase: phases[0] ?? { kind: "unknown" } };
 }
 
+/** True when supervisor reports restart_exhausted / restart_retrying via machine code. */
+export function isRestartLimited(health: ServiceHealth | null | undefined): boolean {
+  const code = (health?.code || "").trim();
+  if (code === CODE_RESTART_EXHAUSTED || code === CODE_RESTART_RETRYING) {
+    return true;
+  }
+  // Legacy snapshots without `code` — Turkish / English degraded banner text only.
+  return Boolean(health?.error && /Service Degraded|limiti aşıldı/i.test(health.error));
+}
+
+export type FleetHealthFields = {
+  status: string;
+  endpoint: string;
+  detail: string;
+  heartbeat: string;
+  pid: string;
+  uptime: string;
+  restarts: string;
+  tone: "ok" | "warn" | "down";
+};
+
+/** Fleet row fields from ServiceHealth — prefers machine `code`, not localized error text. */
+export function fleetHealthFields(
+  health:
+    | {
+        running?: boolean;
+        endpoint?: string;
+        detail?: string | null;
+        error?: string | null;
+        started_by_us?: boolean;
+        availability?: string | null;
+        code?: string | null;
+      }
+    | undefined,
+  fallbackEndpoint: string,
+  missingLabel: string,
+): FleetHealthFields {
+  const running = health?.running === true;
+  const err = (health?.error || "").trim();
+  const notInstalled = health?.availability === AVAIL_NOT_INSTALLED;
+  const code = (health?.code || "").trim();
+  const detailRaw = (health?.detail || "").trim();
+  const detail =
+    detailRaw || (running ? "ok" : notInstalled ? "not-installed" : missingLabel);
+  const attempt = detailRaw.match(/(?:^|\s)attempt=(\d+)(?:\s|$)/i);
+  const max = detailRaw.match(/(?:^|\s)max=(\d+)(?:\s|$)/i);
+  const exhausted = code === CODE_RESTART_EXHAUSTED;
+  const retrying = code === CODE_RESTART_RETRYING;
+  return {
+    status: running
+      ? "ready"
+      : notInstalled
+        ? "not-installed"
+        : exhausted
+          ? "restart-limit"
+          : "down",
+    endpoint: health?.endpoint || fallbackEndpoint,
+    detail: err || detail,
+    heartbeat: running ? "live" : "stale",
+    pid: health?.started_by_us ? "supervised" : "—",
+    uptime: running ? "up" : "—",
+    restarts:
+      attempt && max
+        ? `${attempt[1]}/${max[1]}`
+        : exhausted
+          ? "max"
+          : retrying && max
+            ? `?/${max[1]}`
+            : "—",
+    tone: running ? "ok" : notInstalled ? "warn" : exhausted || retrying ? "warn" : "down",
+  };
+}
+
 export type DecisionGatePhase = "loading" | "ready" | "failed" | "available";
 
 export type DecisionGateStatus = {

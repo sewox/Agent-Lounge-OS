@@ -6,7 +6,9 @@ import {
   CODE_RESTART_RETRYING,
   coreServicesDegraded,
   degradedCoreServiceNames,
+  fleetHealthFields,
   isNotInstalled,
+  isRestartLimited,
   optionalMissingServiceNames,
   resolveDegradedRestart,
   type ServiceHealth,
@@ -98,5 +100,87 @@ describe("lounge health helpers", () => {
       assert.equal(retryPhase.phase.max, 5);
       assert.equal(retryPhase.phase.waitSecs, 4);
     }
+  });
+
+  it("fleetHealthFields uses code for restart-limit, not Turkish error regex", () => {
+    const exhausted = fleetHealthFields(
+      {
+        running: false,
+        endpoint: "http://127.0.0.1:18790",
+        code: CODE_RESTART_EXHAUSTED,
+        detail: "max=5",
+        error: "opaque failure without deneme markers",
+        started_by_us: true,
+      },
+      "http://fallback",
+      "LMR",
+    );
+    assert.equal(exhausted.status, "restart-limit");
+    assert.equal(exhausted.restarts, "max");
+    assert.equal(exhausted.tone, "warn");
+    assert.equal(exhausted.heartbeat, "stale");
+    assert.equal(exhausted.pid, "supervised");
+
+    const retrying = fleetHealthFields(
+      {
+        running: false,
+        endpoint: "nats://127.0.0.1:4222",
+        code: CODE_RESTART_RETRYING,
+        detail: "attempt=3 max=5 wait=8",
+        error: "opaque",
+      },
+      "nats://fallback",
+      "bus",
+    );
+    assert.equal(retrying.status, "down");
+    assert.equal(retrying.restarts, "3/5");
+    assert.equal(retrying.tone, "warn");
+
+    const notInstalled = fleetHealthFields(
+      {
+        running: false,
+        availability: AVAIL_NOT_INSTALLED,
+        detail: "optional",
+        error: null,
+      },
+      "http://fallback",
+      "LMR",
+    );
+    assert.equal(notInstalled.status, "not-installed");
+    assert.equal(notInstalled.tone, "warn");
+  });
+
+  it("isRestartLimited prefers code; Disconnected path ignores Service Degraded substring alone when code set", () => {
+    assert.equal(
+      isRestartLimited(
+        health("ollama", "LMR", false, {
+          code: CODE_RESTART_EXHAUSTED,
+          error: "totally unrelated localized string",
+        }),
+      ),
+      true,
+    );
+    assert.equal(
+      isRestartLimited(
+        health("ollama", "LMR", false, {
+          code: CODE_RESTART_RETRYING,
+          error: null,
+        }),
+      ),
+      true,
+    );
+    // Legacy fallback only when code is absent.
+    assert.equal(
+      isRestartLimited(
+        health("ollama", "LMR", false, {
+          error: "Service Degraded — auto-restart limiti aşıldı (5 deneme)",
+        }),
+      ),
+      true,
+    );
+    assert.equal(
+      isRestartLimited(health("ollama", "LMR", false, { error: "port closed" })),
+      false,
+    );
   });
 });

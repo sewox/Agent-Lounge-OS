@@ -141,7 +141,14 @@ fn program_base(raw: &str) -> String {
         .next()
         .unwrap_or(trimmed)
         .to_ascii_lowercase();
-    base.strip_suffix(".exe").unwrap_or(&base).to_string()
+    // Strip Windows launcher suffixes so `rm.cmd` / `RM.BAT` classify like `rm`
+    // (F22: must not bypass destructive confirmation via extension).
+    base.strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".cmd"))
+        .or_else(|| base.strip_suffix(".bat"))
+        .or_else(|| base.strip_suffix(".com"))
+        .unwrap_or(&base)
+        .to_string()
 }
 
 /// Tokenize a command line into program + argv, expanding short-flag clusters (`-rfvid` → r,f,v,i,d)
@@ -899,5 +906,27 @@ mod tests {
         );
         let args = vec!["-c".into(), "echo hi".into()];
         assert_eq!(classify_argv("sh", &args), None);
+    }
+
+    #[test]
+    fn windows_launcher_suffixes_do_not_bypass_rm_classification() {
+        let args = vec!["-rf".into(), "/tmp/x".into()];
+        for prog in [
+            "rm.exe",
+            "RM.EXE",
+            "rm.cmd",
+            "Rm.CMD",
+            "rm.bat",
+            "RM.BAT",
+            "rm.com",
+            "Rm.Com",
+            r"C:\Tools\rm.cmd",
+        ] {
+            assert_eq!(
+                classify_argv(prog, &args),
+                Some(DestructiveClass::PosixRm),
+                "{prog}"
+            );
+        }
     }
 }

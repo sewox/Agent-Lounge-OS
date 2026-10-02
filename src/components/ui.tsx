@@ -1,6 +1,14 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { natsEventTone, type ExperienceOutcome, type NatsEvent, type NatsTone, type ServiceHealth } from "@/lib/lounge";
+import {
+  isNotInstalled,
+  isRestartLimited,
+  natsEventTone,
+  type ExperienceOutcome,
+  type NatsEvent,
+  type NatsTone,
+  type ServiceHealth,
+} from "@/lib/lounge";
 
 export function Pip({ live = false, tone = "ok" }: { live?: boolean; tone?: "ok" | "warn" | "down" | "primary" }) {
   const color =
@@ -25,10 +33,10 @@ export function daemonTone(health: ServiceHealth | undefined): "ok" | "warn" | "
   if (health.running) {
     return "ok";
   }
-  if (health.availability === "not_installed") {
+  if (isNotInstalled(health)) {
     return "warn";
   }
-  if (health.error?.includes("Service Degraded")) {
+  if (isRestartLimited(health)) {
     return "warn";
   }
   return "down";
@@ -45,12 +53,11 @@ export function daemonLabel(
   if (health.running) {
     return "Running";
   }
-  if (health.availability === "not_installed") {
+  if (isNotInstalled(health)) {
     return notInstalledLabel;
   }
-  if (health.error?.includes("Service Degraded")) {
-    return "Disconnected";
-  }
+  // Crashed / restart-limited / otherwise down — same Disconnected label;
+  // prefer machine `code` via isRestartLimited (not "Service Degraded" substring).
   return "Disconnected";
 }
 

@@ -40,10 +40,15 @@ use tauri_plugin_dialog::DialogExt;
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
 
-/// Diagnostic kernel.log size before rotation (plugin default is ~40 KB).
-const KERNEL_LOG_MAX_FILE_SIZE: u128 = 5 * 1024 * 1024;
-/// Keep several dated rotations plus the active file (plugin default is KeepOne).
-const KERNEL_LOG_KEEP_COUNT: usize = 5;
+/// Kernel file-log rotation: larger than plugin defaults (~40 KB / KeepOne).
+fn kernel_log_settings() -> (u128, tauri_plugin_log::RotationStrategy) {
+    const MAX_FILE_SIZE: u128 = 5 * 1024 * 1024;
+    const KEEP_COUNT: usize = 5;
+    (
+        MAX_FILE_SIZE,
+        tauri_plugin_log::RotationStrategy::KeepSome(KEEP_COUNT),
+    )
+}
 
 /// `connected_tools` boşsa onboarding, doluysa dashboard.
 pub fn initial_window_route() -> &'static str {
@@ -100,13 +105,12 @@ pub fn run_with_start_route(start_route: &'static str) {
             // Always persist kernel/supervisor logs under the data dir so empty
             // redirected stdout/stderr still leaves a diagnosable file.
             // Plugin defaults are ~40 KB + KeepOne — too small for diagnostics.
+            let (max_file_size, rotation_strategy) = kernel_log_settings();
             app.handle().plugin(
                 tauri_plugin_log::Builder::new()
                     .level(log::LevelFilter::Info)
-                    .max_file_size(KERNEL_LOG_MAX_FILE_SIZE)
-                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(
-                        KERNEL_LOG_KEEP_COUNT,
-                    ))
+                    .max_file_size(max_file_size)
+                    .rotation_strategy(rotation_strategy)
                     .targets([
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
@@ -1477,12 +1481,14 @@ async fn set_graph_ui_port(
 #[cfg(test)]
 mod kernel_log_config_tests {
     #[test]
-    fn kernel_log_rotation_is_multi_mb_keep_some() {
-        // Document plugin defaults we intentionally override (tauri-plugin-log 2.10.0).
-        const PLUGIN_DEFAULT_MAX: u128 = 40_000;
-        const _: () = assert!(super::KERNEL_LOG_MAX_FILE_SIZE == 5 * 1024 * 1024);
-        const _: () = assert!(super::KERNEL_LOG_KEEP_COUNT == 5);
-        const _: () = assert!(super::KERNEL_LOG_MAX_FILE_SIZE > PLUGIN_DEFAULT_MAX);
-        const _: () = assert!(super::KERNEL_LOG_KEEP_COUNT > 1);
+    fn kernel_log_settings_are_multi_mb_keep_some() {
+        let (max_size, strategy) = super::kernel_log_settings();
+        assert_eq!(max_size, 5 * 1024 * 1024);
+        match strategy {
+            tauri_plugin_log::RotationStrategy::KeepSome(n) => assert_eq!(n, 5),
+            other => panic!("expected KeepSome(5), got {other:?}"),
+        }
+        // Plugin defaults (tauri-plugin-log 2.10.0): 40_000 bytes + KeepOne.
+        assert!(max_size > 40_000);
     }
 }

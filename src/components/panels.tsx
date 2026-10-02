@@ -31,6 +31,7 @@ import {
   eventDecisionLabel,
   experiencesMatchingSelection,
   fetchAgentEfficiencyReport,
+  fleetHealthFields,
   formatDecisionStreamLabel,
   formatExperienceTime,
   formatLayaDecision,
@@ -1488,55 +1489,6 @@ type FleetWorkerRow = {
   restarts: string;
   tone: "ok" | "warn" | "down";
 };
-
-function fleetHealthFields(
-  health: {
-    running?: boolean;
-    endpoint?: string;
-    detail?: string | null;
-    error?: string | null;
-    started_by_us?: boolean;
-    availability?: string | null;
-    code?: string | null;
-  } | undefined,
-  fallbackEndpoint: string,
-  missingLabel: string,
-): Pick<FleetWorkerRow, "status" | "endpoint" | "detail" | "heartbeat" | "pid" | "uptime" | "restarts" | "tone"> {
-  const running = health?.running === true;
-  const err = (health?.error || "").trim();
-  const notInstalled = health?.availability === "not_installed";
-  const code = (health?.code || "").trim();
-  const detailRaw = (health?.detail || "").trim();
-  const detail =
-    detailRaw ||
-    (running ? "ok" : notInstalled ? "not-installed" : missingLabel);
-  const attempt = detailRaw.match(/(?:^|\s)attempt=(\d+)(?:\s|$)/i);
-  const max = detailRaw.match(/(?:^|\s)max=(\d+)(?:\s|$)/i);
-  const exhausted = code === "restart_exhausted";
-  const retrying = code === "restart_retrying";
-  return {
-    status: running
-      ? "ready"
-      : notInstalled
-        ? "not-installed"
-        : exhausted
-          ? "restart-limit"
-          : "down",
-    endpoint: health?.endpoint || fallbackEndpoint,
-    detail: err || detail,
-    heartbeat: running ? "live" : "stale",
-    pid: health?.started_by_us ? "supervised" : "—",
-    uptime: running ? "up" : "—",
-    restarts: attempt && max
-      ? `${attempt[1]}/${max[1]}`
-      : exhausted
-        ? "max"
-        : retrying && max
-          ? `?/${max[1]}`
-          : "—",
-    tone: running ? "ok" : notInstalled ? "warn" : "down",
-  };
-}
 
 const FLEET_STATUS_KEYS: Record<string, string> = {
   ok: "statusOk",
