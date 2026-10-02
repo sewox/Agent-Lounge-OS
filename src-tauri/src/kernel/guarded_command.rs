@@ -254,11 +254,7 @@ mod tests {
             msg.contains("confirm_id="),
             "expected confirm_id= in error, got: {msg}"
         );
-        msg.split("confirm_id=")
-            .nth(1)
-            .unwrap()
-            .trim()
-            .to_string()
+        msg.split("confirm_id=").nth(1).unwrap().trim().to_string()
     }
 
     #[test]
@@ -413,7 +409,10 @@ mod tests {
         let cases: Vec<(&str, &[&str])> = vec![
             ("cmd", &["/c", "del /s /q C:\\tmp\\x"]),
             ("cmd", &["/c", "rd /s /q build"]),
-            ("powershell", &["-Command", "Remove-Item -Recurse -Force .\\db"]),
+            (
+                "powershell",
+                &["-Command", "Remove-Item -Recurse -Force .\\db"],
+            ),
             ("pwsh", &["-Command", "Remove-Item -Recurse x"]),
             ("powershell.exe", &["-Command", "ri -Recurse x"]),
         ];

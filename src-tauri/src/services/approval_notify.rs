@@ -93,7 +93,10 @@ pub fn set_pending_approval_task_id(task_id: Option<String>) {
     match task_id {
         Some(id) => enqueue_pending_approval(id),
         None => {
-            pending_queue().lock().expect("pending approval lock").clear();
+            pending_queue()
+                .lock()
+                .expect("pending approval lock")
+                .clear();
         }
     }
 }
@@ -119,10 +122,7 @@ pub fn pending_approval_ids() -> Vec<String> {
 
 /// Number of pending approvals in the FIFO queue.
 pub fn pending_approval_count() -> usize {
-    pending_queue()
-        .lock()
-        .expect("pending approval lock")
-        .len()
+    pending_queue().lock().expect("pending approval lock").len()
 }
 
 /// Clear the pending-approval queue entry only when it still holds `task_id`.

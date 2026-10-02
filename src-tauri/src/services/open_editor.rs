@@ -127,7 +127,10 @@ pub fn validate_custom_editor(program: &str, args_template: &str) -> Result<()> 
             bail!("editor argument template must not contain shell metacharacters");
         }
     }
-    if args.split_whitespace().any(|token| token == "-c" || token == "--command") {
+    if args
+        .split_whitespace()
+        .any(|token| token == "-c" || token == "--command")
+    {
         bail!("editor argument template must not invoke a shell (-c)");
     }
     Ok(())
@@ -153,7 +156,12 @@ fn spawn_editor_argv(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn spawn_from_template(program: &str, args_template: &str, path: &str, line: Option<i64>) -> Result<()> {
+fn spawn_from_template(
+    program: &str,
+    args_template: &str,
+    path: &str,
+    line: Option<i64>,
+) -> Result<()> {
     validate_custom_editor(program, args_template)?;
     let args = expand_template(args_template, path, line);
     spawn_editor_argv(program, &args)
@@ -226,28 +234,25 @@ pub async fn save_editor_settings(
 }
 
 pub async fn test_editor_open(
-    store: &ExperienceStore,
+    _store: &ExperienceStore,
     settings: &EditorSettings,
     path: &str,
 ) -> Result<()> {
-    open_with_settings(store, settings, path, None).await
+    open_with_settings(settings, path, None)
 }
 
-async fn open_with_settings(
-    store: &ExperienceStore,
+fn open_with_settings(
     settings: &EditorSettings,
     path: &str,
     line: Option<i64>,
 ) -> Result<()> {
     match settings.preset {
-        EditorPreset::Custom => {
-            spawn_from_template(
-                &settings.custom_program,
-                &settings.custom_args_template,
-                path,
-                line,
-            )
-        }
+        EditorPreset::Custom => spawn_from_template(
+            &settings.custom_program,
+            &settings.custom_args_template,
+            path,
+            line,
+        ),
         preset => {
             let (program, args_template) = preset_argv_template(preset);
             spawn_from_template(&program, &args_template, path, line)
@@ -292,17 +297,7 @@ pub async fn open_in_editor(
     }
 
     let settings = load_editor_settings(store).await?;
-    open_with_settings(store, &settings, &normalized, line).await
-}
-
-fn open_with_platform_default(path: &str) -> Result<()> {
-    let (program, args) = platform_opener_argv(path)?;
-    let mut cmd = GuardedCommand::new(&program).source(ActionSource::User);
-    for arg in &args {
-        cmd = cmd.arg(arg);
-    }
-    let _child = cmd.spawn().with_context(|| format!("{program} opener"))?;
-    Ok(())
+    open_with_settings(&settings, &normalized, line)
 }
 
 /// Pure argv builder for the platform default opener (testable without spawning).

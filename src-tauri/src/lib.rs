@@ -990,10 +990,7 @@ async fn test_editor_settings(
     state: tauri::State<'_, ExperienceStore>,
     settings: services::open_editor::EditorSettings,
 ) -> Result<(), String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|err| err.to_string())?;
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let path = dir.to_string_lossy().into_owned();
     services::open_editor::test_editor_open(&state, &settings, &path)
@@ -1002,9 +999,7 @@ async fn test_editor_settings(
 }
 
 #[tauri::command]
-async fn get_experience_ttl_days(
-    state: tauri::State<'_, ExperienceStore>,
-) -> Result<u64, String> {
+async fn get_experience_ttl_days(state: tauri::State<'_, ExperienceStore>) -> Result<u64, String> {
     state
         .experience_ttl_days()
         .await

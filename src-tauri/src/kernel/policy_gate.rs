@@ -891,10 +891,7 @@ mod tests {
     #[test]
     fn f22_classify_argv_preserves_shell_c_payload() {
         let args = vec!["-c".into(), "rm -rf x".into()];
-        assert_eq!(
-            classify_argv("sh", &args),
-            Some(DestructiveClass::PosixRm)
-        );
+        assert_eq!(classify_argv("sh", &args), Some(DestructiveClass::PosixRm));
         let args = vec!["-lc".into(), "git clean -fdx".into()];
         assert_eq!(
             classify_argv("bash", &args),

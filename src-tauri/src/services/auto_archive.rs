@@ -17,10 +17,7 @@ pub fn spawn_auto_archive(store: ExperienceStore) {
             first = false;
             tokio::time::sleep(delay).await;
             let ttl = store.experience_ttl_days().await.unwrap_or(90);
-            let use_threshold = store
-                .experience_use_count_threshold()
-                .await
-                .unwrap_or(0);
+            let use_threshold = store.experience_use_count_threshold().await.unwrap_or(0);
             match store
                 .auto_archive_stale(ttl, use_threshold, &SystemClock)
                 .await
