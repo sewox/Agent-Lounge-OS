@@ -13,6 +13,7 @@ import { I18nextProvider } from "react-i18next";
 import { i18n, initI18n, persistLocale } from "@/lib/i18n/config";
 import {
   detectInitialLocale,
+  detectOsLocale,
   readStoredLocale,
   type AppLocale,
   writeStoredLocale,
@@ -55,10 +56,19 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
   const locale = useSyncExternalStore(subscribeLocale, getLocaleSnapshot, getServerLocaleSnapshot);
 
   useEffect(() => {
-    // First launch (K5 / X-01): persist OS-detected locale so onboarding + Settings stay consistent.
+    // First launch (K5 / X-01): persist OS locale — never the SSR default ("en").
+    // useSyncExternalStore hydrates with getServerSnapshot ("en"); if we wrote that
+    // before the client snapshot applied, detectInitialLocale would lock EN forever.
     if (!readStoredLocale()) {
-      writeStoredLocale(locale);
-      persistLocale(locale);
+      const detected = detectOsLocale();
+      writeStoredLocale(detected);
+      persistLocale(detected);
+      void i18n.changeLanguage(detected);
+      document.documentElement.lang = detected;
+      if (detected !== locale) {
+        emitLocaleChange();
+      }
+      return;
     }
     void i18n.changeLanguage(locale);
     document.documentElement.lang = locale;
