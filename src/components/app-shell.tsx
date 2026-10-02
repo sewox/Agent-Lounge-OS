@@ -18,6 +18,8 @@ import {
   QUOTA_ALERT_PROMPT,
   coreServicesDegraded,
   degradedCoreServiceNames,
+  isNotInstalled,
+  optionalMissingServiceNames,
   resolveDegradedRestart,
   indexProgressActive,
   isTauri,
@@ -236,6 +238,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const serviceDegraded = coreServicesDegraded(report);
   const degradedNames = degradedCoreServiceNames(report);
+  const optionalMissing = useMemo(() => optionalMissingServiceNames(report), [report]);
   const degradedRestart = useMemo(() => resolveDegradedRestart(report), [report]);
   const criticalAlerts = useMemo(
     () => buildCriticalAlerts({ quotas, amberAlert, amberTools, approval, degradedNames }),
@@ -243,6 +246,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
   const statusBanner =
     serviceDegraded ||
+    optionalMissing.length > 0 ||
     (approval && !securityHold && !quotaHold) ||
     destructiveHold ||
     indexing ||
@@ -284,6 +288,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     decisionGate,
     countdownLabel,
     degradedKey,
+    optionalMissing.length,
   ]);
 
   const bannerPos = onboarding
@@ -531,22 +536,32 @@ export function AppShell({ children }: { children: ReactNode }) {
           className={`${bannerPos} border-b border-error-container bg-error-container/25 py-2 px-4`}
           role="status"
           aria-live="polite"
+          data-qa="service-degraded-banner"
         >
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-body text-body">
             <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
               <span className="font-semibold tracking-label text-error-dim uppercase">
-                Service Degraded ·{" "}
+                {t("serviceDegraded")} ·{" "}
               </span>
               <span className="text-on-surface">
                 {degradedRestart.phase.kind === "exhausted"
-                  ? `${degradedRestart.names.join(", ")} kapalı — auto-restart limiti aşıldı (${degradedRestart.phase.max} deneme)`
+                  ? t("degradedExhausted", {
+                      names: degradedRestart.names.join(", "),
+                      max: degradedRestart.phase.max,
+                    })
                   : degradedRestart.phase.kind === "retrying"
-                    ? `${degradedRestart.names.join(", ")} kapalı — yeniden deneme${
-                        degradedRestart.phase.waitSecs != null
-                          ? ` ${degradedRestart.phase.waitSecs}s`
-                          : ""
-                      } (deneme ${degradedRestart.phase.attempt}/${degradedRestart.phase.max})`
-                    : `${degradedRestart.names.join(", ")} kapalı — otomatik yeniden başlatma deneniyor`}
+                    ? t("degradedRetrying", {
+                        names: degradedRestart.names.join(", "),
+                        wait:
+                          degradedRestart.phase.waitSecs != null
+                            ? ` ${degradedRestart.phase.waitSecs}s`
+                            : "",
+                        attempt: degradedRestart.phase.attempt,
+                        max: degradedRestart.phase.max,
+                      })
+                    : t("degradedUnknown", {
+                        names: degradedRestart.names.join(", "),
+                      })}
               </span>
             </div>
             {degradedRestart.phase.kind === "exhausted" ? (
@@ -556,15 +571,44 @@ export function AppShell({ children }: { children: ReactNode }) {
                 disabled={restarting}
                 className={`${BANNER_BTN} shrink-0 border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase hover:bg-surface-bright disabled:opacity-60`}
               >
-                {restarting ? "Restarting…" : "Auto-Restart"}
+                {restarting ? t("restarting") : t("autoRestart")}
               </button>
             ) : (
               <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase">
                 {degradedRestart.phase.kind === "retrying"
                   ? `${degradedRestart.phase.attempt}/${degradedRestart.phase.max}`
-                  : "auto-restart"}
+                  : t("autoRestart")}
               </span>
             )}
+          </div>
+        </div>
+      ) : optionalMissing.length > 0 ? (
+        <div
+          ref={attachBannerRef}
+          className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
+          role="status"
+          aria-live="polite"
+          data-qa="service-optional-banner"
+        >
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 font-body text-body">
+            <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
+              <span className="font-semibold tracking-label text-on-surface-variant uppercase">
+                {t("serviceOptional")} ·{" "}
+              </span>
+              <span className="text-on-surface">
+                {t("serviceOptionalDetail", { names: optionalMissing.join(", ") })}
+              </span>
+              {optionalMissing.includes("LMR") ? (
+                <span className="mt-1 block font-mono text-meta text-outline">
+                  {t("lmrInstallHint")}
+                </span>
+              ) : null}
+              {optionalMissing.includes("NATS") ? (
+                <span className="mt-1 block font-mono text-meta text-outline">
+                  {t("natsInstallHint")}
+                </span>
+              ) : null}
+            </div>
           </div>
         </div>
       ) : approval && !securityHold && !quotaHold ? (
@@ -921,10 +965,22 @@ export function AppShell({ children }: { children: ReactNode }) {
             <div
               className="rounded border border-error-container/70 bg-error-container/15 px-2 py-1.5 font-mono text-meta text-error-dim"
               role="status"
+              data-qa="sidebar-service-degraded"
             >
               <div className="font-bold tracking-wider uppercase">{t("serviceDegraded")}</div>
               <div className="mt-0.5 truncate text-on-surface-variant">
-                {degradedNames.join(" · ")} down
+                {degradedNames.join(" · ")} {t("downLabel")}
+              </div>
+            </div>
+          ) : optionalMissing.length > 0 ? (
+            <div
+              className="rounded border border-outline-variant/70 bg-surface-container-low px-2 py-1.5 font-mono text-meta text-on-surface-variant"
+              role="status"
+              data-qa="sidebar-service-optional"
+            >
+              <div className="font-bold tracking-wider uppercase">{t("serviceOptional")}</div>
+              <div className="mt-0.5 truncate">
+                {optionalMissing.join(" · ")} · {t("notInstalled")}
               </div>
             </div>
           ) : null}
@@ -1150,20 +1206,27 @@ function DaemonRow({
 }) {
   const { t } = useTranslation("shell");
   const running = health?.running === true;
+  const missing = isNotInstalled(health);
   const label = !checked
     ? t("checkingServices")
-    : daemonLabel(health, t("disconnected"));
+    : daemonLabel(health, t("disconnected"), t("notInstalled"));
   // Short label keeps "Memory Bridge" readable at 1280; status wraps below.
   const shortName = name === "Memory Bridge" ? "Memory" : name;
   return (
-    <div className="space-y-0.5 font-mono text-body" title={name}>
+    <div className="space-y-0.5 font-mono text-body" title={name} data-qa={`daemon-${shortName}`}>
       <div className="flex min-w-0 items-center gap-2">
         <Pip tone={daemonTone(health)} />
         <span className="min-w-0 truncate text-on-surface">{shortName}</span>
       </div>
       <div className="ml-4 space-y-0.5">
-        <div className={`tnum ${running ? "text-secondary" : "text-error"}`}>{label}</div>
-        {checked && !running ? (
+        <div
+          className={`tnum ${
+            running ? "text-secondary" : missing ? "text-on-surface-variant" : "text-error"
+          }`}
+        >
+          {label}
+        </div>
+        {checked && !running && !missing ? (
           <button
             type="button"
             onClick={onRestart}

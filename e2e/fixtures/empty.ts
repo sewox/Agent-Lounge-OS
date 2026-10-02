@@ -5,17 +5,22 @@ const mkHealth = (
   name: string,
   running: boolean,
   endpoint: string,
+  opts?: { availability?: string | null; error?: string | null; detail?: string | null },
 ): FixtureDataset["serviceReport"]["ollama"] => ({
   id,
   name,
   running,
   started_by_us: false,
   endpoint,
-  detail: running ? "ok" : null,
-  error: running ? null : "disconnected",
+  detail:
+    opts?.detail ??
+    (running ? "ok" : opts?.availability === "not_installed" ? "optional" : null),
+  error:
+    opts?.error ?? (running || opts?.availability === "not_installed" ? null : "disconnected"),
+  availability: opts?.availability ?? null,
 });
 
-/** Empty / disconnected dataset — should surface empty states, never MOCK_* totals. */
+/** Empty / fresh-install dataset — optional LMR/NATS absent, never MOCK_* totals. */
 export const EMPTY_FIXTURE: FixtureDataset = {
   name: "empty",
   experiences: [],
@@ -31,8 +36,14 @@ export const EMPTY_FIXTURE: FixtureDataset = {
   },
   events: [],
   serviceReport: {
-    ollama: mkHealth("ollama", "LMR", false, "http://127.0.0.1:18790"),
-    nats: mkHealth("nats", "NATS", false, "nats://127.0.0.1:4222"),
+    ollama: mkHealth("ollama", "LMR", false, "http://127.0.0.1:18790", {
+      availability: "not_installed",
+      detail: "optional — place an Ollama-compatible binary at data/lmr/ollama",
+    }),
+    nats: mkHealth("nats", "NATS", false, "nats://127.0.0.1:4222", {
+      availability: "not_installed",
+      detail: "optional — install nats-server on PATH",
+    }),
     memory: mkHealth("memory", "Memory Bridge", false, "http://127.0.0.1:7432"),
     plugin: mkHealth("plugin", "MCP Plugin", false, "stdio"),
   },

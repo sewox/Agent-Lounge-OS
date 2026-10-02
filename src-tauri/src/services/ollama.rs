@@ -12,7 +12,7 @@ use super::hf_catalog::{
     gguf_filename_for, hf_gguf_resolve_url, is_hf_redirect_block, is_installed,
     normalize_pull_name, strip_hf_prefix, with_quant_tag,
 };
-use super::lmr_runtime::ensure_lmr_runtime;
+use super::lmr_runtime::{ensure_lmr_runtime, lmr_not_installed_detail, lmr_runtime_present};
 use super::probe::{
     http_endpoint, lounge_lmr_dir, lounge_ollama_host, lounge_ollama_models_dir,
     lounge_ollama_port, wait_until,
@@ -86,6 +86,20 @@ impl OllamaService {
         self.fetch_models().await.is_ok()
     }
 
+    /// Optional LMR binary present under `data/lmr` (or LOUNGE_LMR_BINARY). Never host PATH.
+    pub fn runtime_installed(&self) -> bool {
+        lmr_runtime_present(&self.config.binary)
+    }
+
+    pub fn not_installed_health(&self) -> ServiceHealth {
+        ServiceHealth::not_installed(
+            ServiceId::Ollama,
+            SERVICE_NAME,
+            self.endpoint(),
+            lmr_not_installed_detail(),
+        )
+    }
+
     pub async fn ensure(&mut self) -> ServiceHealth {
         match self.ensure_inner().await {
             Ok(health) => health,
@@ -112,6 +126,8 @@ impl OllamaService {
             endpoint: self.endpoint(),
             detail,
             error,
+            availability: None,
+            code: None,
         }
     }
 
@@ -120,6 +136,10 @@ impl OllamaService {
 
         if let Ok(models) = self.fetch_models().await {
             return Ok(self.snapshot(true, models_detail(&models), None));
+        }
+
+        if !self.runtime_installed() {
+            return Ok(self.not_installed_health());
         }
 
         let binary = ensure_lmr_runtime(&self.config.binary)
@@ -783,7 +803,9 @@ mod tests {
         });
         let health = service.ensure().await;
         assert!(!health.running);
-        assert!(health.error.unwrap().contains("LMR runtime yok"));
+        assert!(health.is_not_installed());
+        assert!(health.error.is_none());
+        assert!(health.detail.as_deref().unwrap_or("").contains("optional"));
     }
 
     #[test]

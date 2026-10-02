@@ -1,7 +1,10 @@
-//! Kritik yerel servisler (NATS, LMR) için periyodik health check + auto-restart.
+//! Yerel servisler (NATS, LMR) için periyodik health check + auto-restart.
 //!
 //! Host sistem Ollama (:11434) izlenmez; yalnızca ServiceManager’ın sahip olduğu
 //! Lounge LMR (loopback private runtime) ve NATS yeniden başlatılır.
+//!
+//! LMR ve NATS isteğe bağlıdır: binary yoksa `not_installed` raporu döner,
+//! restart storm / SERVICE DEGRADED banner tetiklenmez.
 
 use std::time::{Duration, Instant};
 
@@ -9,7 +12,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::sleep;
 
 use super::SharedServices;
-use crate::models::{ServiceHealth, ServiceId, ServiceReport, SERVICE_EVENT};
+use crate::models::{
+    ServiceHealth, ServiceId, ServiceReport, CODE_RESTART_EXHAUSTED, CODE_RESTART_RETRYING,
+    SERVICE_EVENT,
+};
 
 const TICK: Duration = Duration::from_secs(2);
 const BACKOFF_MIN: Duration = Duration::from_secs(2);
@@ -34,7 +40,8 @@ async fn run_supervisor(app: AppHandle, services: SharedServices) {
         };
         let core = CoreHealth::from(&report);
         // Degraded iken her tick emit: UI countdown / Service Degraded banner güncellenir.
-        if last.as_ref() != Some(&core) || core.degraded() {
+        // Optional-missing değişince de emit (sidebar "Not installed" güncellensin).
+        if last.as_ref() != Some(&core) || core.degraded() || core.optional_missing() {
             emit_service_status(&app, &report);
             last = Some(core);
         }
@@ -63,6 +70,12 @@ async fn recover_nats(manager: &mut super::ServiceManager, backoff: &mut Backoff
         return manager.nats.snapshot(true, Some("health ok".into()), None);
     }
 
+    // Optional bus: no binary + closed port → not_installed (no restart storm).
+    if !manager.nats.runtime_installed() {
+        backoff.reset();
+        return manager.nats.not_installed_health();
+    }
+
     if let Some(health) = degraded_wait(ServiceId::Nats, "NATS", manager.nats.endpoint(), backoff) {
         return health;
     }
@@ -72,6 +85,10 @@ async fn recover_nats(manager: &mut super::ServiceManager, backoff: &mut Backoff
         manager.nats.endpoint()
     );
     let health = manager.nats.ensure().await;
+    if health.is_not_installed() {
+        backoff.reset();
+        return health;
+    }
     finalize_recovery("NATS", health, backoff)
 }
 
@@ -81,6 +98,12 @@ async fn recover_lmr(manager: &mut super::ServiceManager, backoff: &mut Backoff)
         return manager
             .ollama
             .snapshot(true, Some("health ok".into()), None);
+    }
+
+    // Optional LMR: missing managed binary → not_installed (no restart storm).
+    if !manager.ollama.runtime_installed() {
+        backoff.reset();
+        return manager.ollama.not_installed_health();
     }
 
     if let Some(health) =
@@ -94,6 +117,10 @@ async fn recover_lmr(manager: &mut super::ServiceManager, backoff: &mut Backoff)
         manager.ollama.endpoint()
     );
     let health = manager.ollama.ensure().await;
+    if health.is_not_installed() {
+        backoff.reset();
+        return health;
+    }
     finalize_recovery("LMR", health, backoff)
 }
 
@@ -104,26 +131,38 @@ fn degraded_wait(
     backoff: &Backoff,
 ) -> Option<ServiceHealth> {
     if backoff.exhausted() {
-        return Some(ServiceHealth::down(
-            id,
-            label,
-            endpoint,
-            format!(
-                "Service Degraded — auto-restart limiti aşıldı ({MAX_RESTART_ATTEMPTS} deneme)"
+        return Some(
+            ServiceHealth::down(
+                id,
+                label,
+                endpoint,
+                format!(
+                    "Service Degraded — auto-restart limiti aşıldı ({MAX_RESTART_ATTEMPTS} deneme)"
+                ),
+            )
+            .with_restart_code(
+                CODE_RESTART_EXHAUSTED,
+                format!("max={MAX_RESTART_ATTEMPTS}"),
             ),
-        ));
+        );
     }
     if !backoff.ready() {
-        return Some(ServiceHealth::down(
-            id,
-            label,
-            endpoint,
-            format!(
-                "Service Degraded — yeniden deneme {}s (deneme {}/{MAX_RESTART_ATTEMPTS})",
-                backoff.remaining_secs(),
-                backoff.attempts() + 1
+        let attempt = backoff.attempts() + 1;
+        let wait = backoff.remaining_secs();
+        return Some(
+            ServiceHealth::down(
+                id,
+                label,
+                endpoint,
+                format!(
+                    "Service Degraded — yeniden deneme {wait}s (deneme {attempt}/{MAX_RESTART_ATTEMPTS})"
+                ),
+            )
+            .with_restart_code(
+                CODE_RESTART_RETRYING,
+                format!("attempt={attempt} max={MAX_RESTART_ATTEMPTS} wait={wait}"),
             ),
-        ));
+        );
     }
     None
 }
@@ -144,17 +183,23 @@ fn finalize_recovery(
         .unwrap_or_else(|| "bilinmeyen hata".into());
     log::error!("{label} recovery başarısız: {reason}");
     backoff.fail();
-    health.error = Some(if backoff.exhausted() {
-        format!(
+    if backoff.exhausted() {
+        health.error = Some(format!(
             "Service Degraded — auto-restart limiti aşıldı ({MAX_RESTART_ATTEMPTS} deneme): {reason}"
-        )
+        ));
+        health.code = Some(CODE_RESTART_EXHAUSTED.into());
+        health.detail = Some(format!("max={MAX_RESTART_ATTEMPTS}"));
     } else {
-        format!(
-            "Service Degraded — restart denemesi başarısız, {}s sonra (deneme {}/{MAX_RESTART_ATTEMPTS}): {reason}",
-            backoff.remaining_secs(),
-            backoff.attempts(),
-        )
-    });
+        let wait = backoff.remaining_secs();
+        let attempt = backoff.attempts();
+        health.error = Some(format!(
+            "Service Degraded — restart denemesi başarısız, {wait}s sonra (deneme {attempt}/{MAX_RESTART_ATTEMPTS}): {reason}"
+        ));
+        health.code = Some(CODE_RESTART_RETRYING.into());
+        health.detail = Some(format!(
+            "attempt={attempt} max={MAX_RESTART_ATTEMPTS} wait={wait}"
+        ));
+    }
     health
 }
 
@@ -174,6 +219,8 @@ fn emit_service_status(app: &AppHandle, report: &ServiceReport) {
 struct CoreHealth {
     nats: bool,
     lmr: bool,
+    nats_optional: bool,
+    lmr_optional: bool,
 }
 
 impl CoreHealth {
@@ -181,11 +228,17 @@ impl CoreHealth {
         Self {
             nats: report.nats.running,
             lmr: report.ollama.running,
+            nats_optional: report.nats.is_not_installed(),
+            lmr_optional: report.ollama.is_not_installed(),
         }
     }
 
     fn degraded(&self) -> bool {
-        !(self.nats && self.lmr)
+        (!self.nats && !self.nats_optional) || (!self.lmr && !self.lmr_optional)
+    }
+
+    fn optional_missing(&self) -> bool {
+        self.nats_optional || self.lmr_optional
     }
 }
 
@@ -255,6 +308,7 @@ pub fn max_restart_attempts() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::AVAIL_NOT_INSTALLED;
     use crate::services::memory_bridge::MemoryBridge;
     use crate::services::nats_manager::{NatsConfig, NatsService};
     use crate::services::ollama::{OllamaConfig, OllamaService};
@@ -312,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn core_health_marks_degraded() {
+    fn core_health_marks_degraded_for_crash_not_optional() {
         let report = ServiceReport {
             ollama: ServiceHealth::down(ServiceId::Ollama, "LMR", "http://127.0.0.1:18790", "down"),
             nats: ServiceHealth {
@@ -323,6 +377,8 @@ mod tests {
                 endpoint: "nats://127.0.0.1:4222".into(),
                 detail: None,
                 error: None,
+                availability: None,
+                code: None,
             },
             memory: ServiceHealth::down(ServiceId::MemoryBridge, "Memory", "", "n/a"),
             plugin: ServiceHealth::down(ServiceId::Plugin, "Plugin", "", "n/a"),
@@ -373,7 +429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervise_once_marks_degraded_without_real_crash() {
+    async fn missing_optional_lmr_is_not_installed_without_restart_storm() {
         let mut manager = ServiceManager::for_test(
             ollama_stub_missing(),
             nats_stub_listening().await,
@@ -383,19 +439,158 @@ mod tests {
         let mut lmr = Backoff::new();
 
         let report = supervise_once(&mut manager, &mut nats, &mut lmr).await;
-        assert!(report.core_degraded());
-        assert!(report.degraded_core_names().contains(&"LMR"));
+        assert!(!report.core_degraded());
+        assert!(report.degraded_core_names().is_empty());
+        assert_eq!(report.optional_missing_names(), vec!["LMR"]);
         assert!(!report.ollama.running);
+        assert!(report.ollama.is_not_installed());
+        assert_eq!(
+            report.ollama.availability.as_deref(),
+            Some(AVAIL_NOT_INSTALLED)
+        );
         assert!(report
+            .ollama
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("optional"));
+        // No restart attempts when binary is absent.
+        assert_eq!(lmr.attempts(), 0);
+        assert!(!lmr.exhausted());
+        // NATS TCP açık + http_port=0 → healthy, restart denemesi yok
+        assert!(report.nats.running);
+        assert_eq!(nats.attempts(), 0);
+
+        // Second tick still quiet — no storm.
+        let report2 = supervise_once(&mut manager, &mut nats, &mut lmr).await;
+        assert!(report2.ollama.is_not_installed());
+        assert_eq!(lmr.attempts(), 0);
+        assert!(!report2.core_degraded());
+    }
+
+    #[tokio::test]
+    async fn missing_optional_nats_is_not_installed() {
+        let mut manager = ServiceManager::for_test(
+            ollama_stub_missing(),
+            nats_stub_missing(),
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+        );
+        let mut nats = Backoff::new();
+        let mut lmr = Backoff::new();
+
+        let report = supervise_once(&mut manager, &mut nats, &mut lmr).await;
+        assert!(!report.core_degraded());
+        assert!(report.nats.is_not_installed());
+        assert!(report.ollama.is_not_installed());
+        assert_eq!(nats.attempts(), 0);
+        assert_eq!(lmr.attempts(), 0);
+        assert_eq!(report.optional_missing_names(), vec!["LMR", "NATS"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_marks_installed_but_down_lmr_as_core_degraded() {
+        let stub = opaque_daemon_stub("ollama");
+        let manager = ServiceManager::for_test(
+            OllamaService::with_config(OllamaConfig {
+                host: "127.0.0.1".into(),
+                port: 1,
+                binary: stub.display().to_string(),
+                args: vec!["serve".into()],
+                models_dir: None,
+            }),
+            nats_stub_listening().await,
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+        );
+        assert!(manager.ollama.runtime_installed());
+
+        let report = manager.snapshot().await;
+        assert!(!report.ollama.running);
+        assert!(!report.ollama.is_not_installed());
+        assert!(report.ollama.availability.is_none());
+        assert_eq!(report.ollama.error.as_deref(), Some("LMR ayakta değil"));
+        assert!(report.core_degraded());
+        assert_eq!(report.degraded_core_names(), vec!["LMR"]);
+        assert!(report.nats.running);
+    }
+
+    #[tokio::test]
+    async fn installed_but_unstartable_lmr_hits_restart_limit_via_supervise_once() {
+        let stub = opaque_daemon_stub("ollama");
+        let mut manager = ServiceManager::for_test(
+            OllamaService::with_config(OllamaConfig {
+                host: "127.0.0.1".into(),
+                port: 1,
+                binary: stub.display().to_string(),
+                args: vec!["serve".into()],
+                models_dir: None,
+            }),
+            nats_stub_listening().await,
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+        );
+        let mut nats = Backoff::new();
+        let mut lmr = Backoff::new();
+
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            let report = supervise_once(&mut manager, &mut nats, &mut lmr).await;
+            assert!(
+                !report.ollama.is_not_installed(),
+                "opaque stub must count as installed"
+            );
+            assert!(!report.ollama.running);
+            assert!(report.core_degraded());
+            assert!(lmr.attempts() > 0);
+            // Skip backoff window so the next tick can attempt recovery.
+            lmr.next_at = Instant::now();
+        }
+        assert!(lmr.exhausted());
+
+        let final_report = supervise_once(&mut manager, &mut nats, &mut lmr).await;
+        assert!(final_report.core_degraded());
+        assert_eq!(
+            final_report.ollama.code.as_deref(),
+            Some(crate::models::CODE_RESTART_EXHAUSTED)
+        );
+        assert!(final_report
             .ollama
             .error
             .as_deref()
             .unwrap_or("")
             .contains("Service Degraded"));
-        assert!(lmr.attempts() >= 1);
-        // NATS TCP açık + http_port=0 → healthy, restart denemesi yok
-        assert!(report.nats.running);
-        assert_eq!(nats.attempts(), 0);
+    }
+
+    #[tokio::test]
+    async fn installed_but_unstartable_nats_hits_restart_limit_via_supervise_once() {
+        let stub = opaque_daemon_stub("nats-server");
+        let mut manager = ServiceManager::for_test(
+            ollama_stub_missing(),
+            NatsService::with_config(NatsConfig {
+                host: "127.0.0.1".into(),
+                port: 1,
+                http_port: 0,
+                binary: stub.display().to_string(),
+                args: vec![],
+            }),
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+        );
+        let mut nats = Backoff::new();
+        let mut lmr = Backoff::new();
+
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            let report = supervise_once(&mut manager, &mut nats, &mut lmr).await;
+            assert!(!report.nats.is_not_installed());
+            assert!(!report.nats.running);
+            assert!(nats.attempts() > 0);
+            nats.next_at = Instant::now();
+            let _ = report;
+        }
+        assert!(nats.exhausted());
+
+        let final_report = supervise_once(&mut manager, &mut nats, &mut lmr).await;
+        assert!(final_report.core_degraded());
+        assert_eq!(
+            final_report.nats.code.as_deref(),
+            Some(crate::models::CODE_RESTART_EXHAUSTED)
+        );
     }
 
     fn ollama_stub_missing() -> OllamaService {
@@ -419,5 +614,34 @@ mod tests {
             binary: "__missing_nats__".into(),
             args: vec![],
         })
+    }
+
+    fn nats_stub_missing() -> NatsService {
+        NatsService::with_config(NatsConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            http_port: 0,
+            binary: "__missing_nats__".into(),
+            args: vec![],
+        })
+    }
+
+    /// Cross-platform opaque file that `is_file()` sees as installed but cannot exec.
+    /// Spawn fails immediately (Exec format / CreateProcess error) — no long startup wait.
+    fn opaque_daemon_stub(basename: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lounge-supervisor-stub-{}-{}",
+            basename,
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(basename);
+        std::fs::write(&path, b"\0not-a-real-daemon-binary\0").expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
+        path
     }
 }

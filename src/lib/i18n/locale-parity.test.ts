@@ -44,4 +44,33 @@ describe("i18n locale parity", () => {
       );
     }
   });
+
+  it("covers palette footer + onboarding selectGroup (TR/EN)", () => {
+    const enShell = JSON.parse(
+      readFileSync(join(LOCALES_ROOT, "en/shell.json"), "utf8"),
+    ) as Record<string, string>;
+    const trShell = JSON.parse(
+      readFileSync(join(LOCALES_ROOT, "tr/shell.json"), "utf8"),
+    ) as Record<string, string>;
+    const enOn = JSON.parse(
+      readFileSync(join(LOCALES_ROOT, "en/onboarding.json"), "utf8"),
+    ) as Record<string, string>;
+    const trOn = JSON.parse(
+      readFileSync(join(LOCALES_ROOT, "tr/onboarding.json"), "utf8"),
+    ) as Record<string, string>;
+
+    assert.ok(enShell.paletteFooter?.includes("select"));
+    assert.ok(enShell.paletteFooter?.includes("run"));
+    assert.ok(!/seç|çalıştır/.test(enShell.paletteFooter ?? ""));
+    assert.ok(trShell.paletteFooter?.includes("seç"));
+    assert.ok(trShell.paletteFooter?.includes("çalıştır"));
+    assert.ok(!/\bselect\b/i.test(trShell.paletteFooter ?? ""));
+
+    assert.equal(enOn.selectGroup, "Select group");
+    assert.equal(trOn.selectGroup, "Grubu seç");
+    assert.ok(enShell.notInstalled);
+    assert.ok(trShell.notInstalled);
+    assert.ok(enShell.serviceOptional);
+    assert.ok(trShell.serviceOptional);
+  });
 });

@@ -31,6 +31,7 @@ import {
   eventDecisionLabel,
   experiencesMatchingSelection,
   fetchAgentEfficiencyReport,
+  fleetHealthFields,
   formatDecisionStreamLabel,
   formatExperienceTime,
   formatLayaDecision,
@@ -792,7 +793,32 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
 }
 
 export function HealthPanel() {
+  const { t } = useTranslation("health");
   const { projects, deadSymbols, semanticMap, indexing, indexWorkspace } = useLounge();
+  const tauriHost = useIsTauri();
+  const [kernelLog, setKernelLog] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!tauriHost) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const paths = await invoke<{ kernel_log: string }>("get_runtime_paths");
+        if (!cancelled) {
+          setKernelLog(paths.kernel_log);
+        }
+      } catch {
+        /* browser / mock */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tauriHost]);
+
   const rows = semanticMap.projects.length
     ? semanticMap.projects.map((row) => {
         const fromList = deadSymbols.filter(
@@ -857,6 +883,16 @@ export function HealthPanel() {
           <span className="font-mono text-meta text-outline">memory_bridge · live</span>
         </div>
       </div>
+      {kernelLog ? (
+        <div
+          className="shrink-0 border-b border-outline-variant/60 bg-surface-container-lowest/40 px-2.5 py-1.5 font-mono text-meta text-outline"
+          data-qa="health-kernel-log"
+        >
+          <span className="font-semibold text-on-surface-variant">{t("diagnosticsTitle")}: </span>
+          {t("diagnosticsKernelLog", { path: kernelLog })}
+          <span className="mt-0.5 block">{t("diagnosticsHint")}</span>
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5 font-mono text-body">
         {rows.length === 0 ? (
           <IndexEmptyState detail="No data found." className="min-h-full" />
@@ -1160,6 +1196,91 @@ export function QuotaPanel() {
 
 const QUOTA_ACTION_IDS: QuotaExhaustedAction[] = ["stop", "ask_then_local", "ask_then_abort"];
 
+type RuntimePaths = {
+  data_root: string;
+  kernel_log: string;
+  lmr_log: string;
+  nats_log: string;
+  lmr_dir: string;
+  lmr_binary: string;
+};
+
+function DiagnosticsSettingsPanel() {
+  const { t } = useTranslation("settings");
+  const tauriHost = useIsTauri();
+  const [paths, setPaths] = useState<RuntimePaths | null>(null);
+
+  useEffect(() => {
+    if (!tauriHost) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const next = await invoke<RuntimePaths>("get_runtime_paths");
+        if (!cancelled) {
+          setPaths(next);
+        }
+      } catch {
+        if (!cancelled) {
+          setPaths(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tauriHost]);
+
+  return (
+    <div className="rounded-lg border border-outline-variant bg-surface-container" data-qa="diagnostics-panel">
+      <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
+        <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+          {t("diagnosticsTitle")}
+        </h2>
+        <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
+          {t("diagnosticsDesc")}
+        </p>
+      </div>
+      <div className="space-y-2 p-3 font-mono text-meta text-on-surface-variant">
+        {!tauriHost ? (
+          <p>{t("diagnosticsBrowser")}</p>
+        ) : !paths ? (
+          <p>{t("diagnosticsLoading")}</p>
+        ) : (
+          <dl className="space-y-2">
+            <div>
+              <dt className="text-outline">{t("diagnosticsDataRoot")}</dt>
+              <dd className="break-all text-on-surface" data-qa="diagnostics-data-root">
+                {paths.data_root}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-outline">{t("diagnosticsKernelLog")}</dt>
+              <dd className="break-all text-on-surface" data-qa="diagnostics-kernel-log">
+                {paths.kernel_log}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-outline">{t("diagnosticsLmrLog")}</dt>
+              <dd className="break-all text-on-surface">{paths.lmr_log}</dd>
+            </div>
+            <div>
+              <dt className="text-outline">{t("diagnosticsNatsLog")}</dt>
+              <dd className="break-all text-on-surface">{paths.nats_log}</dd>
+            </div>
+            <div>
+              <dt className="text-outline">{t("diagnosticsLmrBinary")}</dt>
+              <dd className="break-all text-on-surface">{paths.lmr_binary}</dd>
+            </div>
+          </dl>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   const { policy, savePolicy, model } = useLounge();
   const { scale, setScale, scales } = useUiScale();
@@ -1303,6 +1424,7 @@ export function SettingsPanel() {
       <ApprovalSoundSettingsPanel />
       <DestructiveGateSettingsPanel />
       <GraphUiSettings />
+      <DiagnosticsSettingsPanel />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
           <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
@@ -1368,32 +1490,6 @@ type FleetWorkerRow = {
   tone: "ok" | "warn" | "down";
 };
 
-function fleetHealthFields(
-  health: { running?: boolean; endpoint?: string; detail?: string | null; error?: string | null; started_by_us?: boolean } | undefined,
-  fallbackEndpoint: string,
-  missingLabel: string,
-): Pick<FleetWorkerRow, "status" | "endpoint" | "detail" | "heartbeat" | "pid" | "uptime" | "restarts" | "tone"> {
-  const running = health?.running === true;
-  const err = (health?.error || "").trim();
-  const detail = (health?.detail || "").trim() || (running ? "ok" : missingLabel);
-  const restartMatch = err.match(/deneme\s+(\d+)\s*\/\s*(\d+)/i);
-  const exhausted = /limiti aşıldı/i.test(err);
-  return {
-    status: running ? "ready" : exhausted ? "restart-limit" : "down",
-    endpoint: health?.endpoint || fallbackEndpoint,
-    detail: err || detail,
-    heartbeat: running ? "live" : "stale",
-    pid: health?.started_by_us ? "supervised" : "—",
-    uptime: running ? "up" : "—",
-    restarts: restartMatch
-      ? `${restartMatch[1]}/${restartMatch[2]}`
-      : exhausted
-        ? "max"
-        : "—",
-    tone: running ? "ok" : "down",
-  };
-}
-
 const FLEET_STATUS_KEYS: Record<string, string> = {
   ok: "statusOk",
   ready: "statusReady",
@@ -1408,6 +1504,7 @@ const FLEET_STATUS_KEYS: Record<string, string> = {
   offline: "statusOffline",
   listening: "statusListening",
   missing: "statusMissing",
+  "not-installed": "statusNotInstalled",
 };
 
 function translateFleetToken(t: (key: string) => string, token: string): string {

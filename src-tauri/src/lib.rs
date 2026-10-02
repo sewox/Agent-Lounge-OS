@@ -40,6 +40,16 @@ use tauri_plugin_dialog::DialogExt;
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
 
+/// Kernel file-log rotation: larger than plugin defaults (~40 KB / KeepOne).
+fn kernel_log_settings() -> (u128, tauri_plugin_log::RotationStrategy) {
+    const MAX_FILE_SIZE: u128 = 5 * 1024 * 1024;
+    const KEEP_COUNT: usize = 5;
+    (
+        MAX_FILE_SIZE,
+        tauri_plugin_log::RotationStrategy::KeepSome(KEEP_COUNT),
+    )
+}
+
 /// `connected_tools` boşsa onboarding, doluysa dashboard.
 pub fn initial_window_route() -> &'static str {
     match ExperienceStore::open(db::default_db_path(data_root())) {
@@ -85,17 +95,33 @@ pub fn run_with_start_route(start_route: &'static str) {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
-
             let workspace = resolve_data_root_for_app(app.handle()).map_err(|err| {
                 format!("uygulama veri dizini hazırlanamadı (LOUNGE_DATA_DIR veya app data): {err}")
             })?;
+            let log_dir = workspace.join("logs");
+            std::fs::create_dir_all(&log_dir).map_err(|err| {
+                format!("log dizini oluşturulamadı ({}): {err}", log_dir.display())
+            })?;
+            // Always persist kernel/supervisor logs under the data dir so empty
+            // redirected stdout/stderr still leaves a diagnosable file.
+            // Plugin defaults are ~40 KB + KeepOne — too small for diagnostics.
+            let (max_file_size, rotation_strategy) = kernel_log_settings();
+            app.handle().plugin(
+                tauri_plugin_log::Builder::new()
+                    .level(log::LevelFilter::Info)
+                    .max_file_size(max_file_size)
+                    .rotation_strategy(rotation_strategy)
+                    .targets([
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                            path: log_dir.clone(),
+                            file_name: Some("kernel".into()),
+                        }),
+                    ])
+                    .build(),
+            )?;
+            log::info!("kernel log → {}", log_dir.join("kernel.log").display());
+
             let store = ExperienceStore::open(db::default_db_path(&workspace)).map_err(|err| {
                 format!(
                     "experience veritabanı açılamadı ({}): {err}",
@@ -223,9 +249,19 @@ pub fn run_with_start_route(start_route: &'static str) {
                     let mut manager = services.lock().await;
                     let report = manager.ensure_all().await;
                     log::info!(
-                        "bootstrap lmr={} nats={} memory={} plugin={}",
+                        "bootstrap lmr={}({}) nats={}({}) memory={} plugin={}",
                         report.ollama.running,
+                        report
+                            .ollama
+                            .availability
+                            .as_deref()
+                            .unwrap_or(if report.ollama.running { "up" } else { "down" }),
                         report.nats.running,
+                        report
+                            .nats
+                            .availability
+                            .as_deref()
+                            .unwrap_or(if report.nats.running { "up" } else { "down" }),
                         report.memory.running,
                         report.plugin.running
                     );
@@ -256,6 +292,7 @@ pub fn run_with_start_route(start_route: &'static str) {
         .invoke_handler(tauri::generate_handler![
             ensure_services,
             service_status,
+            get_runtime_paths,
             index_workspace,
             scan_workspace,
             list_index_jobs,
@@ -374,6 +411,32 @@ async fn ensure_services(state: tauri::State<'_, SharedServices>) -> Result<Serv
 async fn service_status(state: tauri::State<'_, SharedServices>) -> Result<ServiceReport, String> {
     let manager = state.lock().await;
     Ok(manager.snapshot().await)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RuntimePaths {
+    data_root: String,
+    kernel_log: String,
+    lmr_log: String,
+    nats_log: String,
+    lmr_dir: String,
+    lmr_binary: String,
+}
+
+#[tauri::command]
+fn get_runtime_paths() -> RuntimePaths {
+    let root = services::data_root();
+    let lmr_dir = services::lounge_lmr_dir();
+    let nats_dir = services::lounge_nats_dir();
+    RuntimePaths {
+        data_root: root.display().to_string(),
+        kernel_log: root.join("logs").join("kernel.log").display().to_string(),
+        lmr_log: lmr_dir.join("serve.log").display().to_string(),
+        nats_log: nats_dir.join("nats-server.log").display().to_string(),
+        lmr_dir: lmr_dir.display().to_string(),
+        lmr_binary: services::lounge_lmr_binary_path().display().to_string(),
+    }
 }
 
 #[tauri::command]
@@ -1413,4 +1476,19 @@ async fn set_graph_ui_port(
         .await
         .map_err(|err| err.to_string())?;
     Ok(port)
+}
+
+#[cfg(test)]
+mod kernel_log_config_tests {
+    #[test]
+    fn kernel_log_settings_are_multi_mb_keep_some() {
+        let (max_size, strategy) = super::kernel_log_settings();
+        assert_eq!(max_size, 5 * 1024 * 1024);
+        match strategy {
+            tauri_plugin_log::RotationStrategy::KeepSome(n) => assert_eq!(n, 5),
+            other => panic!("expected KeepSome(5), got {other:?}"),
+        }
+        // Plugin defaults (tauri-plugin-log 2.10.0): 40_000 bytes + KeepOne.
+        assert!(max_size > 40_000);
+    }
 }

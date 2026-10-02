@@ -66,9 +66,10 @@ pub use open_editor::{
 };
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
-    data_root, ensure_data_layout, lounge_laya_dir, lounge_ollama_endpoint, nats_monitor_endpoint,
-    resolve_data_root, resolve_data_root_for_app, system_ollama_endpoint, DataRootEnv,
-    APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
+    data_root, ensure_data_layout, lounge_laya_dir, lounge_lmr_binary_path, lounge_lmr_dir,
+    lounge_nats_dir, lounge_ollama_endpoint, nats_monitor_endpoint, resolve_data_root,
+    resolve_data_root_for_app, system_ollama_endpoint, DataRootEnv, APP_IDENTIFIER,
+    LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,
@@ -167,9 +168,25 @@ impl ServiceManager {
     pub async fn snapshot(&self) -> ServiceReport {
         let ollama_running = self.ollama.is_healthy().await;
         let nats_running = self.nats.is_healthy().await;
+        let ollama = if ollama_running {
+            self.ollama.snapshot(true, None, None)
+        } else if !self.ollama.runtime_installed() {
+            self.ollama.not_installed_health()
+        } else {
+            self.ollama
+                .snapshot(false, None, Some("LMR ayakta değil".into()))
+        };
+        let nats = if nats_running {
+            self.nats.snapshot(true, None, None)
+        } else if !self.nats.runtime_installed() {
+            self.nats.not_installed_health()
+        } else {
+            self.nats
+                .snapshot(false, None, Some("NATS ayakta değil".into()))
+        };
         ServiceReport {
-            ollama: self.ollama.snapshot(ollama_running, None, None),
-            nats: self.nats.snapshot(nats_running, None, None),
+            ollama,
+            nats,
             memory: self.memory.diagnose(),
             plugin: plugin_snapshot(),
         }
@@ -236,9 +253,12 @@ mod tests {
 
         let report = manager.ensure_all().await;
         assert!(!report.ollama.running);
+        assert!(report.ollama.is_not_installed());
         assert!(report.nats.running);
         assert!(!report.memory.running);
         assert!(report.plugin.running);
         assert!(!report.all_core_running());
+        // Missing optional LMR is not a core crash / SERVICE DEGRADED.
+        assert!(!report.core_degraded());
     }
 }

@@ -85,6 +85,9 @@ impl GuardedCommand {
             .unwrap_or(&raw)
             .to_ascii_lowercase();
         base.strip_suffix(".exe")
+            .or_else(|| base.strip_suffix(".cmd"))
+            .or_else(|| base.strip_suffix(".bat"))
+            .or_else(|| base.strip_suffix(".com"))
             .map(str::to_string)
             .unwrap_or(base)
     }
@@ -101,7 +104,8 @@ impl GuardedCommand {
             return Ok(());
         }
         let base = self.program_base();
-        // Exact match after stripping `.exe`; target-triple suffix (`name-triple`) still ok.
+        // Exact match after stripping Windows executable suffixes (.exe/.cmd/.bat/.com);
+        // target-triple suffix (`name-triple`) still ok.
         // Must NOT prefix-match bare names (`kill` ↛ `killall`) — F18.
         let allowed = INTERNAL_DAEMON_ALLOWLIST
             .iter()
@@ -283,6 +287,74 @@ mod tests {
             .internal_daemon()
             .into_std_command();
         assert!(err.is_ok(), "kill.exe should strip .exe and exact-match");
+    }
+
+    /// F22: Windows launcher suffixes must strip for allowlist AND must not
+    /// let a non-allowlisted destructive program sneak past as an "internal_daemon".
+    #[test]
+    fn program_base_strips_windows_launcher_suffixes_case_insensitive() {
+        let _guard = test_lock();
+        let allow_cases = [
+            "ollama.exe",
+            "OLLAMA.EXE",
+            "ollama.cmd",
+            "Ollama.CMD",
+            "ollama.bat",
+            "OLLAMA.BAT",
+            "ollama.com",
+            "Ollama.Com",
+            r"C:\Program Files\Lounge\nats-server.CMD",
+            "/usr/local/bin/nats-server.bat",
+        ];
+        for prog in allow_cases {
+            let result = GuardedCommand::new(prog)
+                .internal_daemon()
+                .into_std_command();
+            assert!(
+                result.is_ok(),
+                "allowlisted stem must pass after suffix strip: {prog} → {}",
+                result.err().map(|e| e.to_string()).unwrap_or_default()
+            );
+        }
+
+        // Non-allowlisted programs with the same suffixes stay blocked from bypass.
+        let deny_cases = [
+            "rm.cmd",
+            "RM.BAT",
+            "killall.com",
+            "KillAll.EXE",
+            r"C:\Windows\System32\cmd.exe",
+        ];
+        for prog in deny_cases {
+            let result = GuardedCommand::new(prog)
+                .args(["-rf", "/tmp/x"])
+                .internal_daemon()
+                .into_std_command();
+            assert!(
+                result.is_err(),
+                "non-allowlisted {prog} must not bypass via launcher suffix"
+            );
+            assert!(
+                format!("{}", result.unwrap_err()).contains("allowlisted"),
+                "{prog}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_suffix_does_not_bypass_destructive_confirmation() {
+        let _guard = test_lock();
+        reset_for_tests();
+        // Without internal_daemon, destructive argv still needs confirmation even
+        // when the program path uses .cmd/.bat/.com (suffix strip is for allowlist only).
+        for prog in ["rm.cmd", "RM.BAT", "rm.COM", "rm.exe"] {
+            reset_for_tests();
+            let result = GuardedCommand::new(prog)
+                .args(["-rf", "/tmp/suffix-bypass"])
+                .source(ActionSource::Agent)
+                .into_std_command();
+            let _ = expect_confirm_id(result);
+        }
     }
 
     #[test]

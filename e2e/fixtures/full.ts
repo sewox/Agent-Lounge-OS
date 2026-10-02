@@ -13,6 +13,7 @@ const mkHealth = (
   endpoint,
   detail: running ? "ok" : null,
   error: running ? null : "disconnected",
+  availability: null,
 });
 
 const deadSymbols: FixtureDataset["deadSymbols"] = [

@@ -379,6 +379,17 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.projects;
         case "ensure_services":
           return f.serviceReport;
+        case "service_status":
+          return f.serviceReport;
+        case "get_runtime_paths":
+          return {
+            data_root: "/tmp/AgentLounge-qa",
+            kernel_log: "/tmp/AgentLounge-qa/logs/kernel.log",
+            lmr_log: "/tmp/AgentLounge-qa/data/lmr/serve.log",
+            nats_log: "/tmp/AgentLounge-qa/data/nats/nats-server.log",
+            lmr_dir: "/tmp/AgentLounge-qa/data/lmr",
+            lmr_binary: "/tmp/AgentLounge-qa/data/lmr/ollama",
+          };
         case "list_ollama_models":
           return f.models;
         case "get_kernel_model":

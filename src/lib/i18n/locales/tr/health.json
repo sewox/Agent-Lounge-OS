@@ -28,6 +28,9 @@
   "taskQueued": "Görev kuyruğa alındı: {{message}}",
   "noAgent": "Ajan yok — Fleet'te bir worker bağlayın.",
   "viewAll": "Tümünü gör {{count}}",
-  "reindex": "Re-index workspace",
-  "deadDrillDown": "{{count}} dead symbols"
+  "reindex": "Çalışma alanını yeniden indeksle",
+  "deadDrillDown": "{{count}} ölü sembol",
+  "diagnosticsTitle": "Runtime günlükleri",
+  "diagnosticsKernelLog": "Kernel günlüğü: {{path}}",
+  "diagnosticsHint": "Supervisor ve kernel günlükleri uygulama veri dizinindedir (Ayarlar → Tanılama)."
 }

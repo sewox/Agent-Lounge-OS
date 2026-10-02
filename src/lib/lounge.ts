@@ -6,6 +6,10 @@ export type ServiceHealth = {
   endpoint: string;
   detail: string | null;
   error: string | null;
+  /** `"not_installed"` when optional binary is absent — not a crash. */
+  availability?: string | null;
+  /** Supervisor phase: `restart_exhausted` / `restart_retrying`. */
+  code?: string | null;
 };
 
 export type ServiceReport = {
@@ -15,24 +19,56 @@ export type ServiceReport = {
   plugin: ServiceHealth;
 };
 
-/** Çekirdek daemon'lar (Lounge LMR + NATS) ayakta değilse degraded. */
+export const AVAIL_NOT_INSTALLED = "not_installed";
+
+/** Supervisor auto-restart exhausted (`MAX_RESTART_ATTEMPTS`). */
+export const CODE_RESTART_EXHAUSTED = "restart_exhausted";
+/** Supervisor waiting / mid retry. */
+export const CODE_RESTART_RETRYING = "restart_retrying";
+
+export function isNotInstalled(health: ServiceHealth | null | undefined): boolean {
+  return health?.availability === AVAIL_NOT_INSTALLED;
+}
+
+function isCoreFailure(health: ServiceHealth | null | undefined): boolean {
+  return Boolean(health && !health.running && !isNotInstalled(health));
+}
+
+/** Çekirdek daemon crash / restart-limit — optional missing sayılmaz. */
 export function coreServicesDegraded(report: ServiceReport | null | undefined): boolean {
   if (!report) {
     return false;
   }
-  return !report.ollama.running || !report.nats.running;
+  return isCoreFailure(report.ollama) || isCoreFailure(report.nats);
 }
 
-/** UI banner: hangi servis(ler) down — LMR adı host Ollama değil, Lounge runtime. */
+/** UI banner: hangi servis(ler) crashed — LMR adı host Ollama değil, Lounge runtime. */
 export function degradedCoreServiceNames(report: ServiceReport | null | undefined): string[] {
   if (!report) {
     return [];
   }
   const names: string[] = [];
-  if (!report.ollama.running) {
+  if (isCoreFailure(report.ollama)) {
     names.push("LMR");
   }
-  if (!report.nats.running) {
+  if (isCoreFailure(report.nats)) {
+    names.push("NATS");
+  }
+  return names;
+}
+
+/** Fresh-install optional binaries absent (install guidance, not alarms). */
+export function optionalMissingServiceNames(
+  report: ServiceReport | null | undefined,
+): string[] {
+  if (!report) {
+    return [];
+  }
+  const names: string[] = [];
+  if (isNotInstalled(report.ollama)) {
+    names.push("LMR");
+  }
+  if (isNotInstalled(report.nats)) {
     names.push("NATS");
   }
   return names;
@@ -44,7 +80,38 @@ export type DegradedRestartPhase =
   | { kind: "exhausted"; max: number }
   | { kind: "unknown" };
 
-function parseRestartPhase(error: string | null | undefined): DegradedRestartPhase | null {
+function parseDetailInt(detail: string | null | undefined, key: string): number | null {
+  if (!detail) {
+    return null;
+  }
+  const match = detail.match(new RegExp(`(?:^|\\s)${key}=(\\d+)(?:\\s|$)`, "i"));
+  return match ? Number(match[1]) : null;
+}
+
+function parseRestartPhaseFromHealth(
+  health: ServiceHealth | null | undefined,
+): DegradedRestartPhase | null {
+  if (!health || health.running || isNotInstalled(health)) {
+    return null;
+  }
+  const code = (health.code || "").trim();
+  const detail = health.detail;
+  if (code === CODE_RESTART_EXHAUSTED) {
+    return { kind: "exhausted", max: parseDetailInt(detail, "max") ?? 5 };
+  }
+  if (code === CODE_RESTART_RETRYING) {
+    return {
+      kind: "retrying",
+      attempt: parseDetailInt(detail, "attempt") ?? 1,
+      max: parseDetailInt(detail, "max") ?? 5,
+      waitSecs: parseDetailInt(detail, "wait"),
+    };
+  }
+  // Legacy Turkish error strings (pre-code field) — keep for older snapshots.
+  return parseRestartPhaseFromError(health.error);
+}
+
+function parseRestartPhaseFromError(error: string | null | undefined): DegradedRestartPhase | null {
   if (!error) {
     return null;
   }
@@ -70,7 +137,7 @@ function parseRestartPhase(error: string | null | undefined): DegradedRestartPha
 
 /**
  * Prefer exhausted over retrying when either core daemon reports it.
- * Returns null when nothing is degraded.
+ * Returns null when nothing is degraded (optional missing excluded).
  */
 export function resolveDegradedRestart(
   report: ServiceReport | null | undefined,
@@ -79,8 +146,8 @@ export function resolveDegradedRestart(
   if (names.length === 0 || !report) {
     return null;
   }
-  const phases = [report.ollama.error, report.nats.error]
-    .map(parseRestartPhase)
+  const phases = [report.ollama, report.nats]
+    .map(parseRestartPhaseFromHealth)
     .filter((row): row is DegradedRestartPhase => row != null);
   const exhausted = phases.find((row) => row.kind === "exhausted");
   if (exhausted) {
@@ -91,6 +158,79 @@ export function resolveDegradedRestart(
     return { names, phase: retrying };
   }
   return { names, phase: phases[0] ?? { kind: "unknown" } };
+}
+
+/** True when supervisor reports restart_exhausted / restart_retrying via machine code. */
+export function isRestartLimited(health: ServiceHealth | null | undefined): boolean {
+  const code = (health?.code || "").trim();
+  if (code === CODE_RESTART_EXHAUSTED || code === CODE_RESTART_RETRYING) {
+    return true;
+  }
+  // Legacy snapshots without `code` — Turkish / English degraded banner text only.
+  return Boolean(health?.error && /Service Degraded|limiti aşıldı/i.test(health.error));
+}
+
+export type FleetHealthFields = {
+  status: string;
+  endpoint: string;
+  detail: string;
+  heartbeat: string;
+  pid: string;
+  uptime: string;
+  restarts: string;
+  tone: "ok" | "warn" | "down";
+};
+
+/** Fleet row fields from ServiceHealth — prefers machine `code`, not localized error text. */
+export function fleetHealthFields(
+  health:
+    | {
+        running?: boolean;
+        endpoint?: string;
+        detail?: string | null;
+        error?: string | null;
+        started_by_us?: boolean;
+        availability?: string | null;
+        code?: string | null;
+      }
+    | undefined,
+  fallbackEndpoint: string,
+  missingLabel: string,
+): FleetHealthFields {
+  const running = health?.running === true;
+  const err = (health?.error || "").trim();
+  const notInstalled = health?.availability === AVAIL_NOT_INSTALLED;
+  const code = (health?.code || "").trim();
+  const detailRaw = (health?.detail || "").trim();
+  const detail =
+    detailRaw || (running ? "ok" : notInstalled ? "not-installed" : missingLabel);
+  const attempt = detailRaw.match(/(?:^|\s)attempt=(\d+)(?:\s|$)/i);
+  const max = detailRaw.match(/(?:^|\s)max=(\d+)(?:\s|$)/i);
+  const exhausted = code === CODE_RESTART_EXHAUSTED;
+  const retrying = code === CODE_RESTART_RETRYING;
+  return {
+    status: running
+      ? "ready"
+      : notInstalled
+        ? "not-installed"
+        : exhausted
+          ? "restart-limit"
+          : "down",
+    endpoint: health?.endpoint || fallbackEndpoint,
+    detail: err || detail,
+    heartbeat: running ? "live" : "stale",
+    pid: health?.started_by_us ? "supervised" : "—",
+    uptime: running ? "up" : "—",
+    restarts:
+      attempt && max
+        ? `${attempt[1]}/${max[1]}`
+        : exhausted
+          ? "max"
+          : retrying && max
+            ? `?/${max[1]}`
+            : "—",
+    tone: running ? "ok" : notInstalled ? "warn" : exhausted || retrying ? "warn" : "down",
+  };
 }
 
 export type DecisionGatePhase = "loading" | "ready" | "failed" | "available";

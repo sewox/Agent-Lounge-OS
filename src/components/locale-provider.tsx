@@ -13,6 +13,7 @@ import { I18nextProvider } from "react-i18next";
 import { i18n, initI18n, persistLocale } from "@/lib/i18n/config";
 import {
   detectInitialLocale,
+  readStoredLocale,
   type AppLocale,
   writeStoredLocale,
 } from "@/lib/i18n/locale";
@@ -54,6 +55,11 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
   const locale = useSyncExternalStore(subscribeLocale, getLocaleSnapshot, getServerLocaleSnapshot);
 
   useEffect(() => {
+    // First launch (K5 / X-01): persist OS-detected locale so onboarding + Settings stay consistent.
+    if (!readStoredLocale()) {
+      writeStoredLocale(locale);
+      persistLocale(locale);
+    }
     void i18n.changeLanguage(locale);
     document.documentElement.lang = locale;
   }, [locale]);

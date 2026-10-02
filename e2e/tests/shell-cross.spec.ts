@@ -92,7 +92,7 @@ test.describe("SH — global shell", () => {
     expect(log.some((e) => e.cmd === "set_kernel_model")).toBeTruthy();
   });
 
-  test("SH-07 · Daemon rows show Running or Disconnected (not bare —)", async ({
+  test("SH-07 · Daemon rows show Running, Disconnected, or Not installed", async ({
     page,
   }) => {
     await openRoute(page, "/dashboard", "full");
@@ -100,10 +100,10 @@ test.describe("SH — global shell", () => {
     await expect(daemonBlock).toBeVisible();
     await page.waitForTimeout(500);
     const text = await page.locator('[data-qa="sidebar"]').innerText();
-    expect(/Running|Disconnected/i.test(text)).toBeTruthy();
+    expect(/Running|Disconnected|Not installed|Kurulu değil/i.test(text)).toBeTruthy();
     expect(text).not.toMatch(/\n\s*—\s*\n/);
-    // Disconnected rows expose Restart Service.
-    if (/Disconnected/i.test(text)) {
+    // Disconnected (crashed) rows expose Restart Service; not-installed does not.
+    if (/Disconnected/i.test(text) && !/Not installed|Kurulu değil/i.test(text)) {
       await expect(page.getByRole("button", { name: /Restart Service/i }).first()).toBeVisible();
     }
   });
@@ -246,8 +246,8 @@ test.describe("X — cross-cutting", () => {
     const lang = await page.locator("html").getAttribute("lang");
     expect(lang).toBe("tr");
     const stored = await page.evaluate(() => localStorage.getItem("lounge.locale"));
-    // First launch does not force-write until the user picks a language.
-    expect(stored == null || /tr/i.test(stored ?? "")).toBeTruthy();
+    // First launch persists OS language so onboarding + Settings stay consistent (K5 / X-01).
+    expect(stored).toMatch(/tr/i);
     await context.close();
   });
 

@@ -29,5 +29,8 @@
   "noAgent": "No agent available — connect a worker in Fleet.",
   "viewAll": "View all {{count}}",
   "reindex": "Re-index workspace",
-  "deadDrillDown": "{{count}} dead symbols"
+  "deadDrillDown": "{{count}} dead symbols",
+  "diagnosticsTitle": "Runtime logs",
+  "diagnosticsKernelLog": "Kernel log: {{path}}",
+  "diagnosticsHint": "Supervisor and kernel logs are under the app data directory (see Settings → Diagnostics)."
 }

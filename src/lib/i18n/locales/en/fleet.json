@@ -33,6 +33,7 @@
   "statusOffline": "offline",
   "statusListening": "listening",
   "statusMissing": "missing",
+  "statusNotInstalled": "not-installed",
   "detailNatsWorker": "nats worker",
   "endpointNats": "nats",
   "localWeights": "local weights",

@@ -84,34 +84,51 @@ fn host_ollama_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// LMR binary: yalnızca uygulama dizini. Host PATH'e düşmez.
-pub async fn ensure_lmr_runtime(requested: &str) -> Result<PathBuf> {
+/// Sync probe: is an LMR-owned binary present? Never falls back to host Ollama.
+pub fn lmr_runtime_present(requested: &str) -> bool {
+    resolve_lmr_runtime_path(requested).is_some()
+}
+
+fn resolve_lmr_runtime_path(requested: &str) -> Option<PathBuf> {
     let requested = requested.trim();
     let requested_path = PathBuf::from(requested);
     if requested_path.is_file() {
-        return Ok(requested_path);
+        return Some(requested_path);
     }
 
     if !is_default_ollama_name(requested) {
-        return find_executable(requested)
-            .ok_or_else(|| anyhow::anyhow!("LMR runtime yok ({requested})"));
+        return find_executable(requested);
     }
 
     if let Some(path) = std::env::var_os("LOUNGE_LMR_BINARY") {
         let path = PathBuf::from(path);
         if path.is_file() {
-            return Ok(path);
+            return Some(path);
         }
     }
 
     let managed = lounge_lmr_binary_path();
     if managed.is_file() {
-        return Ok(managed);
+        return Some(managed);
     }
+    None
+}
 
-    anyhow::bail!(
-        "LMR runtime yok ({}). Host Ollama kullanılmaz.",
-        lounge_lmr_dir().display()
+/// LMR binary: yalnızca uygulama dizini. Host PATH'e düşmez.
+pub async fn ensure_lmr_runtime(requested: &str) -> Result<PathBuf> {
+    resolve_lmr_runtime_path(requested).ok_or_else(|| {
+        anyhow::anyhow!(
+            "LMR runtime yok ({}). Host Ollama kullanılmaz.",
+            lounge_lmr_dir().display()
+        )
+    })
+}
+
+/// Optional install guidance when the managed binary is absent.
+pub fn lmr_not_installed_detail() -> String {
+    format!(
+        "optional — place an Ollama-compatible binary at {} (or set LOUNGE_LMR_BINARY)",
+        lounge_lmr_binary_path().display()
     )
 }
 
@@ -147,5 +164,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("LMR runtime yok"));
+    }
+
+    #[test]
+    fn missing_default_runtime_is_not_present() {
+        // Default name resolves only under data/lmr — never host PATH.
+        let prev = std::env::var_os("LOUNGE_LMR_BINARY");
+        std::env::remove_var("LOUNGE_LMR_BINARY");
+        assert!(!lmr_runtime_present("ollama"));
+        assert!(lmr_not_installed_detail().contains("optional"));
+        match prev {
+            Some(v) => std::env::set_var("LOUNGE_LMR_BINARY", v),
+            None => std::env::remove_var("LOUNGE_LMR_BINARY"),
+        }
     }
 }
