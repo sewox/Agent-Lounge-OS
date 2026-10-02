@@ -83,12 +83,18 @@ const blockerExpected = rows.filter((r) => {
   return isB && failedAsExpected;
 });
 
+const headSha =
+  process.env.BASELINE_HEAD_SHA ||
+  process.env.GITHUB_SHA ||
+  "";
+
 const lines = [];
-lines.push("# QA Baseline — 2026-09-26 (PR-0)");
+lines.push("# QA Baseline — 2026-09-26 (PR-5)");
 lines.push("");
 lines.push("| Field | Value |");
 lines.push("|-------|-------|");
-lines.push("| Commit base | `15e19e9` (main) |");
+lines.push("| Commit base | `main` |");
+if (headSha) lines.push(`| Head | \`${headSha.slice(0, 7)}\` |`);
 lines.push(`| Generated | ${new Date().toISOString()} |`);
 lines.push("| Suite | Playwright e2e (S1) + S4 gates |");
 lines.push(
@@ -97,16 +103,24 @@ lines.push(
 lines.push(`| Layout metrics rows | ${metrics.length} (route × viewport) |`);
 lines.push(`| Layout violations | ${layoutViolations.length} |`);
 lines.push(
-  "| CI | `qa-e2e.yml` non-blocking; §10.2 `qa-cross-platform.yml`; S2-Linux `linux-bundle.yml` (`agent-lounge-linux`) |",
+  "| CI | required `ci.yml` (static-gates); `qa-e2e.yml` Playwright; §10.2 `qa-cross-platform.yml`; S2-Linux `linux-bundle.yml` |",
 );
 lines.push("");
 lines.push("## Verdict");
 lines.push("");
-lines.push(
-  unexpectedFail === 0
-    ? "Suite exit green for PR-0 harness (expected-fail cases intentionally failing until PR-1…5). L1–L6 hardened for live S2 findings (narrow panels, sparse interiors, New Node overlap)."
-    : `Harness has ${unexpectedFail} unexpected failures — investigate before relying on CI signal.`,
-);
+if (unexpectedFail > 0) {
+  lines.push(
+    `Harness has ${unexpectedFail} unexpected failures — investigate before relying on CI signal.`,
+  );
+} else if (expectedFail === 0 && skipped === 0) {
+  lines.push(
+    "PR-5 zero-failure target met: 0 expected-fail, 0 unexpected, 0 skipped. L1–L6 layout green across D0–D4. AP-10 remains manual S2 per-OS.",
+  );
+} else {
+  lines.push(
+    "Suite exit green with residual expected-fail/skips mapped below. L1–L6 hardened for live S2 findings.",
+  );
+}
 lines.push("");
 lines.push("## Per-test results");
 lines.push("");
