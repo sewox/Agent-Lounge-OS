@@ -1418,6 +1418,11 @@ function translateFleetToken(t: (key: string) => string, token: string): string 
 export function FleetPanel() {
   const { t } = useTranslation("fleet");
   const { report, model, decisionGate, layaEngine } = useLounge();
+  const copyEndpoint = (endpoint: string) => {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(endpoint);
+    }
+  };
   const engineLabel = formatLayaEngineFleetStatus(layaEngine);
   const downloadPct = layaEnginePercentage(layaEngine);
   const gateHint =
@@ -1590,7 +1595,7 @@ export function FleetPanel() {
                         className="block w-full truncate text-left hover:underline"
                         onClick={(event) => {
                           event.stopPropagation();
-                          void navigator.clipboard?.writeText(row.endpoint);
+                          copyEndpoint(row.endpoint);
                         }}
                       >
                         {row.endpoint}
