@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
 import {
@@ -37,22 +38,22 @@ const SOURCE_LABEL: Record<string, string> = {
   antigravity: "Antigravity",
   lmr: "LMR",
   ollama: "Ollama",
-  system: "Sistem",
+  system: "System",
 };
 
 const SOURCE_TITLE: Record<string, string> = {
   lmr: "Lounge Model Runner",
-  ollama: "Ollama Sunucusu",
+  ollama: "Ollama Server",
 };
 
 const INSTALL: Record<string, { label: string; href: string }> = {
-  ollama: { label: "Ollama kur", href: "https://ollama.com/download" },
+  ollama: { label: "Install Ollama", href: "https://ollama.com/download" },
   claude_desktop: { label: "Claude Desktop", href: "https://claude.ai/download" },
   claude_cli: { label: "Claude CLI", href: "https://docs.anthropic.com/en/docs/claude-code" },
   cursor: { label: "Cursor", href: "https://cursor.com/download" },
   grok_bot: { label: "Grok", href: "https://grok.x.ai" },
   antigravity: { label: "Antigravity", href: "https://antigravity.google" },
-  git: { label: "Git kur", href: "https://git-scm.com/downloads" },
+  git: { label: "Install Git", href: "https://git-scm.com/downloads" },
   gh: { label: "GitHub CLI", href: "https://cli.github.com" },
   docker: { label: "Docker Desktop", href: "https://docs.docker.com/get-docker/" },
 };
@@ -83,6 +84,7 @@ function installFor(id: string): { label: string; href: string } | null {
 }
 
 export function OnboardingPanel() {
+  const { t } = useTranslation("onboarding");
   const router = useRouter();
   const [report, setReport] = useState<DiscoveryReport | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -398,11 +400,10 @@ export function OnboardingPanel() {
         <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low p-3">
           <div className="min-w-0">
             <h1 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
-              İlk açılış · Sistem keşfi
+              {t("title")}
             </h1>
             <p className="mt-1 font-body text-body text-on-surface-variant">
-              Yerel AI uygulamaları, plugin’ler, LMR modelleri ve sistem CLI taranır. Seçtiklerin
-              Lounge’a bağlanır; MCP env değerleri kaydedilmez.
+              {t("desc")}
             </p>
           </div>
           <button
@@ -411,7 +412,7 @@ export function OnboardingPanel() {
             disabled={scanning}
             className="shrink-0 rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-body text-on-surface hover:bg-surface-bright disabled:opacity-50"
           >
-            {scanning ? "Scanning…" : "Yeniden tara"}
+            {scanning ? t("scanning") : t("rescan")}
           </button>
         </div>
         <SourceTable sources={report?.sources ?? []} />
@@ -436,24 +437,24 @@ export function OnboardingPanel() {
       />
 
       <ToolGroup
-        title="Yerel AI uygulamaları"
-        emptyHint="Claude Desktop, Claude CLI, Cursor, Antigravity veya Grok Bot bulunamadı."
+        title={t("appsTitle")}
+        emptyHint={t("appsEmpty")}
         tools={apps}
         selected={selected}
         onToggle={toggle}
         onSelectAll={() => selectGroup(apps, true)}
       />
       <ToolGroup
-        title="Plugin’ler"
-        emptyHint="Host uygulamalarda MCP plugin’i yok."
+        title={t("pluginsTitle")}
+        emptyHint={t("pluginsEmpty")}
         tools={plugins}
         selected={selected}
         onToggle={toggle}
         onSelectAll={() => selectGroup(plugins, true)}
       />
       <ToolGroup
-        title="Yerel modeller"
-        emptyHint="LMR veya Ollama Sunucusu üzerinde yüklü model yok."
+        title={t("modelsTitle")}
+        emptyHint={t("modelsEmpty")}
         missing={ollamaInstall}
         tools={models}
         selected={selected}
@@ -461,8 +462,8 @@ export function OnboardingPanel() {
         onSelectAll={() => selectGroup(models, true)}
       />
       <ToolGroup
-        title="Sistem CLI"
-        emptyHint="PATH üzerinde git / gh / docker görünmüyor."
+        title={t("cliTitle")}
+        emptyHint={t("cliEmpty")}
         tools={systemTools}
         selected={selected}
         onToggle={toggle}
@@ -471,7 +472,7 @@ export function OnboardingPanel() {
 
       <div className="mt-auto flex items-center justify-between rounded-lg border border-outline-variant bg-surface-container px-3 py-2">
         <div className="font-mono text-body text-on-surface-variant">
-          {selected.size} seçildi
+          {selected.size}
         </div>
         <button
           type="button"
@@ -479,17 +480,15 @@ export function OnboardingPanel() {
           disabled={saving || !report || (selected.size === 0 && hfSelected.size === 0)}
           className="rounded bg-primary-container px-3 py-1.5 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
         >
-          {saving ? "Kaydediliyor…" : "Sistemi Başlat"}
+          {saving ? t("saving") : t("finish")}
         </button>
       </div>
-      <p className="font-body text-meta text-outline">
-        Seçim kaydedilince Dashboard’a dönülür · MCP env değerleri saklanmaz
-      </p>
     </section>
   );
 }
 
 function ScanningSystem() {
+  const { t } = useTranslation("onboarding");
   return (
     <section
       data-qa="panel"
@@ -499,10 +498,7 @@ function ScanningSystem() {
     >
       <BrandMark size={56} className="rounded-md" />
       <div className="font-mono text-xs font-bold tracking-[0.28em] text-on-surface uppercase">
-        Scanning System...
-      </div>
-      <div className="font-mono text-meta text-outline">
-        LMR :18790 · abonelik uygulamaları · plugin · PATH
+        {t("scanningSystem")}
       </div>
     </section>
   );

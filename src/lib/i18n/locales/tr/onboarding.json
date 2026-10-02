@@ -1,0 +1,21 @@
+{
+  "title": "İlk açılış · Sistem keşfi",
+  "desc": "Yerel AI uygulamaları, plugin’ler, LMR modelleri ve sistem CLI taranır. Seçtiklerin Lounge’a bağlanır; MCP env değerleri kaydedilmez.",
+  "rescan": "Yeniden tara",
+  "scanning": "Scanning…",
+  "scanningSystem": "Scanning System...",
+  "finish": "Sistemi Başlat",
+  "saving": "Kaydediliyor…",
+  "appsTitle": "Yerel AI uygulamaları",
+  "appsEmpty": "Claude Desktop, Claude CLI, Cursor, Antigravity veya Grok Bot bulunamadı.",
+  "pluginsTitle": "Plugin’ler",
+  "pluginsEmpty": "Host uygulamalarda MCP plugin’i yok.",
+  "modelsTitle": "Yerel modeller",
+  "modelsEmpty": "LMR veya Ollama Sunucusu üzerinde yüklü model yok.",
+  "cliTitle": "Sistem CLI",
+  "cliEmpty": "PATH üzerinde git / gh / docker görünmüyor.",
+  "sourceSystem": "Sistem",
+  "sourceOllamaServer": "Ollama Sunucusu",
+  "installOllama": "Ollama kur",
+  "installGit": "Git kur"
+}

@@ -5,6 +5,7 @@ import enApprovals from "./locales/en/approvals.json";
 import enCommon from "./locales/en/common.json";
 import enDashboard from "./locales/en/dashboard.json";
 import enHealth from "./locales/en/health.json";
+import enOnboarding from "./locales/en/onboarding.json";
 import enSettings from "./locales/en/settings.json";
 import enShell from "./locales/en/shell.json";
 import enVault from "./locales/en/vault.json";
@@ -12,14 +13,15 @@ import trApprovals from "./locales/tr/approvals.json";
 import trCommon from "./locales/tr/common.json";
 import trDashboard from "./locales/tr/dashboard.json";
 import trHealth from "./locales/tr/health.json";
+import trOnboarding from "./locales/tr/onboarding.json";
 import trSettings from "./locales/tr/settings.json";
 import trShell from "./locales/tr/shell.json";
 import trVault from "./locales/tr/vault.json";
 import { detectInitialLocale, LOCALE_KEY, type AppLocale } from "./locale";
 
 /**
- * Real dictionaries for all primary namespaces.
- * fleet / quotas / telemetry / onboarding leftovers may still have mixed copy.
+ * Real dictionaries for primary namespaces.
+ * fleet / quotas / telemetry may still have residual mixed copy.
  */
 export const I18N_NAMESPACES = [
   "shell",
@@ -29,6 +31,7 @@ export const I18N_NAMESPACES = [
   "common",
   "vault",
   "health",
+  "onboarding",
 ] as const;
 
 export type I18nNamespace = (typeof I18N_NAMESPACES)[number];
@@ -42,6 +45,7 @@ const resources = {
     common: enCommon,
     vault: enVault,
     health: enHealth,
+    onboarding: enOnboarding,
   },
   tr: {
     shell: trShell,
@@ -51,6 +55,7 @@ const resources = {
     common: trCommon,
     vault: trVault,
     health: trHealth,
+    onboarding: trOnboarding,
   },
 } as const;
 
