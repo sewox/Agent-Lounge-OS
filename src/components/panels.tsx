@@ -163,17 +163,12 @@ export function OverviewKpis() {
       />
       <Kpi
         label={t("kpi.indexedFiles")}
-<<<<<<< HEAD
         value={indexedFiles.toLocaleString("en-US")}
-        hint={lastIndex?.project ? `${lastIndex.project} · memory_bridge` : "memory_bridge"}
-=======
-        value={indexedFiles.toLocaleString()}
         hint={
           lastIndex?.project
             ? `${lastIndex.project} · ${tStream("kpiMemoryBridge")}`
             : tStream("kpiMemoryBridge")
         }
->>>>>>> 8dd8b67 (feat(pr-5): i18n namespaces for fleet/quotas/stream/telemetry)
         badge={
           <span className="font-mono text-meta text-on-surface-variant">
             {t("repos", { count: projects.length })}
@@ -1882,13 +1877,8 @@ export function TelemetryPanel() {
             <div className="space-y-4">
               <p className="text-meta text-outline">
                 {report.scopeLabel}
-<<<<<<< HEAD
-                {tauriHost ? "" : " · tarayıcı"}
-                {loading ? " · yenileniyor…" : ""}
-=======
-                {isTauri() ? "" : t("browserSuffix")}
+                {tauriHost ? "" : t("browserSuffix")}
                 {loading ? t("refreshingSuffix") : ""}
->>>>>>> 8dd8b67 (feat(pr-5): i18n namespaces for fleet/quotas/stream/telemetry)
               </p>
               <div className="grid gap-2 sm:grid-cols-3">
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
