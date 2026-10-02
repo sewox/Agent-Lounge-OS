@@ -123,6 +123,11 @@ jobs:
       - name: Small-font grep
         run: bash scripts/qa/gates/small-font.sh
 
+      - name: Hydration safety gate
+        run: bash scripts/qa/gates/hydration-safety.sh
+        env:
+          QA_HYDRATION_SAFETY_STRICT: "1"
+
   ci:
     name: CI
     needs: [frontend, rust, workers, static-gates]

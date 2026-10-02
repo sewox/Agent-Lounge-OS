@@ -11,8 +11,10 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { useLounge } from "@/components/lounge-provider";
-import { isTauri, type AstNode, type LoungeExperience } from "@/lib/lounge";
+import { type AstNode, type LoungeExperience } from "@/lib/lounge";
 import { searchBrowserExperiences } from "@/lib/mock/browser-fixtures";
+import { useIsTauri } from "@/hooks/use-is-tauri";
+import { usePlatform } from "@/hooks/use-platform";
 import { paletteShortcutLabel } from "@/lib/platform";
 
 type PaletteItem = {
@@ -63,8 +65,10 @@ export function CommandPalette() {
   const [grokBusy, setGrokBusy] = useState(false);
   const [wasOpen, setWasOpen] = useState(openCommandPalette);
   const inputRef = useRef<HTMLInputElement>(null);
-  const mockMode = !isTauri();
-  const shortcutLabel = paletteShortcutLabel();
+  const tauriHost = useIsTauri();
+  const mockMode = !tauriHost;
+  const platform = usePlatform();
+  const shortcutLabel = paletteShortcutLabel(platform);
 
   if (wasOpen !== openCommandPalette) {
     setWasOpen(openCommandPalette);
@@ -110,7 +114,7 @@ export function CommandPalette() {
     const q = query.trim();
     const timer = window.setTimeout(() => {
       void (async () => {
-        if (!isTauri()) {
+        if (!tauriHost) {
           setRemoteExperiences(searchBrowserExperiences(q));
           // Browser harness: search in-provider projects/experiences only — no fake map nodes.
           setRemoteNodes([]);
@@ -146,7 +150,7 @@ export function CommandPalette() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [openCommandPalette, query]);
+  }, [openCommandPalette, query, tauriHost]);
 
   const projectRows = useMemo(() => {
     if (semanticMap.projects.length > 0) {
@@ -168,7 +172,7 @@ export function CommandPalette() {
     if (remoteExperiences.length > 0) {
       return remoteExperiences;
     }
-    if (!isTauri()) {
+    if (!tauriHost) {
       return searchBrowserExperiences(query);
     }
     const q = query.trim().toLowerCase();
@@ -181,7 +185,7 @@ export function CommandPalette() {
               .includes(q),
       )
       .slice(0, 8);
-  }, [experiences, query, remoteExperiences]);
+  }, [experiences, query, remoteExperiences, tauriHost]);
 
   const runGrokTest = useCallback(async () => {
     if (grokBusy) {
@@ -190,7 +194,7 @@ export function CommandPalette() {
     setGrokBusy(true);
     setStatus(null);
     try {
-      if (!isTauri()) {
+      if (!tauriHost) {
         setStatus("Grok Test yalnızca Tauri oturumunda — browser mock'ta NATS yok");
         return;
       }
@@ -206,7 +210,7 @@ export function CommandPalette() {
     } finally {
       setGrokBusy(false);
     }
-  }, [close, grokBusy, router, selectedProject]);
+  }, [close, grokBusy, router, selectedProject, tauriHost]);
 
   const items = useMemo<PaletteItem[]>(() => {
     const q = query.trim();

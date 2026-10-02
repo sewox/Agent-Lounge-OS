@@ -165,7 +165,7 @@ export function Pager({
   const totalPages = Math.max(1, pages);
   const safe = Math.min(Math.max(0, page), totalPages - 1);
   return (
-    <div className="flex items-center gap-2 font-body text-meta" suppressHydrationWarning>
+    <div className="flex items-center gap-2 font-body text-meta">
       <button
         type="button"
         disabled={safe <= 0}

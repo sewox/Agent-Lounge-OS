@@ -3,30 +3,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { onAction } from "@tauri-apps/plugin-notification";
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef } from "react";
 import { useLounge } from "@/components/lounge-provider";
-import { isTauri } from "@/lib/lounge";
+import { useIsTauri } from "@/hooks/use-is-tauri";
 
 const APPROVAL_BANNER_FOCUS_EVENT = "approval_banner_focus";
-
-/** Post-hydration Tauri flag — server + first client snapshot stay `false`. */
-let tauriHostClient = false;
-const tauriHostListeners = new Set<() => void>();
-
-function subscribeTauriHost(listener: () => void) {
-  tauriHostListeners.add(listener);
-  return () => {
-    tauriHostListeners.delete(listener);
-  };
-}
-
-function getTauriHostSnapshot() {
-  return tauriHostClient;
-}
-
-function getServerTauriHostSnapshot() {
-  return false;
-}
 
 function focusApprovalBanner(taskId?: string): void {
   const scopedChrome = taskId
@@ -65,27 +46,12 @@ export function ApprovalNotificationBridge() {
   const { approval } = useLounge();
   const taskId = approval?.task_id;
   const pendingTaskIdRef = useRef<string | undefined>(undefined);
-  const tauriReady = useSyncExternalStore(
-    subscribeTauriHost,
-    getTauriHostSnapshot,
-    getServerTauriHostSnapshot,
-  );
+  const tauriReady = useIsTauri();
   const listenersReadyRef = useRef(false);
 
   useEffect(() => {
     pendingTaskIdRef.current = taskId;
   }, [taskId]);
-
-  useEffect(() => {
-    // Defer so the first client paint matches SSR (no #418); then flip external store.
-    const id = window.setTimeout(() => {
-      tauriHostClient = isTauri();
-      for (const listener of tauriHostListeners) {
-        listener();
-      }
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, []);
 
   useEffect(() => {
     if (!tauriReady) {
