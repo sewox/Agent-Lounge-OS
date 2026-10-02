@@ -15,12 +15,15 @@ pub use decision_engine::{
     apply_user_bias, DecisionGate, DecisionGatePhase, DecisionGateStatus, DecisionResult,
     InferMeter, LoungeTelemetry, UserBiasStats, DECISION_GATE_EVENT, USER_BIAS_APPROVE_THRESHOLD,
 };
-pub use destructive_confirm::{confirm_destructive, reject_destructive, DestructivePendingEvent};
+pub use destructive_confirm::{
+    assert_destructive_hash, confirm_destructive, list_pending_destructive, reject_destructive,
+    DestructivePendingEvent,
+};
 pub use dispatcher::{default_model_lock, Dispatcher};
 pub use guarded_command::GuardedCommand;
 pub use memory_prompt::{build_knowledge_whisper, inject_knowledge_hit, whisper_publish_subjects};
 pub use policy_gate::{
-    classify_destructive, ActionSource, DestructiveClass, PolicyDecision, PolicyGate,
+    classify_argv, classify_destructive, ActionSource, DestructiveClass, PolicyDecision, PolicyGate,
 };
 pub use policy_manager::{ALERT_SECURITY, PENDING_APPROVAL, TASK_CANCEL, TASK_RESUME};
 pub use worker_registry::{

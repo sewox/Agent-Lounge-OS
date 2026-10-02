@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "types:check": "next typegen && tsc --noEmit",
-    "test:unit": "node --experimental-strip-types --import ./scripts/node-alias-loader.mjs --test src/lib/ui-prefs.test.ts src/lib/lounge-events.test.ts src/lib/i18n/locale.test.ts src/lib/approval-alert/engine.test.ts src/lib/platform.test.ts src/hooks/hydration-hooks.test.ts",
+    "test:unit": "node --experimental-strip-types --import ./scripts/node-alias-loader.mjs --test src/lib/ui-prefs.test.ts src/lib/lounge-events.test.ts src/lib/i18n/locale.test.ts src/lib/i18n/locale-parity.test.ts src/lib/approval-alert/engine.test.ts src/lib/platform.test.ts src/hooks/hydration-hooks.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:report": "node scripts/qa/generate-baseline-report.mjs",
     "qa:gates": "bash scripts/qa/gates/mock-ban.sh && bash scripts/qa/gates/small-font.sh && bash scripts/qa/gates/hydration-safety.sh",

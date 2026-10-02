@@ -1,0 +1,21 @@
+{
+  "title": "First launch · System discovery",
+  "desc": "Local AI apps, plugins, LMR models, and system CLIs are scanned. Your selections connect to Lounge; MCP env values are not stored.",
+  "rescan": "Rescan",
+  "scanning": "Scanning…",
+  "scanningSystem": "Scanning System...",
+  "finish": "Start System",
+  "saving": "Saving…",
+  "appsTitle": "Local AI apps",
+  "appsEmpty": "Claude Desktop, Claude CLI, Cursor, Antigravity, or Grok Bot not found.",
+  "pluginsTitle": "Plugins",
+  "pluginsEmpty": "No MCP plugins in host apps.",
+  "modelsTitle": "Local models",
+  "modelsEmpty": "No models installed on LMR or Ollama Server.",
+  "cliTitle": "System CLI",
+  "cliEmpty": "git / gh / docker not visible on PATH.",
+  "sourceSystem": "System",
+  "sourceOllamaServer": "Ollama Server",
+  "installOllama": "Install Ollama",
+  "installGit": "Install Git"
+}

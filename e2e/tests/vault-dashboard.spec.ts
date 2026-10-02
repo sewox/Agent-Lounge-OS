@@ -20,9 +20,7 @@ test.describe("DB — dashboard", () => {
     expect(text).not.toMatch(/\b127\b/);
   });
 
-  test("DB-02 · KPI vs vault selection consistency [expected-fail when mock KPI]", async ({
-    page,
-  }, testInfo) => {
+  test("DB-02 · KPI vs vault selection consistency", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     // Prefer Semantic Map project row — avoid experience cards that also mention the name.
     const node = page
@@ -36,11 +34,10 @@ test.describe("DB — dashboard", () => {
     const text = await page.locator("main").innerText();
     const kpiDead = /\bDEAD SYMBOLS\b[\s\S]{0,80}?(\d+)/i.exec(text);
     const clean = /temiz/i.test(text);
-    if (kpiDead && Number(kpiDead[1]) > 0 && clean) {
-      testInfo.annotations.push({ type: "expected-fail", description: "KPI>0 but selection says temiz" });
-      test.fail(true, "KPI/list mismatch");
+    // When KPI reports dead > 0, selection must not claim "temiz".
+    if (kpiDead && Number(kpiDead[1]) > 0) {
+      expect(clean, "KPI>0 must not show temiz for selection").toBe(false);
     }
-    expect(true).toBeTruthy();
   });
 
   test("DB-03 · Event Stream filters + Probe bus", async ({ page }) => {
@@ -60,15 +57,25 @@ test.describe("DB — dashboard", () => {
     }
   });
 
-  test("DB-04 · Embedded Vault visible in first fold @ D0", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "D0", "D0-only fold check");
+  test("DB-04 · Embedded Vault visible in first fold", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const vaultTitle = page.getByText(/Semantic Map \+ Experiences/i).first();
     await expect(vaultTitle).toBeVisible();
     const box = await vaultTitle.boundingBox();
-    expect(box).toBeTruthy();
-    const belowFold = Boolean(box && box.y > 700);
-    expect(belowFold, "vault title should be in first fold").toBe(false);
+    expect(box, "vault title must have a layout box").toBeTruthy();
+    const vp = page.viewportSize()!;
+    // Tightened vs prior 1.15× everywhere: desktop widths must be true first-fold.
+    // D960 (≤960px) stacks KPI + stream above the vault, so allow one short scroll
+    // (still stricter than unbounded / endless scroll).
+    const maxTop = vp.width <= 960 ? vp.height * 1.15 : vp.height;
+    expect(box!.y, "vault title top must not be above the page").toBeGreaterThanOrEqual(-2);
+    expect(box!.y, "vault title must stay near the first fold").toBeLessThan(maxTop);
+    if (vp.width > 960) {
+      expect(
+        box!.y + Math.min(box!.height, 24),
+        "vault title text must intersect the first viewport on desktop",
+      ).toBeLessThanOrEqual(vp.height);
+    }
   });
 
   test("DB-05 · Critical Quotas link to /quotas", async ({ page }) => {
@@ -343,11 +350,15 @@ test.describe("DS — dead symbols", () => {
 
   test("DS-02 · Detail on click", async ({ page }) => {
     await openRoute(page, "/health?tab=dead", "full");
-    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    const orphan = page.locator('[data-qa="dead-symbol-row"]').filter({ hasText: "orphan_dispatch" });
+    await expect(orphan.first()).toBeVisible();
+    await orphan.first().click();
     const detail = page.locator('[data-qa="dead-symbol-detail"]');
     await expect(detail).toBeVisible();
+    await expect(detail.getByText("orphan_dispatch")).toBeVisible();
     await expect(detail.getByText(/last_ref/i)).toBeVisible();
-    await expect(detail.getByText(/orphan_dispatch|referans yok/i)).toBeVisible();
+    // Fixture last_ref path for orphan_dispatch (EN/TR label already asserted above).
+    await expect(detail.getByText(/workflow_engine\.rs:168/i)).toBeVisible();
   });
 
   test("DS-03 · Open in editor (index-backed; Settings Editor preference is PR-5)", async ({
@@ -454,16 +465,7 @@ test.describe("DS — dead symbols", () => {
     ).toBeTruthy();
   });
 
-  test("DS-LAYOUT · Dead list + detail fill width/height @ D0/D3/D960/D4", async ({
-    page,
-  }, testInfo) => {
-    test.skip(
-      testInfo.project.name !== "D0" &&
-        testInfo.project.name !== "D3" &&
-        testInfo.project.name !== "D960" &&
-        testInfo.project.name !== "D4-scale",
-      "viewport matrix",
-    );
+  test("DS-LAYOUT · Dead list + detail fill width/height", async ({ page }) => {
     await openRoute(page, "/health?tab=dead", "full");
     const m = await measureLayout(page, "/health");
     expect(m.l1_pass, formatLayoutFailure(m)).toBe(true);

@@ -10,6 +10,9 @@ import { useLounge } from "@/components/lounge-provider";
 import { ExperienceDrawer } from "@/components/experience-drawer";
 import { LocaleSwitch } from "@/components/locale-switch";
 import { ApprovalSoundSettingsPanel } from "@/components/approval-sound-settings";
+import { DestructiveGateSettingsPanel } from "@/components/destructive-gate-settings";
+import { EditorSettingsPanel } from "@/components/editor-settings-panel";
+import { ExperienceGovernanceSettingsPanel } from "@/components/experience-governance-settings";
 import { SemanticMap } from "@/components/SemanticMap";
 import {
   formatDisplayPath,
@@ -76,6 +79,7 @@ function quotaKindClass(mode: string): string {
 
 export function OverviewKpis() {
   const { t } = useTranslation("dashboard");
+  const { t: tStream } = useTranslation("stream");
   const {
     experiences,
     projects,
@@ -144,7 +148,7 @@ export function OverviewKpis() {
         label={t("kpi.msgPerMin")}
         value={String(decisionMsgPerMin)}
         live={msgLive}
-        hint="NATS / 60s"
+        hint={tStream("kpiNats60s")}
         badge={
           <span
             className={`flex items-center gap-0.5 rounded border px-1.5 py-0.5 font-body text-meta font-medium ${
@@ -160,7 +164,11 @@ export function OverviewKpis() {
       <Kpi
         label={t("kpi.indexedFiles")}
         value={indexedFiles.toLocaleString("en-US")}
-        hint={lastIndex?.project ? `${lastIndex.project} · memory_bridge` : "memory_bridge"}
+        hint={
+          lastIndex?.project
+            ? `${lastIndex.project} · ${tStream("kpiMemoryBridge")}`
+            : tStream("kpiMemoryBridge")
+        }
         badge={
           <span className="font-mono text-meta text-on-surface-variant">
             {t("repos", { count: projects.length })}
@@ -170,7 +178,7 @@ export function OverviewKpis() {
       <Kpi
         label={t("kpi.experiences")}
         value={String(experiences.length)}
-        hint="vault persistence: sqlite"
+        hint={tStream("kpiVaultPersistence")}
         badge={<span className="font-body text-meta text-secondary">{t("synced")}</span>}
       />
       <Kpi
@@ -217,6 +225,7 @@ function DecisionStreamChip({
 }
 
 export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
+  const { t } = useTranslation("stream");
   const { events, query, probeBus, decisionTelemetry } = useLounge();
   const [subjectFilter, setSubjectFilter] = useState<SubjectFilter>("all");
   const [showHeartbeats, setShowHeartbeats] = useState(false);
@@ -265,18 +274,18 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
           <Pip live tone="primary" />
           {embedded ? null : (
             <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-              NATS EVENT STREAM
+              {t("title")}
             </h2>
           )}
-          <span className="rounded bg-surface-container-high px-1 font-mono text-meta text-outline">topic: lounge.&gt;</span>
+          <span className="rounded bg-surface-container-high px-1 font-mono text-meta text-outline">{t("topic")}</span>
           <span className="rounded border border-primary/30 bg-primary-container/20 px-1.5 py-0.5 font-body text-meta text-primary">
-            bus live
+            {t("busLive")}
           </span>
           {decisionLive ? <DecisionStreamChip label={liveDecisionLabel} live /> : null}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-1.5 rounded border border-outline-variant/60 bg-surface-container-high px-2 py-0.5">
-            <span className="font-body text-meta text-on-surface-variant">buffered:</span>
+            <span className="font-body text-meta text-on-surface-variant">{t("buffered")}</span>
             <span className="tnum font-mono text-meta font-semibold text-primary">{events.length}</span>
           </div>
           <button
@@ -291,9 +300,11 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
                 ? "border-primary bg-primary-container/25 text-primary"
                 : "border-outline-variant bg-surface-container-high text-on-surface-variant hover:text-on-surface"
             }`}
-            title="Heartbeats are debug-level and hidden by default (SR-02)"
+            title={t("heartbeatsTitle")}
           >
-            {showHeartbeats ? `Heartbeats on (${heartbeatCount})` : `Heartbeats hidden (${heartbeatCount})`}
+            {showHeartbeats
+              ? t("heartbeatsOn", { count: heartbeatCount })
+              : t("heartbeatsHidden", { count: heartbeatCount })}
           </button>
           <div className="flex items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-body text-meta">
             {(["all", "task", "exp"] as const).map((key) => (
@@ -306,7 +317,7 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
                 }}
                 className={`min-h-8 rounded px-2.5 py-1 ${subjectFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
-                {key === "all" ? "all" : key === "task" ? "task.*" : "exp.*"}
+                {key === "all" ? t("filterAll") : key === "task" ? t("filterTask") : t("filterExp")}
               </button>
             ))}
           </div>
@@ -315,17 +326,12 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full table-fixed border-collapse text-left font-body text-body">
           <thead className="sticky top-0 z-10">
-            <tr
-              lang="en"
-              className="select-none border-b border-outline-variant bg-surface-container-low/95 font-body text-meta tracking-label text-outline uppercase"
-            >
-              <th lang="en" className="w-[6.5rem] px-2.5 py-1.5 font-medium">
-                Time
-              </th>
-              <th className="px-2 py-1.5 font-medium">Subject</th>
-              <th className="w-[11rem] px-2 py-1.5 font-medium">Route</th>
-              <th className="w-14 px-2 py-1.5 text-right font-medium">Payload</th>
-              <th className="w-16 px-2.5 py-1.5 text-right font-medium">State</th>
+            <tr className="select-none border-b border-outline-variant bg-surface-container-low/95 font-body text-meta tracking-label text-outline uppercase">
+              <th className="w-[6.5rem] px-2.5 py-1.5 font-medium">{t("colTime")}</th>
+              <th className="px-2 py-1.5 font-medium">{t("colSubject")}</th>
+              <th className="w-[11rem] px-2 py-1.5 font-medium">{t("colRoute")}</th>
+              <th className="w-14 px-2 py-1.5 text-right font-medium">{t("colPayload")}</th>
+              <th className="w-16 px-2.5 py-1.5 text-right font-medium">{t("colState")}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
@@ -394,8 +400,8 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
               <tr>
                 <td colSpan={5} className="px-2.5 py-6 text-center font-body text-body text-outline">
                   {heartbeatCount > 0 && !showHeartbeats
-                    ? "Heartbeats hidden — toggle to show debug traffic"
-                    : "Bus dinleniyor — henüz lounge.> mesajı yok"}
+                    ? t("emptyHeartbeatsHidden")
+                    : t("emptyListening")}
                 </td>
               </tr>
             ) : null}
@@ -404,7 +410,12 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-body text-meta text-outline">
         <span>
-          {visible.length}/{filtered.length} · {PAGE_SIZE}/sayfa · {events.length} buffered
+          {t("footerPage", {
+            visible: visible.length,
+            filtered: filtered.length,
+            pageSize: PAGE_SIZE,
+            buffered: events.length,
+          })}
         </span>
         <div className="flex flex-wrap items-center gap-2">
           <Pager page={safePage} pages={pages} total={filtered.length} onPage={setPage} />
@@ -416,10 +427,10 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
             }}
             className="min-h-8 rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 font-medium text-on-surface hover:bg-surface-bright"
           >
-            {probing ? "Probing…" : "Probe bus"}
+            {probing ? t("probing") : t("probeBus")}
           </button>
           <span className="h-1.5 w-1.5 rounded-full bg-secondary" />
-          <span className="text-on-surface-variant">NATS listen survives navigation</span>
+          <span className="text-on-surface-variant">{t("listenSurvives")}</span>
         </div>
       </div>
     </section>
@@ -908,6 +919,7 @@ export function HealthPanel() {
 }
 
 export function QuotaMiniCard() {
+  const { t } = useTranslation("quotas");
   const { quotas, quotaError, amberAlert, amberTools } = useLounge();
   const displayQuotas = useMemo(() => mergeClaudeQuotaRows(quotas), [quotas]);
   const critical = useMemo(() => selectCriticalQuotas(displayQuotas, 3), [displayQuotas]);
@@ -916,12 +928,12 @@ export function QuotaMiniCard() {
     <div className="space-y-2 p-2.5" data-testid="quota-mini-card">
       {amberAlert ? (
         <div className="rounded border border-error-container bg-error-container/20 px-2.5 py-1.5 font-body text-meta text-error-dim">
-          Amber Alert · {amberTools.join(", ") || "quota"}
+          {t("amberAlert", { tools: amberTools.join(", ") || t("amberAlertDefault") })}
         </div>
       ) : null}
       {critical.length === 0 ? (
         <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-4 text-center font-body text-body text-outline">
-          {quotaError ?? "Kota verisi yok"}
+          {quotaError ?? t("miniEmpty")}
         </div>
       ) : (
         critical.map((row) => (
@@ -967,7 +979,7 @@ export function QuotaMiniCard() {
           href="/quotas"
           className="font-body text-meta font-medium text-primary hover:underline"
         >
-          /quotas sayfasında tüm liste
+          {t("miniAllList")}
         </Link>
       </div>
     </div>
@@ -975,6 +987,7 @@ export function QuotaMiniCard() {
 }
 
 export function QuotaPanel() {
+  const { t } = useTranslation("quotas");
   const { quotas, quotaError, query, amberAlert, amberTools } = useLounge();
   const [quotaFilter, setQuotaFilter] = useState<QuotaFilter>("all");
   const displayQuotas = useMemo(() => mergeClaudeQuotaRows(quotas), [quotas]);
@@ -1007,20 +1020,30 @@ export function QuotaPanel() {
         <div className="flex min-w-0 items-center gap-2.5">
           <Pip live tone="ok" />
           <h2 className="truncate font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-            CONNECTED AI + BOT QUOTAS
+            {t("title")}
           </h2>
           {amberAlert ? (
             <span className="rounded border border-error-container bg-error-container/20 px-1.5 py-0.5 font-mono text-meta font-semibold text-error-dim uppercase">
-              Amber Alert · {amberTools.join(", ") || "quota"}
+              {t("amberAlert", { tools: amberTools.join(", ") || t("amberAlertDefault") })}
             </span>
           ) : (
             <span className="rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-meta text-on-surface-variant">
-              30s probes
+              {t("probes")}
             </span>
           )}
         </div>
         <div className="flex flex-wrap items-center rounded border border-outline-variant/70 bg-surface-container-high p-0.5 font-mono text-meta">
           {(["all", "subscription", "api", "plugin", "local"] as const).map((key) => {
+            const label =
+              key === "all"
+                ? t("filterAll")
+                : key === "subscription"
+                  ? t("filterSubscription")
+                  : key === "api"
+                    ? t("filterApi")
+                    : key === "plugin"
+                      ? t("filterPlugin")
+                      : t("filterLocal");
             return (
               <button
                 key={key}
@@ -1031,7 +1054,7 @@ export function QuotaPanel() {
                 }}
                 className={`rounded px-2 py-0.5 ${quotaFilter === key ? "bg-primary-container font-medium text-on-primary-container" : "text-on-surface-variant hover:text-on-surface"}`}
               >
-                {key}
+                {label}
               </button>
             );
           })}
@@ -1041,13 +1064,13 @@ export function QuotaPanel() {
         <table className="w-full min-w-0 border-collapse text-left font-mono text-body table-fixed md:table-auto">
           <thead>
             <tr className="select-none border-b border-outline-variant bg-surface-container-low/80 text-meta text-outline uppercase">
-              <th className="px-2.5 py-1.5 font-medium">Tool</th>
-              <th className="w-14 px-2 py-1.5 font-medium">Kind</th>
-              <th className="hidden w-16 px-2 py-1.5 font-medium sm:table-cell">Unit</th>
-              <th className="px-2 py-1.5 font-medium">Used / Limit</th>
-              <th className="hidden px-2 py-1.5 text-right font-medium md:table-cell">Remaining / Hosts</th>
-              <th className="hidden px-2 py-1.5 text-right font-medium lg:table-cell">Reset</th>
-              <th className="w-40 min-w-[10rem] px-2.5 py-1.5 text-right font-medium">State</th>
+              <th className="px-2.5 py-1.5 font-medium">{t("colTool")}</th>
+              <th className="w-14 px-2 py-1.5 font-medium">{t("colKind")}</th>
+              <th className="hidden w-16 px-2 py-1.5 font-medium sm:table-cell">{t("colUnit")}</th>
+              <th className="px-2 py-1.5 font-medium">{t("colUsedLimit")}</th>
+              <th className="hidden px-2 py-1.5 text-right font-medium md:table-cell">{t("colRemainingHosts")}</th>
+              <th className="hidden px-2 py-1.5 text-right font-medium lg:table-cell">{t("colReset")}</th>
+              <th className="w-40 min-w-[10rem] px-2.5 py-1.5 text-right font-medium">{t("colState")}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-outline-variant/30">
@@ -1114,7 +1137,7 @@ export function QuotaPanel() {
             {rows.length === 0 ? (
               <tr>
                 <td colSpan={7} className="px-2.5 py-6 text-center font-mono text-body text-outline">
-                  {quotaError ?? "0 tools"}
+                  {quotaError ?? t("emptyTools")}
                 </td>
               </tr>
             ) : null}
@@ -1122,12 +1145,12 @@ export function QuotaPanel() {
         </table>
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline">
-        <span>abonelik: yerel plan · API keys · plugins · LMR sysinfo</span>
+        <span>{t("footerSources")}</span>
         <div className="flex items-center gap-3">
           <Pager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
           <div className={`flex items-center gap-1.5 ${amberAlert ? "text-error-dim" : "text-outline"}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-error"}`} />
-            <span>{amberAlert ? "Amber Alert" : `${nearCap} tools near cap`}</span>
+            <span>{amberAlert ? t("amberAlertShort") : t("toolsNearCap", { count: nearCap })}</span>
           </div>
         </div>
       </div>
@@ -1135,20 +1158,32 @@ export function QuotaPanel() {
   );
 }
 
-const QUOTA_ACTIONS: { id: QuotaExhaustedAction; title: string; hint: string }[] = [
-  { id: "stop", title: "Kotam biterse durdur", hint: "Görevi iptal et, ajan değiştirme." },
-  { id: "ask_then_local", title: "Onay alarak yerel modele geç", hint: "Kota bitince UI onayı → LMR." },
-  { id: "ask_then_abort", title: "Onay alarak iptal et", hint: "Kota bitince kullanıcı reddedebilir." },
-];
+const QUOTA_ACTION_IDS: QuotaExhaustedAction[] = ["stop", "ask_then_local", "ask_then_abort"];
 
 export function SettingsPanel() {
   const { policy, savePolicy, model } = useLounge();
   const { scale, setScale, scales } = useUiScale();
   const { t } = useTranslation("settings");
+  const { t: tq } = useTranslation("quotas");
   const { t: tc } = useTranslation("common");
   const { t: ts } = useTranslation("shell");
 
   const scaleLabel = (value: UiScale) => `${Math.round(value * 100)}%`;
+  const quotaActions = QUOTA_ACTION_IDS.map((id) => ({
+    id,
+    title:
+      id === "stop"
+        ? tq("actionStop")
+        : id === "ask_then_local"
+          ? tq("actionAskLocal")
+          : tq("actionAskAbort"),
+    hint:
+      id === "stop"
+        ? tq("actionStopHint")
+        : id === "ask_then_local"
+          ? tq("actionAskLocalHint")
+          : tq("actionAskAbortHint"),
+  }));
 
   return (
     <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-auto">
@@ -1175,7 +1210,7 @@ export function SettingsPanel() {
             />
           </label>
           <div className="grid gap-2 md:grid-cols-3">
-            {QUOTA_ACTIONS.map((action) => {
+            {quotaActions.map((action) => {
               const selected = policy.on_quota_exhausted === action.id;
               return (
                 <button
@@ -1263,7 +1298,10 @@ export function SettingsPanel() {
           <LocaleSwitch />
         </div>
       </div>
+      <EditorSettingsPanel />
+      <ExperienceGovernanceSettingsPanel />
       <ApprovalSoundSettingsPanel />
+      <DestructiveGateSettingsPanel />
       <GraphUiSettings />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">
@@ -1356,16 +1394,43 @@ function fleetHealthFields(
   };
 }
 
+const FLEET_STATUS_KEYS: Record<string, string> = {
+  ok: "statusOk",
+  ready: "statusReady",
+  "restart-limit": "statusRestartLimit",
+  down: "statusDown",
+  live: "statusLive",
+  stale: "statusStale",
+  supervised: "statusSupervised",
+  up: "statusUp",
+  max: "statusMax",
+  online: "statusOnline",
+  offline: "statusOffline",
+  listening: "statusListening",
+  missing: "statusMissing",
+};
+
+function translateFleetToken(t: (key: string) => string, token: string): string {
+  const key = FLEET_STATUS_KEYS[token];
+  return key ? t(key) : token;
+}
+
 export function FleetPanel() {
+  const { t } = useTranslation("fleet");
   const { report, model, decisionGate, layaEngine } = useLounge();
+  const copyEndpoint = (endpoint: string) => {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(endpoint);
+    }
+  };
   const engineLabel = formatLayaEngineFleetStatus(layaEngine);
   const downloadPct = layaEnginePercentage(layaEngine);
   const gateHint =
     layaEngine?.phase === "downloading" && downloadPct != null
       ? `${downloadPct}%`
       : decisionGate?.phase === "ready"
-        ? decisionGate.device || "DecisionGate"
-        : "DecisionGate kapalı";
+        ? decisionGate.device || t("decisionGate")
+        : t("decisionGateOff");
   const [natsWorkers, setNatsWorkers] = useState<FleetWorkerRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>("lounge-kernel");
 
@@ -1399,8 +1464,8 @@ export function FleetPanel() {
                 id: row.id,
                 label: row.name || row.id,
                 status: online ? "online" : "offline",
-                endpoint: row.endpoint || "nats",
-                detail: row.payload?.detail || "nats worker",
+                endpoint: row.endpoint || t("endpointNats"),
+                detail: row.payload?.detail || t("detailNatsWorker"),
                 heartbeat: online ? "live" : "stale",
                 pid: "—",
                 uptime: online ? "up" : "—",
@@ -1419,7 +1484,7 @@ export function FleetPanel() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [t]);
 
   const layaTone: FleetWorkerRow["tone"] =
     layaEngine?.phase === "failed"
@@ -1435,26 +1500,26 @@ export function FleetPanel() {
       detail:
         report?.ollama.error ||
         report?.ollama.detail ||
-        (report?.ollama.running ? model || "LMR ready" : "LMR down"),
+        (report?.ollama.running ? model || t("lmrReady") : t("lmrDown")),
     },
     {
       id: "nats-hub",
       label: "nats-hub",
       ...fleetHealthFields(report?.nats, "nats://127.0.0.1:4222", "lounge.>"),
       status: report?.nats.running ? "listening" : "down",
-      detail: report?.nats.error || report?.nats.detail || "lounge.> listening",
+      detail: report?.nats.error || report?.nats.detail || t("natsListening"),
     },
     {
       id: "memory-bridge",
       label: "memory-bridge",
-      ...fleetHealthFields(report?.memory, "http://127.0.0.1:7432", "cbm cli missing"),
+      ...fleetHealthFields(report?.memory, "http://127.0.0.1:7432", t("cbmMissing")),
       status: report?.memory.running ? "ready" : "missing",
     },
     {
       id: "openjev-laya",
       label: "openjev-laya",
       status: engineLabel,
-      endpoint: layaEngine?.path || "local weights",
+      endpoint: layaEngine?.path || t("localWeights"),
       detail: gateHint,
       heartbeat: layaEngine?.phase === "ready" ? "live" : "—",
       pid: "—",
@@ -1472,20 +1537,20 @@ export function FleetPanel() {
       className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
     >
       <div className="shrink-0 border-b border-outline-variant bg-surface-container-low p-2.5">
-        <h2 className="font-body text-panel font-semibold tracking-label uppercase">Worker Fleet</h2>
+        <h2 className="font-body text-panel font-semibold tracking-label uppercase">{t("title")}</h2>
       </div>
       <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden lg:flex-row">
         <div className="min-h-0 min-w-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[36rem] border-collapse text-left font-mono text-body">
+          <table className="w-full table-fixed border-collapse text-left font-mono text-body">
             <thead>
               <tr className="sticky top-0 border-b border-outline-variant bg-surface-container-low/95 text-meta text-outline uppercase">
-                <th className="px-3 py-2 font-medium">Worker</th>
-                <th className="px-2 py-2 font-medium">Status</th>
-                <th className="hidden px-2 py-2 font-medium sm:table-cell">Heartbeat</th>
-                <th className="hidden px-2 py-2 font-medium md:table-cell">PID</th>
-                <th className="hidden px-2 py-2 font-medium md:table-cell">Uptime</th>
-                <th className="hidden px-2 py-2 font-medium lg:table-cell">Restarts</th>
-                <th className="px-3 py-2 font-medium">Endpoint</th>
+                <th className="w-[22%] px-3 py-2 font-medium">{t("colWorker")}</th>
+                <th className="w-[12%] px-2 py-2 font-medium">{t("colStatus")}</th>
+                <th className="hidden w-[12%] px-2 py-2 font-medium sm:table-cell">{t("colHeartbeat")}</th>
+                <th className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">{t("colPid")}</th>
+                <th className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">{t("colUptime")}</th>
+                <th className="hidden w-[10%] px-2 py-2 font-medium lg:table-cell">{t("colRestarts")}</th>
+                <th className="px-3 py-2 font-medium">{t("colEndpoint")}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-outline-variant/40">
@@ -1497,7 +1562,9 @@ export function FleetPanel() {
                     className={`cursor-pointer ${active ? "bg-surface-container-highest/70" : "hover:bg-surface-container-high/50"}`}
                     onClick={() => setSelectedId(row.id)}
                   >
-                    <td className="truncate px-3 py-2.5 font-medium text-on-surface">{row.label}</td>
+                    <td className="truncate px-3 py-2.5 font-medium text-on-surface" title={row.label}>
+                      {row.label}
+                    </td>
                     <td
                       className={`px-2 py-2.5 ${
                         row.tone === "down"
@@ -1507,22 +1574,32 @@ export function FleetPanel() {
                             : "text-secondary"
                       }`}
                     >
-                      {row.status}
+                      {translateFleetToken(t, row.status)}
                     </td>
                     <td className="hidden px-2 py-2.5 text-on-surface-variant sm:table-cell">
-                      {row.heartbeat}
+                      {translateFleetToken(t, row.heartbeat)}
                     </td>
                     <td className="hidden px-2 py-2.5 text-on-surface-variant md:table-cell">
-                      {row.pid}
+                      {translateFleetToken(t, row.pid)}
                     </td>
                     <td className="hidden px-2 py-2.5 text-on-surface-variant md:table-cell">
-                      {row.uptime}
+                      {translateFleetToken(t, row.uptime)}
                     </td>
                     <td className="hidden px-2 py-2.5 text-on-surface-variant lg:table-cell">
-                      {row.restarts}
+                      {translateFleetToken(t, row.restarts)}
                     </td>
-                    <td className="truncate px-3 py-2.5 text-on-surface-variant" title={row.endpoint}>
-                      {row.endpoint}
+                    <td className="px-3 py-2.5 text-on-surface-variant">
+                      <button
+                        type="button"
+                        title={row.endpoint}
+                        className="block w-full truncate text-left hover:underline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          copyEndpoint(row.endpoint);
+                        }}
+                      >
+                        {row.endpoint}
+                      </button>
                     </td>
                   </tr>
                 );
@@ -1532,65 +1609,64 @@ export function FleetPanel() {
         </div>
         <aside className="flex min-h-[10rem] w-full shrink-0 flex-col border-t border-outline-variant bg-surface-container-low/40 lg:w-72 lg:border-t-0 lg:border-l">
           <div className="border-b border-outline-variant px-3 py-2 font-body text-meta font-semibold tracking-label text-on-surface uppercase">
-            Worker detail
+            {t("detailTitle")}
           </div>
           {selected ? (
             <dl className="min-h-0 flex-1 space-y-2 overflow-auto px-3 py-3 font-mono text-body">
               <div>
-                <dt className="text-meta text-outline uppercase">Name</dt>
+                <dt className="text-meta text-outline uppercase">{t("detailName")}</dt>
                 <dd className="text-on-surface">{selected.label}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">Status</dt>
+                <dt className="text-meta text-outline uppercase">{t("detailStatus")}</dt>
                 <dd className={selected.tone === "down" ? "text-error" : "text-secondary"}>
-                  {selected.status}
+                  {translateFleetToken(t, selected.status)}
                 </dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">Heartbeat</dt>
-                <dd className="text-on-surface-variant">{selected.heartbeat}</dd>
+                <dt className="text-meta text-outline uppercase">{t("detailHeartbeat")}</dt>
+                <dd className="text-on-surface-variant">{translateFleetToken(t, selected.heartbeat)}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">PID / supervision</dt>
-                <dd className="text-on-surface-variant">{selected.pid}</dd>
+                <dt className="text-meta text-outline uppercase">{t("detailPid")}</dt>
+                <dd className="text-on-surface-variant">{translateFleetToken(t, selected.pid)}</dd>
               </div>
               <div>
-                <dt lang="en" className="text-meta text-outline uppercase">
-                  Uptime
-                </dt>
-                <dd className="text-on-surface-variant">{selected.uptime}</dd>
+                <dt className="text-meta text-outline uppercase">{t("detailUptime")}</dt>
+                <dd className="text-on-surface-variant">{translateFleetToken(t, selected.uptime)}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">Restart count</dt>
-                <dd className="text-on-surface-variant">{selected.restarts}</dd>
+                <dt className="text-meta text-outline uppercase">{t("detailRestarts")}</dt>
+                <dd className="text-on-surface-variant">{translateFleetToken(t, selected.restarts)}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">Endpoint</dt>
+                <dt className="text-meta text-outline uppercase">{t("detailEndpoint")}</dt>
                 <dd className="break-all text-on-surface-variant">{selected.endpoint}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">Detail</dt>
+                <dt className="text-meta text-outline uppercase">{t("detailDetail")}</dt>
                 <dd className="break-words text-on-surface-variant">{selected.detail}</dd>
               </div>
             </dl>
           ) : (
-            <p className="px-3 py-4 font-body text-body text-on-surface-variant">No worker selected</p>
+            <p className="px-3 py-4 font-body text-body text-on-surface-variant">{t("noWorkerSelected")}</p>
           )}
           <div className="mt-auto space-y-1 border-t border-outline-variant px-3 py-2 font-body text-meta text-outline">
-            <p>NATS heartbeat · offline after ~45s</p>
+            <p>{t("footerHeartbeat")}</p>
             <p className="font-mono">lounge.workers.heartbeat</p>
           </div>
         </aside>
       </div>
       <div className="flex shrink-0 items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-2 font-body text-meta text-outline">
-        <span className="font-body">{workers.length} workers registered</span>
-        <span className="font-mono">nats · supervisor</span>
+        <span className="font-body">{t("workersRegistered", { count: workers.length })}</span>
+        <span className="font-mono">{t("footerSupervisor")}</span>
       </div>
     </section>
   );
 }
 
 export function TelemetryPanel() {
+  const { t } = useTranslation("telemetry");
   const {
     events,
     quotas,
@@ -1689,8 +1765,8 @@ export function TelemetryPanel() {
     <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div lang="en" className="text-meta tracking-wider text-outline uppercase">
-            Laya Decision
+          <div className="text-body tracking-wider text-on-surface-variant uppercase">
+            {t("layaDecision")}
           </div>
           <div
             key={latencyLive ? formatLatencyMs(latencyMs) : "idle"}
@@ -1698,31 +1774,35 @@ export function TelemetryPanel() {
           >
             {latencyLive ? formatLatencyMs(latencyMs) : "—"}
           </div>
-          <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
+          <div className="text-on-surface-variant">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
           <div className="mt-3 min-h-0 flex-1 overflow-auto">
             {latencyLive ? (
               <LatencySparkline values={decisionLatencyHistory} />
             ) : (
-              <span className="text-meta text-on-surface-variant">
-                {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
+              <span className="text-body text-on-surface-variant">
+                {decisionGate?.phase === "ready" ? t("idleNoInfer") : t("gateCold")}
               </span>
             )}
           </div>
-          <div className="mt-auto pt-4 text-meta text-outline">
+          <div className="mt-auto pt-4 text-body text-on-surface-variant">
             lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
           </div>
         </div>
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div className="text-meta tracking-wider text-outline uppercase">MSG / MIN</div>
+          <div className="text-body tracking-wider text-on-surface-variant uppercase">{t("msgPerMin")}</div>
           <div
             key={decisionMsgPerMin}
             className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
           >
             {decisionMsgPerMin}
           </div>
-          <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
-          <div className="mt-auto pt-4 text-meta text-outline">
-            NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
+          <div className="text-on-surface-variant">{msgLive ? t("nats60sLive") : t("nats60sIdle")}</div>
+          <div className="mt-auto pt-4 text-body text-on-surface-variant">
+            {t("natsBufferLine", {
+              events: events.length,
+              subscriptions: subscription.length,
+              plugins: plugins.length,
+            })}
           </div>
         </div>
       </div>
@@ -1730,26 +1810,25 @@ export function TelemetryPanel() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
           <h2 className="font-body text-panel font-semibold tracking-label uppercase">
-            Agent Efficiency Report
+            {t("efficiencyTitle")}
           </h2>
-          <span className="text-meta text-outline">Ajan Verimlilik Raporu</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 font-mono text-meta text-on-surface-variant">
+            <label className="flex items-center gap-1.5 font-mono text-body text-on-surface-variant">
               <input
                 type="checkbox"
                 checked={weekly}
                 onChange={(e) => setWeekly(e.target.checked)}
                 className="accent-primary"
               />
-              Haftalık (7g)
+              {t("weekly")}
             </label>
             <select
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
-              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-meta text-on-surface"
-              aria-label="Proje filtresi"
+              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-body text-on-surface"
+              aria-label={t("projectFilter")}
             >
-              <option value="">Tüm projeler</option>
+              <option value="">{t("allProjects")}</option>
               {projectOptions.map((id) => (
                 <option key={id} value={id}>
                   {id}
@@ -1768,18 +1847,18 @@ export function TelemetryPanel() {
                     if (result.ok) {
                       setSaveToast(
                         result.mode === "tauri"
-                          ? `Kaydedildi · ${result.path}`
-                          : `İndirildi · ${result.path}`,
+                          ? t("savedTauri", { path: result.path })
+                          : t("savedDownload", { path: result.path }),
                       );
                     } else if (!result.cancelled) {
-                      setSaveToast(`Markdown kaydı başarısız · ${result.error}`);
+                      setSaveToast(t("saveFailed", { error: result.error }));
                     }
                   })
                   .finally(() => setSavingMd(false));
               }}
               className="rounded border border-outline-variant bg-surface-container-high px-2 py-1 font-mono text-meta font-bold tracking-wider text-on-surface uppercase enabled:hover:bg-surface-container disabled:opacity-40"
             >
-              {savingMd ? "Kaydediliyor…" : "Markdown indir"}
+              {savingMd ? t("saving") : t("downloadMarkdown")}
             </button>
           </div>
           {saveToast ? (
@@ -1794,63 +1873,65 @@ export function TelemetryPanel() {
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-3 font-mono text-body">
           {loading && !report ? (
-            <p className="text-on-surface-variant">Rapor yükleniyor…</p>
+            <p className="text-on-surface-variant">{t("loadingReport")}</p>
           ) : null}
           {error ? (
-            <p className="mb-2 text-meta text-error">Tauri rapor hatası · mock gösteriliyor: {error}</p>
+            <p className="mb-2 text-meta text-error">{t("tauriReportError", { error })}</p>
           ) : null}
           {report ? (
             <div className="space-y-4">
               <p className="text-meta text-outline">
                 {report.scopeLabel}
-                {tauriHost ? "" : " · tarayıcı"}
-                {loading ? " · yenileniyor…" : ""}
+                {tauriHost ? "" : t("browserSuffix")}
+                {loading ? t("refreshingSuffix") : ""}
               </p>
               <div className="grid gap-2 sm:grid-cols-3">
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
                   <div className="text-meta tracking-wider text-outline uppercase">
-                    Toplam failure
+                    {t("totalFailure")}
                   </div>
                   <div className="tnum mt-1 text-xl font-bold text-on-surface">
                     {report.totalFailures}
                   </div>
-                  <div className="text-meta text-on-surface-variant">ajan × hata/failure</div>
+                  <div className="text-meta text-on-surface-variant">{t("failureByAgentHint")}</div>
                 </div>
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
                   <div className="text-meta tracking-wider text-outline uppercase">
-                    Cross-Project
+                    {t("crossProject")}
                   </div>
                   <div className="tnum mt-1 text-xl font-bold text-on-surface">
                     {report.crossProjectExperienceHits}
                   </div>
                   <div className="text-meta text-on-surface-variant">
-                    {report.crossProjectWhisperEvents} fısıltı olayı
+                    {t("whisperEvents", { count: report.crossProjectWhisperEvents })}
                   </div>
                 </div>
                 <div className="rounded border border-outline-variant/60 bg-surface-container-low px-2.5 py-2">
                   <div className="text-meta tracking-wider text-outline uppercase">
-                    Dead cleanup
+                    {t("deadCleanup")}
                   </div>
                   <div className="tnum mt-1 text-xl font-bold text-on-surface">{rateLabel}</div>
                   <div className="text-meta text-on-surface-variant">
-                    kalan {report.dead.remaining}
-                    {report.dead.cleaned != null ? ` · temizlenen ${report.dead.cleaned}` : ""}
+                    {t("deadRemaining", { remaining: report.dead.remaining })}
+                    {report.dead.cleaned != null
+                      ? t("deadCleaned", { cleaned: report.dead.cleaned })
+                      : ""}
                   </div>
                 </div>
               </div>
 
               <div>
                 <h3 className="mb-1.5 text-meta font-bold tracking-wider text-outline uppercase">
-                  Ajan başına hata / failure
+                  {t("failuresByAgent")}
                 </h3>
                 {report.failuresByAgent.length === 0 ? (
-                  <p className="text-on-surface-variant">Kayıt yok.</p>
+                  <p className="text-on-surface-variant">{t("noRecords")}</p>
                 ) : (
                   <table className="w-full text-left">
                     <thead>
                       <tr className="text-meta text-outline">
-                        <th className="py-1 font-normal">Ajan</th>
-                        <th className="py-1 text-right font-normal">Sayı</th>
+                        <th className="py-1 font-normal">{t("colAgent")}</th>
+                        <th className="py-1 text-right font-normal">{t("colCount")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1868,7 +1949,7 @@ export function TelemetryPanel() {
               </div>
 
               <div className="text-meta text-on-surface-variant">
-                <div className="mb-1 font-bold tracking-wider text-outline uppercase">Kaynak</div>
+                <div className="mb-1 font-bold tracking-wider text-outline uppercase">{t("source")}</div>
                 <ul className="list-inside list-disc space-y-0.5">
                   {report.sourceNotes.map((note) => (
                     <li key={note}>{note}</li>
@@ -1882,10 +1963,10 @@ export function TelemetryPanel() {
       </div>
       <div className="flex shrink-0 items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-2">
         <span className="font-body text-meta text-outline">
-          Efficiency · {report ? report.scopeLabel : "waiting"}
+          {t("footerEfficiency", { scope: report ? report.scopeLabel : t("footerWaiting") })}
         </span>
         <span className="font-mono text-meta text-outline">
-          buffer {events.length} · dead {deadSymbols.length}
+          {t("footerBuffer", { events: events.length, dead: deadSymbols.length })}
         </span>
       </div>
     </section>

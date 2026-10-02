@@ -297,6 +297,14 @@ pub fn run_with_start_route(start_route: &'static str) {
             services::approval_sound::load_custom_approval_sound_data_url,
             confirm_destructive,
             reject_destructive,
+            list_pending_destructive,
+            get_editor_settings,
+            set_editor_settings,
+            test_editor_settings,
+            get_experience_ttl_days,
+            set_experience_ttl_days,
+            get_experience_use_count_threshold,
+            set_experience_use_count_threshold,
             trigger_grok_test,
             list_projects,
             list_quotas,
@@ -939,15 +947,124 @@ async fn focus_app_for_approval(
 }
 
 /// One-shot confirm for a PolicyGate-blocked destructive command (F3).
+/// Optional `command_hash` is validated when provided (UI/QA assert path).
 #[tauri::command]
-async fn confirm_destructive(id: String) -> Result<(), String> {
+async fn confirm_destructive(id: String, command_hash: Option<String>) -> Result<(), String> {
+    if let Some(hash) = command_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        kernel::assert_destructive_hash(&id, hash).map_err(|err| err.to_string())?;
+    }
     kernel::confirm_destructive(&id).map_err(|err| err.to_string())
 }
 
 /// Reject / dismiss a pending destructive confirmation (clears notification slot).
 #[tauri::command]
-async fn reject_destructive(id: String) -> Result<(), String> {
+async fn reject_destructive(id: String, command_hash: Option<String>) -> Result<(), String> {
+    if let Some(hash) = command_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        kernel::assert_destructive_hash(&id, hash).map_err(|err| err.to_string())?;
+    }
     kernel::reject_destructive(&id).map_err(|err| err.to_string())
+}
+
+/// FIFO list of pending destructive confirmations for the UI queue.
+#[tauri::command]
+async fn list_pending_destructive() -> Result<Vec<kernel::DestructivePendingEvent>, String> {
+    Ok(kernel::list_pending_destructive())
+}
+
+#[tauri::command]
+async fn get_editor_settings(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<services::open_editor::EditorSettings, String> {
+    services::open_editor::load_editor_settings(&state)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn set_editor_settings(
+    state: tauri::State<'_, ExperienceStore>,
+    settings: services::open_editor::EditorSettings,
+) -> Result<services::open_editor::EditorSettings, String> {
+    services::open_editor::save_editor_settings(&state, &settings)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Open a harmless Rust-chosen path (app data dir) with the selected editor.
+#[tauri::command]
+async fn test_editor_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ExperienceStore>,
+    settings: services::open_editor::EditorSettings,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let path = dir.to_string_lossy().into_owned();
+    services::open_editor::test_editor_open(&state, &settings, &path)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_experience_ttl_days(state: tauri::State<'_, ExperienceStore>) -> Result<u64, String> {
+    state
+        .experience_ttl_days()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn set_experience_ttl_days(
+    state: tauri::State<'_, ExperienceStore>,
+    days: u64,
+) -> Result<u64, String> {
+    if !(1..=3650).contains(&days) {
+        return Err("TTL must be between 1 and 3650 days".into());
+    }
+    state
+        .set_experience_ttl_days(days)
+        .await
+        .map_err(|err| err.to_string())?;
+    state
+        .experience_ttl_days()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn get_experience_use_count_threshold(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<u64, String> {
+    state
+        .experience_use_count_threshold()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn set_experience_use_count_threshold(
+    state: tauri::State<'_, ExperienceStore>,
+    threshold: u64,
+) -> Result<u64, String> {
+    if threshold > 1_000_000 {
+        return Err("use-count threshold too large".into());
+    }
+    state
+        .set_experience_use_count_threshold(threshold)
+        .await
+        .map_err(|err| err.to_string())?;
+    state
+        .experience_use_count_threshold()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

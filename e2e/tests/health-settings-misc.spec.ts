@@ -1,6 +1,31 @@
 import { test, expect } from "@playwright/test";
 import { openRoute } from "../helpers/nav";
-import { getIpcLog } from "../harness/tauri-mock";
+import {
+  getIpcLog,
+  seedDestructiveQueue,
+  type QaDestructiveRow,
+} from "../harness/tauri-mock";
+
+const DESTRUCTIVE_FIFO: QaDestructiveRow[] = [
+  {
+    id: "dest-fifo-1",
+    kind: "destructive",
+    command: "rm -rf /tmp/agent-lounge-demo",
+    pattern: "RmRf",
+    source: "agent",
+    class: "RmRf",
+    command_hash: "hash-fifo-1",
+  },
+  {
+    id: "dest-fifo-2",
+    kind: "destructive",
+    command: "git reset --hard HEAD",
+    pattern: "GitResetHard",
+    source: "agent",
+    class: "GitResetHard",
+    command_hash: "hash-fifo-2",
+  },
+];
 
 test.describe("HM — health / map empty states", () => {
   test("HM-01 · Empty DB must not show MOCK_HEALTH 12/41/74", async ({
@@ -27,7 +52,7 @@ test.describe("HM — health / map empty states", () => {
     const main = await page.locator("main").innerText();
     expect(main).not.toMatch(/Claude\s*7\d%/i);
     expect(main).not.toMatch(/Claude\s*5\d%/i);
-    expect(main).toMatch(/Kota verisi alınamadı/i);
+    expect(main).toMatch(/Kota verisi alınamadı|Could not load quota data/i);
     await page.getByRole("button", { name: "Alert history" }).click();
     const history = page.locator('[data-qa="alert-history"]');
     await expect(history).toBeVisible();
@@ -97,17 +122,41 @@ test.describe("HM — health / map empty states", () => {
 });
 
 test.describe("ST — settings", () => {
-  test("ST-01 · Routing table not clipped @ D0", async ({
-    page,
-  }, testInfo) => {
-    test.skip(testInfo.project.name !== "D0" && testInfo.project.name !== "D4-scale", "D0/D4");
+  test("ST-01 · Routing table not clipped", async ({ page }) => {
     await openRoute(page, "/settings", "full");
-    const vp = page.viewportSize()!;
     const region = page.locator('[data-qa="routing-table"]');
     await expect(region).toBeVisible();
+    await region.scrollIntoViewIfNeeded();
     const box = await region.boundingBox();
-    const clipped = Boolean(box && box.y + box.height > vp.height - 4);
-    expect(clipped, "routing controls must fit in viewport or scroll").toBe(false);
+    expect(box, "routing table must have a layout box").toBeTruthy();
+    const vp = page.viewportSize()!;
+    // Tightened: after scrollIntoView, the table top must sit in the viewport
+    // and either fully fit or have an explicit scroll container.
+    expect(box!.y, "routing table top must be in viewport").toBeGreaterThanOrEqual(-2);
+    expect(box!.y, "routing table top must not sit below the fold").toBeLessThan(vp.height);
+    const scrollable = await region.evaluate((el) => {
+      let node: HTMLElement | null = el;
+      while (node) {
+        const style = window.getComputedStyle(node);
+        const oy = style.overflowY;
+        if (
+          (oy === "auto" || oy === "scroll" || style.overflow === "auto" || style.overflow === "scroll") &&
+          node.scrollHeight > node.clientHeight + 1
+        ) {
+          return true;
+        }
+        node = node.parentElement;
+      }
+      return el.scrollHeight > el.clientHeight + 1;
+    });
+    const bottom = box!.y + box!.height;
+    if (bottom > vp.height - 4) {
+      expect(scrollable, "overflowing routing table must scroll inside a parent").toBe(true);
+    }
+    // Controls inside the table must be interactable (not zero-size / opacity-0 clipped).
+    const firstControl = region.locator("input, select, button, [role='checkbox']").first();
+    await expect(firstControl, "routing table must expose a control").toBeVisible();
+    await expect(firstControl).toBeEnabled();
   });
 
   test("ST-02 · Routing policy save calls set_routing_policy", async ({ page }) => {
@@ -118,10 +167,7 @@ test.describe("ST — settings", () => {
     const trigger = page
       .locator('[data-qa="routing-table"] input[type="checkbox"]:not([disabled])')
       .first();
-    if ((await trigger.count()) === 0) {
-      test.skip(true, "No editable trigger checkbox");
-      return;
-    }
+    await expect(trigger, "editable routing trigger must exist").toBeVisible();
     await trigger.click({ timeout: 5_000 });
     await page.waitForTimeout(400);
     const after = await getIpcLog(page);
@@ -146,19 +192,34 @@ test.describe("ST — settings", () => {
   test("ST-05 · Locked approval checkbox explained", async ({ page }) => {
     await openRoute(page, "/settings", "full");
     const locked = page.locator('input[type="checkbox"][disabled]');
-    if ((await locked.count()) === 0) {
-      test.skip(true, "No locked checkbox found");
-      return;
-    }
+    await expect(locked.first(), "locked approval checkbox must exist").toBeVisible();
     const el = locked.first();
     const title =
       (await el.getAttribute("title")) ||
       (await el.evaluate((node) => node.parentElement?.textContent || ""));
-    const explained = /kilit|lock|always|onay|disabled|zorunlu/i.test(title || "");
-    if (!explained) {
-      test.fail(true, "Disabled approval checkbox lacks explanation");
-    }
-    expect(explained).toBeTruthy();
+    expect(title || "", "disabled approval checkbox lacks explanation").toMatch(
+      /kilit|lock|always|onay|disabled|zorunlu/i,
+    );
+  });
+
+  test("EX-13 · Settings TTL + use-count controls persist", async ({ page }) => {
+    await openRoute(page, "/settings", "full");
+    const panel = page.locator('[data-qa="experience-governance"]');
+    await expect(panel).toBeVisible();
+    await panel.scrollIntoViewIfNeeded();
+    const ttlExact = panel.locator('input[type="number"]').first();
+    await expect(ttlExact).toBeVisible();
+    await ttlExact.fill("120");
+    await ttlExact.blur();
+    await page.waitForTimeout(300);
+    const useCount = panel.locator('[data-qa="use-count-threshold"]');
+    await expect(useCount).toBeVisible();
+    await useCount.fill("3");
+    await useCount.blur();
+    await page.waitForTimeout(300);
+    const log = await getIpcLog(page);
+    expect(log.some((e) => e.cmd === "set_experience_ttl_days")).toBeTruthy();
+    expect(log.some((e) => e.cmd === "set_experience_use_count_threshold")).toBeTruthy();
   });
 
   test("ST-06 · Yeniden tara → /onboarding", async ({ page }) => {
@@ -173,54 +234,99 @@ test.describe("ST — settings", () => {
 test.describe("AP / CP / misc", () => {
   test("AP-03 · ?demo=routing-banner actions (browser mode)", async ({ page }) => {
     await openRoute(page, "/dashboard?demo=routing-banner", "browser");
-    await page.waitForTimeout(500);
-    // In browser mode demo injects approval; buttons should appear.
     const approve = page.getByRole("button", { name: /Onayla|Approve|Local|Yerel|Reddet|Deny/i });
-    // If banner not visible (hydration), soft note
-    if ((await approve.count()) === 0) {
-      test.fail(true, "Routing banner demo not visible");
-    }
+    await expect(approve.first(), "routing banner demo actions").toBeVisible({ timeout: 5_000 });
     expect(await approve.count()).toBeGreaterThan(0);
   });
 
-  test("AP-06 · Destructive ops always require confirmation UI (POSIX + Windows) [expected-fail until PR-1/5]", async ({
+  test("AP-06 · Destructive ops always require confirmation UI (POSIX + Windows)", async ({
     page,
-  }, testInfo) => {
-    // O4 / §10.2: DB drop/truncate/delete/migrate-down, rm -rf, reset,
-    // and Windows del /s, rd /s, Remove-Item -Recurse, format → always confirm.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "destructive-operation gate missing (O4 / §10.2)",
-    });
-    test.fail(true, "Destructive confirmation gate not implemented");
-    await openRoute(page, "/settings", "full");
-    const gate = page.getByText(
-      /destructive|yıkıcı|always confirm|her zaman onay|Never Ask.*cannot|atlanamaz|del \/s|Remove-Item|rm -rf/i,
+  }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, DESTRUCTIVE_FIFO);
+    const dialog = page.locator('[data-qa="destructive-dialog"]');
+    await expect(dialog, "destructive confirm alertdialog").toBeVisible({ timeout: 5_000 });
+    await expect(dialog).toHaveAttribute("data-task-id", DESTRUCTIVE_FIFO[0]!.id);
+    await expect(dialog).toHaveAttribute("data-command-hash", DESTRUCTIVE_FIFO[0]!.command_hash);
+    await expect(page.locator('[data-qa="destructive-command"]')).toHaveText(
+      DESTRUCTIVE_FIFO[0]!.command,
     );
-    expect(await gate.count(), "destructive gate copy / control").toBeGreaterThan(0);
-    // Contract surface for detector patterns (documented until backend ships).
-    const patterns = [
-      "rm -rf",
-      "del /s",
-      "rd /s",
-      "Remove-Item -Recurse",
-      "format",
-    ];
-    expect(patterns.length).toBe(5);
+    await expect(page.locator('[data-qa="destructive-queue-note"]')).toBeVisible();
+    await expect(page.locator('[data-qa="destructive-confirm"]')).toBeVisible();
+    await expect(page.locator('[data-qa="destructive-reject"]')).toBeVisible();
+    // Settings copy still documents Never Ask cannot skip (static gate panel).
+    await openRoute(page, "/settings", "full");
+    const gate = page.locator('[data-qa="destructive-gate"]');
+    await expect(gate, "destructive gate panel").toBeVisible();
+    await expect(gate.getByText(/Never Ask|atlanamaz|cannot skip/i).first()).toBeVisible();
   });
 
-  test("AP-07 · Never Ask cannot skip destructive confirmation [expected-fail until PR-1/5]", async ({
-    page,
-  }, testInfo) => {
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "Never Ask still bypasses destructive ops (O4 / §10.2)",
-    });
-    test.fail(true, "Destructive ops not forced through DecisionGate");
-    await openRoute(page, "/dashboard?demo=destructive-reset", "browser");
-    const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog"));
-    expect(await dialog.count(), "destructive confirm alertdialog").toBeGreaterThan(0);
-    await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil|Remove-Item|del \/s/i);
+  test("AP-07 · FIFO reject then confirm with correct id/hash IPC", async ({ page }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, DESTRUCTIVE_FIFO);
+    const dialog = page.locator('[data-qa="destructive-dialog"]');
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('[data-qa="destructive-command"]')).toHaveText(
+      DESTRUCTIVE_FIFO[0]!.command,
+    );
+
+    const beforeReject = await getIpcLog(page);
+    await page.locator('[data-qa="destructive-reject"]').click();
+    await expect(page.locator('[data-qa="destructive-command"]')).toHaveText(
+      DESTRUCTIVE_FIFO[1]!.command,
+      { timeout: 5_000 },
+    );
+    await expect(dialog).toHaveAttribute("data-task-id", DESTRUCTIVE_FIFO[1]!.id);
+    await expect(dialog).toHaveAttribute("data-command-hash", DESTRUCTIVE_FIFO[1]!.command_hash);
+
+    const afterReject = await getIpcLog(page);
+    const rejectCall = afterReject
+      .slice(beforeReject.length)
+      .find((e) => e.cmd === "reject_destructive");
+    expect(rejectCall, "reject_destructive IPC").toBeTruthy();
+    const rejectArgs = rejectCall!.args as { id?: string; commandHash?: string };
+    expect(rejectArgs.id).toBe(DESTRUCTIVE_FIFO[0]!.id);
+    expect(rejectArgs.commandHash).toBe(DESTRUCTIVE_FIFO[0]!.command_hash);
+
+    const beforeConfirm = await getIpcLog(page);
+    await page.locator('[data-qa="destructive-confirm"]').click();
+    await expect(dialog).toBeHidden({ timeout: 5_000 });
+
+    const afterConfirm = await getIpcLog(page);
+    const confirmCall = afterConfirm
+      .slice(beforeConfirm.length)
+      .find((e) => e.cmd === "confirm_destructive");
+    expect(confirmCall, "confirm_destructive IPC").toBeTruthy();
+    const confirmArgs = confirmCall!.args as { id?: string; commandHash?: string };
+    expect(confirmArgs.id).toBe(DESTRUCTIVE_FIFO[1]!.id);
+    expect(confirmArgs.commandHash).toBe(DESTRUCTIVE_FIFO[1]!.command_hash);
+  });
+
+  test("AP-07b · Destructive dialog focus trap and Esc rejects", async ({ page }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, [DESTRUCTIVE_FIFO[0]!]);
+    const dialog = page.locator('[data-qa="destructive-dialog"]');
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
+    const rejectBtn = page.locator('[data-qa="destructive-reject"]');
+    const confirmBtn = page.locator('[data-qa="destructive-confirm"]');
+    await expect(rejectBtn).toBeFocused({ timeout: 2_000 });
+
+    await page.keyboard.press("Tab");
+    await expect(confirmBtn).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(rejectBtn).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(confirmBtn).toBeFocused();
+
+    const beforeEsc = await getIpcLog(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden({ timeout: 5_000 });
+    const afterEsc = await getIpcLog(page);
+    const rejectCall = afterEsc
+      .slice(beforeEsc.length)
+      .find((e) => e.cmd === "reject_destructive");
+    expect(rejectCall, "Esc must reject via reject_destructive").toBeTruthy();
+    expect((rejectCall!.args as { id?: string }).id).toBe(DESTRUCTIVE_FIFO[0]!.id);
   });
 
   test("AP-08 · Pending approval plays alert sound (HTML Audio; wav/mp3/ogg)", async ({
@@ -297,19 +403,19 @@ test.describe("AP / CP / misc", () => {
     expect(afterResolve, "must stop repeating after approve/deny").toBe(atDecision);
   });
 
-  test("AP-09 · Settings sound options (engine prefs; full Settings UI in PR-5)", async ({
+  test("AP-09 · Settings sound options (on/off, builtins, volume, interval, Listen)", async ({
     page,
   }) => {
-    // Engine + minimal control for PR-2b; full Settings polish is PR-5.
     await openRoute(page, "/settings", "full");
     const section = page.locator('[data-qa="approval-sound"]');
     await expect(section, "sound settings section").toBeVisible();
     await section.scrollIntoViewIfNeeded();
     await expect(section.getByRole("button", { name: /^Dinle$|Preview|Play|Listen|Test/i })).toBeVisible();
-    await expect(section.getByText(/wav|mp3|ogg|aiff|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
+    await expect(section.getByText(/wav|mp3|ogg|upload|yükle|Pick|Dosya|≤5/i).first()).toBeVisible();
     await expect(section.getByText(/volume|ses|interval|aralık|60/i).first()).toBeVisible();
-    // Persist: toggle off writes lounge.approvalSound so PR-5 Settings can reuse it.
-    // Scope to this panel only — outer Settings <section> also contains locked routing checkboxes.
+    await expect(section.getByText(/background|arka plan|escalat|artırılmaz/i).first()).toBeVisible();
+    await expect(section.getByText(/OS notification|OS bildirimi/i).first()).toBeVisible();
+    // Persist: toggle off writes lounge.approvalSound
     const toggle = section.locator('input[type="checkbox"]:not([disabled]), [role="switch"]:not([disabled])').first();
     await expect(toggle).toBeVisible();
     await expect(toggle).toBeEnabled();
@@ -322,6 +428,24 @@ test.describe("AP / CP / misc", () => {
         "",
     );
     expect(stored.length).toBeGreaterThan(0);
+    // Volume + interval controls
+    const volume = section.locator('input[type="range"]').first();
+    await expect(volume).toBeVisible();
+    await volume.fill("40");
+    const interval = section.locator('input[type="number"]').first();
+    await expect(interval).toBeVisible();
+    await interval.fill("30");
+    await page.waitForTimeout(150);
+    const after = await page.evaluate(() => {
+      const raw = localStorage.getItem("lounge.approvalSound") || "";
+      try {
+        return JSON.parse(raw) as { volume?: number; intervalSecs?: number };
+      } catch {
+        return {};
+      }
+    });
+    expect(after.volume).toBeCloseTo(0.4, 1);
+    expect(after.intervalSecs).toBe(30);
   });
 
   test("AP-10 · Native OS notification → focus_app_for_approval + banner focus", async ({
@@ -469,25 +593,11 @@ test.describe("AP / CP / misc", () => {
   });
 
   test("OB-01 · Onboarding finish disabled when nothing selected", async ({ page }) => {
-    // Use full fixture (empty IPC dataset currently trips a client error boundary on
-    // /onboarding — documented in baseline). Deselect all tools to assert disabled CTA.
     await openRoute(page, "/onboarding", "full", { waitMs: 1200 });
-    const body = page.locator("body");
-    if (/couldn.?t load|could not be found/i.test(await body.innerText())) {
-      test.fail(true, "Onboarding failed to load under IPC mock");
-      expect(false, "onboarding page load").toBe(true);
-      return;
-    }
-    // Wait out Scanning System…
-    await page.getByRole("button", { name: /Sistemi Başlat|Finish|Start/i }).first()
-      .waitFor({ state: "visible", timeout: 15_000 })
-      .catch(() => undefined);
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText, "onboarding page must load").not.toMatch(/couldn.?t load|could not be found/i);
     const finish = page.getByRole("button", { name: /Sistemi Başlat|Finish|Start/i }).first();
-    if ((await finish.count()) === 0) {
-      test.fail(true, "Finish CTA not found after scan");
-      expect(await finish.count()).toBeGreaterThan(0);
-      return;
-    }
+    await expect(finish).toBeVisible({ timeout: 15_000 });
     // Deselect everything that looks selected.
     const checked = page.locator('input[type="checkbox"]:checked');
     const n = await checked.count();
@@ -501,8 +611,13 @@ test.describe("AP / CP / misc", () => {
     await openRoute(page, "/fleet", "full");
     await expect(page.locator("main")).toBeVisible();
     const text = await page.locator("main").innerText();
-    expect(/Worker Fleet|Fleet|memory-bridge|Grok|LMR|NATS|DecisionGate/i.test(text)).toBeTruthy();
-    await expect(page.getByText("Worker detail").first()).toBeVisible();
+    expect(
+      /Worker Fleet|İşçi Filosu|Fleet|memory-bridge|Grok|LMR|NATS|DecisionGate/i.test(text),
+    ).toBeTruthy();
+    await expect(
+      page.getByText(/Worker detail|İşçi ayrıntısı/i).first(),
+    ).toBeVisible();
     await expect(page.getByRole("columnheader", { name: /Heartbeat/i })).toBeVisible();
   });
 });
+

@@ -68,6 +68,21 @@ impl PolicyGate {
         Ok(PolicyDecision::Allow)
     }
 
+    /// Evaluate structured argv (F22). Prefer this over re-joining into a string.
+    pub fn evaluate_argv(
+        program: &str,
+        args: &[String],
+        _source: ActionSource,
+    ) -> anyhow::Result<PolicyDecision> {
+        if let Some(class) = classify_argv(program, args) {
+            return Ok(PolicyDecision::RequireConfirmation {
+                class,
+                never_ask_bypasses: false,
+            });
+        }
+        Ok(PolicyDecision::Allow)
+    }
+
     /// Whether Never Ask can skip this class — always false for destructive.
     pub fn never_ask_bypasses_destructive() -> bool {
         false
@@ -403,7 +418,8 @@ fn skip_prefix_wrapper_args<'a>(program: &str, args: &'a [String]) -> &'a [Strin
     &args[i..]
 }
 
-/// Skip git global options before the subcommand (F17).
+/// Skip git global options before the subcommand (F17 / F23).
+/// Handles separate (`-C dir`, `-c k=v`) and combined (`-Cdir`, `-ck=v`) short forms.
 pub fn strip_git_globals(args: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < args.len() {
@@ -411,6 +427,15 @@ pub fn strip_git_globals(args: &[String]) -> Vec<String> {
         let lower = a.to_ascii_lowercase();
         if a == "-C" || a == "-c" {
             i = (i + 2).min(args.len());
+            continue;
+        }
+        // Combined short forms: -C<dir> / -c<k=v> (F23).
+        if a.starts_with("-C") && a.len() > 2 {
+            i += 1;
+            continue;
+        }
+        if a.starts_with("-c") && a.len() > 2 && !a.starts_with("--") {
+            i += 1;
             continue;
         }
         if lower == "--no-pager" || a == "-p" || lower == "--paginate" {
@@ -436,6 +461,15 @@ pub fn classify_destructive(command: &str) -> Option<DestructiveClass> {
         return None;
     }
     classify_words(&shell_words(trimmed), 0)
+}
+
+/// Classify a real argv vector without re-joining / re-splitting (F22).
+/// Preserves quoting of shell `-c` / PowerShell `-Command` payloads.
+pub fn classify_argv(program: &str, args: &[String]) -> Option<DestructiveClass> {
+    let mut words = Vec::with_capacity(1 + args.len());
+    words.push(program.to_string());
+    words.extend(args.iter().cloned());
+    classify_words(&words, 0)
 }
 
 fn classify_words(words: &[String], depth: usize) -> Option<DestructiveClass> {
@@ -488,6 +522,8 @@ fn classify_words(words: &[String], depth: usize) -> Option<DestructiveClass> {
 }
 
 fn classify_program(program: &str, raw_args: &[String]) -> Option<DestructiveClass> {
+    // Build a display/SQL-scan line from intact argv tokens (never used as a
+    // re-split input — shell payload classification goes through classify_words).
     let lower_line = std::iter::once(program)
         .chain(raw_args.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
@@ -830,5 +866,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["reset", "--hard"]
         );
+    }
+
+    #[test]
+    fn f23_strip_git_globals_combined_short_forms() {
+        let args = vec!["-C/tmp/repo".into(), "clean".into(), "-fd".into()];
+        assert_eq!(
+            strip_git_globals(&args)
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clean", "-fd"]
+        );
+        let args = vec!["-cuser.name=x".into(), "push".into(), "-f".into()];
+        assert_eq!(
+            strip_git_globals(&args)
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["push", "-f"]
+        );
+    }
+
+    #[test]
+    fn f22_classify_argv_preserves_shell_c_payload() {
+        let args = vec!["-c".into(), "rm -rf x".into()];
+        assert_eq!(classify_argv("sh", &args), Some(DestructiveClass::PosixRm));
+        let args = vec!["-lc".into(), "git clean -fdx".into()];
+        assert_eq!(
+            classify_argv("bash", &args),
+            Some(DestructiveClass::GitClean)
+        );
+        let args = vec!["-c".into(), "echo hi".into()];
+        assert_eq!(classify_argv("sh", &args), None);
     }
 }

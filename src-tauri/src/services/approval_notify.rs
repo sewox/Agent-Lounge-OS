@@ -1,5 +1,9 @@
 //! OS + frontend notifications when approvals are pending or resolved.
+//!
+//! Pending approvals are tracked as a **FIFO queue** (not a single overwrite
+//! slot): resolving the newest request must not disarm or lose older ones.
 
+use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
@@ -71,33 +75,63 @@ pub struct ApprovalResolvedPayload {
     pub reason: String,
 }
 
-fn pending_slot() -> &'static Mutex<Option<String>> {
-    static SLOT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
+fn pending_queue() -> &'static Mutex<VecDeque<String>> {
+    static QUEUE: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+    QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-/// Remember the latest pending approval so activation / focus can raise the banner.
+/// Enqueue a pending approval id (FIFO). Duplicate ids are ignored.
+pub fn enqueue_pending_approval(task_id: String) {
+    let mut q = pending_queue().lock().expect("pending approval lock");
+    if !q.iter().any(|id| id == &task_id) {
+        q.push_back(task_id);
+    }
+}
+
+/// Compatibility helper: `Some(id)` enqueues; `None` clears the whole queue.
 pub fn set_pending_approval_task_id(task_id: Option<String>) {
-    *pending_slot().lock().expect("pending approval lock") = task_id;
+    match task_id {
+        Some(id) => enqueue_pending_approval(id),
+        None => {
+            pending_queue()
+                .lock()
+                .expect("pending approval lock")
+                .clear();
+        }
+    }
 }
 
+/// Oldest pending approval id (FIFO head), if any.
 pub fn pending_approval_task_id() -> Option<String> {
-    pending_slot()
+    pending_queue()
         .lock()
         .expect("pending approval lock")
-        .clone()
+        .front()
+        .cloned()
 }
 
-/// Clear the pending-approval slot only when it still holds `task_id`.
-/// Returns true if the slot was cleared.
+/// Snapshot of the FIFO queue (oldest first).
+pub fn pending_approval_ids() -> Vec<String> {
+    pending_queue()
+        .lock()
+        .expect("pending approval lock")
+        .iter()
+        .cloned()
+        .collect()
+}
+
+/// Number of pending approvals in the FIFO queue.
+pub fn pending_approval_count() -> usize {
+    pending_queue().lock().expect("pending approval lock").len()
+}
+
+/// Clear the pending-approval queue entry only when it still holds `task_id`.
+/// Returns true if the id was removed.
 pub fn clear_pending_approval_if_matches(task_id: &str) -> bool {
-    let mut slot = pending_slot().lock().expect("pending approval lock");
-    if slot.as_deref() == Some(task_id) {
-        *slot = None;
-        true
-    } else {
-        false
-    }
+    let mut q = pending_queue().lock().expect("pending approval lock");
+    let before = q.len();
+    q.retain(|id| id != task_id);
+    before != q.len()
 }
 
 /// Whether app activation should raise + emit the approval banner.
@@ -124,9 +158,13 @@ fn request_dock_attention<R: Runtime>(app: &AppHandle<R>) {
 /// macOS / `WindowEvent::Focused(true)` on all desktop) while a pending approval
 /// is recorded. See `docs/qa/ap-10-notification-click.md`.
 pub fn emit_approval_pending<R: Runtime>(app: &AppHandle<R>, payload: ApprovalPendingPayload) {
-    set_pending_approval_task_id(Some(payload.task_id.clone()));
+    enqueue_pending_approval(payload.task_id.clone());
     let _ = app.emit(APPROVAL_PENDING_EVENT, &payload);
-    let title = "Approval required";
+    let title = if payload.kind == "destructive" {
+        "Destructive confirmation required"
+    } else {
+        "Approval required"
+    };
     let body = if payload.summary.trim().is_empty() {
         format!("{} → {}", payload.from_agent, payload.to_agent)
     } else {
@@ -232,6 +270,7 @@ mod tests {
     #[test]
     fn pending_slot_round_trips_and_clears() {
         let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(None);
         set_pending_approval_task_id(Some("task-1".into()));
         assert_eq!(pending_approval_task_id().as_deref(), Some("task-1"));
         set_pending_approval_task_id(None);
@@ -241,6 +280,7 @@ mod tests {
     #[test]
     fn clear_pending_if_matches_only_matching_id() {
         let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(None);
         set_pending_approval_task_id(Some("task-keep".into()));
         assert!(!clear_pending_approval_if_matches("task-other"));
         assert_eq!(pending_approval_task_id().as_deref(), Some("task-keep"));
@@ -254,6 +294,7 @@ mod tests {
     #[test]
     fn resolve_paths_clear_slot_so_activation_is_inert() {
         let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(None);
         // Mirrors resolve_vote / await_approval (Approve, Deny, ApproveLocal, routing).
         for (id, _vote) in [
             ("approve-1", "Approve"),
@@ -275,11 +316,46 @@ mod tests {
     #[test]
     fn mismatched_clear_leaves_pending_so_activation_still_armed() {
         let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(None);
         set_pending_approval_task_id(Some("live-approval".into()));
         assert!(!clear_pending_approval_if_matches("stale-other"));
         assert_eq!(pending_approval_task_id().as_deref(), Some("live-approval"));
         assert!(should_focus_on_activation());
         // Clean up for other tests sharing the process-wide slot.
         assert!(clear_pending_approval_if_matches("live-approval"));
+    }
+
+    #[test]
+    fn fifo_queue_preserves_older_when_newer_resolved() {
+        let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(None);
+        enqueue_pending_approval("older".into());
+        enqueue_pending_approval("newer".into());
+        assert_eq!(pending_approval_count(), 2);
+        assert_eq!(pending_approval_task_id().as_deref(), Some("older"));
+        assert_eq!(
+            pending_approval_ids(),
+            vec!["older".to_string(), "newer".to_string()]
+        );
+
+        // Resolving the newest must NOT disarm the older one.
+        assert!(clear_pending_approval_if_matches("newer"));
+        assert_eq!(pending_approval_count(), 1);
+        assert_eq!(pending_approval_task_id().as_deref(), Some("older"));
+        assert!(should_focus_on_activation());
+
+        assert!(clear_pending_approval_if_matches("older"));
+        assert_eq!(pending_approval_count(), 0);
+        assert!(!should_focus_on_activation());
+    }
+
+    #[test]
+    fn fifo_duplicate_enqueue_is_noop() {
+        let _guard = pending_slot_test_lock();
+        set_pending_approval_task_id(None);
+        enqueue_pending_approval("a".into());
+        enqueue_pending_approval("a".into());
+        assert_eq!(pending_approval_count(), 1);
+        set_pending_approval_task_id(None);
     }
 }

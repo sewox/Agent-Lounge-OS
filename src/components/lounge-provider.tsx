@@ -14,6 +14,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { i18n, initI18n } from "@/lib/i18n/config";
 import {
   DEFAULT_POLICY,
   formatClock,
@@ -47,8 +48,11 @@ import {
   isSecurityApproval,
   ROUTING_APPROVAL_CLEARED_EVENT,
   ROUTING_APPROVAL_EVENT,
+  APPROVAL_PENDING_EVENT,
+  APPROVAL_RESOLVED_EVENT,
   type ApprovalCleared,
   type ApprovalRequest,
+  type DestructivePending,
   type DeadSymbol,
   type DecisionGateStatus,
   type IndexNotice,
@@ -145,6 +149,8 @@ type LoungeContextValue = {
   indexProgress: IndexProgress;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
+  destructiveQueue: DestructivePending[];
+  destructiveQueueCount: number;
   approvalError: string | null;
   decisionGate: DecisionGateStatus | null;
   layaEngine: LayaEngineStatus | null;
@@ -158,6 +164,7 @@ type LoungeContextValue = {
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
   resolveApproval: (vote: RoutingVote, taskId?: string) => Promise<void>;
+  resolveDestructive: (id: string, confirmed: boolean) => Promise<void>;
   /** Context Whisper satırını açıkça "faydalı" olarak işaretle (Feedback Loop). */
   markWhisperUseful: (experienceId: string, projectId?: string) => Promise<void>;
   ignoreDeadSymbol: (symbol: DeadSymbol) => Promise<void>;
@@ -217,8 +224,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [indexProgress, setIndexProgress] = useState<IndexProgress>(() => emptyIndexProgress());
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [destructiveQueue, setDestructiveQueue] = useState<DestructivePending[]>([]);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const approvalRef = useRef<ApprovalRequest | null>(null);
+  const destructiveRef = useRef<DestructivePending[]>([]);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
   const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
@@ -428,7 +437,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           setQuotas([]);
           setAmberAlert(false);
           setAmberTools([]);
-          setQuotaError("Kota verisi alınamadı");
+          initI18n();
+          setQuotaError(i18n.t("fetchFailed", { ns: "quotas" }));
         }
       }
       try {
@@ -842,6 +852,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     approvalRef.current = approval;
   }, [approval]);
 
+  useEffect(() => {
+    destructiveRef.current = destructiveQueue;
+  }, [destructiveQueue]);
+
+  const syncDestructiveQueue = useCallback(async () => {
+    if (!isTauri()) {
+      return;
+    }
+    try {
+      const rows = await invoke<DestructivePending[]>("list_pending_destructive");
+      setDestructiveQueue(rows);
+    } catch {
+      /* command may be unavailable in older builds */
+    }
+  }, []);
+
   const syncPendingApprovals = useCallback(async () => {
     if (!isTauri()) {
       return;
@@ -902,7 +928,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     const current = approvalRef.current;
     const id = (taskId ?? current?.task_id ?? "").trim();
     if (!id) {
-      setApprovalError("Bekleyen onay yok");
+      setApprovalError(i18n.t("noPending", { ns: "approvals" }));
       return;
     }
     setApprovalError(null);
@@ -915,15 +941,51 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       const missing =
-        text.toLowerCase().includes("bekleyen") || text.toLowerCase().includes("yok");
+        text.toLowerCase().includes("bekleyen") ||
+        text.toLowerCase().includes("yok") ||
+        text.toLowerCase().includes("pending") ||
+        text.toLowerCase().includes("unknown");
       if (missing) {
         setApproval((prev) => (prev?.task_id === id ? null : prev));
-        setApprovalError("Bekleyen onay kalmamış — banner kapatıldı");
+        setApprovalError(i18n.t("cleared", { ns: "approvals" }));
       } else {
-        setApprovalError(text || "Onay işlenemedi");
+        setApprovalError(text || i18n.t("resolveFailed", { ns: "approvals" }));
       }
     }
   }, []);
+
+  const resolveDestructive = useCallback(
+    async (id: string, confirmed: boolean) => {
+      const trimmed = id.trim();
+      const row = destructiveRef.current.find((item) => item.id === trimmed);
+      if (!trimmed) {
+        setApprovalError(i18n.t("destructiveNoPending", { ns: "approvals" }));
+        return;
+      }
+      setApprovalError(null);
+      try {
+        if (isTauri()) {
+          // Pass commandHash so QA can assert id+hash; Rust uses id only.
+          const args = { id: trimmed, commandHash: row?.command_hash ?? null };
+          if (confirmed) {
+            await invoke("confirm_destructive", args);
+          } else {
+            await invoke("reject_destructive", args);
+          }
+        }
+        setDestructiveQueue((current) => current.filter((item) => item.id !== trimmed));
+        if (!confirmed) {
+          setApprovalError(i18n.t("destructiveRejected", { ns: "approvals" }));
+        }
+        await syncDestructiveQueue();
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        setApprovalError(text || i18n.t("destructiveResolveFailed", { ns: "approvals" }));
+        await syncDestructiveQueue();
+      }
+    },
+    [syncDestructiveQueue],
+  );
 
   const markWhisperUseful = useCallback(async (experienceId: string, projectId?: string) => {
     if (!experienceId.trim()) {
@@ -1122,9 +1184,33 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
             }
           }),
         );
+        unlisteners.push(
+          await listen<{ kind?: string; task_id?: string; confirm_id?: string }>(
+            APPROVAL_PENDING_EVENT,
+            (event) => {
+              if (cancelled) {
+                return;
+              }
+              if (event.payload.kind === "destructive") {
+                void syncDestructiveQueue();
+              }
+            },
+          ),
+        );
+        unlisteners.push(
+          await listen<ApprovalCleared>(APPROVAL_RESOLVED_EVENT, (event) => {
+            if (cancelled) {
+              return;
+            }
+            setDestructiveQueue((current) =>
+              current.filter((row) => row.id !== event.payload.task_id),
+            );
+          }),
+        );
         // Hipotez (a): listener kurulana kadar kaçan event veya state kaybı → backend snapshot.
         if (!cancelled) {
           await syncPendingApprovals();
+          await syncDestructiveQueue();
           try {
             const jobs = await invoke<IndexJob[]>("list_index_jobs");
             if (!cancelled && Array.isArray(jobs)) {
@@ -1145,6 +1231,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     const onVisible = () => {
       if (document.visibilityState === "visible") {
         void syncPendingApprovals();
+        void syncDestructiveQueue();
         if (isTauri()) {
           void invoke<IndexJob[]>("list_index_jobs")
             .then((jobs) => {
@@ -1165,7 +1252,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         void fn();
       });
     };
-  }, [applyIndexJobs, ingestBusMessage, refreshSemantic, syncInstalledModels, syncPendingApprovals]);
+  }, [
+    applyIndexJobs,
+    ingestBusMessage,
+    refreshSemantic,
+    syncInstalledModels,
+    syncPendingApprovals,
+    syncDestructiveQueue,
+  ]);
+
 
   const decisionMsgPerMin = decisionMsgTimes.length;
 
@@ -1321,6 +1416,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexProgress,
       policy,
       approval,
+      destructiveQueue,
+      destructiveQueueCount: destructiveQueue.length,
       approvalError,
       decisionGate,
       layaEngine,
@@ -1334,6 +1431,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      resolveDestructive,
       markWhisperUseful,
       ignoreDeadSymbol,
       unignoreDeadSymbol,
@@ -1395,6 +1493,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexProgress,
       policy,
       approval,
+      destructiveQueue,
       approvalError,
       decisionGate,
       layaEngine,
@@ -1408,6 +1507,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      resolveDestructive,
       markWhisperUseful,
       ignoreDeadSymbol,
       unignoreDeadSymbol,

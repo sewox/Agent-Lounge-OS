@@ -1,6 +1,7 @@
 //! One-shot confirmation tokens for PolicyGate-blocked destructive commands (F3).
+//! Pending tokens are tracked in FIFO insertion order for the confirmation UI.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,10 @@ struct PendingToken {
 
 struct Registry {
     pending: HashMap<String, PendingToken>,
+    /// FIFO insertion order of pending ids (oldest first).
+    order: VecDeque<String>,
+    /// Full event payloads keyed by id (for UI list).
+    events: HashMap<String, DestructivePendingEvent>,
     /// Test / observer capture of emitted events.
     emitted: Vec<DestructivePendingEvent>,
     /// Optional NATS subject publishes (command JSON).
@@ -51,9 +56,26 @@ impl Registry {
     fn new() -> Self {
         Self {
             pending: HashMap::new(),
+            order: VecDeque::new(),
+            events: HashMap::new(),
             emitted: Vec::new(),
             nats_emitted: Vec::new(),
         }
+    }
+
+    fn purge_expired_locked(&mut self, now_elapsed: impl Fn(&PendingToken) -> bool) -> Vec<String> {
+        let expired: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, t)| now_elapsed(t))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in &expired {
+            self.pending.remove(id);
+            self.events.remove(id);
+            self.order.retain(|x| x != id);
+        }
+        expired
     }
 }
 
@@ -129,6 +151,9 @@ pub fn register_pending(
 
     {
         let mut reg = registry().lock().expect("registry");
+        // Drop expired before inserting so the UI list stays accurate.
+        let expired = reg.purge_expired_locked(|t| t.created.elapsed() > TOKEN_TTL);
+        drop(expired);
         reg.pending.insert(
             id.clone(),
             PendingToken {
@@ -141,6 +166,8 @@ pub fn register_pending(
                 consumed: false,
             },
         );
+        reg.events.insert(id.clone(), event.clone());
+        reg.order.push_back(id.clone());
         reg.emitted.push(event.clone());
         reg.nats_emitted
             .push(serde_json::to_string(&event).unwrap_or_default());
@@ -151,6 +178,35 @@ pub fn register_pending(
     }
 
     event
+}
+
+/// FIFO list of pending (unconfirmed, unconsumed, unexpired) destructive events.
+pub fn list_pending_destructive() -> Vec<DestructivePendingEvent> {
+    let mut reg = registry().lock().expect("registry");
+    let expired = reg.purge_expired_locked(|t| t.created.elapsed() > TOKEN_TTL);
+    drop(expired);
+    reg.order
+        .iter()
+        .filter_map(|id| {
+            let token = reg.pending.get(id)?;
+            if token.confirmed || token.consumed {
+                return None;
+            }
+            reg.events.get(id).cloned()
+        })
+        .collect()
+}
+
+/// Optional UI/QA check: pending id must carry the expected command hash.
+pub fn assert_destructive_hash(id: &str, command_hash: &str) -> Result<()> {
+    let reg = registry().lock().expect("registry");
+    let Some(token) = reg.pending.get(id) else {
+        bail!("unknown destructive confirmation id");
+    };
+    if token.command_hash != command_hash {
+        bail!("destructive confirmation hash mismatch");
+    }
+    Ok(())
 }
 
 /// User confirmed the destructive approval — token becomes single-use runnable.
@@ -165,6 +221,8 @@ pub fn confirm_destructive(id: &str) -> Result<()> {
             .is_some_and(|t| t.created.elapsed() > TOKEN_TTL)
         {
             reg.pending.remove(id);
+            reg.events.remove(id);
+            reg.order.retain(|x| x != id);
             Err("expired")
         } else if reg.pending.get(id).is_some_and(|t| t.consumed) {
             Err("consumed")
@@ -172,6 +230,9 @@ pub fn confirm_destructive(id: &str) -> Result<()> {
             if let Some(token) = reg.pending.get_mut(id) {
                 token.confirmed = true;
             }
+            // Confirmed tokens leave the UI list (but stay until consumed/spawn).
+            reg.events.remove(id);
+            reg.order.retain(|x| x != id);
             Ok(())
         }
     };
@@ -190,7 +251,10 @@ pub fn confirm_destructive(id: &str) -> Result<()> {
 pub fn reject_destructive(id: &str) -> Result<()> {
     let removed = {
         let mut reg = registry().lock().expect("registry");
-        reg.pending.remove(id).is_some()
+        let had = reg.pending.remove(id).is_some();
+        reg.events.remove(id);
+        reg.order.retain(|x| x != id);
+        had
     };
     clear_notification_pending_slot(id);
     if removed {
@@ -204,15 +268,7 @@ pub fn reject_destructive(id: &str) -> Result<()> {
 pub fn take_confirmed_allowance(command_hash: &str) -> bool {
     let (expired, key) = {
         let mut reg = registry().lock().expect("registry");
-        let expired: Vec<String> = reg
-            .pending
-            .iter()
-            .filter(|(_, t)| t.created.elapsed() > TOKEN_TTL)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for id in &expired {
-            reg.pending.remove(id);
-        }
+        let expired = reg.purge_expired_locked(|t| t.created.elapsed() > TOKEN_TTL);
         let key = reg
             .pending
             .iter()
@@ -222,6 +278,8 @@ pub fn take_confirmed_allowance(command_hash: &str) -> bool {
             if let Some(token) = reg.pending.get_mut(k) {
                 token.consumed = true;
             }
+            reg.events.remove(k);
+            reg.order.retain(|x| x != k);
         }
         (expired, key)
     };
@@ -309,6 +367,19 @@ mod tests {
     }
 
     #[test]
+    fn assert_destructive_hash_accepts_match_and_rejects_mismatch() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let args = vec!["-rf".into(), "/tmp/y".into()];
+        let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
+        assert_destructive_hash(&event.id, &event.command_hash).unwrap();
+        let err = assert_destructive_hash(&event.id, "wrong-hash").unwrap_err();
+        assert!(err.to_string().contains("hash mismatch"));
+        let missing = assert_destructive_hash("no-such-id", "x").unwrap_err();
+        assert!(missing.to_string().contains("unknown"));
+    }
+
+    #[test]
     fn confirm_hash_matches_argv_with_spaces() {
         let _guard = test_lock();
         reset_for_tests();
@@ -351,5 +422,44 @@ mod tests {
         confirm_destructive(&event3.id).unwrap();
         assert_eq!(pending_approval_task_id().as_deref(), Some("live-other"));
         set_pending_approval_task_id(None);
+    }
+
+    #[test]
+    fn fifo_list_preserves_order_and_survives_newer_resolve() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let a = register_pending(
+            "rm",
+            &["-rf".into(), "/tmp/a".into()],
+            DestructiveClass::PosixRm,
+            ActionSource::Agent,
+        );
+        let b = register_pending(
+            "git",
+            &["reset".into(), "--hard".into()],
+            DestructiveClass::GitResetHard,
+            ActionSource::User,
+        );
+        let list = list_pending_destructive();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, a.id);
+        assert_eq!(list[1].id, b.id);
+
+        // Resolving the newer must leave the older in the FIFO list.
+        confirm_destructive(&b.id).unwrap();
+        let after = list_pending_destructive();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, a.id);
+
+        reject_destructive(&a.id).unwrap();
+        assert!(list_pending_destructive().is_empty());
+    }
+
+    #[test]
+    fn reject_returns_error_for_unknown_id() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let err = reject_destructive("missing-id").unwrap_err();
+        assert!(format!("{err}").contains("unknown"));
     }
 }

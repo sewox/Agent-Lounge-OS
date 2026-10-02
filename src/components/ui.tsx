@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { natsEventTone, type ExperienceOutcome, type NatsEvent, type NatsTone, type ServiceHealth } from "@/lib/lounge";
 
 export function Pip({ live = false, tone = "ok" }: { live?: boolean; tone?: "ok" | "warn" | "down" | "primary" }) {
@@ -162,6 +163,7 @@ export function Pager({
   total: number;
   onPage: (next: number) => void;
 }) {
+  const { t } = useTranslation("common");
   const totalPages = Math.max(1, pages);
   const safe = Math.min(Math.max(0, page), totalPages - 1);
   return (
@@ -172,7 +174,7 @@ export function Pager({
         onClick={() => onPage(Math.max(0, safe - 1))}
         className="min-h-8 rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
       >
-        Prev
+        {t("prev")}
       </button>
       <span className="tnum font-mono text-on-surface-variant">
         {safe + 1}/{totalPages}
@@ -184,7 +186,7 @@ export function Pager({
         onClick={() => onPage(Math.min(totalPages - 1, safe + 1))}
         className="min-h-8 rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
       >
-        Next
+        {t("next")}
       </button>
     </div>
   );

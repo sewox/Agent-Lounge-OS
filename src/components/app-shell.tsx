@@ -75,6 +75,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     amberAlert,
     amberTools,
     approval,
+    destructiveQueue,
+    destructiveQueueCount,
     approvalError,
     decisionGate,
     layaEngine,
@@ -84,8 +86,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     declineLaya,
     indexWorkspace,
     resolveApproval,
+    resolveDestructive,
     setOpenCommandPalette,
   } = useLounge();
+  const headDestructive = destructiveQueue[0] ?? null;
 
   const crumb = t(`titles.${pathname}`, { defaultValue: t("titles.default") });
   const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
@@ -98,6 +102,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const platform = usePlatform();
   const shortcutLabel = paletteShortcutLabel(platform);
   const alertRef = useRef<HTMLDivElement | null>(null);
+  const destructiveDialogRef = useRef<HTMLDivElement | null>(null);
+  const destructivePreviousFocus = useRef<HTMLElement | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
 
   useEffect(() => {
@@ -166,6 +172,68 @@ export function AppShell({ children }: { children: ReactNode }) {
       layaEngine?.phase !== "downloading");
   const securityHold = Boolean(approval && isSecurityApproval(approval.kind));
   const quotaHold = Boolean(approval && isQuotaApproval(approval.kind));
+  const destructiveHold = Boolean(headDestructive);
+
+  // Destructive alertdialog: initial focus, Esc → reject, Tab focus trap.
+  useEffect(() => {
+    if (!destructiveHold || !headDestructive) {
+      return;
+    }
+    const pendingId = headDestructive.id;
+    destructivePreviousFocus.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    function focusableNodes(): HTMLElement[] {
+      if (!destructiveDialogRef.current) {
+        return [];
+      }
+      return [
+        ...destructiveDialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ].filter((node) => !node.hasAttribute("disabled") && node.tabIndex !== -1);
+    }
+
+    const boot = window.setTimeout(() => {
+      const rejectBtn = destructiveDialogRef.current?.querySelector<HTMLElement>(
+        '[data-qa="destructive-reject"]',
+      );
+      (rejectBtn ?? destructiveDialogRef.current?.querySelector<HTMLElement>("button"))?.focus();
+    }, 0);
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        void resolveDestructive(pendingId, false);
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = focusableNodes();
+      if (focusable.length === 0) {
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.clearTimeout(boot);
+      window.removeEventListener("keydown", onKeyDown, true);
+      destructivePreviousFocus.current?.focus();
+    };
+  }, [destructiveHold, headDestructive, resolveDestructive]);
+
   const serviceDegraded = coreServicesDegraded(report);
   const degradedNames = degradedCoreServiceNames(report);
   const degradedRestart = useMemo(() => resolveDegradedRestart(report), [report]);
@@ -176,6 +244,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const statusBanner =
     serviceDegraded ||
     (approval && !securityHold && !quotaHold) ||
+    destructiveHold ||
     indexing ||
     indexProgressActive(indexProgress) ||
     indexNotice ||
@@ -313,6 +382,69 @@ export function AppShell({ children }: { children: ReactNode }) {
                   {ta("continueLocal")}
                 </button>
               ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {destructiveHold && headDestructive ? (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-surface-container-lowest/80 px-4 backdrop-blur-sm pointer-events-auto"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="destructive-overlay-title"
+          data-approval-chrome="destructive"
+          data-qa="destructive-dialog"
+          data-task-id={headDestructive.id}
+          data-command-hash={headDestructive.command_hash}
+        >
+          <div
+            ref={destructiveDialogRef}
+            className="relative z-[61] w-full max-w-lg border border-error-container bg-surface-container-high p-5 shadow-lg pointer-events-auto"
+          >
+            <p className="font-body text-meta font-bold tracking-label text-error-dim uppercase">
+              {ta("destructivePending")}
+              {destructiveQueueCount > 1 ? ` · ${destructiveQueueCount}` : ""}
+            </p>
+            <h2
+              id="destructive-overlay-title"
+              className="mt-3 font-body text-base font-semibold text-on-surface"
+            >
+              {ta("destructiveConfirmTitle")}
+            </h2>
+            <p
+              className="mt-2 whitespace-normal break-words font-mono text-body leading-normal text-on-surface"
+              data-qa="destructive-command"
+            >
+              {headDestructive.command}
+            </p>
+            <p className="mt-2 whitespace-normal break-words font-body text-meta leading-normal text-outline">
+              {ta("destructiveSource")}: {headDestructive.source} · {headDestructive.pattern}
+            </p>
+            {destructiveQueueCount > 1 ? (
+              <p className="mt-2 font-body text-meta text-outline" data-qa="destructive-queue-note">
+                {ta("destructiveQueueNote")}
+              </p>
+            ) : null}
+            <div className="relative z-[62] mt-5 flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
+              <button
+                type="button"
+                data-task-id={headDestructive.id}
+                data-qa="destructive-reject"
+                onClick={() => void resolveDestructive(headDestructive.id, false)}
+                className={`${BANNER_BTN} border border-error bg-error-container text-on-error-container`}
+              >
+                {ta("rejectDestructive")}
+              </button>
+              <button
+                type="button"
+                data-task-id={headDestructive.id}
+                data-qa="destructive-confirm"
+                onClick={() => void resolveDestructive(headDestructive.id, true)}
+                className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
+              >
+                {ta("confirmDestructive")}
+              </button>
             </div>
           </div>
         </div>

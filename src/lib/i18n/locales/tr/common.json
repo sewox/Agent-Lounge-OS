@@ -4,5 +4,7 @@
   "cancel": "İptal",
   "enabled": "Etkin",
   "agent": "Ajan",
-  "trigger": "Tetik"
+  "trigger": "Tetik",
+  "prev": "Önceki",
+  "next": "Sonraki"
 }

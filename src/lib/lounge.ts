@@ -1505,7 +1505,8 @@ export type ApprovalKind =
   | "quota_local_fallback"
   | "quota_abort"
   | "security_critical"
-  | "security_risky";
+  | "security_risky"
+  | "destructive";
 
 export type ApprovalRequest = {
   task_id: string;
@@ -1516,7 +1517,26 @@ export type ApprovalRequest = {
   reason: string;
   expires_at?: string | null;
   timeout_secs?: number | null;
+  /** Destructive confirmation only */
+  command?: string | null;
+  pattern?: string | null;
+  source?: string | null;
+  confirm_id?: string | null;
 };
+
+/** PolicyGate destructive pending token (FIFO queue item). */
+export type DestructivePending = {
+  id: string;
+  kind: string;
+  command: string;
+  pattern: string;
+  source: string;
+  class: string;
+  command_hash: string;
+};
+
+export const APPROVAL_PENDING_EVENT = "approval_pending";
+export const APPROVAL_RESOLVED_EVENT = "approval_resolved";
 
 export type ApprovalCleared = {
   task_id: string;
@@ -1558,6 +1578,26 @@ export function isSecurityApproval(kind: ApprovalKind | string | undefined): boo
 
 export function isQuotaApproval(kind: ApprovalKind | string | undefined): boolean {
   return kind === "quota_local_fallback" || kind === "quota_abort";
+}
+
+export function isDestructiveApproval(kind: ApprovalKind | string | undefined): boolean {
+  return kind === "destructive";
+}
+
+export function destructivePendingToApproval(row: DestructivePending): ApprovalRequest {
+  return {
+    task_id: row.id,
+    summary: row.command,
+    from_agent: row.source,
+    to_agent: "user",
+    kind: "destructive",
+    reason: row.pattern,
+    command: row.command,
+    pattern: row.pattern,
+    source: row.source,
+    confirm_id: row.id,
+    timeout_secs: 300,
+  };
 }
 
 export function parseSecurityAlert(message: LoungeMessage): ApprovalRequest | null {

@@ -78,18 +78,15 @@ test.describe("SH — global shell", () => {
 
   test("SH-05 · Model select calls set_kernel_model", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
-    const select = page.locator("header select").first();
-    if ((await select.count()) === 0) {
-      test.skip(true, "Model select not visible at this viewport");
-      return;
-    }
+    const select = page.locator('header select[aria-label*="LMR"], header select').first();
+    await expect(select, "model select must be visible").toBeVisible();
+    await expect(select).toBeEnabled({ timeout: 10_000 });
     const options = await select.locator("option").allTextContents();
     const pick = options.find((o) => /qwen|llama/i.test(o)) || options[1];
-    if (pick) {
-      await select.selectOption({ label: pick.trim() }).catch(async () => {
-        await select.selectOption({ index: 1 });
-      });
-    }
+    expect(pick, "model options must exist").toBeTruthy();
+    await select.selectOption({ label: pick!.trim() }).catch(async () => {
+      await select.selectOption({ index: 1 });
+    });
     await page.waitForTimeout(300);
     const log = await getIpcLog(page);
     expect(log.some((e) => e.cmd === "set_kernel_model")).toBeTruthy();
@@ -188,9 +185,6 @@ test.describe("X — cross-cutting", () => {
       return { scanned: visible.length, dead };
     });
 
-    if (result.dead.length > 0) {
-      test.fail(true, `Dead clickables: ${result.dead.join(", ")}`);
-    }
     expect(result.dead, `scanned=${result.scanned} dead=${result.dead.join("|")}`).toEqual([]);
   });
 
@@ -261,9 +255,7 @@ test.describe("X — cross-cutting", () => {
     page,
   }) => {
     // O1: strings from i18n dict; Settings language switch; choice persists.
-    // Strengthened beyond a 4-word mixed grep: assert html lang + dictionary chrome
-    // for surfaces that ARE translated (shell/dashboard). Leftovers (model picker,
-    // palette, fleet/onboarding/telemetry bodies) are listed in the PR body — not asserted here.
+    // Fail on mixed-language chrome for translated namespaces (shell/settings/vault/health).
     await openRoute(page, "/settings", "full");
     const langSwitch = page
       .locator('[data-qa="panel"] [data-qa="locale-switch"]')
@@ -276,6 +268,11 @@ test.describe("X — cross-cutting", () => {
     const stored = await page.evaluate(() => localStorage.getItem("lounge.locale") || localStorage.getItem("locale"));
     expect(stored).toMatch(/en/i);
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
+
+    // Settings EN dictionary surfaces (must not show TR leftovers).
+    const settingsText = await page.locator('[data-qa="panel"]').innerText();
+    expect(settingsText).toMatch(/Routing Policy|Default editor|Alert sound|Destructive operations/i);
+    expect(settingsText).not.toMatch(/Yönlendirme Politikası|Varsayılan editör|Onay sesi|Yıkıcı işlemler/i);
 
     await openRoute(page, "/dashboard", "full");
     const enShell = await page.locator('[data-qa="sidebar"]').innerText();
@@ -292,9 +289,14 @@ test.describe("X — cross-cutting", () => {
     expect(trShell).not.toMatch(/Active daemons/i);
     // Translated Index Workspace chrome must flip with the dictionary.
     const indexBtn = page.getByRole("button", { name: /Index Workspace|Çalışma Alanını Tara/i });
-    if (await indexBtn.count()) {
-      await expect(indexBtn.first()).toHaveText(/Çalışma Alanını Tara/i);
-    }
+    await expect(indexBtn.first()).toBeVisible();
+    await expect(indexBtn.first()).toHaveText(/Çalışma Alanını Tara/i);
+
+    // Settings TR dictionary surfaces after switch.
+    await openRoute(page, "/settings", "full");
+    const settingsTr = await page.locator('[data-qa="panel"]').innerText();
+    expect(settingsTr).toMatch(/Yönlendirme Politikası|Varsayılan editör|Onay sesi|Yıkıcı işlemler/i);
+    expect(settingsTr).not.toMatch(/Routing Policy|Default editor|Alert sound|Destructive operations/i);
   });
 
   test("X-02 · min font gate delegated to S4 grep (smoke DOM check)", async ({ page }) => {

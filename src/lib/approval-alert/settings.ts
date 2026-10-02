@@ -10,6 +10,8 @@ export type ApprovalSoundSettings = {
   customFileName: string | null;
   volume: number;
   intervalSecs: number;
+  /** OS toast on pending approval (K1: no volume escalation when background). */
+  osNotificationEnabled: boolean;
 };
 
 export const DEFAULT_APPROVAL_SOUND_SETTINGS: ApprovalSoundSettings = {
@@ -18,6 +20,7 @@ export const DEFAULT_APPROVAL_SOUND_SETTINGS: ApprovalSoundSettings = {
   customFileName: null,
   volume: 0.7,
   intervalSecs: 60,
+  osNotificationEnabled: true,
 };
 
 /** Cache data: URLs so repeats do not re-read/base64 up to 5 MB from disk. */
@@ -72,6 +75,8 @@ export function parseApprovalSoundSettings(raw: string | null | undefined): Appr
       intervalSecs: clampIntervalSecs(
         parsed.intervalSecs ?? DEFAULT_APPROVAL_SOUND_SETTINGS.intervalSecs,
       ),
+      osNotificationEnabled:
+        parsed.osNotificationEnabled ?? DEFAULT_APPROVAL_SOUND_SETTINGS.osNotificationEnabled,
     };
   } catch {
     return { ...DEFAULT_APPROVAL_SOUND_SETTINGS };

@@ -82,6 +82,7 @@ export function ApprovalSoundSettingsPanel() {
         <p className="mt-1 font-body text-body leading-normal text-on-surface-variant">
           {t("alertSoundDesc")}
         </p>
+        <p className="mt-1 font-body text-meta text-outline">{t("alertSoundBackgroundNote")}</p>
       </div>
       <div className="space-y-3 p-3">
         <label className="flex items-center justify-between gap-3 font-body text-body">
@@ -163,6 +164,18 @@ export function ApprovalSoundSettingsPanel() {
               persist({ ...settings, intervalSecs: Number(event.target.value) || 60 })
             }
             className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-body text-body text-on-surface"
+          />
+        </label>
+        <label className="flex items-center justify-between gap-3 font-body text-body">
+          <span>{t("osNotification")}</span>
+          <input
+            type="checkbox"
+            role="switch"
+            checked={settings.osNotificationEnabled}
+            onChange={(event) =>
+              persist({ ...settings, osNotificationEnabled: event.target.checked })
+            }
+            className="accent-primary"
           />
         </label>
         <button
