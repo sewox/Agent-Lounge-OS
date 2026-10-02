@@ -1,0 +1,166 @@
+name: "🐞 Hata Bildirimi / Bug Report"
+description: "Uygulamada beklenmeyen bir davranış bildirin. / Report something that doesn't work as expected."
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Hatayı bildirdiğiniz için teşekkürler! Lütfen alanları olabildiğince doldurun; ne kadar detay, o kadar hızlı çözüm.
+        Thanks for reporting! Please fill in as much as you can — more detail means a faster fix.
+
+        > ⚠️ **Gizlilik / Privacy:** API anahtarlarını, token'ları, özel depo/proje yollarını, ajan konuşmalarını ve kişisel verileri **paylaşmayın**. Log ve ekran görüntülerinde bu alanları kapatın.
+        > Do **not** paste API keys, tokens, private repository/project paths, agent conversations or personal data. Redact them in logs and screenshots.
+        >
+        > Bir **güvenlik açığı** bulduysanız herkese açık issue açmayın; [gizli olarak bildirin](https://github.com/sewox/Agent-Lounge-OS/security/advisories/new).
+        > Found a **security vulnerability**? Don't open a public issue — [report it privately](https://github.com/sewox/Agent-Lounge-OS/security/advisories/new).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: "Ön kontrol / Pre-flight"
+      options:
+        - label: "En güncel `main` veya son CI paketi ile denedim. / I tried the latest `main` or the latest CI bundle."
+          required: true
+        - label: "Aynı hata için açık issue'ları aradım, bulamadım. / I searched existing issues and found no duplicate."
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: "Uygulama sürümü / commit — App version / commit"
+      description: "Uygulama sürümü (ör. `0.1.0`) ve biliyorsanız commit SHA'sı (ör. `2fc830c`). / App version (e.g. `0.1.0`) and, if known, the commit SHA (e.g. `2fc830c`)."
+      placeholder: "0.1.0 / 2fc830c"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: "İşletim sistemi / Operating system"
+      options:
+        - "macOS (Apple Silicon)"
+        - "macOS (Intel)"
+        - "Windows 11"
+        - "Windows 10"
+        - "Linux"
+        - "Diğer / Other"
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: "OS sürümü ve donanım / OS version & hardware"
+      placeholder: "macOS 15.3, M1 Pro 16 GB  /  Windows 11 23H2  /  Ubuntu 22.04 (GNOME, Wayland)"
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: "Kurulum yöntemi / Install method"
+      options:
+        - "AppImage"
+        - ".deb"
+        - ".dmg"
+        - "Windows installer (.msi / .exe)"
+        - "Geliştirme modu (`npm run tauri dev`) — Dev mode"
+        - "Kaynaktan derleme — Built from source"
+        - "Diğer / Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Etkilenen alan / Affected area"
+      multiple: true
+      options:
+        - "Kurulum / onboarding / açılış — Install / onboarding / startup"
+        - "Dashboard / Fleet"
+        - "Bilgi Kasası / Deneyimler — Vault / Experiences"
+        - "Sağlık / Ölü semboller — Health / Dead symbols"
+        - "Onay akışı / Politika — Approvals / Policy gate"
+        - "Cmd+K paleti — Command palette"
+        - "Ayarlar / Tanılama — Settings / Diagnostics"
+        - "Kernel / Supervisor (NATS, LMR)"
+        - "Hafıza köprüsü / codebase-memory-mcp — Memory bridge"
+        - "MCP (`lounge-mcp`) / ajan entegrasyonu — MCP / agent integration"
+        - "Workers (Python)"
+        - "Arayüz / çeviri (TR/EN) — UI / translation"
+        - "Diğer / Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent-client
+    attributes:
+      label: "Hangi ajan/istemci ile? / Agent or client involved (optional)"
+      multiple: true
+      options:
+        - "Claude (Desktop / Code)"
+        - "Cursor"
+        - "Grok"
+        - "Yerel model (LMR) — Local model (LMR)"
+        - "Python worker"
+        - "Yok / None"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: "Ne oldu? / What happened?"
+      description: "Gördüğünüz davranışı ve varsa hata mesajını yazın. / Describe the behavior and any error message."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Tekrar üretme adımları / Steps to reproduce"
+      placeholder: |
+        1. Uygulamayı aç / Open the app
+        2. Ayarlar'a git / Go to Settings
+        3. ...
+        4. Hata görünüyor / See the error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Beklenen davranış / Expected behavior"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: "Ne sıklıkla? / How often?"
+      options:
+        - "Her seferinde / Every time"
+        - "Bazen / Sometimes"
+        - "Bir kez / Only once"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Loglar / Logs"
+      description: |
+        **Ayarlar → Tanılama (Settings → Diagnostics & Health)** ekranı `kernel.log` dosyasının yolunu gösterir (genellikle `<veri-dizini>/logs/kernel.log`). İlgili son satırları yapıştırın.
+        **Settings → Diagnostics & Health** shows the path of `kernel.log` (usually `<data-dir>/logs/kernel.log`). Paste the relevant last lines. (Older builds may not show this panel; then launch the app from a terminal and paste its output.)
+
+        Varsa / If relevant: `data/lmr/serve.log`, `data/nats/nats-server.log`.
+
+        ⚠️ **Yapıştırmadan önce kontrol edin / Check before pasting:** loglar yerel dosya yolları, proje adları, görev içerikleri veya token'lar içerebilir. Bunları silin. / Logs may contain local file paths, project names, task contents or tokens — redact them.
+      render: shell
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: "Ekran görüntüsü / video — Screenshots / video"
+      description: "Sürükleyip bırakabilirsiniz. Hassas bilgileri kapatın. / Drag and drop. Redact sensitive info."
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: "Ek bilgi / Additional context"
+      description: "NATS/LMR durumu, kullanılan MCP istemcisi, ağ/proxy ayarları vb. / NATS/LMR status, MCP client in use, network/proxy setup, etc."
