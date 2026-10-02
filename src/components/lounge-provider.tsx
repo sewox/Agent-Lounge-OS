@@ -14,6 +14,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { i18n, initI18n } from "@/lib/i18n/config";
 import {
   DEFAULT_POLICY,
   formatClock,
@@ -436,7 +437,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
           setQuotas([]);
           setAmberAlert(false);
           setAmberTools([]);
-          setQuotaError("Kota verisi alınamadı");
+          initI18n();
+          setQuotaError(i18n.t("fetchFailed", { ns: "quotas" }));
         }
       }
       try {

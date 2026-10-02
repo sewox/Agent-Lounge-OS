@@ -27,7 +27,7 @@ test.describe("HM — health / map empty states", () => {
     const main = await page.locator("main").innerText();
     expect(main).not.toMatch(/Claude\s*7\d%/i);
     expect(main).not.toMatch(/Claude\s*5\d%/i);
-    expect(main).toMatch(/Kota verisi alınamadı/i);
+    expect(main).toMatch(/Kota verisi alınamadı|Could not load quota data/i);
     await page.getByRole("button", { name: "Alert history" }).click();
     const history = page.locator('[data-qa="alert-history"]');
     await expect(history).toBeVisible();
@@ -502,8 +502,13 @@ test.describe("AP / CP / misc", () => {
     await openRoute(page, "/fleet", "full");
     await expect(page.locator("main")).toBeVisible();
     const text = await page.locator("main").innerText();
-    expect(/Worker Fleet|Fleet|memory-bridge|Grok|LMR|NATS|DecisionGate/i.test(text)).toBeTruthy();
-    await expect(page.getByText("Worker detail").first()).toBeVisible();
+    expect(
+      /Worker Fleet|İşçi Filosu|Fleet|memory-bridge|Grok|LMR|NATS|DecisionGate/i.test(text),
+    ).toBeTruthy();
+    await expect(
+      page.getByText(/Worker detail|İşçi ayrıntısı/i).first(),
+    ).toBeVisible();
     await expect(page.getByRole("columnheader", { name: /Heartbeat/i })).toBeVisible();
   });
 });
+

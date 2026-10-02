@@ -341,11 +341,15 @@ test.describe("DS — dead symbols", () => {
 
   test("DS-02 · Detail on click", async ({ page }) => {
     await openRoute(page, "/health?tab=dead", "full");
-    await page.locator('[data-qa="dead-symbol-row"]').first().click();
+    const orphan = page.locator('[data-qa="dead-symbol-row"]').filter({ hasText: "orphan_dispatch" });
+    await expect(orphan.first()).toBeVisible();
+    await orphan.first().click();
     const detail = page.locator('[data-qa="dead-symbol-detail"]');
     await expect(detail).toBeVisible();
+    await expect(detail.getByText("orphan_dispatch")).toBeVisible();
     await expect(detail.getByText(/last_ref/i)).toBeVisible();
-    await expect(detail.getByText(/orphan_dispatch|referans yok/i)).toBeVisible();
+    // Fixture last_ref path for orphan_dispatch (EN/TR label already asserted above).
+    await expect(detail.getByText(/workflow_engine\.rs:168/i)).toBeVisible();
   });
 
   test("DS-03 · Open in editor (index-backed; Settings Editor preference is PR-5)", async ({

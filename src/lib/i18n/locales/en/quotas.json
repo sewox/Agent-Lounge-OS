@@ -20,6 +20,7 @@
   "amberAlertShort": "Amber Alert",
   "toolsNearCap": "{{count}} tools near cap",
   "miniEmpty": "No quota data",
+  "fetchFailed": "Could not load quota data",
   "miniAllList": "Full list on /quotas",
   "actionStop": "Stop when quota runs out",
   "actionStopHint": "Cancel the task; do not switch agents.",

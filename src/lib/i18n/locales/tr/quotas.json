@@ -20,6 +20,7 @@
   "amberAlertShort": "Amber Alert",
   "toolsNearCap": "{{count}} araç limite yakın",
   "miniEmpty": "Kota verisi yok",
+  "fetchFailed": "Kota verisi alınamadı",
   "miniAllList": "/quotas sayfasında tüm liste",
   "actionStop": "Kotam biterse durdur",
   "actionStopHint": "Görevi iptal et, ajan değiştirme.",
