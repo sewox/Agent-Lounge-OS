@@ -1069,9 +1069,7 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     Ok(projects)
 }
 
-fn list_vault_project_aggregates_blocking(
-    conn: &Connection,
-) -> Result<Vec<VaultProjectAggregate>> {
+fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<VaultProjectAggregate>> {
     let sql = r#"
         SELECT
             project_id,
@@ -1099,8 +1097,7 @@ fn list_vault_project_aggregates_blocking(
     })?;
     let mut projects = Vec::new();
     for row in rows {
-        let (name, repo_path, counted_nodes, counted_edges, pages, last_updated, has_meta) =
-            row?;
+        let (name, repo_path, counted_nodes, counted_edges, pages, last_updated, has_meta) = row?;
         if crate::db::experience_governance::is_project_hidden(conn, &name)? {
             continue;
         }
