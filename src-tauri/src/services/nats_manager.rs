@@ -151,9 +151,9 @@ impl NatsService {
         self.is_healthy().await && self.monitor_ready().await
     }
 
-    /// `nats-server` on PATH (optional local bus).
+    /// `nats-server` on PATH or an absolute path that exists (optional local bus).
     pub fn runtime_installed(&self) -> bool {
-        find_executable(&self.config.binary).is_some()
+        resolve_nats_binary(&self.config.binary).is_some()
     }
 
     pub fn not_installed_health(&self) -> ServiceHealth {
@@ -189,6 +189,7 @@ impl NatsService {
             detail,
             error,
             availability: None,
+            code: None,
         }
     }
 
@@ -240,7 +241,7 @@ impl NatsService {
     }
 
     async fn spawn_and_wait(&mut self, with_monitor: bool) -> Result<ServiceHealth> {
-        let binary = find_executable(&self.config.binary).ok_or_else(|| {
+        let binary = resolve_nats_binary(&self.config.binary).ok_or_else(|| {
             anyhow::anyhow!(
                 "nats-server bulunamadı (PATH). Yerel bus: {}",
                 self.endpoint()
@@ -320,6 +321,19 @@ fn apply_no_window(_command: &mut Command) {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         _command.creation_flags(CREATE_NO_WINDOW);
     }
+}
+
+/// Absolute path that exists, else PATH lookup (`find_executable`).
+fn resolve_nats_binary(requested: &str) -> Option<std::path::PathBuf> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(requested);
+    if path.is_file() {
+        return Some(path);
+    }
+    find_executable(requested)
 }
 
 pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<String> {
@@ -480,6 +494,23 @@ mod tests {
         assert!(health.is_not_installed());
         assert!(health.error.is_none());
         assert!(health.detail.as_deref().unwrap_or("").contains("optional"));
+    }
+
+    #[test]
+    fn resolve_nats_binary_accepts_absolute_existing_path() {
+        let dir = std::env::temp_dir().join(format!("lounge-nats-resolve-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("nats-server");
+        std::fs::write(&path, b"stub").expect("write stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
+        let resolved = resolve_nats_binary(&path.display().to_string());
+        assert_eq!(resolved.as_deref(), Some(path.as_path()));
+        assert!(resolve_nats_binary("__missing_nats_binary_xyz__").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

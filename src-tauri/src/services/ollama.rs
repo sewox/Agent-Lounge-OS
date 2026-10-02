@@ -127,6 +127,7 @@ impl OllamaService {
             detail,
             error,
             availability: None,
+            code: None,
         }
     }
 

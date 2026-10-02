@@ -56,6 +56,7 @@
   "activeDaemons": "Active daemons",
   "restartService": "Restart Service",
   "restarting": "Restarting…",
+  "autoRestart": "Auto-Restart",
   "checkingServices": "Checking services…",
   "disconnected": "Disconnected",
   "notInstalled": "Not installed",

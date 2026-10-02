@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   AVAIL_NOT_INSTALLED,
+  CODE_RESTART_EXHAUSTED,
+  CODE_RESTART_RETRYING,
   coreServicesDegraded,
   degradedCoreServiceNames,
   isNotInstalled,
@@ -66,5 +68,35 @@ describe("lounge health helpers", () => {
     const phase = resolveDegradedRestart(next);
     assert.ok(phase);
     assert.equal(phase?.phase.kind, "exhausted");
+  });
+
+  it("resolves restart phase from machine code, not Turkish error text", () => {
+    const next = report({
+      ollama: health("ollama", "LMR", false, {
+        code: CODE_RESTART_EXHAUSTED,
+        detail: "max=5",
+        error: "opaque localized failure text without limit markers",
+      }),
+    });
+    const phase = resolveDegradedRestart(next);
+    assert.equal(phase?.phase.kind, "exhausted");
+    if (phase?.phase.kind === "exhausted") {
+      assert.equal(phase.phase.max, 5);
+    }
+
+    const retrying = report({
+      nats: health("nats", "NATS", false, {
+        code: CODE_RESTART_RETRYING,
+        detail: "attempt=2 max=5 wait=4",
+        error: "opaque retry text",
+      }),
+    });
+    const retryPhase = resolveDegradedRestart(retrying);
+    assert.equal(retryPhase?.phase.kind, "retrying");
+    if (retryPhase?.phase.kind === "retrying") {
+      assert.equal(retryPhase.phase.attempt, 2);
+      assert.equal(retryPhase.phase.max, 5);
+      assert.equal(retryPhase.phase.waitSecs, 4);
+    }
   });
 });

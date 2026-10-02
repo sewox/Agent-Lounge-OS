@@ -40,6 +40,11 @@ use tauri_plugin_dialog::DialogExt;
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
 
+/// Diagnostic kernel.log size before rotation (plugin default is ~40 KB).
+const KERNEL_LOG_MAX_FILE_SIZE: u128 = 5 * 1024 * 1024;
+/// Keep several dated rotations plus the active file (plugin default is KeepOne).
+const KERNEL_LOG_KEEP_COUNT: usize = 5;
+
 /// `connected_tools` boşsa onboarding, doluysa dashboard.
 pub fn initial_window_route() -> &'static str {
     match ExperienceStore::open(db::default_db_path(data_root())) {
@@ -94,9 +99,14 @@ pub fn run_with_start_route(start_route: &'static str) {
             })?;
             // Always persist kernel/supervisor logs under the data dir so empty
             // redirected stdout/stderr still leaves a diagnosable file.
+            // Plugin defaults are ~40 KB + KeepOne — too small for diagnostics.
             app.handle().plugin(
                 tauri_plugin_log::Builder::new()
                     .level(log::LevelFilter::Info)
+                    .max_file_size(KERNEL_LOG_MAX_FILE_SIZE)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(
+                        KERNEL_LOG_KEEP_COUNT,
+                    ))
                     .targets([
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
@@ -1462,4 +1472,18 @@ async fn set_graph_ui_port(
         .await
         .map_err(|err| err.to_string())?;
     Ok(port)
+}
+
+#[cfg(test)]
+mod kernel_log_config_tests {
+    #[test]
+    fn kernel_log_rotation_is_multi_mb_keep_some() {
+        assert_eq!(super::KERNEL_LOG_MAX_FILE_SIZE, 5 * 1024 * 1024);
+        assert_eq!(super::KERNEL_LOG_KEEP_COUNT, 5);
+        // Document plugin defaults we intentionally override (tauri-plugin-log 2.10.0).
+        const PLUGIN_DEFAULT_MAX: u128 = 40_000;
+        const PLUGIN_DEFAULT_KEEP_ONE: bool = true;
+        assert!(super::KERNEL_LOG_MAX_FILE_SIZE > PLUGIN_DEFAULT_MAX);
+        assert!(super::KERNEL_LOG_KEEP_COUNT > 1 || !PLUGIN_DEFAULT_KEEP_ONE);
+    }
 }

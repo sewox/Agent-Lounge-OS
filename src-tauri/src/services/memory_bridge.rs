@@ -164,6 +164,7 @@ impl MemoryBridge {
             detail: found.then(|| "codebase-memory-mcp hazır".into()),
             error: (!found).then(|| format!("binary yok: {}", self.binary.display())),
             availability: None,
+            code: None,
         }
     }
 

@@ -69,6 +69,7 @@ pub fn plugin_health(catalog: &PluginCatalog) -> ServiceHealth {
         detail: Some(format!("{count} plugin · {hosts} host")),
         error: None,
         availability: None,
+        code: None,
     }
 }
 

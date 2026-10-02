@@ -1497,6 +1497,7 @@ function fleetHealthFields(
     error?: string | null;
     started_by_us?: boolean;
     availability?: string | null;
+    code?: string | null;
   } | undefined,
   fallbackEndpoint: string,
   missingLabel: string,
@@ -1504,11 +1505,15 @@ function fleetHealthFields(
   const running = health?.running === true;
   const err = (health?.error || "").trim();
   const notInstalled = health?.availability === "not_installed";
+  const code = (health?.code || "").trim();
+  const detailRaw = (health?.detail || "").trim();
   const detail =
-    (health?.detail || "").trim() ||
+    detailRaw ||
     (running ? "ok" : notInstalled ? "not-installed" : missingLabel);
-  const restartMatch = err.match(/deneme\s+(\d+)\s*\/\s*(\d+)/i);
-  const exhausted = /limiti aşıldı/i.test(err);
+  const attempt = detailRaw.match(/(?:^|\s)attempt=(\d+)(?:\s|$)/i);
+  const max = detailRaw.match(/(?:^|\s)max=(\d+)(?:\s|$)/i);
+  const exhausted = code === "restart_exhausted";
+  const retrying = code === "restart_retrying";
   return {
     status: running
       ? "ready"
@@ -1522,11 +1527,13 @@ function fleetHealthFields(
     heartbeat: running ? "live" : "stale",
     pid: health?.started_by_us ? "supervised" : "—",
     uptime: running ? "up" : "—",
-    restarts: restartMatch
-      ? `${restartMatch[1]}/${restartMatch[2]}`
+    restarts: attempt && max
+      ? `${attempt[1]}/${max[1]}`
       : exhausted
         ? "max"
-        : "—",
+        : retrying && max
+          ? `?/${max[1]}`
+          : "—",
     tone: running ? "ok" : notInstalled ? "warn" : "down",
   };
 }

@@ -8,6 +8,8 @@ export type ServiceHealth = {
   error: string | null;
   /** `"not_installed"` when optional binary is absent — not a crash. */
   availability?: string | null;
+  /** Supervisor phase: `restart_exhausted` / `restart_retrying`. */
+  code?: string | null;
 };
 
 export type ServiceReport = {
@@ -18,6 +20,11 @@ export type ServiceReport = {
 };
 
 export const AVAIL_NOT_INSTALLED = "not_installed";
+
+/** Supervisor auto-restart exhausted (`MAX_RESTART_ATTEMPTS`). */
+export const CODE_RESTART_EXHAUSTED = "restart_exhausted";
+/** Supervisor waiting / mid retry. */
+export const CODE_RESTART_RETRYING = "restart_retrying";
 
 export function isNotInstalled(health: ServiceHealth | null | undefined): boolean {
   return health?.availability === AVAIL_NOT_INSTALLED;
@@ -73,7 +80,38 @@ export type DegradedRestartPhase =
   | { kind: "exhausted"; max: number }
   | { kind: "unknown" };
 
-function parseRestartPhase(error: string | null | undefined): DegradedRestartPhase | null {
+function parseDetailInt(detail: string | null | undefined, key: string): number | null {
+  if (!detail) {
+    return null;
+  }
+  const match = detail.match(new RegExp(`(?:^|\\s)${key}=(\\d+)(?:\\s|$)`, "i"));
+  return match ? Number(match[1]) : null;
+}
+
+function parseRestartPhaseFromHealth(
+  health: ServiceHealth | null | undefined,
+): DegradedRestartPhase | null {
+  if (!health || health.running || isNotInstalled(health)) {
+    return null;
+  }
+  const code = (health.code || "").trim();
+  const detail = health.detail;
+  if (code === CODE_RESTART_EXHAUSTED) {
+    return { kind: "exhausted", max: parseDetailInt(detail, "max") ?? 5 };
+  }
+  if (code === CODE_RESTART_RETRYING) {
+    return {
+      kind: "retrying",
+      attempt: parseDetailInt(detail, "attempt") ?? 1,
+      max: parseDetailInt(detail, "max") ?? 5,
+      waitSecs: parseDetailInt(detail, "wait"),
+    };
+  }
+  // Legacy Turkish error strings (pre-code field) — keep for older snapshots.
+  return parseRestartPhaseFromError(health.error);
+}
+
+function parseRestartPhaseFromError(error: string | null | undefined): DegradedRestartPhase | null {
   if (!error) {
     return null;
   }
@@ -108,8 +146,8 @@ export function resolveDegradedRestart(
   if (names.length === 0 || !report) {
     return null;
   }
-  const phases = [report.ollama.error, report.nats.error]
-    .map(parseRestartPhase)
+  const phases = [report.ollama, report.nats]
+    .map(parseRestartPhaseFromHealth)
     .filter((row): row is DegradedRestartPhase => row != null);
   const exhausted = phases.find((row) => row.kind === "exhausted");
   if (exhausted) {

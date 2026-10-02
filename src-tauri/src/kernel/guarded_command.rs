@@ -85,6 +85,9 @@ impl GuardedCommand {
             .unwrap_or(&raw)
             .to_ascii_lowercase();
         base.strip_suffix(".exe")
+            .or_else(|| base.strip_suffix(".cmd"))
+            .or_else(|| base.strip_suffix(".bat"))
+            .or_else(|| base.strip_suffix(".com"))
             .map(str::to_string)
             .unwrap_or(base)
     }

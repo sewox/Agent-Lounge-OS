@@ -571,13 +571,13 @@ export function AppShell({ children }: { children: ReactNode }) {
                 disabled={restarting}
                 className={`${BANNER_BTN} shrink-0 border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase hover:bg-surface-bright disabled:opacity-60`}
               >
-                {restarting ? t("restarting") : "Auto-Restart"}
+                {restarting ? t("restarting") : t("autoRestart")}
               </button>
             ) : (
               <span className="shrink-0 rounded border border-error-container/60 bg-surface-container-high px-2 py-0.5 text-meta tracking-label text-error-dim uppercase">
                 {degradedRestart.phase.kind === "retrying"
                   ? `${degradedRestart.phase.attempt}/${degradedRestart.phase.max}`
-                  : "auto-restart"}
+                  : t("autoRestart")}
               </span>
             )}
           </div>

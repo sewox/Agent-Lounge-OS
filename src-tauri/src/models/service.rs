@@ -5,6 +5,11 @@ pub const SERVICE_EVENT: &str = "service-status";
 /// Machine-readable optional-runtime marker (LMR / NATS not on disk).
 pub const AVAIL_NOT_INSTALLED: &str = "not_installed";
 
+/// Supervisor auto-restart exhausted (`MAX_RESTART_ATTEMPTS`).
+pub const CODE_RESTART_EXHAUSTED: &str = "restart_exhausted";
+/// Supervisor waiting / mid retry.
+pub const CODE_RESTART_RETRYING: &str = "restart_retrying";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceId {
@@ -26,6 +31,9 @@ pub struct ServiceHealth {
     /// `"not_installed"` when the optional binary is absent — not a crash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability: Option<String>,
+    /// Machine-readable supervisor phase (`restart_exhausted` / `restart_retrying`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl ServiceHealth {
@@ -44,6 +52,7 @@ impl ServiceHealth {
             detail: None,
             error: Some(error.into()),
             availability: None,
+            code: None,
         }
     }
 
@@ -62,11 +71,18 @@ impl ServiceHealth {
             detail: Some(detail.into()),
             error: None,
             availability: Some(AVAIL_NOT_INSTALLED.into()),
+            code: None,
         }
     }
 
     pub fn is_not_installed(&self) -> bool {
         self.availability.as_deref() == Some(AVAIL_NOT_INSTALLED)
+    }
+
+    pub fn with_restart_code(mut self, code: &str, detail: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self.detail = Some(detail.into());
+        self
     }
 }
 
@@ -132,6 +148,7 @@ mod tests {
             detail: None,
             error: if running { None } else { Some("down".into()) },
             availability: None,
+            code: None,
         }
     }
 

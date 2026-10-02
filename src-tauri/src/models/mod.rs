@@ -35,4 +35,7 @@ pub use quota::{
     NatsUiEvent, QuotaState, QuotaVerdict, ToolQuota, AMBER_THRESHOLD, LIMIT_POLICY_PERCENT,
     QUOTA_EVENT,
 };
-pub use service::{ServiceHealth, ServiceId, ServiceReport, AVAIL_NOT_INSTALLED, SERVICE_EVENT};
+pub use service::{
+    ServiceHealth, ServiceId, ServiceReport, AVAIL_NOT_INSTALLED, CODE_RESTART_EXHAUSTED,
+    CODE_RESTART_RETRYING, SERVICE_EVENT,
+};
