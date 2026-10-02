@@ -25,18 +25,28 @@ export function daemonTone(health: ServiceHealth | undefined): "ok" | "warn" | "
   if (health.running) {
     return "ok";
   }
+  if (health.availability === "not_installed") {
+    return "warn";
+  }
   if (health.error?.includes("Service Degraded")) {
     return "warn";
   }
   return "down";
 }
 
-export function daemonLabel(health: ServiceHealth | undefined, fallback: string): string {
+export function daemonLabel(
+  health: ServiceHealth | undefined,
+  fallback: string,
+  notInstalledLabel = "Not installed",
+): string {
   if (!health) {
     return fallback;
   }
   if (health.running) {
     return "Running";
+  }
+  if (health.availability === "not_installed") {
+    return notInstalledLabel;
   }
   if (health.error?.includes("Service Degraded")) {
     return "Disconnected";

@@ -68,6 +68,7 @@ pub fn plugin_health(catalog: &PluginCatalog) -> ServiceHealth {
         endpoint: catalog.lounge_dir.clone().unwrap_or_else(|| "mcp".into()),
         detail: Some(format!("{count} plugin · {hosts} host")),
         error: None,
+        availability: None,
     }
 }
 

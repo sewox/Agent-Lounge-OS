@@ -53,5 +53,14 @@
   "graphStateUnknown": "Durum: bilinmiyor (tarayıcıda masaüstü probe yok).",
   "graphStateEnabled": "Durum: etkin · {{port}} portunda dinliyor",
   "graphStateDisabled": "Durum: kapalı · etkinleştirilince {{port}} portu kullanılır",
-  "graphStateConflict": "Durum: {{port}} port çakışması — portu değiştirin veya süreci serbest bırakın"
+  "graphStateConflict": "Durum: {{port}} port çakışması — portu değiştirin veya süreci serbest bırakın",
+  "diagnosticsTitle": "Tanılama ve günlükler",
+  "diagnosticsDesc": "Kernel ve supervisor günlükleri uygulama veri dizinine yazılır; boş yönlendirilmiş stdout olsa bile teşhis edilebilir bir dosya kalır.",
+  "diagnosticsDataRoot": "Veri kökü",
+  "diagnosticsKernelLog": "Kernel / supervisor günlüğü",
+  "diagnosticsLmrLog": "LMR serve günlüğü",
+  "diagnosticsNatsLog": "NATS sunucu günlüğü",
+  "diagnosticsLmrBinary": "Beklenen LMR binary",
+  "diagnosticsBrowser": "Günlük yolları masaüstü uygulamada (Tauri) kullanılabilir.",
+  "diagnosticsLoading": "Günlük yolları çözülüyor…"
 }

@@ -8,6 +8,7 @@ export type ServiceHealth = {
   endpoint: string;
   detail: string | null;
   error: string | null;
+  availability?: string | null;
 };
 
 export type ServiceReport = {

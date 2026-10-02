@@ -10,6 +10,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { useLounge } from "@/components/lounge-provider";
 import { type AstNode, type LoungeExperience } from "@/lib/lounge";
 import { searchBrowserExperiences } from "@/lib/mock/browser-fixtures";
@@ -43,6 +44,7 @@ function matchesQuery(hay: string, query: string): boolean {
 }
 
 export function CommandPalette() {
+  const { t } = useTranslation("shell");
   const router = useRouter();
   const {
     experiences,
@@ -445,9 +447,12 @@ export function CommandPalette() {
             {status}
           </div>
         ) : (
-          <div className="border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline">
-            ↑↓ seç · ↵ çalıştır · experience_store + memory_bridge
-            {mockMode ? " · browser mock verisi" : ""}
+          <div
+            className="border-t border-outline-variant bg-surface-container-low px-3 py-1.5 font-mono text-meta text-outline"
+            data-qa="palette-footer"
+          >
+            {t("paletteFooter")}
+            {mockMode ? t("paletteFooterMock") : ""}
           </div>
         )}
       </div>

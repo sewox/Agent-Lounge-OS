@@ -33,6 +33,7 @@
   "statusOffline": "çevrimdışı",
   "statusListening": "dinliyor",
   "statusMissing": "eksik",
+  "statusNotInstalled": "kurulu-değil",
   "detailNatsWorker": "nats işçisi",
   "endpointNats": "nats",
   "localWeights": "yerel ağırlıklar",

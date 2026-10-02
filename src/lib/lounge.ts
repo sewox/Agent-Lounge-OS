@@ -6,6 +6,8 @@ export type ServiceHealth = {
   endpoint: string;
   detail: string | null;
   error: string | null;
+  /** `"not_installed"` when optional binary is absent — not a crash. */
+  availability?: string | null;
 };
 
 export type ServiceReport = {
@@ -15,24 +17,51 @@ export type ServiceReport = {
   plugin: ServiceHealth;
 };
 
-/** Çekirdek daemon'lar (Lounge LMR + NATS) ayakta değilse degraded. */
+export const AVAIL_NOT_INSTALLED = "not_installed";
+
+export function isNotInstalled(health: ServiceHealth | null | undefined): boolean {
+  return health?.availability === AVAIL_NOT_INSTALLED;
+}
+
+function isCoreFailure(health: ServiceHealth | null | undefined): boolean {
+  return Boolean(health && !health.running && !isNotInstalled(health));
+}
+
+/** Çekirdek daemon crash / restart-limit — optional missing sayılmaz. */
 export function coreServicesDegraded(report: ServiceReport | null | undefined): boolean {
   if (!report) {
     return false;
   }
-  return !report.ollama.running || !report.nats.running;
+  return isCoreFailure(report.ollama) || isCoreFailure(report.nats);
 }
 
-/** UI banner: hangi servis(ler) down — LMR adı host Ollama değil, Lounge runtime. */
+/** UI banner: hangi servis(ler) crashed — LMR adı host Ollama değil, Lounge runtime. */
 export function degradedCoreServiceNames(report: ServiceReport | null | undefined): string[] {
   if (!report) {
     return [];
   }
   const names: string[] = [];
-  if (!report.ollama.running) {
+  if (isCoreFailure(report.ollama)) {
     names.push("LMR");
   }
-  if (!report.nats.running) {
+  if (isCoreFailure(report.nats)) {
+    names.push("NATS");
+  }
+  return names;
+}
+
+/** Fresh-install optional binaries absent (install guidance, not alarms). */
+export function optionalMissingServiceNames(
+  report: ServiceReport | null | undefined,
+): string[] {
+  if (!report) {
+    return [];
+  }
+  const names: string[] = [];
+  if (isNotInstalled(report.ollama)) {
+    names.push("LMR");
+  }
+  if (isNotInstalled(report.nats)) {
     names.push("NATS");
   }
   return names;
@@ -70,7 +99,7 @@ function parseRestartPhase(error: string | null | undefined): DegradedRestartPha
 
 /**
  * Prefer exhausted over retrying when either core daemon reports it.
- * Returns null when nothing is degraded.
+ * Returns null when nothing is degraded (optional missing excluded).
  */
 export function resolveDegradedRestart(
   report: ServiceReport | null | undefined,

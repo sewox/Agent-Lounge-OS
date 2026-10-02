@@ -53,5 +53,14 @@
   "graphStateUnknown": "Status: unknown (desktop probe unavailable in browser).",
   "graphStateEnabled": "Status: enabled · listening on port {{port}}",
   "graphStateDisabled": "Status: disabled · will use port {{port}} when enabled",
-  "graphStateConflict": "Status: port {{port}} conflict — change port or free the process"
+  "graphStateConflict": "Status: port {{port}} conflict — change port or free the process",
+  "diagnosticsTitle": "Diagnostics & logs",
+  "diagnosticsDesc": "Kernel and supervisor logs are written under the app data directory so empty redirected stdout still leaves a diagnosable file.",
+  "diagnosticsDataRoot": "Data root",
+  "diagnosticsKernelLog": "Kernel / supervisor log",
+  "diagnosticsLmrLog": "LMR serve log",
+  "diagnosticsNatsLog": "NATS server log",
+  "diagnosticsLmrBinary": "Expected LMR binary",
+  "diagnosticsBrowser": "Log paths are available in the desktop app (Tauri).",
+  "diagnosticsLoading": "Resolving log paths…"
 }

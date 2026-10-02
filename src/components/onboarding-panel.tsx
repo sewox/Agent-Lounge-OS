@@ -775,6 +775,7 @@ function ToolGroup({
   emptyHint: string;
   missing?: { label: string; href: string } | null;
 }) {
+  const { t } = useTranslation("onboarding");
   return (
     <div className="rounded-lg border border-outline-variant bg-surface-container">
       <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low px-3 py-2">
@@ -788,7 +789,7 @@ function ToolGroup({
             onClick={onSelectAll}
             className="font-mono text-meta text-primary hover:underline"
           >
-            Grubu seç
+            {t("selectGroup")}
           </button>
         ) : null}
       </div>

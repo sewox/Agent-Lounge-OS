@@ -151,6 +151,20 @@ impl NatsService {
         self.is_healthy().await && self.monitor_ready().await
     }
 
+    /// `nats-server` on PATH (optional local bus).
+    pub fn runtime_installed(&self) -> bool {
+        find_executable(&self.config.binary).is_some()
+    }
+
+    pub fn not_installed_health(&self) -> ServiceHealth {
+        ServiceHealth::not_installed(
+            ServiceId::Nats,
+            "NATS",
+            self.endpoint(),
+            "optional — install nats-server on PATH for the local bus",
+        )
+    }
+
     pub async fn ensure(&mut self) -> ServiceHealth {
         match self.ensure_inner().await {
             Ok(health) => health,
@@ -174,6 +188,7 @@ impl NatsService {
             endpoint: self.endpoint(),
             detail,
             error,
+            availability: None,
         }
     }
 
@@ -208,6 +223,10 @@ impl NatsService {
                 },
             )
             .await;
+        }
+
+        if !self.runtime_installed() {
+            return Ok(self.not_installed_health());
         }
 
         match self.spawn_and_wait(true).await {
@@ -458,7 +477,13 @@ mod tests {
         });
         let health = service.ensure().await;
         assert!(!health.running);
-        assert!(health.error.unwrap().contains("nats-server bulunamadı"));
+        assert!(health.is_not_installed());
+        assert!(health.error.is_none());
+        assert!(health
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("optional"));
     }
 
     #[test]

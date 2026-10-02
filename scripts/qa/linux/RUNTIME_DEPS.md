@@ -37,7 +37,7 @@ The shell **starts without** host Ollama and without a pre-installed NATS binary
 |-----------|----------------------|--------|
 | **NATS** (`nats-server` on PATH, `127.0.0.1:4222`) | No | Kernel supervisor tries to spawn/recover NATS. Without it: Event Stream / Fleet / task bus stay empty or degraded. Install from [nats.io](https://nats.io) or distro package if you need bus features. |
 | **Host Ollama** (`:11434`) | No | Intentionally unused. Do **not** point Lounge at host Ollama. |
-| **Lounge LMR** (`127.0.0.1:18790`, `data/lmr`) | No | Local model runner for inference/quota paths. UI works without it; LMR-backed actions fail soft. |
+| **Lounge LMR** (`127.0.0.1:18790`, `data/lmr`) | No | **Optional.** Not bundled in the `.deb`. Place an Ollama-compatible binary at `{data_root}/data/lmr/ollama` (or set `LOUNGE_LMR_BINARY`). Fresh install reports **Not installed** (neutral), never red SERVICE DEGRADED / restart storm. |
 | **Laya weights** | No | Optional DecisionGate model under `~/.local/share/AgentLounge/models/laya`. Falls back when missing. |
 | **codebase-memory-mcp** sidecar | Yes (full S2) | `linux-bundle.yml` fetches DeusData `v0.11.0` linux-amd64 into the package. Artifact `agent-lounge-linux` includes a real sidecar (`BUILD_INFO.txt` has size/version). Stub fallback publishes `agent-lounge-linux-ui-only` only. |
 

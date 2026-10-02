@@ -163,6 +163,7 @@ impl MemoryBridge {
             endpoint: self.binary.display().to_string(),
             detail: found.then(|| "codebase-memory-mcp hazır".into()),
             error: (!found).then(|| format!("binary yok: {}", self.binary.display())),
+            availability: None,
         }
     }
 
