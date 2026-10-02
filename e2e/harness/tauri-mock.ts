@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import type { FixtureDataset } from "../fixtures/types";
 import { FULL_FIXTURE } from "../fixtures/full";
 import { EMPTY_FIXTURE } from "../fixtures/empty";
+import { vaultMockBrowserSource } from "./vault-mock";
 
 export type FixtureName = "full" | "empty" | "browser" | "reject";
 
@@ -40,6 +41,9 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
 
   const fixture = fixtureName === "empty" || fixtureName === "reject" ? EMPTY_FIXTURE : FULL_FIXTURE;
   const rejectQuotaExperience = fixtureName === "reject";
+
+  // Vault mock helpers (separate file — keeps this switch smaller for PR #71 rebases).
+  await page.addInitScript({ content: vaultMockBrowserSource() });
 
   await page.addInitScript(({ data, rejectQuotaExperience }: { data: FixtureDataset; rejectQuotaExperience: boolean }) => {
     window.__QA_IPC_LOG__ = [];
@@ -377,98 +381,22 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.semanticMap;
         case "list_projects":
           return f.projects;
-        case "list_vault_projects": {
-          const pageCounts: Record<string, number> = {
-            "Agent-Lounge-OS": 420,
-            EchoMind: 220,
-            "codebase-memory-mcp": 180,
-          };
-          return f.projects.map((project) => {
-            const exps = f.experiences.filter(
-              (row) =>
-                row.project_id === project.name && (row.status ?? "active") === "active",
-            );
-            const unreviewed = exps.filter((row) => row.reviewed === false).length;
-            const lastUpdated =
-              exps
-                .map((row) => row.updated_at || row.created_at)
-                .filter(Boolean)
-                .sort()
-                .at(-1) ?? null;
-            return {
-              name: project.name,
-              repo_path: project.root_path,
-              page_count: pageCounts[project.name] ?? project.files ?? 0,
-              node_count: project.nodes,
-              edge_count: project.edges,
-              experience_count: exps.length,
-              unreviewed_count: unreviewed,
-              last_updated: lastUpdated,
-              source_type: "indexed",
-            };
-          });
-        }
-        case "list_project_pages": {
-          const projectId = String(args?.projectId ?? args?.project_id ?? "");
-          const query = String(args?.query ?? "").trim().toLowerCase();
-          const sort = String(args?.sort ?? "path");
-          const offset = typeof args?.offset === "number" ? args.offset : 0;
-          const limit = typeof args?.limit === "number" ? args.limit : 50;
-          const pageCounts: Record<string, number> = {
-            "Agent-Lounge-OS": 420,
-            EchoMind: 220,
-            "codebase-memory-mcp": 180,
-          };
-          const prefixes: Record<string, string> = {
-            "Agent-Lounge-OS": "src",
-            EchoMind: "workers",
-            "codebase-memory-mcp": "bridge",
-          };
-          const count = pageCounts[projectId] ?? 0;
-          const prefix = prefixes[projectId] ?? "src";
-          let pages = Array.from({ length: count }, (_, i) => {
-            const path = `${prefix}/page_${String(i).padStart(3, "0")}.rs`;
-            return {
-              path,
-              title: path.split("/").at(-1) || path,
-              snippet: `sym_${projectId}_${i}`,
-              symbol_count: 1 + (i % 5),
-              last_updated: null as string | null,
-            };
-          });
-          // Include a couple of real index files from the semantic map for search realism.
-          const project = f.semanticMap.projects.find((row) => row.name === projectId);
-          for (const node of project?.nodes ?? []) {
-            if (!node.file) continue;
-            pages.unshift({
-              path: node.file,
-              title: node.file.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || node.file,
-              snippet: node.name,
-              symbol_count: node.ref_count || 1,
-              last_updated: null,
-            });
-          }
-          if (query) {
-            pages = pages.filter((page) =>
-              `${page.path} ${page.title} ${page.snippet}`.toLowerCase().includes(query),
-            );
-          }
-          if (sort === "title") {
-            pages.sort((a, b) => a.title.localeCompare(b.title));
-          } else if (sort === "symbols") {
-            pages.sort((a, b) => b.symbol_count - a.symbol_count || a.path.localeCompare(b.path));
-          } else {
-            pages.sort((a, b) => a.path.localeCompare(b.path));
-          }
-          const total = pages.length;
-          return {
-            project_id: projectId,
-            pages: pages.slice(offset, offset + limit),
-            total,
-            offset,
-            limit,
-          };
-        }
+        // --- VAULT_MOCK_BEGIN (logic in e2e/harness/vault-mock.ts) ---
+        case "list_vault_projects":
+          return (
+            window as Window & {
+              __QA_VAULT_MOCK__?: { listProjects: (f: FixtureDataset) => unknown };
+            }
+          ).__QA_VAULT_MOCK__!.listProjects(f);
+        case "list_project_pages":
+          return (
+            window as Window & {
+              __QA_VAULT_MOCK__?: {
+                listPages: (f: FixtureDataset, args: Record<string, unknown> | undefined) => unknown;
+              };
+            }
+          ).__QA_VAULT_MOCK__!.listPages(f, args as Record<string, unknown> | undefined);
+        // --- VAULT_MOCK_END ---
         case "ensure_services":
           return f.serviceReport;
         case "service_status":

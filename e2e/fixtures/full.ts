@@ -147,14 +147,31 @@ const experiences: FixtureDataset["experiences"] = [
     updated_at: new Date(Date.UTC(2026, 8, 19, 9, i, 0)).toISOString(),
     original_content: null,
   })),
+  // Experiences-only project (no project_index / projects row) — source_type imported.
+  {
+    id: "exp-solo-import",
+    type: "experience",
+    agent: "cursor-agent",
+    project_id: "solo-import",
+    adr_summary: "Imported experience without indexed project row.",
+    outcome: "success" as const,
+    related_task_id: null,
+    tags: ["import"],
+    created_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
+    status: "active",
+    reviewed: true,
+    use_count: 1,
+    last_used_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
+    archived_at: null,
+    archived_by: null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
+    original_content: null,
+  },
 ];
 
-/** Page counts for vault grouping e2e (generated on demand in the mock, not in init payload). */
-export const VAULT_PAGE_COUNTS: Record<string, number> = {
-  "Agent-Lounge-OS": 420,
-  EchoMind: 220,
-  "codebase-memory-mcp": 180,
-};
+/** Re-export page counts from vault mock (single source of truth). */
+export { VAULT_PAGE_COUNTS } from "../harness/vault-mock";
 
 const quotas: FixtureDataset["quotas"] = [
   {

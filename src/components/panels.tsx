@@ -21,7 +21,6 @@ import {
   resolveGraphTotals,
   sortExperiencesForDisplay,
 } from "@/lib/experience";
-import { vaultStrings as vaultS } from "@/lib/strings/vault";
 import { useIsTauri } from "@/hooks/use-is-tauri";
 import { useUiScale } from "@/components/ui-scale-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
@@ -61,6 +60,7 @@ import {
   buildVaultProjectRows,
   mapProjectPage,
   mapVaultAggregate,
+  VAULT_PAGE_WINDOW,
   type PageSortKey,
   type ProjectPageRow,
   type VaultProjectRow,
@@ -473,14 +473,21 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     experienceDetailError,
     closeExperience,
   } = useLounge();
+  const { t: tv } = useTranslation("vault");
   const tauriReady = useIsTauri();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const [selectionProject, setSelectionProject] = useState(selectedProject);
   const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
   const [openProjectName, setOpenProjectName] = useState<string | null>(null);
   const [vaultAggregates, setVaultAggregates] = useState<VaultProjectRow[] | null>(null);
+  const [aggregatesLoading, setAggregatesLoading] = useState(false);
+  const [aggregatesError, setAggregatesError] = useState<string | null>(null);
+  const [aggregatesTick, setAggregatesTick] = useState(0);
   const [serverPages, setServerPages] = useState<ProjectPageRow[] | null>(null);
   const [serverPagesTotal, setServerPagesTotal] = useState<number | null>(null);
+  const [pagesLoading, setPagesLoading] = useState(false);
+  const [pagesError, setPagesError] = useState<string | null>(null);
+  const [pageQueryState, setPageQueryState] = useState({ query: "", sort: "path" as PageSortKey });
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
 
   if (selectionProject !== selectedProject) {
@@ -501,51 +508,98 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     }
     let cancelled = false;
     void (async () => {
+      setAggregatesLoading(true);
+      setAggregatesError(null);
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const rows = await invoke<Record<string, unknown>[]>("list_vault_projects");
         if (!cancelled) {
           setVaultAggregates(rows.map((row) => mapVaultAggregate(row)));
+          setAggregatesError(null);
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
           setVaultAggregates(null);
+          setAggregatesError(err instanceof Error ? err.message : tv("projectsError"));
+        }
+      } finally {
+        if (!cancelled) {
+          setAggregatesLoading(false);
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [tauriReady, semanticMap, projects, experiences.length]);
+  }, [tauriReady, semanticMap, projects, experiences.length, aggregatesTick, tv]);
 
-  const handlePageSearch = useCallback(
-    (pageQuery: string, sort: PageSortKey) => {
+  const fetchProjectPages = useCallback(
+    async (pageQuery: string, sort: PageSortKey, offset: number, append: boolean) => {
       if (!tauriReady || !openProjectName) {
         return;
       }
-      void (async () => {
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const result = await invoke<{
-            pages?: Record<string, unknown>[];
-            total?: number;
-          }>("list_project_pages", {
-            projectId: openProjectName,
-            query: pageQuery || null,
-            sort,
-            offset: 0,
-            limit: 500,
-          });
-          setServerPages((result.pages ?? []).map((row) => mapProjectPage(row)));
-          setServerPagesTotal(Number(result.total ?? 0) || 0);
-        } catch {
+      setPagesLoading(true);
+      if (!append) {
+        setPagesError(null);
+      }
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{
+          pages?: Record<string, unknown>[];
+          total?: number;
+        }>("list_project_pages", {
+          projectId: openProjectName,
+          query: pageQuery || null,
+          sort,
+          offset,
+          limit: VAULT_PAGE_WINDOW,
+        });
+        const mapped = (result.pages ?? []).map((row) => mapProjectPage(row));
+        setServerPages((prev) => (append && prev ? [...prev, ...mapped] : mapped));
+        setServerPagesTotal(Number(result.total ?? 0) || 0);
+        setPagesError(null);
+      } catch (err) {
+        if (!append) {
           setServerPages(null);
           setServerPagesTotal(null);
         }
-      })();
+        setPagesError(err instanceof Error ? err.message : tv("pagesError"));
+      } finally {
+        setPagesLoading(false);
+      }
     },
-    [openProjectName, tauriReady],
+    [openProjectName, tauriReady, tv],
   );
+
+  const handlePageSearch = useCallback(
+    (pageQuery: string, sort: PageSortKey) => {
+      setPageQueryState({ query: pageQuery, sort });
+      void fetchProjectPages(pageQuery, sort, 0, false);
+    },
+    [fetchProjectPages],
+  );
+
+  const handleLoadMorePages = useCallback(() => {
+    if (pagesLoading || !serverPages || serverPagesTotal == null) {
+      return;
+    }
+    if (serverPages.length >= serverPagesTotal) {
+      return;
+    }
+    void fetchProjectPages(
+      pageQueryState.query,
+      pageQueryState.sort,
+      serverPages.length,
+      true,
+    );
+  }, [
+    fetchProjectPages,
+    pageQueryState.query,
+    pageQueryState.sort,
+    pagesLoading,
+    serverPages,
+    serverPagesTotal,
+  ]);
 
   const graphTotals = useMemo(
     () => resolveGraphTotals({ projects, semanticMap }),
@@ -635,14 +689,24 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             graphTotals={graphTotals}
             selected={selected}
             aggregates={vaultAggregates}
+            aggregatesLoading={aggregatesLoading}
+            aggregatesError={aggregatesError}
+            onRetryAggregates={() => setAggregatesTick((n) => n + 1)}
             projectPages={serverPages}
             projectPagesTotal={serverPagesTotal}
+            pagesLoading={pagesLoading}
+            pagesError={pagesError}
             onPageSearch={handlePageSearch}
+            onLoadMorePages={handleLoadMorePages}
+            onRetryPages={() =>
+              void fetchProjectPages(pageQueryState.query, pageQueryState.sort, 0, false)
+            }
             openProjectName={openProjectName}
             onOpenProject={(name) => {
               setOpenProjectName(name);
               setServerPages(null);
               setServerPagesTotal(null);
+              setPagesError(null);
               if (name) {
                 setSelected({
                   id: `project:${name}`,
@@ -679,7 +743,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2"
           >
             <div className="font-mono text-meta text-on-surface-variant">
-              {vaultS.totalExperiences(experienceTotal)}
+              {tv("totalExperiences", { count: experienceTotal })}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -687,7 +751,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                 onClick={() => setShowArchived(!showArchived)}
                 className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
               >
-                {showArchived ? vaultS.hideArchived : vaultS.showArchived}
+                {showArchived ? tv("hideArchived") : tv("showArchived")}
               </button>
               {unreviewedCount > 0 ? (
                 <button
@@ -695,7 +759,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   onClick={() => void markAllExperiencesReviewed()}
                   className="min-h-8 rounded border border-secondary/40 px-2 py-1 font-body text-meta text-secondary hover:bg-secondary/10"
                 >
-                  {vaultS.markAllReviewed}
+                  {tv("markAllReviewed")}
                 </button>
               ) : null}
             </div>
@@ -705,7 +769,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               data-qa="vault-project-path"
               className="mb-2 shrink-0 break-all font-mono text-meta text-on-surface-variant"
             >
-              <span className="uppercase tracking-label text-outline">{vaultS.projectPath}</span>
+              <span className="uppercase tracking-label text-outline">{tv("projectPath")}</span>
               {" · "}
               {formatDisplayPath(selectedProjectPath)}
             </div>
@@ -713,9 +777,9 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           {selected ? (
             <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
               <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
-                <span>{vaultS.deadSymbols}</span>
+                <span>{tv("deadSymbols")}</span>
                 <span className={deadForNode.length > 0 ? "text-error" : "text-outline"}>
-                  {deadForNode.length > 0 ? vaultS.warnings(deadForNode.length) : vaultS.clean}
+                  {deadForNode.length > 0 ? tv("warnings", { count: deadForNode.length }) : tv("clean")}
                 </span>
               </div>
               {deadForNode.length === 0 ? (
@@ -757,8 +821,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
             <span>
               {openProjectName
-                ? vaultS.experiencesForProject(openProjectName)
-                : vaultS.experienceLog}
+                ? tv("experiencesForProject", { name: openProjectName })
+                : tv("experienceLog")}
             </span>
             <span
               className={
@@ -766,67 +830,34 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               }
             >
               {whispered.size > 0
-                ? vaultS.whisperLive(whispered.size)
+                ? tv("whisperLive", { count: whispered.size })
                 : openProjectName
-                  ? vaultS.filter(openProjectName)
-                  : vaultS.projectCount(experienceProjectRows.length)}
+                  ? tv("filter", { name: openProjectName })
+                  : tv("projectCount", { count: experienceProjectRows.length })}
             </span>
           </div>
-          <div className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body">
+          <div
+            className={`min-h-0 flex-1 overflow-auto font-body text-body ${
+              !openProjectName && experienceProjectRows.length > 0 && experienceProjectRows.length <= 8
+                ? "flex flex-col gap-2"
+                : "space-y-2"
+            }`}
+          >
             {!openProjectName ? (
               experienceProjectRows.length === 0 ? (
                 <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                  {vaultS.noExperiences}
+                  {tv("noExperiences")}
                 </div>
               ) : (
-                experienceProjectRows.map((row) => (
-                  <div
-                    key={`exp-proj:${row.name}`}
-                    role="listitem"
-                    data-qa="vault-experience-project-row"
-                    data-project={row.name}
-                    tabIndex={0}
-                    onDoubleClick={() => {
-                      setOpenProjectName(row.name);
-                      setSelected({
-                        id: `project:${row.name}`,
-                        name: row.name,
-                        kind: "project",
-                        project: row.name,
-                        file: null,
-                      });
-                      switchProject(row.name);
-                      setLogPage(0);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        setOpenProjectName(row.name);
-                        setSelected({
-                          id: `project:${row.name}`,
-                          name: row.name,
-                          kind: "project",
-                          project: row.name,
-                          file: null,
-                        });
-                        switchProject(row.name);
-                        setLogPage(0);
-                      }
-                    }}
-                    className="flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate font-mono font-medium text-on-surface">
-                        {row.name}
-                      </span>
-                      <span className="block truncate font-mono text-meta text-outline">
-                        {vaultS.pageCountMeta(row.pageCount, row.experienceCount)}
-                      </span>
-                    </span>
-                    <button
-                      type="button"
-                      data-qa="vault-experience-project-open"
-                      onClick={() => {
+                <>
+                  {experienceProjectRows.map((row) => (
+                    <div
+                      key={`exp-proj:${row.name}`}
+                      role="listitem"
+                      data-qa="vault-experience-project-row"
+                      data-project={row.name}
+                      tabIndex={0}
+                      onDoubleClick={() => {
                         setOpenProjectName(row.name);
                         setSelected({
                           id: `project:${row.name}`,
@@ -838,24 +869,76 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                         switchProject(row.name);
                         setLogPage(0);
                       }}
-                      className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container"
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          setOpenProjectName(row.name);
+                          setSelected({
+                            id: `project:${row.name}`,
+                            name: row.name,
+                            kind: "project",
+                            project: row.name,
+                            file: null,
+                          });
+                          switchProject(row.name);
+                          setLogPage(0);
+                        }
+                      }}
+                      className={`flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high ${
+                        experienceProjectRows.length <= 8 ? "min-h-0 flex-1" : ""
+                      }`}
                     >
-                      {vaultS.openProject}
-                    </button>
+                      <span className="min-w-0">
+                        <span className="block truncate font-mono font-medium text-on-surface">
+                          {row.name}
+                        </span>
+                        <span className="block truncate font-mono text-meta text-outline">
+                          {tv("pageCountMeta", {
+                            pages: row.pageCount,
+                            experiences: row.experienceCount,
+                          })}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        data-qa="vault-experience-project-open"
+                        onClick={() => {
+                          setOpenProjectName(row.name);
+                          setSelected({
+                            id: `project:${row.name}`,
+                            name: row.name,
+                            kind: "project",
+                            project: row.name,
+                            file: null,
+                          });
+                          switchProject(row.name);
+                          setLogPage(0);
+                        }}
+                        className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container"
+                      >
+                        {tv("openProject")}
+                      </button>
+                    </div>
+                  ))}
+                  <div className="mt-auto shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline">
+                    <span className="font-body">
+                      {tv("projectCount", { count: experienceProjectRows.length })} ·{" "}
+                      {tv("totalExperiences", { count: experienceTotal })}
+                    </span>
                   </div>
-                ))
+                </>
               )
             ) : experiencesLoading && experiences.length === 0 ? (
               <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                {vaultS.loading}
+                {tv("loading")}
               </div>
             ) : experiencesError ? (
               <div className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center text-body text-error">
-                {experiencesError || vaultS.listError}
+                {experiencesError || tv("listError")}
               </div>
             ) : logVisible.length === 0 ? (
               <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                {vaultS.noExperiencesForNode(openProjectName)}
+                {tv("noExperiencesForNode", { name: openProjectName })}
               </div>
             ) : (
               logVisible.map((item) => {
@@ -889,17 +972,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                         ) : null}
                         {archived ? (
                           <span className="rounded border border-outline-variant px-1 text-meta text-outline uppercase">
-                            {vaultS.archivedLabel}
+                            {tv("archivedLabel")}
                           </span>
                         ) : null}
                         {item.reviewed === false ? (
                           <span className="rounded border border-secondary/40 px-1 text-meta text-secondary uppercase">
-                            {vaultS.unreviewed}
+                            {tv("unreviewed")}
                           </span>
                         ) : null}
                         {isWhisper ? (
                           <span className="rounded border border-primary/50 px-1 text-meta text-primary">
-                            {vaultS.whisper}
+                            {tv("whisper")}
                           </span>
                         ) : null}
                         <span
@@ -932,7 +1015,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                           className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
                           aria-label="Bu fısıltıyı faydalı olarak işaretle"
                         >
-                          {alreadyUseful ? vaultS.usefulDone : vaultS.useful}
+                          {alreadyUseful ? tv("usefulDone") : tv("useful")}
                         </button>
                       </div>
                     ) : null}
@@ -950,7 +1033,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                 onClick={() => void loadMoreExperiences()}
                 className="min-h-8 w-full rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high disabled:opacity-60"
               >
-                {vaultS.loadMore}
+                {tv("loadMore")}
               </button>
             </div>
           ) : null}
@@ -958,7 +1041,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       </div>
       <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline">
         <span>
-          codebase-memory-mcp · {repoCount} repos · {vaultS.totalExperiences(experienceTotal)}
+          codebase-memory-mcp · {repoCount} repos · {tv("totalExperiences", { count: experienceTotal })}
         </span>
         <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>

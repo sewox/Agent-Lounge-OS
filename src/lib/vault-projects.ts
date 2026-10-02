@@ -9,6 +9,9 @@ import type {
 
 export const VAULT_FILTERS_KEY = "al-os-vault-project-filters";
 
+/** Server page window size for drill-down offset pagination. */
+export const VAULT_PAGE_WINDOW = 200;
+
 export type VaultSourceType = "indexed" | "discovered" | "imported" | "all";
 
 export type VaultReviewStatus = "all" | "reviewed" | "unreviewed" | "has_experiences";
@@ -72,7 +75,15 @@ export function getVaultFiltersSnapshot(): VaultProjectFilters {
     return cachedFilters;
   }
   cachedFilterJson = raw;
-  cachedFilters = raw ? parseVaultFilters(JSON.parse(raw) as unknown) : DEFAULT_VAULT_FILTERS;
+  if (!raw) {
+    cachedFilters = DEFAULT_VAULT_FILTERS;
+    return cachedFilters;
+  }
+  try {
+    cachedFilters = parseVaultFilters(JSON.parse(raw) as unknown);
+  } catch {
+    cachedFilters = DEFAULT_VAULT_FILTERS;
+  }
   return cachedFilters;
 }
 
@@ -326,16 +337,12 @@ function pickNewer(a: string | null, b: string | null): string | null {
   return a >= b ? a : b;
 }
 
+/** Distinct kind=node files — aligned with list_project_pages / aggregate page_count. */
 function uniquePageCount(project: SemanticProject): number {
   const files = new Set<string>();
   for (const node of project.nodes) {
     if (node.file?.trim()) {
       files.add(node.file.trim());
-    }
-  }
-  for (const edge of project.references) {
-    if (edge.file?.trim()) {
-      files.add(edge.file.trim());
     }
   }
   return files.size || project.files || 0;

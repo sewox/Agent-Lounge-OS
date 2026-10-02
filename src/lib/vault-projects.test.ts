@@ -6,10 +6,14 @@ import {
   DEFAULT_VAULT_FILTERS,
   filterAndSortPages,
   filterVaultProjects,
+  getServerVaultFiltersSnapshot,
+  getVaultFiltersSnapshot,
   pagesFromSemanticProject,
   parseVaultFilters,
   readVaultFilters,
   resetVaultFilters,
+  subscribeVaultFilters,
+  VAULT_FILTERS_KEY,
   windowSlice,
   writeVaultFilters,
   type VaultProjectRow,
@@ -95,7 +99,8 @@ describe("vault project grouping", () => {
     assert.equal(rows.length, 3);
     const alpha = rows.find((r) => r.name === "Alpha");
     assert.ok(alpha);
-    assert.equal(alpha.pageCount, 3);
+    // kind=node files only (a.rs, b.rs) — reference-only c.rs excluded
+    assert.equal(alpha.pageCount, 2);
     assert.equal(alpha.experienceCount, 2);
     assert.equal(alpha.unreviewedCount, 1);
     assert.equal(alpha.sourceType, "indexed");
@@ -182,6 +187,36 @@ describe("vault project grouping", () => {
     assert.deepEqual(parseVaultFilters({ nameQuery: 12, recent: "nope" }), {
       ...DEFAULT_VAULT_FILTERS,
     });
+  });
+
+  it("getVaultFiltersSnapshot tolerates corrupt localStorage JSON", () => {
+    const prev = globalThis.window;
+    const store = new Map<string, string>();
+    store.set(VAULT_FILTERS_KEY, "{not-json");
+    // @ts-expect-error test stub
+    globalThis.window = {
+      localStorage: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => {
+          store.set(k, v);
+        },
+        removeItem: (k: string) => {
+          store.delete(k);
+        },
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    try {
+      const snap = getVaultFiltersSnapshot();
+      assert.deepEqual(snap, DEFAULT_VAULT_FILTERS);
+      assert.deepEqual(getServerVaultFiltersSnapshot(), DEFAULT_VAULT_FILTERS);
+      const unsub = subscribeVaultFilters(() => {});
+      unsub();
+    } finally {
+      // @ts-expect-error restore
+      globalThis.window = prev;
+    }
   });
 });
 

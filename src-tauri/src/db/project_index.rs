@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -30,6 +31,8 @@ pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_project_index_project_kind
               ON project_index(project_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_project_index_project_kind_file
+              ON project_index(project_id, kind, file_path);
             CREATE TABLE IF NOT EXISTS ignored_symbols (
               id TEXT PRIMARY KEY,
               project_id TEXT,
@@ -48,7 +51,21 @@ pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
     )?;
     migrate_ignored_symbols_unique(conn)?;
     let _ = crate::db::experience_governance::ensure_project_flags_table(conn);
+    register_path_basename_fn(conn);
     Ok(())
+}
+
+/// Path basename for SQL ORDER BY title (idempotent if already registered).
+fn register_path_basename_fn(conn: &Connection) {
+    let _ = conn.create_scalar_function(
+        "al_path_basename",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let path: String = ctx.get(0)?;
+            Ok::<_, rusqlite::Error>(path_basename(&path))
+        },
+    );
 }
 
 /// Rebuild ignored_symbols if the UNIQUE still includes `line` (pre-F12).
@@ -1069,20 +1086,172 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     Ok(projects)
 }
 
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1",
+            params![name],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+fn load_declared_totals_map(conn: &Connection) -> Result<HashMap<String, (u64, u64)>> {
+    let mut out = HashMap::new();
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT project_id, ref_count, COALESCE(detail, '0'), COALESCE(payload_json, '{}')
+        FROM project_index
+        WHERE kind = 'meta' AND name = ?1
+        "#,
+    )?;
+    let rows = stmt.query_map(params![GRAPH_TOTALS_NAME], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (project_id, ref_count, detail, payload) = row?;
+        let mut nodes = ref_count.max(0) as u64;
+        let mut edges = detail.parse::<u64>().unwrap_or(0);
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) {
+            if let Some(n) = value.get("declared_node_count").and_then(|v| v.as_u64()) {
+                nodes = nodes.max(n);
+            }
+            if let Some(e) = value.get("declared_edge_count").and_then(|v| v.as_u64()) {
+                edges = edges.max(e);
+            }
+        }
+        out.insert(project_id, (nodes, edges));
+    }
+    Ok(out)
+}
+
 fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<VaultProjectAggregate>> {
-    let sql = r#"
+    let _ = crate::db::experience_governance::ensure_project_flags_table(conn);
+    let declared = load_declared_totals_map(conn)?;
+    let has_experiences = table_exists(conn, "experiences")?;
+
+    // page_count = distinct kind='node' files (aligned with list_project_pages).
+    // Experiences-only projects are UNION'd so `imported` is reachable.
+    // Hidden / declared / experience stats are batched (no per-project N+1).
+    let sql = if has_experiences {
+        r#"
+        WITH indexed AS (
+          SELECT
+            project_id AS name,
+            MAX(repo_path) AS repo_path,
+            SUM(CASE WHEN kind = 'node' THEN 1 ELSE 0 END) AS counted_nodes,
+            SUM(CASE WHEN kind = 'reference' THEN 1 ELSE 0 END) AS counted_edges,
+            COUNT(DISTINCT CASE
+              WHEN kind = 'node'
+               AND file_path IS NOT NULL
+               AND TRIM(file_path) != ''
+              THEN file_path END) AS page_count,
+            MAX(indexed_at) AS index_updated,
+            MAX(CASE WHEN kind = 'meta' THEN 1 ELSE 0 END) AS has_meta
+          FROM project_index
+          GROUP BY project_id
+        ),
+        exp_stats AS (
+          SELECT
+            MIN(project_id) AS name,
+            COUNT(*) AS experience_count,
+            SUM(CASE WHEN COALESCE(reviewed, 1) = 0 THEN 1 ELSE 0 END) AS unreviewed_count,
+            MAX(COALESCE(updated_at, created_at)) AS exp_updated
+          FROM experiences
+          WHERE COALESCE(status, 'active') = 'active'
+          GROUP BY project_id COLLATE NOCASE
+        ),
+        combined AS (
+          SELECT
+            i.name,
+            i.repo_path,
+            i.counted_nodes,
+            i.counted_edges,
+            i.page_count,
+            i.index_updated,
+            i.has_meta,
+            COALESCE(e.experience_count, 0) AS experience_count,
+            COALESCE(e.unreviewed_count, 0) AS unreviewed_count,
+            e.exp_updated AS exp_updated
+          FROM indexed i
+          LEFT JOIN exp_stats e ON i.name = e.name COLLATE NOCASE
+          UNION ALL
+          SELECT
+            e.name,
+            NULL,
+            0,
+            0,
+            0,
+            NULL,
+            0,
+            e.experience_count,
+            e.unreviewed_count,
+            e.exp_updated
+          FROM exp_stats e
+          WHERE NOT EXISTS (
+            SELECT 1 FROM indexed i WHERE i.name = e.name COLLATE NOCASE
+          )
+        )
         SELECT
-            project_id,
-            MAX(repo_path),
-            SUM(CASE WHEN kind = 'node' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN kind = 'reference' THEN 1 ELSE 0 END),
-            COUNT(DISTINCT CASE WHEN kind != 'meta' THEN NULLIF(file_path, '') END),
-            MAX(indexed_at),
-            MAX(CASE WHEN kind = 'meta' THEN 1 ELSE 0 END)
+          c.name,
+          c.repo_path,
+          c.counted_nodes,
+          c.counted_edges,
+          c.page_count,
+          c.index_updated,
+          c.has_meta,
+          c.experience_count,
+          c.unreviewed_count,
+          c.exp_updated
+        FROM combined c
+        LEFT JOIN project_flags pf ON c.name = pf.project_id COLLATE NOCASE
+        WHERE COALESCE(pf.hidden, 0) = 0
+        ORDER BY
+          COALESCE(
+            CASE
+              WHEN c.index_updated IS NOT NULL AND c.exp_updated IS NOT NULL
+                AND c.exp_updated > c.index_updated THEN c.exp_updated
+              ELSE c.index_updated
+            END,
+            c.exp_updated,
+            ''
+          ) DESC,
+          c.name COLLATE NOCASE
+        "#
+    } else {
+        r#"
+        SELECT
+          project_id AS name,
+          MAX(repo_path) AS repo_path,
+          SUM(CASE WHEN kind = 'node' THEN 1 ELSE 0 END) AS counted_nodes,
+          SUM(CASE WHEN kind = 'reference' THEN 1 ELSE 0 END) AS counted_edges,
+          COUNT(DISTINCT CASE
+            WHEN kind = 'node'
+             AND file_path IS NOT NULL
+             AND TRIM(file_path) != ''
+            THEN file_path END) AS page_count,
+          MAX(indexed_at) AS index_updated,
+          MAX(CASE WHEN kind = 'meta' THEN 1 ELSE 0 END) AS has_meta,
+          0 AS experience_count,
+          0 AS unreviewed_count,
+          NULL AS exp_updated
         FROM project_index
         GROUP BY project_id
-        ORDER BY MAX(indexed_at) DESC, project_id
-        "#;
+        HAVING NOT EXISTS (
+          SELECT 1 FROM project_flags pf
+          WHERE pf.project_id = project_index.project_id COLLATE NOCASE
+            AND COALESCE(pf.hidden, 0) != 0
+        )
+        ORDER BY MAX(indexed_at) DESC, project_id COLLATE NOCASE
+        "#
+    };
+
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -1093,20 +1262,30 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             row.get::<_, i64>(4)? as u64,
             row.get::<_, Option<String>>(5)?,
             row.get::<_, i64>(6)? as u64,
+            row.get::<_, i64>(7)? as u64,
+            row.get::<_, i64>(8)? as u64,
+            row.get::<_, Option<String>>(9)?,
         ))
     })?;
+
     let mut projects = Vec::new();
     for row in rows {
-        let (name, repo_path, counted_nodes, counted_edges, pages, last_updated, has_meta) = row?;
-        if crate::db::experience_governance::is_project_hidden(conn, &name)? {
-            continue;
-        }
-        let (declared_nodes, declared_edges) = read_declared_totals(conn, &name)?;
+        let (
+            name,
+            repo_path,
+            counted_nodes,
+            counted_edges,
+            pages,
+            index_updated,
+            has_meta,
+            experience_count,
+            unreviewed_count,
+            exp_updated,
+        ) = row?;
+        let (declared_nodes, declared_edges) = declared.get(&name).copied().unwrap_or((0, 0));
         let node_count = reconcile_totals(declared_nodes, counted_nodes);
         let edge_count = reconcile_totals(declared_edges, counted_edges);
-        let (experience_count, unreviewed_count, exp_updated) =
-            experience_stats_for_project(conn, &name)?;
-        let last = match (last_updated.as_deref(), exp_updated.as_deref()) {
+        let last = match (index_updated.as_deref(), exp_updated.as_deref()) {
             (Some(a), Some(b)) => Some(if a >= b { a.to_string() } else { b.to_string() }),
             (Some(a), None) => Some(a.to_string()),
             (None, Some(b)) => Some(b.to_string()),
@@ -1134,55 +1313,6 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
     Ok(projects)
 }
 
-fn experience_stats_for_project(
-    conn: &Connection,
-    project_id: &str,
-) -> Result<(u64, u64, Option<String>)> {
-    // experiences table may be absent in isolated unit fixtures — treat as zero.
-    let has_table: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiences' LIMIT 1",
-            [],
-            |_| Ok(true),
-        )
-        .optional()?
-        .unwrap_or(false);
-    if !has_table {
-        return Ok((0, 0, None));
-    }
-    let total: i64 = conn.query_row(
-        r#"
-        SELECT COUNT(*) FROM experiences
-        WHERE lower(project_id) = lower(?1)
-          AND COALESCE(status, 'active') = 'active'
-        "#,
-        params![project_id],
-        |row| row.get(0),
-    )?;
-    let unreviewed: i64 = conn.query_row(
-        r#"
-        SELECT COUNT(*) FROM experiences
-        WHERE lower(project_id) = lower(?1)
-          AND COALESCE(status, 'active') = 'active'
-          AND COALESCE(reviewed, 1) = 0
-        "#,
-        params![project_id],
-        |row| row.get(0),
-    )?;
-    let last: Option<String> = conn
-        .query_row(
-            r#"
-            SELECT MAX(COALESCE(updated_at, created_at)) FROM experiences
-            WHERE lower(project_id) = lower(?1)
-            "#,
-            params![project_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok((total.max(0) as u64, unreviewed.max(0) as u64, last))
-}
-
 fn list_project_pages_blocking(
     conn: &Connection,
     project_id: &str,
@@ -1191,51 +1321,123 @@ fn list_project_pages_blocking(
     offset: u64,
     limit: u64,
 ) -> Result<ProjectPageList> {
+    register_path_basename_fn(conn);
     let needle = query.trim().to_ascii_lowercase();
-    let sql = r#"
-        SELECT
+    let like = format!("%{needle}%");
+    let order_by = match sort {
+        "updated" | "last_updated" => "last_updated DESC, path ASC",
+        "-updated" => "last_updated ASC, path ASC",
+        "symbols" => "symbol_count DESC, path ASC",
+        "-symbols" => "symbol_count ASC, path ASC",
+        "title" => "title_key ASC, path ASC",
+        "-title" => "title_key DESC, path ASC",
+        "-path" => "path DESC",
+        _ => "path ASC",
+    };
+
+    // Search / sort / LIMIT / OFFSET in SQL — avoid loading every GROUP_CONCAT into Rust.
+    let filtered_cte = if needle.is_empty() {
+        r#"
+        pages AS (
+          SELECT
             file_path AS path,
             COUNT(*) AS symbol_count,
             MAX(indexed_at) AS last_updated,
-            GROUP_CONCAT(name, ', ') AS snippet
-        FROM project_index
-        WHERE project_id = ?1
-          AND kind = 'node'
-          AND file_path IS NOT NULL
-          AND TRIM(file_path) != ''
-        GROUP BY file_path
-        "#;
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![project_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)? as u64,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-        ))
-    })?;
+            lower(al_path_basename(file_path)) AS title_key
+          FROM project_index
+          WHERE project_id = ?1 COLLATE NOCASE
+            AND kind = 'node'
+            AND file_path IS NOT NULL
+            AND TRIM(file_path) != ''
+          GROUP BY file_path
+        )
+        "#
+        .to_string()
+    } else {
+        r#"
+        pages AS (
+          SELECT
+            file_path AS path,
+            COUNT(*) AS symbol_count,
+            MAX(indexed_at) AS last_updated,
+            lower(al_path_basename(file_path)) AS title_key
+          FROM project_index
+          WHERE project_id = ?1 COLLATE NOCASE
+            AND kind = 'node'
+            AND file_path IS NOT NULL
+            AND TRIM(file_path) != ''
+          GROUP BY file_path
+          HAVING lower(file_path) LIKE ?2
+              OR lower(al_path_basename(file_path)) LIKE ?2
+              OR EXISTS (
+                SELECT 1 FROM project_index n
+                WHERE n.project_id = ?1 COLLATE NOCASE
+                  AND n.kind = 'node'
+                  AND n.file_path = project_index.file_path
+                  AND lower(n.name) LIKE ?2
+              )
+        )
+        "#
+        .to_string()
+    };
 
-    let mut matched: Vec<ProjectPage> = Vec::new();
-    for row in rows {
-        let (path, symbol_count, last_updated, snippet_raw) = row?;
-        let title = path_basename(&path);
-        let snippet = snippet_raw
-            .unwrap_or_default()
-            .chars()
-            .take(160)
-            .collect::<String>();
-        if !needle.is_empty() {
-            let hay = format!(
-                "{} {} {}",
-                path.to_ascii_lowercase(),
-                title.to_ascii_lowercase(),
-                snippet.to_ascii_lowercase()
-            );
-            if !hay.contains(&needle) {
-                continue;
-            }
+    let count_sql = format!("WITH {filtered_cte} SELECT COUNT(*) FROM pages");
+    let total: u64 = if needle.is_empty() {
+        conn.query_row(&count_sql, params![project_id], |row| row.get::<_, i64>(0))?
+            .max(0) as u64
+    } else {
+        conn.query_row(&count_sql, params![project_id, like], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .max(0) as u64
+    };
+
+    let list_sql = format!(
+        r#"
+        WITH {filtered_cte}
+        SELECT path, symbol_count, last_updated
+        FROM pages
+        ORDER BY {order_by}
+        LIMIT ?{lim_idx} OFFSET ?{off_idx}
+        "#,
+        lim_idx = if needle.is_empty() { 2 } else { 3 },
+        off_idx = if needle.is_empty() { 3 } else { 4 },
+    );
+
+    let mut stmt = conn.prepare(&list_sql)?;
+    let mut raw_pages: Vec<(String, u64, Option<String>)> = Vec::new();
+    if needle.is_empty() {
+        let mapped = stmt.query_map(params![project_id, limit as i64, offset as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        for row in mapped {
+            raw_pages.push(row?);
         }
-        matched.push(ProjectPage {
+    } else {
+        let mapped = stmt.query_map(
+            params![project_id, like, limit as i64, offset as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )?;
+        for row in mapped {
+            raw_pages.push(row?);
+        }
+    }
+
+    let mut pages = Vec::with_capacity(raw_pages.len());
+    for (path, symbol_count, last_updated) in raw_pages {
+        let title = path_basename(&path);
+        let snippet = page_snippet(conn, project_id, &path)?;
+        pages.push(ProjectPage {
             path,
             title,
             snippet,
@@ -1244,45 +1446,6 @@ fn list_project_pages_blocking(
         });
     }
 
-    match sort {
-        "updated" | "last_updated" => {
-            matched.sort_by(|a, b| {
-                b.last_updated
-                    .cmp(&a.last_updated)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        }
-        "-updated" => {
-            matched.sort_by(|a, b| {
-                a.last_updated
-                    .cmp(&b.last_updated)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        }
-        "symbols" => {
-            matched.sort_by(|a, b| {
-                b.symbol_count
-                    .cmp(&a.symbol_count)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        }
-        "-symbols" => {
-            matched.sort_by(|a, b| {
-                a.symbol_count
-                    .cmp(&b.symbol_count)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-        }
-        "title" => matched.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
-        "-title" => matched.sort_by(|a, b| b.title.to_lowercase().cmp(&a.title.to_lowercase())),
-        "-path" => matched.sort_by(|a, b| b.path.cmp(&a.path)),
-        _ => matched.sort_by(|a, b| a.path.cmp(&b.path)),
-    }
-
-    let total = matched.len() as u64;
-    let start = offset.min(total) as usize;
-    let end = (start + limit as usize).min(matched.len());
-    let pages = matched[start..end].to_vec();
     Ok(ProjectPageList {
         project_id: project_id.to_string(),
         pages,
@@ -1290,6 +1453,26 @@ fn list_project_pages_blocking(
         offset,
         limit,
     })
+}
+
+/// Short symbol preview for one page (windowed rows only — not the full project).
+fn page_snippet(conn: &Connection, project_id: &str, path: &str) -> Result<String> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT name FROM project_index
+        WHERE project_id = ?1 COLLATE NOCASE
+          AND kind = 'node'
+          AND file_path = ?2
+        ORDER BY name
+        LIMIT 12
+        "#,
+    )?;
+    let names = stmt.query_map(params![project_id, path], |row| row.get::<_, String>(0))?;
+    let mut parts = Vec::new();
+    for name in names {
+        parts.push(name?);
+    }
+    Ok(parts.join(", ").chars().take(160).collect())
 }
 
 fn path_basename(path: &str) -> String {
@@ -2013,10 +2196,58 @@ mod tests {
             .expect("aggregates");
         assert_eq!(rows.len(), 2, "one aggregate per project");
         let lounge = rows.iter().find(|r| r.name == "lounge").expect("lounge");
-        assert_eq!(lounge.page_count, 3, "unique files from nodes+refs");
+        // page_count counts kind='node' files only (lib.rs, dead.rs) — not reference-only main.rs
+        assert_eq!(
+            lounge.page_count, 2,
+            "unique node files aligned with list_project_pages"
+        );
         assert_eq!(lounge.node_count, 2);
         assert_eq!(lounge.source_type, "indexed");
         assert!(lounge.last_updated.is_some());
+
+        let pages = store
+            .list_project_pages("lounge".into(), None, None, Some(0), Some(50))
+            .await
+            .expect("pages");
+        assert_eq!(
+            lounge.page_count, pages.total,
+            "aggregate page_count must match drill-down total"
+        );
+    }
+
+    #[tokio::test]
+    async fn vault_aggregates_includes_experiences_only_projects() {
+        use crate::models::{ExperienceOutcome, ExperienceRecord, LoungeTask};
+
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_project_index(sample_graph())
+            .await
+            .expect("save lounge");
+        let task = LoungeTask::new("claude", "orphan-exp", "imported only");
+        store
+            .insert_record(ExperienceRecord::from_task(
+                &task,
+                "summary",
+                "adr",
+                ExperienceOutcome::Success,
+                vec![],
+            ))
+            .await
+            .expect("insert exp");
+
+        let rows = store
+            .list_vault_project_aggregates()
+            .await
+            .expect("aggregates");
+        let orphan = rows
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case("orphan-exp"))
+            .expect("experiences-only project");
+        assert_eq!(orphan.source_type, "imported");
+        assert_eq!(orphan.page_count, 0);
+        assert_eq!(orphan.experience_count, 1);
+        assert!(rows.iter().any(|r| r.name == "lounge"));
     }
 
     #[tokio::test]
@@ -2064,5 +2295,75 @@ mod tests {
         assert_eq!(searched.total, 1);
         assert_eq!(searched.pages[0].title, "page_07.rs");
         assert!(searched.pages[0].snippet.contains("sym_7"));
+    }
+
+    #[tokio::test]
+    async fn list_project_pages_offset_window_for_large_projects() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = sample_graph();
+        graph.nodes.clear();
+        graph.references.clear();
+        graph.dead.clear();
+        for i in 0..806 {
+            graph.nodes.push(AstNode {
+                id: format!("n{i}"),
+                name: format!("sym_{i}"),
+                kind: "fn".into(),
+                file: Some(format!("src/page_{i:04}.rs")),
+                line: Some(1),
+                ref_count: 1,
+            });
+        }
+        store.save_project_index(graph).await.expect("save");
+
+        let aggregates = store
+            .list_vault_project_aggregates()
+            .await
+            .expect("aggregates");
+        let lounge = aggregates.iter().find(|r| r.name == "lounge").unwrap();
+        assert_eq!(lounge.page_count, 806);
+
+        let first = store
+            .list_project_pages(
+                "lounge".into(),
+                None,
+                Some("path".into()),
+                Some(0),
+                Some(200),
+            )
+            .await
+            .expect("first window");
+        assert_eq!(first.total, 806);
+        assert_eq!(first.pages.len(), 200);
+
+        let mid = store
+            .list_project_pages(
+                "lounge".into(),
+                None,
+                Some("path".into()),
+                Some(500),
+                Some(200),
+            )
+            .await
+            .expect("offset past 500");
+        assert_eq!(mid.pages.len(), 200);
+        assert!(
+            mid.pages[0].path.contains("0500") || mid.pages[0].path.contains("page_0500"),
+            "expected offset 500 window, got {}",
+            mid.pages[0].path
+        );
+
+        let last = store
+            .list_project_pages(
+                "lounge".into(),
+                None,
+                Some("path".into()),
+                Some(800),
+                Some(50),
+            )
+            .await
+            .expect("tail");
+        assert_eq!(last.pages.len(), 6);
+        assert_eq!(last.pages.last().unwrap().title, "page_0805.rs");
     }
 }

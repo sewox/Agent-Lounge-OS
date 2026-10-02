@@ -4,16 +4,15 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { Icon } from "@/components/icons";
 import { IndexEmptyState } from "@/components/index-empty-state";
 import { Pager } from "@/components/ui";
 import { formatDisplayPath } from "@/lib/experience";
-import { vaultStrings as vaultS } from "@/lib/strings/vault";
 import {
   pageCount,
   pageSlice,
@@ -64,10 +63,17 @@ type SemanticMapProps = {
   onOpenProject: (name: string | null) => void;
   /** Optional server aggregates (list_vault_projects). */
   aggregates?: VaultProjectRow[] | null;
+  aggregatesLoading?: boolean;
+  aggregatesError?: string | null;
+  onRetryAggregates?: () => void;
   /** Optional server page list for the open project. */
   projectPages?: ProjectPageRow[] | null;
   projectPagesTotal?: number | null;
+  pagesLoading?: boolean;
+  pagesError?: string | null;
   onPageSearch?: (query: string, sort: PageSortKey) => void;
+  onLoadMorePages?: () => void;
+  onRetryPages?: () => void;
 };
 
 function formatStamp(iso: string | null): string {
@@ -94,6 +100,7 @@ function ProjectFiltersBar({
   onChange: (next: VaultProjectFilters) => void;
   onReset: () => void;
 }) {
+  const { t } = useTranslation("vault");
   return (
     <div
       data-qa="vault-project-filters"
@@ -101,7 +108,7 @@ function ProjectFiltersBar({
     >
       <div className="flex flex-wrap items-center gap-1.5">
         <label className="sr-only" htmlFor="vault-project-search">
-          {vaultS.searchProjects}
+          {t("searchProjects")}
         </label>
         <input
           id="vault-project-search"
@@ -109,7 +116,7 @@ function ProjectFiltersBar({
           type="search"
           value={filters.nameQuery}
           onChange={(event) => onChange({ ...filters, nameQuery: event.target.value })}
-          placeholder={vaultS.searchProjects}
+          placeholder={t("searchProjects")}
           className="min-h-8 min-w-0 flex-1 rounded border border-outline-variant bg-surface-container px-2 py-1 font-body text-meta text-on-surface"
         />
         <button
@@ -118,12 +125,12 @@ function ProjectFiltersBar({
           onClick={onReset}
           className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
         >
-          {vaultS.resetFilters}
+          {t("resetFilters")}
         </button>
       </div>
       <div className="flex flex-wrap items-center gap-1.5 font-body text-meta">
         <label className="flex items-center gap-1 text-on-surface-variant">
-          <span>{vaultS.minPages}</span>
+          <span>{t("minPages")}</span>
           <input
             data-qa="vault-filter-min-pages"
             type="number"
@@ -140,44 +147,44 @@ function ProjectFiltersBar({
         </label>
         <select
           data-qa="vault-filter-recent"
-          aria-label={vaultS.filters}
+          aria-label={t("filters")}
           value={filters.recent}
           onChange={(event) =>
             onChange({ ...filters, recent: event.target.value as VaultRecentWindow })
           }
           className="min-h-8 rounded border border-outline-variant bg-surface-container px-1.5 py-1 text-on-surface"
         >
-          <option value="all">{vaultS.recentAll}</option>
-          <option value="7d">{vaultS.recent7d}</option>
-          <option value="30d">{vaultS.recent30d}</option>
+          <option value="all">{t("recentAll")}</option>
+          <option value="7d">{t("recent7d")}</option>
+          <option value="30d">{t("recent30d")}</option>
         </select>
         <select
           data-qa="vault-filter-status"
-          aria-label={vaultS.statusAll}
+          aria-label={t("statusAll")}
           value={filters.reviewStatus}
           onChange={(event) =>
             onChange({ ...filters, reviewStatus: event.target.value as VaultReviewStatus })
           }
           className="min-h-8 rounded border border-outline-variant bg-surface-container px-1.5 py-1 text-on-surface"
         >
-          <option value="all">{vaultS.statusAll}</option>
-          <option value="has_experiences">{vaultS.statusHasExperiences}</option>
-          <option value="reviewed">{vaultS.statusReviewed}</option>
-          <option value="unreviewed">{vaultS.statusUnreviewed}</option>
+          <option value="all">{t("statusAll")}</option>
+          <option value="has_experiences">{t("statusHasExperiences")}</option>
+          <option value="reviewed">{t("statusReviewed")}</option>
+          <option value="unreviewed">{t("statusUnreviewed")}</option>
         </select>
         <select
           data-qa="vault-filter-source"
-          aria-label={vaultS.sourceAll}
+          aria-label={t("sourceAll")}
           value={filters.sourceType}
           onChange={(event) =>
             onChange({ ...filters, sourceType: event.target.value as VaultSourceType })
           }
           className="min-h-8 rounded border border-outline-variant bg-surface-container px-1.5 py-1 text-on-surface"
         >
-          <option value="all">{vaultS.sourceAll}</option>
-          <option value="indexed">{vaultS.sourceIndexed}</option>
-          <option value="discovered">{vaultS.sourceDiscovered}</option>
-          <option value="imported">{vaultS.sourceImported}</option>
+          <option value="all">{t("sourceAll")}</option>
+          <option value="indexed">{t("sourceIndexed")}</option>
+          <option value="discovered">{t("sourceDiscovered")}</option>
+          <option value="imported">{t("sourceImported")}</option>
         </select>
       </div>
     </div>
@@ -189,12 +196,15 @@ function ProjectRow({
   active,
   onSelect,
   onOpen,
+  stretch,
 }: {
   row: VaultProjectRow;
   active: boolean;
   onSelect: () => void;
   onOpen: () => void;
+  stretch?: boolean;
 }) {
+  const { t } = useTranslation("vault");
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Enter") {
       event.preventDefault();
@@ -214,6 +224,8 @@ function ProjectRow({
       }}
       onKeyDown={onKeyDown}
       className={`flex w-full items-center justify-between gap-2 rounded px-1.5 py-1.5 text-left transition-colors outline-none focus-visible:ring-1 focus-visible:ring-primary ${
+        stretch ? "min-h-0 flex-1" : ""
+      } ${
         active
           ? "bg-primary-container/25 text-primary"
           : "text-on-surface hover:bg-surface-container-high/80"
@@ -224,8 +236,8 @@ function ProjectRow({
         <span className="min-w-0">
           <span className="block truncate font-medium font-mono">{row.name || "unnamed"}</span>
           <span className="block truncate font-mono text-meta text-outline">
-            {vaultS.pageCountMeta(row.pageCount, row.experienceCount)}
-            {` · ${vaultS.astNodes(row.nodeCount)} · ${vaultS.edges(row.edgeCount)}`}
+            {t("pageCountMeta", { pages: row.pageCount, experiences: row.experienceCount })}
+            {` · ${t("astNodes", { count: row.nodeCount })} · ${t("edges", { count: row.edgeCount })}`}
             {row.lastUpdated ? ` · ${formatStamp(row.lastUpdated)}` : ""}
           </span>
         </span>
@@ -239,7 +251,7 @@ function ProjectRow({
         }}
         className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
       >
-        {vaultS.openProject}
+        {t("openProject")}
       </button>
     </div>
   );
@@ -248,43 +260,68 @@ function ProjectRow({
 function VirtualPageList({
   pages,
   query,
+  loading,
+  onNearEnd,
 }: {
   pages: ProjectPageRow[];
   query: string;
+  loading?: boolean;
+  onNearEnd?: () => void;
 }) {
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const { t } = useTranslation("vault");
+  const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(320);
 
+  // Rebind ResizeObserver when the scroller mounts (empty → loaded).
   useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el) {
+    if (!scrollerEl) {
       return;
     }
-    const update = () => setViewportHeight(el.clientHeight || 320);
+    const update = () => setViewportHeight(scrollerEl.clientHeight || 320);
     update();
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
-    ro?.observe(el);
+    ro?.observe(scrollerEl);
     return () => ro?.disconnect();
-  }, []);
+  }, [scrollerEl]);
 
   const win = windowSlice(pages, scrollTop, viewportHeight, PAGE_ROW_HEIGHT, 8);
   const visible = pages.slice(win.start, win.end);
 
-  if (pages.length === 0) {
+  if (pages.length === 0 && !loading) {
     return (
       <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant">
-        {query.trim() ? vaultS.noPagesMatch : vaultS.noPages}
+        {query.trim() ? t("noPagesMatch") : t("noPages")}
+      </div>
+    );
+  }
+
+  if (pages.length === 0 && loading) {
+    return (
+      <div
+        data-qa="vault-pages-loading"
+        className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+      >
+        {t("pagesLoading")}
       </div>
     );
   }
 
   return (
     <div
-      ref={scrollerRef}
+      ref={setScrollerEl}
       data-qa="vault-page-list"
       className="min-h-0 flex-1 overflow-auto"
-      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      onScroll={(event) => {
+        const el = event.currentTarget;
+        setScrollTop(el.scrollTop);
+        if (
+          onNearEnd &&
+          el.scrollHeight - el.scrollTop - el.clientHeight < PAGE_ROW_HEIGHT * 12
+        ) {
+          onNearEnd();
+        }
+      }}
     >
       <div style={{ height: win.totalHeight, position: "relative" }}>
         <div style={{ transform: `translateY(${win.offsetY}px)` }}>
@@ -305,12 +342,20 @@ function VirtualPageList({
                 </span>
               </span>
               <span className="shrink-0 font-mono text-meta text-outline">
-                {vaultS.symbols(page.symbolCount)}
+                {t("symbols", { count: page.symbolCount })}
               </span>
             </div>
           ))}
         </div>
       </div>
+      {loading ? (
+        <div
+          data-qa="vault-pages-loading-more"
+          className="px-2 py-2 text-center font-body text-meta text-on-surface-variant"
+        >
+          {t("pagesLoading")}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -325,10 +370,18 @@ export function SemanticMap({
   openProjectName,
   onOpenProject,
   aggregates = null,
+  aggregatesLoading = false,
+  aggregatesError = null,
+  onRetryAggregates,
   projectPages = null,
   projectPagesTotal = null,
+  pagesLoading = false,
+  pagesError = null,
   onPageSearch,
+  onLoadMorePages,
+  onRetryPages,
 }: SemanticMapProps) {
+  const { t } = useTranslation("vault");
   const filters = useSyncExternalStore(
     subscribeVaultFilters,
     getVaultFiltersSnapshot,
@@ -373,6 +426,7 @@ export function SemanticMap({
   const pages = pageCount(filteredProjects.length, PROJECT_PAGE);
   const safeProjectPage = Math.min(projectPage, pages - 1);
   const visibleProjects = pageSlice(filteredProjects, safeProjectPage, PROJECT_PAGE);
+  const stretchRows = visibleProjects.length > 0 && visibleProjects.length <= 8;
 
   const openProject = useMemo(
     () => allProjects.find((row) => row.name === openProjectName) ?? null,
@@ -389,9 +443,8 @@ export function SemanticMap({
       projectPages && projectPages.length > 0
         ? projectPages
         : pagesFromSemanticProject(semanticProject);
-    // When server already filtered, still allow client sort/search fallback.
-    if (projectPages && projectPages.length > 0 && onPageSearch) {
-      return base;
+    if (projectPages && onPageSearch) {
+      return projectPages;
     }
     return filterAndSortPages(base, debouncedQuery, sort);
   }, [debouncedQuery, onPageSearch, projectPages, semanticProject, sort]);
@@ -420,6 +473,38 @@ export function SemanticMap({
     setDebouncedQuery("");
   }, [onOpenProject]);
 
+  if (aggregatesLoading && allProjects.length === 0) {
+    return (
+      <div
+        data-qa="vault-projects-loading"
+        className="flex h-full min-h-[12rem] w-full flex-1 items-center justify-center font-body text-body text-on-surface-variant"
+      >
+        {t("projectsLoading")}
+      </div>
+    );
+  }
+
+  if (aggregatesError && allProjects.length === 0) {
+    return (
+      <div
+        data-qa="vault-projects-error"
+        className="flex h-full min-h-[12rem] w-full flex-1 flex-col items-center justify-center gap-2 font-body text-body text-error"
+      >
+        <span>{aggregatesError || t("projectsError")}</span>
+        {onRetryAggregates ? (
+          <button
+            type="button"
+            data-qa="vault-projects-retry"
+            onClick={onRetryAggregates}
+            className="min-h-8 rounded border border-outline-variant px-2 py-1 text-on-surface-variant hover:bg-surface-container-high"
+          >
+            {t("retry")}
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
   if (allProjects.length === 0) {
     return (
       <div className="flex h-full min-h-[12rem] w-full min-w-0 flex-1 flex-col">
@@ -445,22 +530,22 @@ export function SemanticMap({
             onClick={goBack}
             className="min-h-8 rounded border border-outline-variant px-2 py-1 text-on-surface-variant hover:bg-surface-container-high"
           >
-            ← {vaultS.backToProjects}
+            ← {t("backToProjects")}
           </button>
           <nav aria-label="breadcrumb" className="flex min-w-0 items-center gap-1 font-mono text-outline">
             <button type="button" className="hover:text-primary" onClick={goBack}>
-              {vaultS.breadcrumbProjects}
+              {t("breadcrumbProjects")}
             </button>
             <span>/</span>
             <span className="truncate text-on-surface">{openProject.name}</span>
           </nav>
-          <span className="ml-auto text-on-surface-variant">
-            {vaultS.pages(pageTotal)}
+          <span data-qa="vault-page-total" className="ml-auto text-on-surface-variant">
+            {t("pages", { count: pageTotal })}
           </span>
         </div>
         <div className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5">
           <label className="sr-only" htmlFor="vault-page-search">
-            {vaultS.searchPages}
+            {t("searchPages")}
           </label>
           <input
             id="vault-page-search"
@@ -468,23 +553,46 @@ export function SemanticMap({
             type="search"
             value={pageQuery}
             onChange={(event) => setPageQuery(event.target.value)}
-            placeholder={vaultS.searchPages}
+            placeholder={t("searchPages")}
             className="min-h-8 min-w-0 flex-1 rounded border border-outline-variant bg-surface-container px-2 py-1 font-body text-meta text-on-surface"
           />
           <select
             data-qa="vault-page-sort"
-            aria-label={vaultS.sortPath}
+            aria-label={t("sortPath")}
             value={sort}
             onChange={(event) => setSort(event.target.value as PageSortKey)}
             className="min-h-8 rounded border border-outline-variant bg-surface-container px-1.5 py-1 font-body text-meta text-on-surface"
           >
-            <option value="path">{vaultS.sortPath}</option>
-            <option value="title">{vaultS.sortTitle}</option>
-            <option value="updated">{vaultS.sortUpdated}</option>
-            <option value="symbols">{vaultS.sortSymbols}</option>
+            <option value="path">{t("sortPath")}</option>
+            <option value="title">{t("sortTitle")}</option>
+            <option value="updated">{t("sortUpdated")}</option>
+            <option value="symbols">{t("sortSymbols")}</option>
           </select>
         </div>
-        <VirtualPageList pages={clientPages} query={debouncedQuery} />
+        {pagesError ? (
+          <div
+            data-qa="vault-pages-error"
+            className="mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded border border-error/40 bg-error/5 px-2 py-2 font-body text-body text-error"
+          >
+            <span>{pagesError || t("pagesError")}</span>
+            {onRetryPages ? (
+              <button
+                type="button"
+                data-qa="vault-pages-retry"
+                onClick={onRetryPages}
+                className="min-h-8 rounded border border-outline-variant px-2 py-1 text-on-surface-variant hover:bg-surface-container-high"
+              >
+                {t("retry")}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        <VirtualPageList
+          pages={clientPages}
+          query={debouncedQuery}
+          loading={pagesLoading}
+          onNearEnd={onLoadMorePages}
+        />
       </div>
     );
   }
@@ -496,11 +604,11 @@ export function SemanticMap({
       className="flex min-h-0 w-full flex-1 flex-col overflow-hidden"
     >
       <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
-        <span>{vaultS.indexedFiles}</span>
+        <span>{t("indexedFiles")}</span>
         <span className="text-on-surface-variant">
           {graphTotals.files > 0
-            ? `${vaultS.files(graphTotals.files)} · ${vaultS.projectCount(filteredProjects.length)}`
-            : vaultS.projectCount(filteredProjects.length)}
+            ? `${t("files", { count: graphTotals.files })} · ${t("projectCount", { count: filteredProjects.length })}`
+            : t("projectCount", { count: filteredProjects.length })}
         </span>
       </div>
       <ProjectFiltersBar
@@ -516,10 +624,33 @@ export function SemanticMap({
           setProjectPage(0);
         }}
       />
-      <div role="list" className="min-h-0 flex-1 space-y-1 overflow-auto font-body text-body">
+      {aggregatesError ? (
+        <div
+          data-qa="vault-projects-error"
+          className="mb-2 flex shrink-0 flex-wrap items-center gap-2 rounded border border-error/40 bg-error/5 px-2 py-2 font-body text-meta text-error"
+        >
+          <span>{aggregatesError || t("projectsError")}</span>
+          {onRetryAggregates ? (
+            <button
+              type="button"
+              data-qa="vault-projects-retry"
+              onClick={onRetryAggregates}
+              className="min-h-8 rounded border border-outline-variant px-2 py-1 text-on-surface-variant hover:bg-surface-container-high"
+            >
+              {t("retry")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      <div
+        role="list"
+        className={`min-h-0 flex-1 overflow-auto font-body text-body ${
+          stretchRows ? "flex flex-col gap-1" : "space-y-1"
+        }`}
+      >
         {visibleProjects.length === 0 ? (
           <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-on-surface-variant">
-            {vaultS.noProjects}
+            {t("noProjects")}
           </div>
         ) : (
           visibleProjects.map((row) => {
@@ -531,6 +662,7 @@ export function SemanticMap({
                 key={`proj:${row.name}:${row.repoPath ?? ""}`}
                 row={row}
                 active={Boolean(isActive)}
+                stretch={stretchRows}
                 onSelect={() =>
                   onSelect(
                     isActive
@@ -549,10 +681,21 @@ export function SemanticMap({
             );
           })
         )}
+        <div
+          data-qa="vault-projects-summary"
+          className="mt-auto shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline"
+        >
+          <span className="font-body">
+            {t("files", { count: graphTotals.files })} · {t("astNodes", { count: graphTotals.nodes })} ·{" "}
+            {t("edges", { count: graphTotals.edges })}
+          </span>
+        </div>
       </div>
       <div className="mt-1.5 flex shrink-0 items-center justify-between border-t border-outline-variant/40 pt-1.5 font-body text-meta text-outline">
         <span>
-          {selected ? vaultS.selected(selected.name) : vaultS.projectCount(filteredProjects.length)}
+          {selected
+            ? t("selected", { name: selected.name })
+            : t("projectCount", { count: filteredProjects.length })}
         </span>
         <Pager
           page={safeProjectPage}
