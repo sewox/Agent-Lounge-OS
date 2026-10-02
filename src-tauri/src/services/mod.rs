@@ -253,9 +253,12 @@ mod tests {
 
         let report = manager.ensure_all().await;
         assert!(!report.ollama.running);
+        assert!(report.ollama.is_not_installed());
         assert!(report.nats.running);
         assert!(!report.memory.running);
         assert!(report.plugin.running);
         assert!(!report.all_core_running());
+        // Missing optional LMR is not a core crash / SERVICE DEGRADED.
+        assert!(!report.core_degraded());
     }
 }

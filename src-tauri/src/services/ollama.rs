@@ -802,7 +802,9 @@ mod tests {
         });
         let health = service.ensure().await;
         assert!(!health.running);
-        assert!(health.error.unwrap().contains("LMR runtime yok"));
+        assert!(health.is_not_installed());
+        assert!(health.error.is_none());
+        assert!(health.detail.as_deref().unwrap_or("").contains("optional"));
     }
 
     #[test]
