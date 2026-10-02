@@ -197,13 +197,8 @@ test.describe("ST — settings", () => {
 test.describe("AP / CP / misc", () => {
   test("AP-03 · ?demo=routing-banner actions (browser mode)", async ({ page }) => {
     await openRoute(page, "/dashboard?demo=routing-banner", "browser");
-    await page.waitForTimeout(500);
-    // In browser mode demo injects approval; buttons should appear.
     const approve = page.getByRole("button", { name: /Onayla|Approve|Local|Yerel|Reddet|Deny/i });
-    // If banner not visible (hydration), soft note
-    if ((await approve.count()) === 0) {
-      test.fail(true, "Routing banner demo not visible");
-    }
+    await expect(approve.first(), "routing banner demo actions").toBeVisible({ timeout: 5_000 });
     expect(await approve.count()).toBeGreaterThan(0);
   });
 

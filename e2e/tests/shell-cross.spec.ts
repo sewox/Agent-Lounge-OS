@@ -185,9 +185,6 @@ test.describe("X — cross-cutting", () => {
       return { scanned: visible.length, dead };
     });
 
-    if (result.dead.length > 0) {
-      test.fail(true, `Dead clickables: ${result.dead.join(", ")}`);
-    }
     expect(result.dead, `scanned=${result.scanned} dead=${result.dead.join("|")}`).toEqual([]);
   });
 
@@ -258,9 +255,7 @@ test.describe("X — cross-cutting", () => {
     page,
   }) => {
     // O1: strings from i18n dict; Settings language switch; choice persists.
-    // Strengthened beyond a 4-word mixed grep: assert html lang + dictionary chrome
-    // for surfaces that ARE translated (shell/dashboard). Leftovers (model picker,
-    // palette, fleet/onboarding/telemetry bodies) are listed in the PR body — not asserted here.
+    // Fail on mixed-language chrome for translated namespaces (shell/settings/vault/health).
     await openRoute(page, "/settings", "full");
     const langSwitch = page
       .locator('[data-qa="panel"] [data-qa="locale-switch"]')
@@ -273,6 +268,11 @@ test.describe("X — cross-cutting", () => {
     const stored = await page.evaluate(() => localStorage.getItem("lounge.locale") || localStorage.getItem("locale"));
     expect(stored).toMatch(/en/i);
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
+
+    // Settings EN dictionary surfaces (must not show TR leftovers).
+    const settingsText = await page.locator('[data-qa="panel"]').innerText();
+    expect(settingsText).toMatch(/Routing Policy|Default editor|Alert sound|Destructive operations/i);
+    expect(settingsText).not.toMatch(/Yönlendirme Politikası|Varsayılan editör|Onay sesi|Yıkıcı işlemler/i);
 
     await openRoute(page, "/dashboard", "full");
     const enShell = await page.locator('[data-qa="sidebar"]').innerText();
@@ -289,9 +289,14 @@ test.describe("X — cross-cutting", () => {
     expect(trShell).not.toMatch(/Active daemons/i);
     // Translated Index Workspace chrome must flip with the dictionary.
     const indexBtn = page.getByRole("button", { name: /Index Workspace|Çalışma Alanını Tara/i });
-    if (await indexBtn.count()) {
-      await expect(indexBtn.first()).toHaveText(/Çalışma Alanını Tara/i);
-    }
+    await expect(indexBtn.first()).toBeVisible();
+    await expect(indexBtn.first()).toHaveText(/Çalışma Alanını Tara/i);
+
+    // Settings TR dictionary surfaces after switch.
+    await openRoute(page, "/settings", "full");
+    const settingsTr = await page.locator('[data-qa="panel"]').innerText();
+    expect(settingsTr).toMatch(/Yönlendirme Politikası|Varsayılan editör|Onay sesi|Yıkıcı işlemler/i);
+    expect(settingsTr).not.toMatch(/Routing Policy|Default editor|Alert sound|Destructive operations/i);
   });
 
   test("X-02 · min font gate delegated to S4 grep (smoke DOM check)", async ({ page }) => {

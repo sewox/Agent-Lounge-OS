@@ -1,7 +1,8 @@
 /** Vault UI strings via react-i18next (PR-5). */
-import { i18n } from "@/lib/i18n/config";
+import { i18n, initI18n } from "@/lib/i18n/config";
 
 function t(key: string, opts?: Record<string, unknown>): string {
+  initI18n();
   return i18n.t(key, { ns: "vault", ...opts });
 }
 

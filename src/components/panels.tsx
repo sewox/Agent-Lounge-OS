@@ -1707,7 +1707,7 @@ export function TelemetryPanel() {
     <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div lang="en" className="text-meta tracking-wider text-outline uppercase">
+          <div lang="en" className="text-body tracking-wider text-on-surface-variant uppercase">
             Laya Decision
           </div>
           <div
@@ -1716,31 +1716,31 @@ export function TelemetryPanel() {
           >
             {latencyLive ? formatLatencyMs(latencyMs) : "—"}
           </div>
-          <div className="text-outline">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
+          <div className="text-on-surface-variant">{formatLayaDecision(latencyLive ? latencyMs : null)}</div>
           <div className="mt-3 min-h-0 flex-1 overflow-auto">
             {latencyLive ? (
               <LatencySparkline values={decisionLatencyHistory} />
             ) : (
-              <span className="text-meta text-on-surface-variant">
-                {decisionGate?.phase === "ready" ? "idle · henüz infer yok" : "gate soğuk"}
+              <span className="text-body text-on-surface-variant">
+                {decisionGate?.phase === "ready" ? "idle · no infer yet" : "gate cold"}
               </span>
             )}
           </div>
-          <div className="mt-auto pt-4 text-meta text-outline">
+          <div className="mt-auto pt-4 text-body text-on-surface-variant">
             lounge.telemetry.decision · {decisionTelemetry?.device ?? decisionGate?.device ?? "—"}
           </div>
         </div>
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div className="text-meta tracking-wider text-outline uppercase">MSG / MIN</div>
+          <div className="text-body tracking-wider text-on-surface-variant uppercase">MSG / MIN</div>
           <div
             key={decisionMsgPerMin}
             className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"
           >
             {decisionMsgPerMin}
           </div>
-          <div className="text-outline">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
-          <div className="mt-auto pt-4 text-meta text-outline">
-            NATS buffer {events.length} · {subscription.length} abonelik · {plugins.length} plugin
+          <div className="text-on-surface-variant">NATS / 60s {msgLive ? "· live" : "· idle"}</div>
+          <div className="mt-auto pt-4 text-body text-on-surface-variant">
+            NATS buffer {events.length} · {subscription.length} subscriptions · {plugins.length} plugins
           </div>
         </div>
       </div>
@@ -1750,24 +1750,23 @@ export function TelemetryPanel() {
           <h2 className="font-body text-panel font-semibold tracking-label uppercase">
             Agent Efficiency Report
           </h2>
-          <span className="text-meta text-outline">Ajan Verimlilik Raporu</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 font-mono text-meta text-on-surface-variant">
+            <label className="flex items-center gap-1.5 font-mono text-body text-on-surface-variant">
               <input
                 type="checkbox"
                 checked={weekly}
                 onChange={(e) => setWeekly(e.target.checked)}
                 className="accent-primary"
               />
-              Haftalık (7g)
+              Weekly (7d)
             </label>
             <select
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
-              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-meta text-on-surface"
-              aria-label="Proje filtresi"
+              className="max-w-[10rem] truncate rounded border border-outline-variant bg-surface px-1.5 py-1 font-mono text-body text-on-surface"
+              aria-label="Project filter"
             >
-              <option value="">Tüm projeler</option>
+              <option value="">All projects</option>
               {projectOptions.map((id) => (
                 <option key={id} value={id}>
                   {id}
