@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectSummary,
-    SemanticMap, SemanticProject,
+    now_rfc3339, AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectPage,
+    ProjectPageList, ProjectSummary, SemanticMap, SemanticProject, VaultProjectAggregate,
 };
 
 pub(crate) fn migrate_project_index(conn: &Connection) -> Result<()> {
@@ -174,6 +174,44 @@ impl ExperienceStore {
         })
         .await
         .context("project_index list join")?
+    }
+
+    /// Vault UI aggregate: one row per project (page/experience counts, last updated).
+    pub async fn list_vault_project_aggregates(&self) -> Result<Vec<VaultProjectAggregate>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_vault_project_aggregates_blocking(&conn)
+        })
+        .await
+        .context("vault project aggregates join")?
+    }
+
+    /// Paginated unique-file ("page") list for a single project — search + sort.
+    pub async fn list_project_pages(
+        &self,
+        project_id: String,
+        query: Option<String>,
+        sort: Option<String>,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<ProjectPageList> {
+        let conn = self.conn.clone();
+        let lim = limit.unwrap_or(50).clamp(1, 500);
+        let off = offset.unwrap_or(0);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_project_pages_blocking(
+                &conn,
+                &project_id,
+                query.as_deref().unwrap_or(""),
+                sort.as_deref().unwrap_or("path"),
+                off,
+                lim,
+            )
+        })
+        .await
+        .context("project pages join")?
     }
 
     /// Tarama sonrası hemen UI'da görünsün diye proje kaydı (indeks öncesi).
@@ -1031,6 +1069,240 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     Ok(projects)
 }
 
+fn list_vault_project_aggregates_blocking(
+    conn: &Connection,
+) -> Result<Vec<VaultProjectAggregate>> {
+    let sql = r#"
+        SELECT
+            project_id,
+            MAX(repo_path),
+            SUM(CASE WHEN kind = 'node' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN kind = 'reference' THEN 1 ELSE 0 END),
+            COUNT(DISTINCT CASE WHEN kind != 'meta' THEN NULLIF(file_path, '') END),
+            MAX(indexed_at),
+            MAX(CASE WHEN kind = 'meta' THEN 1 ELSE 0 END)
+        FROM project_index
+        GROUP BY project_id
+        ORDER BY MAX(indexed_at) DESC, project_id
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)? as u64,
+            row.get::<_, i64>(3)? as u64,
+            row.get::<_, i64>(4)? as u64,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, i64>(6)? as u64,
+        ))
+    })?;
+    let mut projects = Vec::new();
+    for row in rows {
+        let (name, repo_path, counted_nodes, counted_edges, pages, last_updated, has_meta) =
+            row?;
+        if crate::db::experience_governance::is_project_hidden(conn, &name)? {
+            continue;
+        }
+        let (declared_nodes, declared_edges) = read_declared_totals(conn, &name)?;
+        let node_count = reconcile_totals(declared_nodes, counted_nodes);
+        let edge_count = reconcile_totals(declared_edges, counted_edges);
+        let (experience_count, unreviewed_count, exp_updated) =
+            experience_stats_for_project(conn, &name)?;
+        let last = match (last_updated.as_deref(), exp_updated.as_deref()) {
+            (Some(a), Some(b)) => Some(if a >= b { a.to_string() } else { b.to_string() }),
+            (Some(a), None) => Some(a.to_string()),
+            (None, Some(b)) => Some(b.to_string()),
+            (None, None) => None,
+        };
+        let source_type = if node_count > 0 || pages > 0 || has_meta > 0 {
+            "indexed"
+        } else if experience_count > 0 {
+            "imported"
+        } else {
+            "discovered"
+        };
+        projects.push(VaultProjectAggregate {
+            name,
+            repo_path: repo_path.filter(|path| !path.is_empty()),
+            page_count: pages,
+            node_count,
+            edge_count,
+            experience_count,
+            unreviewed_count,
+            last_updated: last,
+            source_type: source_type.into(),
+        });
+    }
+    Ok(projects)
+}
+
+fn experience_stats_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<(u64, u64, Option<String>)> {
+    // experiences table may be absent in isolated unit fixtures — treat as zero.
+    let has_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiences' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !has_table {
+        return Ok((0, 0, None));
+    }
+    let total: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM experiences
+        WHERE lower(project_id) = lower(?1)
+          AND COALESCE(status, 'active') = 'active'
+        "#,
+        params![project_id],
+        |row| row.get(0),
+    )?;
+    let unreviewed: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM experiences
+        WHERE lower(project_id) = lower(?1)
+          AND COALESCE(status, 'active') = 'active'
+          AND COALESCE(reviewed, 1) = 0
+        "#,
+        params![project_id],
+        |row| row.get(0),
+    )?;
+    let last: Option<String> = conn
+        .query_row(
+            r#"
+            SELECT MAX(COALESCE(updated_at, created_at)) FROM experiences
+            WHERE lower(project_id) = lower(?1)
+            "#,
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok((total.max(0) as u64, unreviewed.max(0) as u64, last))
+}
+
+fn list_project_pages_blocking(
+    conn: &Connection,
+    project_id: &str,
+    query: &str,
+    sort: &str,
+    offset: u64,
+    limit: u64,
+) -> Result<ProjectPageList> {
+    let needle = query.trim().to_ascii_lowercase();
+    let sql = r#"
+        SELECT
+            file_path AS path,
+            COUNT(*) AS symbol_count,
+            MAX(indexed_at) AS last_updated,
+            GROUP_CONCAT(name, ', ') AS snippet
+        FROM project_index
+        WHERE project_id = ?1
+          AND kind = 'node'
+          AND file_path IS NOT NULL
+          AND TRIM(file_path) != ''
+        GROUP BY file_path
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as u64,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+
+    let mut matched: Vec<ProjectPage> = Vec::new();
+    for row in rows {
+        let (path, symbol_count, last_updated, snippet_raw) = row?;
+        let title = path_basename(&path);
+        let snippet = snippet_raw
+            .unwrap_or_default()
+            .chars()
+            .take(160)
+            .collect::<String>();
+        if !needle.is_empty() {
+            let hay = format!(
+                "{} {} {}",
+                path.to_ascii_lowercase(),
+                title.to_ascii_lowercase(),
+                snippet.to_ascii_lowercase()
+            );
+            if !hay.contains(&needle) {
+                continue;
+            }
+        }
+        matched.push(ProjectPage {
+            path,
+            title,
+            snippet,
+            symbol_count,
+            last_updated,
+        });
+    }
+
+    match sort {
+        "updated" | "last_updated" => {
+            matched.sort_by(|a, b| {
+                b.last_updated
+                    .cmp(&a.last_updated)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+        }
+        "-updated" => {
+            matched.sort_by(|a, b| {
+                a.last_updated
+                    .cmp(&b.last_updated)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+        }
+        "symbols" => {
+            matched.sort_by(|a, b| {
+                b.symbol_count
+                    .cmp(&a.symbol_count)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+        }
+        "-symbols" => {
+            matched.sort_by(|a, b| {
+                a.symbol_count
+                    .cmp(&b.symbol_count)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
+        }
+        "title" => matched.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+        "-title" => matched.sort_by(|a, b| b.title.to_lowercase().cmp(&a.title.to_lowercase())),
+        "-path" => matched.sort_by(|a, b| b.path.cmp(&a.path)),
+        _ => matched.sort_by(|a, b| a.path.cmp(&b.path)),
+    }
+
+    let total = matched.len() as u64;
+    let start = offset.min(total) as usize;
+    let end = (start + limit as usize).min(matched.len());
+    let pages = matched[start..end].to_vec();
+    Ok(ProjectPageList {
+        project_id: project_id.to_string(),
+        pages,
+        total,
+        offset,
+        limit,
+    })
+}
+
+fn path_basename(path: &str) -> String {
+    path.replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn search_index_nodes_blocking(
     conn: &Connection,
     query: &str,
@@ -1716,5 +1988,84 @@ mod tests {
         let ok2 = confine_index_file_path(missing_repo.to_str().unwrap(), "src/x.rs");
         assert!(ok2.is_ok(), "missing path under symlink ancestor: {ok2:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn vault_aggregates_one_row_per_project_with_page_counts() {
+        let store = ExperienceStore::memory().expect("memory db");
+        store
+            .save_project_index(sample_graph())
+            .await
+            .expect("save lounge");
+        let mut other = sample_graph();
+        other.project = "echo".into();
+        other.repo_path = "/tmp/echo".into();
+        other.nodes.push(AstNode {
+            id: "baz".into(),
+            name: "baz".into(),
+            kind: "fn".into(),
+            file: Some("src/extra.rs".into()),
+            line: Some(1),
+            ref_count: 0,
+        });
+        store.save_project_index(other).await.expect("save echo");
+
+        let rows = store
+            .list_vault_project_aggregates()
+            .await
+            .expect("aggregates");
+        assert_eq!(rows.len(), 2, "one aggregate per project");
+        let lounge = rows.iter().find(|r| r.name == "lounge").expect("lounge");
+        assert_eq!(lounge.page_count, 3, "unique files from nodes+refs");
+        assert_eq!(lounge.node_count, 2);
+        assert_eq!(lounge.source_type, "indexed");
+        assert!(lounge.last_updated.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_project_pages_paginates_and_searches() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = sample_graph();
+        // Seed many unique files so pagination is meaningful.
+        for i in 0..40 {
+            graph.nodes.push(AstNode {
+                id: format!("n{i}"),
+                name: format!("sym_{i}"),
+                kind: "fn".into(),
+                file: Some(format!("src/page_{i:02}.rs")),
+                line: Some(1),
+                ref_count: (i % 5) as u64,
+            });
+        }
+        store.save_project_index(graph).await.expect("save");
+
+        let page = store
+            .list_project_pages(
+                "lounge".into(),
+                None,
+                Some("path".into()),
+                Some(0),
+                Some(10),
+            )
+            .await
+            .expect("page0");
+        assert!(page.total >= 40);
+        assert_eq!(page.pages.len(), 10);
+        assert_eq!(page.offset, 0);
+        assert_eq!(page.limit, 10);
+
+        let searched = store
+            .list_project_pages(
+                "lounge".into(),
+                Some("page_07".into()),
+                Some("title".into()),
+                Some(0),
+                Some(20),
+            )
+            .await
+            .expect("search");
+        assert_eq!(searched.total, 1);
+        assert_eq!(searched.pages[0].title, "page_07.rs");
+        assert!(searched.pages[0].snippet.contains("sym_7"));
     }
 }

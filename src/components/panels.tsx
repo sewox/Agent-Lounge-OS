@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GraphUiButton } from "@/components/graph-ui-button";
 import { GraphUiSettings } from "@/components/graph-ui-settings";
@@ -57,6 +57,14 @@ import {
   type QuotaKind,
   type SemanticMapSelection,
 } from "@/lib/lounge";
+import {
+  buildVaultProjectRows,
+  mapProjectPage,
+  mapVaultAggregate,
+  type PageSortKey,
+  type ProjectPageRow,
+  type VaultProjectRow,
+} from "@/lib/vault-projects";
 import { selectCriticalQuotas, type UiScale } from "@/lib/ui-prefs";
 import { DeadSymbolsVaultLink } from "@/components/dead-symbols-panel";
 import { IndexEmptyState } from "@/components/index-empty-state";
@@ -465,9 +473,14 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     experienceDetailError,
     closeExperience,
   } = useLounge();
+  const tauriReady = useIsTauri();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const [selectionProject, setSelectionProject] = useState(selectedProject);
   const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
+  const [openProjectName, setOpenProjectName] = useState<string | null>(null);
+  const [vaultAggregates, setVaultAggregates] = useState<VaultProjectRow[] | null>(null);
+  const [serverPages, setServerPages] = useState<ProjectPageRow[] | null>(null);
+  const [serverPagesTotal, setServerPagesTotal] = useState<number | null>(null);
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
 
   if (selectionProject !== selectedProject) {
@@ -482,9 +495,73 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     }
   }
 
+  useEffect(() => {
+    if (!tauriReady) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const rows = await invoke<Record<string, unknown>[]>("list_vault_projects");
+        if (!cancelled) {
+          setVaultAggregates(rows.map((row) => mapVaultAggregate(row)));
+        }
+      } catch {
+        if (!cancelled) {
+          setVaultAggregates(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tauriReady, semanticMap, projects, experiences.length]);
+
+  const handlePageSearch = useCallback(
+    (pageQuery: string, sort: PageSortKey) => {
+      if (!tauriReady || !openProjectName) {
+        setServerPages(null);
+        setServerPagesTotal(null);
+        return;
+      }
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const result = await invoke<{
+            pages?: Record<string, unknown>[];
+            total?: number;
+          }>("list_project_pages", {
+            projectId: openProjectName,
+            query: pageQuery || null,
+            sort,
+            offset: 0,
+            limit: 500,
+          });
+          setServerPages((result.pages ?? []).map((row) => mapProjectPage(row)));
+          setServerPagesTotal(Number(result.total ?? 0) || 0);
+        } catch {
+          setServerPages(null);
+          setServerPagesTotal(null);
+        }
+      })();
+    },
+    [openProjectName, tauriReady],
+  );
+
   const graphTotals = useMemo(
     () => resolveGraphTotals({ projects, semanticMap }),
     [projects, semanticMap],
+  );
+  const projectRows = useMemo(
+    () =>
+      buildVaultProjectRows({
+        semanticMap,
+        projects,
+        experiences,
+        aggregates: vaultAggregates,
+      }),
+    [experiences, projects, semanticMap, vaultAggregates],
   );
   const selectedProjectPath = useMemo(() => {
     if (!selected || selected.kind !== "project") {
@@ -492,8 +569,9 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     }
     const fromProjects = projects.find((row) => row.name === selected.name)?.root_path;
     const fromMap = semanticMap.projects.find((row) => row.name === selected.name)?.repo_path;
-    return fromProjects || fromMap || null;
-  }, [projects, selected, semanticMap.projects]);
+    const fromAgg = projectRows.find((row) => row.name === selected.name)?.repoPath;
+    return fromProjects || fromMap || fromAgg || null;
+  }, [projects, projectRows, selected, semanticMap.projects]);
   const log = useMemo(
     () =>
       sortExperiencesForDisplay(
@@ -501,6 +579,12 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       ),
     [experiences, selected, query],
   );
+  const experienceProjectRows = useMemo(() => {
+    if (openProjectName) {
+      return [];
+    }
+    return projectRows.filter((row) => row.experienceCount > 0 || row.pageCount > 0);
+  }, [openProjectName, projectRows]);
   const deadForNode = useMemo(
     () => deadSymbolsMatchingSelection(deadSymbols, semanticMap, selected),
     [deadSymbols, semanticMap, selected],
@@ -549,8 +633,34 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <SemanticMap
             semanticMap={semanticMap}
             projects={projects}
+            experiences={experiences}
             graphTotals={graphTotals}
             selected={selected}
+            aggregates={vaultAggregates}
+            projectPages={serverPages}
+            projectPagesTotal={serverPagesTotal}
+            onPageSearch={handlePageSearch}
+            openProjectName={openProjectName}
+            onOpenProject={(name) => {
+              setOpenProjectName(name);
+              setServerPages(null);
+              setServerPagesTotal(null);
+              if (name) {
+                setSelected({
+                  id: `project:${name}`,
+                  name,
+                  kind: "project",
+                  project: name,
+                  file: null,
+                });
+                switchProject(name);
+                setLogPage(0);
+              } else {
+                setSelected(null);
+                switchProject(null);
+                setLogPage(0);
+              }
+            }}
             onSelect={(next) => {
               setSelected(next);
               setLogPage(0);
@@ -647,7 +757,11 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             </div>
           ) : null}
           <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
-            <span>{vaultS.experienceLog}</span>
+            <span>
+              {openProjectName
+                ? vaultS.experiencesForProject(openProjectName)
+                : vaultS.experienceLog}
+            </span>
             <span
               className={
                 whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
@@ -655,13 +769,85 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             >
               {whispered.size > 0
                 ? vaultS.whisperLive(whispered.size)
-                : selected
-                  ? vaultS.filter(selected.name)
-                  : vaultS.synced}
+                : openProjectName
+                  ? vaultS.filter(openProjectName)
+                  : vaultS.projectCount(experienceProjectRows.length)}
             </span>
           </div>
           <div className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body">
-            {experiencesLoading && experiences.length === 0 ? (
+            {!openProjectName ? (
+              experienceProjectRows.length === 0 ? (
+                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
+                  {vaultS.noExperiences}
+                </div>
+              ) : (
+                experienceProjectRows.map((row) => (
+                  <div
+                    key={`exp-proj:${row.name}`}
+                    role="listitem"
+                    data-qa="vault-experience-project-row"
+                    data-project={row.name}
+                    tabIndex={0}
+                    onDoubleClick={() => {
+                      setOpenProjectName(row.name);
+                      setSelected({
+                        id: `project:${row.name}`,
+                        name: row.name,
+                        kind: "project",
+                        project: row.name,
+                        file: null,
+                      });
+                      switchProject(row.name);
+                      setLogPage(0);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        setOpenProjectName(row.name);
+                        setSelected({
+                          id: `project:${row.name}`,
+                          name: row.name,
+                          kind: "project",
+                          project: row.name,
+                          file: null,
+                        });
+                        switchProject(row.name);
+                        setLogPage(0);
+                      }
+                    }}
+                    className="flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-mono font-medium text-on-surface">
+                        {row.name}
+                      </span>
+                      <span className="block truncate font-mono text-meta text-outline">
+                        {vaultS.pageCountMeta(row.pageCount, row.experienceCount)}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      data-qa="vault-experience-project-open"
+                      onClick={() => {
+                        setOpenProjectName(row.name);
+                        setSelected({
+                          id: `project:${row.name}`,
+                          name: row.name,
+                          kind: "project",
+                          project: row.name,
+                          file: null,
+                        });
+                        switchProject(row.name);
+                        setLogPage(0);
+                      }}
+                      className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container"
+                    >
+                      {vaultS.openProject}
+                    </button>
+                  </div>
+                ))
+              )
+            ) : experiencesLoading && experiences.length === 0 ? (
               <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
                 {vaultS.loading}
               </div>
@@ -671,9 +857,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               </div>
             ) : logVisible.length === 0 ? (
               <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                {selected
-                  ? vaultS.noExperiencesForNode(selected.name)
-                  : vaultS.noExperiences}
+                {vaultS.noExperiencesForNode(openProjectName)}
               </div>
             ) : (
               logVisible.map((item) => {

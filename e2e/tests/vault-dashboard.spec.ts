@@ -3,6 +3,19 @@ import { openRoute } from "../helpers/nav";
 import { getIpcLog } from "../harness/tauri-mock";
 import { measureLayout, formatLayoutFailure } from "../helpers/layout";
 
+async function openVaultProject(page: import("@playwright/test").Page, name: string) {
+  const row = page
+    .locator('[data-qa="vault-project-row"]')
+    .filter({ hasText: new RegExp(name, "i") })
+    .first();
+  await expect(row).toBeVisible();
+  await row.locator('[data-qa="vault-project-open"]').click();
+  await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+    "data-view",
+    "pages",
+  );
+}
+
 test.describe("DB — dashboard", () => {
   test("DB-01 · KPI Dead Symbols equals real count (not 127) [full]", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
@@ -106,6 +119,7 @@ test.describe("DB — dashboard", () => {
 test.describe("EX — vault experiences", () => {
   test("EX-01 · Full read detail drawer", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     const card = page
       .locator('[data-qa="experience-card"]')
       .filter({ hasText: /Indexed dispatcher\.rs/i })
@@ -121,6 +135,7 @@ test.describe("EX — vault experiences", () => {
 
   test("EX-02 · Edit experience", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     await page
       .locator('[data-qa="experience-card"]')
       .filter({ hasText: /Indexed dispatcher\.rs/i })
@@ -144,6 +159,7 @@ test.describe("EX — vault experiences", () => {
 
   test("EX-03 · Soft delete / archive", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "EchoMind");
     const target = page
       .locator('[data-qa="experience-card"]')
       .filter({ hasText: /Experience ADR #14/i })
@@ -179,6 +195,7 @@ test.describe("EX — vault experiences", () => {
 
   test("EX-04 · Pin", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "EchoMind");
     const target = page
       .locator('[data-qa="experience-card"]')
       .filter({ hasText: /Experience ADR #14/i })
@@ -199,6 +216,7 @@ test.describe("EX — vault experiences", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     const badge = page.locator('[data-qa="unreviewed-count"]');
     await expect(badge).toBeVisible();
     const before = Number(((await badge.first().textContent()) || "").trim());
@@ -217,6 +235,7 @@ test.describe("EX — vault experiences", () => {
 
   test("EX-05b · Mark all reviewed clears badge from backend count", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     // Seed multiple unreviewed active rows, then refetch via Show Archived toggle.
     await page.evaluate(() => {
       const fixture = (
@@ -243,12 +262,14 @@ test.describe("EX — vault experiences", () => {
 
   test("EX-08 · List limit > 12", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     const cards = page.locator('[data-qa="experience-card"]');
     expect(await cards.count()).toBeGreaterThan(12);
   });
 
   test("EX-13 · TTL auto-archive restore UI", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     await expect(page.getByRole("button", { name: /Show Archived/i })).toBeVisible();
     await page.getByRole("button", { name: /Show Archived/i }).click();
     const archived = page
@@ -284,6 +305,7 @@ test.describe("EX — vault experiences", () => {
     expect(m.l1_pass && m.l3_pass && !m.l2_sparseInterior, fail).toBe(true);
 
     // Drawer + footer must remain fully visible at 960px / D4-scale (130%) as well as D0–D3.
+    await openVaultProject(page, "Agent-Lounge-OS");
     await page.locator('[data-qa="experience-card"]').first().click();
     const drawer = page.locator("[data-qa=experience-drawer]");
     await expect(drawer).toBeVisible();
@@ -304,13 +326,19 @@ test.describe("EX — vault experiences", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
+    // Project list shows reconciled totals (not LIMIT-shaped node dumps).
+    const projectText = await page.locator('[data-qa="vault-semantic-map"]').innerText();
+    const treeNodes = Number(
+      (projectText.match(/(\d+)\s*AST nodes/i) || projectText.match(/(\d+)\s*nodes/i) || [])[1] ||
+        0,
+    );
+    const treeEdges = Number((projectText.match(/(\d+)\s*edges/i) || [])[1] || 0);
+    await openVaultProject(page, "Agent-Lounge-OS");
     const text = await page.locator("main").innerText();
     const bridge = text.match(/nodes=(\d+)\s+edges=(\d+)/i);
     expect(bridge, "bridge stats appear in experience content").toBeTruthy();
     const bridgeNodes = Number(bridge![1]);
     const bridgeEdges = Number(bridge![2]);
-    const treeNodes = Number((text.match(/(\d+)\s*AST nodes/i) || text.match(/(\d+)\s*nodes/i) || [])[1] || 0);
-    const treeEdges = Number((text.match(/(\d+)\s*edges/i) || [])[1] || 0);
     expect(treeNodes, `tree nodes ${treeNodes} vs bridge ${bridgeNodes}`).toBe(bridgeNodes);
     expect(treeEdges, `tree edges ${treeEdges} vs bridge ${bridgeEdges}`).toBe(bridgeEdges);
   });
@@ -319,6 +347,7 @@ test.describe("EX — vault experiences", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
     const text = await page.locator("main").innerText();
     expect(text).not.toMatch(/##\s*Cross-Project Memory/i);
     expect(text).not.toMatch(/###\s*Tecrübeler/i);

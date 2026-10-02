@@ -377,6 +377,87 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.semanticMap;
         case "list_projects":
           return f.projects;
+        case "list_vault_projects": {
+          return f.semanticMap.projects.map((project) => {
+            const pages = new Set(
+              project.nodes.map((n) => n.file).filter((p): p is string => Boolean(p?.trim())),
+            );
+            const exps = f.experiences.filter(
+              (row) =>
+                row.project_id === project.name && (row.status ?? "active") === "active",
+            );
+            const unreviewed = exps.filter((row) => row.reviewed === false).length;
+            const lastUpdated = exps
+              .map((row) => row.updated_at || row.created_at)
+              .filter(Boolean)
+              .sort()
+              .at(-1) ?? null;
+            return {
+              name: project.name,
+              repo_path: project.repo_path,
+              page_count: pages.size || project.files,
+              node_count: project.node_count,
+              edge_count: project.edge_count,
+              experience_count: exps.length,
+              unreviewed_count: unreviewed,
+              last_updated: lastUpdated,
+              source_type: pages.size > 0 ? "indexed" : "discovered",
+            };
+          });
+        }
+        case "list_project_pages": {
+          const projectId = String(args?.projectId ?? args?.project_id ?? "");
+          const query = String(args?.query ?? "").trim().toLowerCase();
+          const sort = String(args?.sort ?? "path");
+          const offset = typeof args?.offset === "number" ? args.offset : 0;
+          const limit = typeof args?.limit === "number" ? args.limit : 50;
+          const project = f.semanticMap.projects.find((row) => row.name === projectId);
+          const byPath = new Map<
+            string,
+            { path: string; title: string; snippet: string; symbol_count: number; last_updated: string | null }
+          >();
+          for (const node of project?.nodes ?? []) {
+            const path = node.file?.trim();
+            if (!path) continue;
+            const prev = byPath.get(path);
+            const title = path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || path;
+            if (!prev) {
+              byPath.set(path, {
+                path,
+                title,
+                snippet: node.name || "",
+                symbol_count: 1,
+                last_updated: null,
+              });
+            } else {
+              prev.symbol_count += 1;
+              if (node.name && !prev.snippet.includes(node.name)) {
+                prev.snippet = `${prev.snippet}, ${node.name}`.slice(0, 160);
+              }
+            }
+          }
+          let pages = [...byPath.values()];
+          if (query) {
+            pages = pages.filter((page) =>
+              `${page.path} ${page.title} ${page.snippet}`.toLowerCase().includes(query),
+            );
+          }
+          if (sort === "title") {
+            pages.sort((a, b) => a.title.localeCompare(b.title));
+          } else if (sort === "symbols") {
+            pages.sort((a, b) => b.symbol_count - a.symbol_count || a.path.localeCompare(b.path));
+          } else {
+            pages.sort((a, b) => a.path.localeCompare(b.path));
+          }
+          const total = pages.length;
+          return {
+            project_id: projectId,
+            pages: pages.slice(offset, offset + limit),
+            total,
+            offset,
+            limit,
+          };
+        }
         case "ensure_services":
           return f.serviceReport;
         case "service_status":

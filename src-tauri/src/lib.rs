@@ -17,9 +17,9 @@ use kernel::{
 use lounge_protocol::LoungeMessage;
 use models::{
     merge_project_summaries, AstNode, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
-    DiscoveryReport, IndexSnapshot, LoungeExperience, LoungeTask, ProjectSummary, QuotaState,
-    RecommendedModels, RoutingPolicy, RoutingVote, SemanticMap, ServiceReport, TaskKind, ToolQuota,
-    TASK_REQUESTED,
+    DiscoveryReport, IndexSnapshot, LoungeExperience, LoungeTask, ProjectPageList, ProjectSummary,
+    QuotaState, RecommendedModels, RoutingPolicy, RoutingVote, SemanticMap, ServiceReport,
+    TaskKind, ToolQuota, VaultProjectAggregate, TASK_REQUESTED,
 };
 use services::autodiscover::discovery_report;
 use services::{
@@ -300,6 +300,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             cancel_all_index_jobs,
             get_dead_symbols,
             get_semantic_map,
+            list_vault_projects,
+            list_project_pages,
             get_kernel_model,
             set_kernel_model,
             list_ollama_models,
@@ -578,6 +580,35 @@ async fn get_semantic_map(
 ) -> Result<SemanticMap, String> {
     store
         .load_semantic_map(project_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_vault_projects(
+    store: tauri::State<'_, ExperienceStore>,
+) -> Result<Vec<VaultProjectAggregate>, String> {
+    store
+        .list_vault_project_aggregates()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_project_pages(
+    store: tauri::State<'_, ExperienceStore>,
+    project_id: String,
+    query: Option<String>,
+    sort: Option<String>,
+    offset: Option<u64>,
+    limit: Option<u64>,
+) -> Result<ProjectPageList, String> {
+    let project_id = project_id.trim().to_string();
+    if project_id.is_empty() {
+        return Err("project_id gerekli".into());
+    }
+    store
+        .list_project_pages(project_id, query, sort, offset, limit)
         .await
         .map_err(|err| err.to_string())
 }
