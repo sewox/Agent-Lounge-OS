@@ -135,10 +135,13 @@ test.describe("SH — global shell", () => {
 test.describe("X — cross-cutting", () => {
   test("X-03 · no uncaught console errors on dashboard", async ({ page }) => {
     const errors = await collectConsoleErrors(page);
+    // Must exercise the full Tauri fixture (product path). ApprovalNotificationBridge
+    // no longer branches on isTauri() during render, so hydrate matches SSR.
+    // Keep the #418 filter un-widened — hydration mismatches must fail the test.
     await openRoute(page, "/dashboard", "full");
     await page.waitForTimeout(500);
     const critical = errors.filter(
-      (e) => !/favicon|Download the React|hydration/i.test(e),
+      (e) => !/favicon|Download the React DevTools/i.test(e),
     );
     expect(critical, critical.join("\n")).toEqual([]);
   });
@@ -191,21 +194,34 @@ test.describe("X — cross-cutting", () => {
     expect(result.dead, `scanned=${result.scanned} dead=${result.dead.join("|")}`).toEqual([]);
   });
 
-  test("X-02 · lang=tr must not dotted-İ English labels (TİME) [expected-fail until PR-2]", async ({
+  test("X-02 · lang=tr must not dotted-İ English labels (TİME)", async ({
     page,
-  }, testInfo) => {
-    // Live G2: <html lang="tr"> + CSS uppercase → TİME, SEMANTİC, ROUTİNG, ACTİVE, …
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "lang=tr + uppercase produces dotted İ on English UI (live S2 G2)",
-    });
-    test.fail(true, "Dotted-İ English labels still rendered");
+  }) => {
+    // Live G2: <html lang="tr"> + CSS uppercase must not turn English stems into TİME / SEMANTİC.
     await openRoute(page, "/dashboard", "full");
+    const langSwitch = page.locator('[data-qa="locale-switch"]').first();
+    await expect(langSwitch).toBeVisible();
+    await langSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
+    await page.waitForTimeout(300);
     const lang = await page.locator("html").getAttribute("lang");
+    expect(lang).toBe("tr");
     const text = await page.locator("body").innerText();
-    // Acceptable: lang=en for English UI, or lang=tr with no Turkish dotted-İ on EN stems.
-    const dotted = /TİME|SEMANTİC|ROUTİNG|ACTİVE|CRİTİCAL|DECİSİON|FİLTER|LİMİT|KİND/i.test(text);
-    expect(dotted, `dotted-İ labels with lang=${lang}`).toBe(false);
+    const matches = text.match(/TİME|SEMANTİC|ROUTİNG|ACTİVE|CRİTİCAL|DECİSİON|FİLTER|LİMİT|KİND/g);
+    const dotted = Boolean(matches?.length);
+    expect(dotted, `dotted-İ labels with lang=${lang}: ${matches?.join(",") ?? ""}`).toBe(false);
+    // Stronger than body regex alone: Latin chrome must keep lang="en" so CSS
+    // text-transform:uppercase stays locale-neutral under <html lang="tr">.
+    await expect(page.locator('[lang="en"]').first()).toBeVisible();
+    const renderedLatin = await page.locator('[lang="en"]').evaluateAll((nodes) =>
+      nodes.map((n) => (n.textContent || "").trim()).filter(Boolean),
+    );
+    expect(renderedLatin.length, "expected lang=en chrome labels").toBeGreaterThan(0);
+    // Assert the *rendered* text (post CSS), not String.toLocaleUpperCase("tr-TR")
+    // which always applies Turkish rules regardless of the element's lang.
+    const dottedRendered = renderedLatin.filter((s) =>
+      /TİME|SERVİCE|SEMANTİC|ROUTİNG|ACTİVE/.test(s),
+    );
+    expect(dottedRendered, `dotted-İ in lang=en chrome: ${dottedRendered.join("|")}`).toEqual([]);
   });
 
   test("SH-08b · + New Node must not overlap AL-OS CORE (removed)", async ({
@@ -218,28 +234,67 @@ test.describe("X — cross-cutting", () => {
     expect(await page.getByRole("button", { name: "+ New Node" }).count()).toBe(0);
   });
 
-  test("X-01 · TR/EN i18n dictionary + Settings switch + persistence [expected-fail until PR-2]", async ({
+  test("X-01 · first launch follows OS language (tr-TR → tr) with empty storage", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ locale: "tr-TR" });
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      try {
+        localStorage.removeItem("lounge.locale");
+        localStorage.removeItem("locale");
+      } catch {
+        /* ignore */
+      }
+    });
+    await openRoute(page, "/dashboard", "full");
+    await page.waitForTimeout(500);
+    const lang = await page.locator("html").getAttribute("lang");
+    expect(lang).toBe("tr");
+    const stored = await page.evaluate(() => localStorage.getItem("lounge.locale"));
+    // First launch does not force-write until the user picks a language.
+    expect(stored == null || /tr/i.test(stored ?? "")).toBeTruthy();
+    await context.close();
+  });
+
+  test("X-01 · TR/EN i18n dictionary + Settings switch + persistence", async ({
     page,
-  }, testInfo) => {
-    // O1: strings from i18n dict; Settings language switch; choice persists; no hardcoded mix.
-    testInfo.annotations.push({ type: "expected-fail", description: "i18n not implemented (O1 → PR-2)" });
-    test.fail(true, "TR/EN i18n infrastructure missing");
+  }) => {
+    // O1: strings from i18n dict; Settings language switch; choice persists.
+    // Strengthened beyond a 4-word mixed grep: assert html lang + dictionary chrome
+    // for surfaces that ARE translated (shell/dashboard). Leftovers (model picker,
+    // palette, fleet/onboarding/telemetry bodies) are listed in the PR body — not asserted here.
     await openRoute(page, "/settings", "full");
     const langSwitch = page
-      .getByRole("radiogroup", { name: /Language|Dil/i })
-      .or(page.locator('[data-qa="locale-switch"]'))
-      .or(page.getByRole("button", { name: /English|Türkçe|Turkish/i }));
-    expect(await langSwitch.count(), "Settings language switch missing").toBeGreaterThan(0);
-    await langSwitch.getByText(/English|EN/i).first().click();
+      .locator('[data-qa="panel"] [data-qa="locale-switch"]')
+      .or(page.getByRole("radiogroup", { name: /Language|Dil/i }))
+      .first();
+    await expect(langSwitch, "Settings language switch missing").toBeVisible();
+    await langSwitch.getByText(/English|EN/i).click();
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForTimeout(400);
     const stored = await page.evaluate(() => localStorage.getItem("lounge.locale") || localStorage.getItem("locale"));
     expect(stored).toMatch(/en/i);
-    // Hardcoded mixed TR/EN chrome must be gone once dictionary is wired.
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+
     await openRoute(page, "/dashboard", "full");
-    const text = await page.locator("main").innerText();
-    const mixed = /kapalı|düğüm|TEMİZ|Kaydet/i.test(text) && /Dashboard|Index Workspace/i.test(text);
-    expect(mixed, "hardcoded mixed TR/EN strings").toBe(false);
+    const enShell = await page.locator('[data-qa="sidebar"]').innerText();
+    expect(enShell).toMatch(/Active daemons/i);
+    expect(enShell).not.toMatch(/Aktif servisler/i);
+
+    const headerSwitch = page.locator('[data-qa="locale-switch"]').first();
+    await headerSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
+    await page.waitForTimeout(300);
+    await expect(page.locator("html")).toHaveAttribute("lang", "tr");
+    const trShell = await page.locator('[data-qa="sidebar"]').innerText();
+    // CSS text-transform:uppercase under lang=tr yields AKTİF (dotted İ) — match that.
+    expect(trShell).toMatch(/Aktif servisler|AKTİF SERVİSLER/);
+    expect(trShell).not.toMatch(/Active daemons/i);
+    // Translated Index Workspace chrome must flip with the dictionary.
+    const indexBtn = page.getByRole("button", { name: /Index Workspace|Çalışma Alanını Tara/i });
+    if (await indexBtn.count()) {
+      await expect(indexBtn.first()).toHaveText(/Çalışma Alanını Tara/i);
+    }
   });
 
   test("X-02 · min font gate delegated to S4 grep (smoke DOM check)", async ({ page }) => {

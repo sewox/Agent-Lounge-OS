@@ -81,6 +81,12 @@ pub fn clear_emitter() {
     *emitter_slot().lock().expect("emitter lock") = None;
 }
 
+/// Clear the OS-notification pending slot for this confirm id (id-matched).
+/// Called on confirm / reject / expiry so Focused/Reopen cannot re-raise with a stale id.
+fn clear_notification_pending_slot(id: &str) {
+    crate::services::clear_pending_approval_if_matches(id);
+}
+
 /// Stable hash of program + args (order-sensitive).
 pub fn command_hash(program: &str, args: &[impl AsRef<str>]) -> String {
     let mut hasher = Sha256::new();
@@ -149,38 +155,83 @@ pub fn register_pending(
 
 /// User confirmed the destructive approval — token becomes single-use runnable.
 pub fn confirm_destructive(id: &str) -> Result<()> {
-    let mut reg = registry().lock().expect("registry");
-    let Some(token) = reg.pending.get_mut(id) else {
-        bail!("unknown destructive confirmation id");
+    let outcome: Result<(), &'static str> = {
+        let mut reg = registry().lock().expect("registry");
+        if !reg.pending.contains_key(id) {
+            Err("unknown")
+        } else if reg
+            .pending
+            .get(id)
+            .is_some_and(|t| t.created.elapsed() > TOKEN_TTL)
+        {
+            reg.pending.remove(id);
+            Err("expired")
+        } else if reg.pending.get(id).is_some_and(|t| t.consumed) {
+            Err("consumed")
+        } else {
+            if let Some(token) = reg.pending.get_mut(id) {
+                token.confirmed = true;
+            }
+            Ok(())
+        }
     };
-    if token.created.elapsed() > TOKEN_TTL {
-        reg.pending.remove(id);
-        bail!("destructive confirmation expired");
+    // Always clear the notification slot for this id (success, expired, or unknown).
+    clear_notification_pending_slot(id);
+    match outcome {
+        Ok(()) => Ok(()),
+        Err("unknown") => bail!("unknown destructive confirmation id"),
+        Err("expired") => bail!("destructive confirmation expired"),
+        Err("consumed") => bail!("destructive confirmation already used"),
+        Err(_) => bail!("unknown destructive confirmation id"),
     }
-    if token.consumed {
-        bail!("destructive confirmation already used");
+}
+
+/// User rejected the destructive approval — drop the token and clear the notification slot.
+pub fn reject_destructive(id: &str) -> Result<()> {
+    let removed = {
+        let mut reg = registry().lock().expect("registry");
+        reg.pending.remove(id).is_some()
+    };
+    clear_notification_pending_slot(id);
+    if removed {
+        Ok(())
+    } else {
+        bail!("unknown destructive confirmation id")
     }
-    token.confirmed = true;
-    Ok(())
 }
 
 /// Returns true (and consumes the token) when a confirmed matching hash exists.
 pub fn take_confirmed_allowance(command_hash: &str) -> bool {
-    let mut reg = registry().lock().expect("registry");
-    reg.pending.retain(|_, t| t.created.elapsed() <= TOKEN_TTL);
-    let key = reg
-        .pending
-        .iter()
-        .find(|(_, t)| t.confirmed && !t.consumed && t.command_hash == command_hash)
-        .map(|(k, _)| k.clone());
-    let Some(key) = key else {
-        return false;
+    let (expired, key) = {
+        let mut reg = registry().lock().expect("registry");
+        let expired: Vec<String> = reg
+            .pending
+            .iter()
+            .filter(|(_, t)| t.created.elapsed() > TOKEN_TTL)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in &expired {
+            reg.pending.remove(id);
+        }
+        let key = reg
+            .pending
+            .iter()
+            .find(|(_, t)| t.confirmed && !t.consumed && t.command_hash == command_hash)
+            .map(|(k, _)| k.clone());
+        if let Some(ref k) = key {
+            if let Some(token) = reg.pending.get_mut(k) {
+                token.consumed = true;
+            }
+        }
+        (expired, key)
     };
-    if let Some(token) = reg.pending.get_mut(&key) {
-        token.consumed = true;
-        return true;
+    for id in expired {
+        clear_notification_pending_slot(&id);
     }
-    false
+    if let Some(ref k) = key {
+        clear_notification_pending_slot(k);
+    }
+    key.is_some()
 }
 
 /// Reject replaying a consumed / unknown token.
@@ -223,6 +274,10 @@ mod tests {
     use super::*;
     use crate::kernel::guarded_command::GuardedCommand;
     use crate::kernel::policy_gate::ActionSource;
+    use crate::services::{
+        approval_notify::pending_slot_test_lock, pending_approval_task_id,
+        set_pending_approval_task_id, should_focus_on_activation,
+    };
 
     #[test]
     fn destructive_confirm_flow_single_use() {
@@ -265,5 +320,36 @@ mod tests {
         );
         confirm_destructive(&event.id).unwrap();
         assert!(take_confirmed_allowance(&event.command_hash));
+    }
+
+    #[test]
+    fn confirm_and_reject_clear_notification_pending_slot() {
+        let _guard = test_lock();
+        let _slot = pending_slot_test_lock();
+        reset_for_tests();
+
+        let args = vec!["-rf".into(), "/tmp/slot-confirm".into()];
+        let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::Agent);
+        set_pending_approval_task_id(Some(event.id.clone()));
+        assert!(should_focus_on_activation());
+        confirm_destructive(&event.id).unwrap();
+        assert_eq!(pending_approval_task_id(), None);
+        assert!(!should_focus_on_activation());
+
+        let args2 = vec!["-rf".into(), "/tmp/slot-reject".into()];
+        let event2 = register_pending("rm", &args2, DestructiveClass::PosixRm, ActionSource::User);
+        set_pending_approval_task_id(Some(event2.id.clone()));
+        assert!(should_focus_on_activation());
+        reject_destructive(&event2.id).unwrap();
+        assert_eq!(pending_approval_task_id(), None);
+        assert!(!should_focus_on_activation());
+
+        // Mismatched id must not clear a different pending approval.
+        set_pending_approval_task_id(Some("live-other".into()));
+        let args3 = vec!["-rf".into(), "/tmp/slot-mismatch".into()];
+        let event3 = register_pending("rm", &args3, DestructiveClass::PosixRm, ActionSource::Agent);
+        confirm_destructive(&event3.id).unwrap();
+        assert_eq!(pending_approval_task_id().as_deref(), Some("live-other"));
+        set_pending_approval_task_id(None);
     }
 }

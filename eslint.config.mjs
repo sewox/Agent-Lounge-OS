@@ -16,6 +16,7 @@ const eslintConfig = defineConfig([
     "playwright-report/**",
     "test-results/**",
     "scripts/qa/**",
+    "src-tauri/target/**",
   ]),
 ]);
 

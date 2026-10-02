@@ -1,6 +1,7 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
 pub mod approval_notify;
+pub mod approval_sound;
 pub mod auto_archive;
 pub mod autodiscover;
 pub mod dead_symbol_actions;
@@ -27,10 +28,14 @@ use tokio::sync::Mutex;
 use crate::models::ServiceReport;
 
 pub use approval_notify::{
-    emit_approval_pending, emit_approval_resolved, focus_app_for_approval,
-    install_destructive_approval_emitter, ApprovalPendingPayload, APPROVAL_BANNER_FOCUS_EVENT,
-    APPROVAL_PENDING_EVENT, APPROVAL_PENDING_NATS, APPROVAL_RESOLVED_EVENT,
+    clear_pending_approval_if_matches, emit_approval_pending, emit_approval_resolved,
+    focus_app_for_approval, install_destructive_approval_emitter,
+    on_app_activated_for_pending_approval, pending_approval_task_id, set_pending_approval_task_id,
+    should_focus_on_activation, ApprovalPendingPayload, ApprovalResolvedPayload,
+    APPROVAL_BANNER_FOCUS_EVENT, APPROVAL_PENDING_EVENT, APPROVAL_PENDING_NATS,
+    APPROVAL_RESOLVED_EVENT,
 };
+pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;
 pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
