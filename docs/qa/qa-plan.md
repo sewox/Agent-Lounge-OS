@@ -3,7 +3,7 @@
 | Alan | Değer |
 |------|-------|
 | Tarih | 2026-09-26 |
-| Girdi | UI/fonksiyon audit'i, draft PR #45 (https://github.com/sewox/Agent-Lounge-OS/pull/45): `docs/qa/2026-09-26-ui-audit.md` ve 54 ekran görüntüsü |
+| Girdi | UI/fonksiyon audit'i, draft PR #45 (https://github.com/sewox/Agent-Lounge-OS/pull/45): `docs/qa/archive/2026-09-26-ui-audit.md` ve 54 ekran görüntüsü |
 | Mimar | Gemini (AI Studio), 2 tur. Ham yanıtlar: `gemini-qa-plan-reply.md` |
 | Audit base / güncel main | Audit `716f42c` üzerinde koştu. Güncel main `15e19e9` (fontlar self-host, build artık Google Fonts istemiyor) |
 | Durum | Sadece plan. Implementasyon ya da merge yok. PR #45 merge edilmeyecek |

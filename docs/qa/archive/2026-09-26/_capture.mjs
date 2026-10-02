@@ -7,7 +7,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const BASE = process.env.QA_BASE_URL || "http://localhost:3000";
-const OUT = path.resolve("docs/qa/2026-09-26");
+const OUT = path.resolve("docs/qa/archive/2026-09-26");
 const VIEWPORTS = [
   { name: "1280x800", width: 1280, height: 800 },
   { name: "1536x960", width: 1536, height: 960 },
