@@ -70,7 +70,9 @@ test.describe("VP — vault project grouping", () => {
       "pages",
     );
     await expect(page.locator('[data-qa="vault-page-list"]')).toBeVisible();
-    await expect(page.locator('[data-qa="vault-page-total"]')).toContainText(/806/);
+    const totalText = await page.locator('[data-qa="vault-page-total"]').innerText();
+    const total = Number((totalText.match(/(\d+)/) || [])[1] || 0);
+    expect(total).toBeGreaterThanOrEqual(806);
 
     const domRows = page.locator('[data-qa="vault-page-row"]');
     const visibleCount = await domRows.count();
@@ -79,15 +81,16 @@ test.describe("VP — vault project grouping", () => {
 
     // Scroll through windows past the 500 boundary to the last row.
     const list = page.locator('[data-qa="vault-page-list"]');
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 16; i++) {
       await list.evaluate((el) => {
         el.scrollTop = el.scrollHeight;
       });
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(250);
     }
-    await expect(page.locator('[data-qa="vault-page-row"]').filter({ hasText: /page_805/i })).toBeVisible({
-      timeout: 15_000,
-    });
+    // Last generated page is page_805.rs (0..805); may coexist with semantic files.
+    await expect(
+      page.locator('[data-qa="vault-page-row"]').filter({ hasText: /page_805/i }),
+    ).toBeVisible({ timeout: 15_000 });
   });
 
   test("VP-04 · Search in project page list (debounced)", async ({ page }) => {
