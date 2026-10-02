@@ -729,7 +729,7 @@ fn resolve_binary(repo_root: &Path) -> Result<PathBuf> {
 }
 
 /// Tauri externalBin compile stubs are <4KB shell scripts that exit 127.
-fn is_compile_stub(path: &Path) -> bool {
+pub fn is_compile_stub(path: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };

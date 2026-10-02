@@ -17,10 +17,13 @@ import {
 import {
   DEFAULT_POLICY,
   formatClock,
-  indexBusMessage,
   isTauri,
-  pickWorkspaceFolder,
+  mockWorkspaceScan,
   mockIndexSnapshot,
+  emptyIndexProgress,
+  indexProgressActive,
+  scanErrorI18nKey,
+  INDEX_JOB_EVENT,
   loungeMessageToEvent,
   sortEventsNewestFirst,
   AMBER_THRESHOLD,
@@ -49,9 +52,13 @@ import {
   type DeadSymbol,
   type DecisionGateStatus,
   type IndexNotice,
+  type IndexJob,
+  type IndexJobEvent,
+  type IndexProgress,
   type LayaEngineStatus,
   type IndexSnapshot,
   type LoungeExperience,
+  type WorkspaceScanResult,
   type LoungeMessage,
   type LoungeTelemetry,
   type MsgTick,
@@ -134,6 +141,8 @@ type LoungeContextValue = {
   clock: string;
   indexing: boolean;
   indexNotice: IndexNotice | null;
+  indexJobs: IndexJob[];
+  indexProgress: IndexProgress;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
   approvalError: string | null;
@@ -204,6 +213,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const EXPERIENCE_PAGE_SIZE = 100;
   const [indexing, setIndexing] = useState(false);
   const [indexNotice, setIndexNotice] = useState<IndexNotice | null>(null);
+  const [indexJobs, setIndexJobs] = useState<IndexJob[]>([]);
+  const [indexProgress, setIndexProgress] = useState<IndexProgress>(() => emptyIndexProgress());
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
@@ -541,57 +552,94 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshExperiences]);
 
+  const applyIndexJobs = useCallback((jobs: IndexJob[], progress?: IndexProgress) => {
+    setIndexJobs(jobs);
+    const next = progress ?? {
+      total: jobs.length,
+      queued: jobs.filter((j) => j.status === "queued").length,
+      indexing: jobs.filter((j) => j.status === "indexing").length,
+      done: jobs.filter((j) => j.status === "done").length,
+      failed: jobs.filter((j) => j.status === "failed").length,
+      cancelled: jobs.filter((j) => j.status === "cancelled").length,
+    };
+    setIndexProgress(next);
+    setIndexing(indexProgressActive(next));
+  }, []);
+
   const indexWorkspace = useCallback(async () => {
-    if (indexing) {
-      return;
-    }
-    const repoPath = isTauri()
-      ? await pickWorkspaceFolder()
-      : "/Users/demo/Agent-Lounge-OS";
-    if (!repoPath) {
-      return;
-    }
-    setIndexing(true);
+    // Tarama isteği hızlı döner; indeksleme arka planda sürer (route/blur bağımsız).
     setIndexNotice(null);
     try {
-      const snapshot = isTauri()
-        ? await invoke<IndexSnapshot>("index_workspace", { path: repoPath })
-        : await new Promise<IndexSnapshot>((resolve) => {
-            window.setTimeout(() => resolve(mockIndexSnapshot(repoPath)), 1400);
-          });
-      setLastIndex(snapshot);
-      setProjects((current) => upsertIndexedProject(current, snapshot, repoPath));
       if (isTauri()) {
-        await refreshSemantic();
-      } else {
-        setDeadSymbols(mockDeadSymbols(snapshot));
+        const result = await invoke<WorkspaceScanResult>("scan_workspace", {});
+        setProjects((current) => mergeDiscoveredProjects(current, result.discovered));
+        applyIndexJobs(result.jobs, result.progress);
+        setIndexNotice({
+          tone: "success",
+          text: `Imported ${result.discovered.length} project(s)`,
+          i18nKey: "scanImported",
+          i18nParams: { count: result.discovered.length },
+        });
+        // Semantic refresh after import so vault/health see registered projects.
+        void refreshSemantic();
+        return;
       }
-      const files = snapshot.files ?? 0;
-      ingestBusMessage(
-        indexBusMessage("lounge.index.completed", {
-          path: repoPath,
-          project: snapshot.project,
-          files,
-          dead: snapshot.dead ?? 0,
-        }),
-      );
+      const result = await new Promise<WorkspaceScanResult>((resolve) => {
+        window.setTimeout(() => resolve(mockWorkspaceScan("/Users/demo/workspace")), 400);
+      });
+      setProjects((current) => mergeDiscoveredProjects(current, result.discovered));
+      applyIndexJobs(result.jobs, result.progress);
       setIndexNotice({
         tone: "success",
-        text: `Success · ${files} files · ${snapshot.project || repoPath}`,
+        text: `Imported ${result.discovered.length} project(s)`,
+        i18nKey: "scanImported",
+        i18nParams: { count: result.discovered.length },
       });
+      // Browser harness: simulate background job completion without blocking.
+      window.setTimeout(() => {
+        const doneJobs = result.jobs.map((job) => ({
+          ...job,
+          status: "done" as const,
+          snapshot: mockIndexSnapshot(job.repo_path),
+          updated_at: new Date().toISOString(),
+        }));
+        applyIndexJobs(doneJobs, {
+          total: doneJobs.length,
+          queued: 0,
+          indexing: 0,
+          done: doneJobs.length,
+          failed: 0,
+          cancelled: 0,
+        });
+        setLastIndex(mockIndexSnapshot(result.workspace_path));
+        setDeadSymbols(mockDeadSymbols(mockIndexSnapshot(result.workspace_path)));
+        setProjects((current) =>
+          mergeDiscoveredProjects(
+            current,
+            doneJobs.map((job) => ({
+              name: job.project,
+              root_path: job.repo_path,
+              nodes: job.snapshot?.nodes ?? 0,
+              edges: job.snapshot?.edges ?? 0,
+              files: job.snapshot?.files ?? 0,
+            })),
+          ),
+        );
+      }, 600);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      ingestBusMessage(
-        indexBusMessage("lounge.index.failed", {
-          path: repoPath,
-          error: text,
-        }),
-      );
-      setIndexNotice({ tone: "error", text });
-    } finally {
-      setIndexing(false);
+      const mapped = scanErrorI18nKey(text);
+      setIndexNotice({
+        tone: "error",
+        text: mapped.detail ?? text,
+        i18nKey: mapped.key,
+        i18nParams: mapped.detail ? { detail: mapped.detail } : undefined,
+      });
+      if (!/cancelled/i.test(text)) {
+        setIndexing(false);
+      }
     }
-  }, [indexing, ingestBusMessage, refreshSemantic]);
+  }, [applyIndexJobs, refreshSemantic]);
 
   const probeBus = useCallback(async () => {
     if (!isTauri()) {
@@ -1043,9 +1091,43 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
             setApprovalError(formatApprovalClearReason(event.payload.reason));
           }),
         );
+        unlisteners.push(
+          await listen<IndexJobEvent>(INDEX_JOB_EVENT, (event) => {
+            if (cancelled) {
+              return;
+            }
+            const payload = event.payload;
+            applyIndexJobs(payload.jobs, payload.progress);
+            if (payload.job.status === "done") {
+              if (payload.job.snapshot) {
+                setLastIndex(payload.job.snapshot);
+              }
+              void refreshSemantic();
+            } else if (payload.job.status === "failed") {
+              const mapped = scanErrorI18nKey(payload.job.error || payload.job.error_code || "index_failed");
+              setIndexNotice({
+                tone: "error",
+                text: payload.job.error || mapped.detail || payload.job.project,
+                i18nKey: mapped.key,
+                i18nParams: mapped.detail ? { detail: mapped.detail } : undefined,
+              });
+            }
+          }),
+        );
         // Hipotez (a): listener kurulana kadar kaçan event veya state kaybı → backend snapshot.
         if (!cancelled) {
           await syncPendingApprovals();
+          try {
+            const jobs = await invoke<IndexJob[]>("list_index_jobs");
+            if (!cancelled && Array.isArray(jobs)) {
+              applyIndexJobs(jobs);
+              if (jobs.some((job) => job.status === "done")) {
+                void refreshSemantic();
+              }
+            }
+          } catch {
+            /* queue henüz yok olabilir */
+          }
         }
       } catch (error) {
         console.error(error);
@@ -1055,6 +1137,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     const onVisible = () => {
       if (document.visibilityState === "visible") {
         void syncPendingApprovals();
+        if (isTauri()) {
+          void invoke<IndexJob[]>("list_index_jobs")
+            .then((jobs) => {
+              if (Array.isArray(jobs)) {
+                applyIndexJobs(jobs);
+              }
+            })
+            .catch(() => undefined);
+        }
       }
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1066,7 +1157,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         void fn();
       });
     };
-  }, [ingestBusMessage, syncInstalledModels, syncPendingApprovals]);
+  }, [applyIndexJobs, ingestBusMessage, refreshSemantic, syncInstalledModels, syncPendingApprovals]);
 
   const decisionMsgPerMin = decisionMsgTimes.length;
 
@@ -1218,6 +1309,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       clock,
       indexing,
       indexNotice,
+      indexJobs,
+      indexProgress,
       policy,
       approval,
       approvalError,
@@ -1290,6 +1383,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       clock,
       indexing,
       indexNotice,
+      indexJobs,
+      indexProgress,
       policy,
       approval,
       approvalError,
@@ -1328,27 +1423,20 @@ export function useLounge(): LoungeContextValue {
   return value;
 }
 
-function upsertIndexedProject(
+function mergeDiscoveredProjects(
   current: ProjectSummary[],
-  snapshot: IndexSnapshot,
-  repoPath: string,
+  discovered: ProjectSummary[],
 ): ProjectSummary[] {
-  const next: ProjectSummary = {
-    name: snapshot.project || repoPath.split(/[/\\]/).filter(Boolean).at(-1) || "workspace",
-    root_path: repoPath,
-    nodes: snapshot.nodes,
-    edges: snapshot.edges,
-    files: snapshot.files ?? null,
-  };
-  const index = current.findIndex(
-    (row) => row.name === next.name || row.root_path === repoPath,
-  );
-  if (index === -1) {
-    return [next, ...current];
+  const byKey = new Map<string, ProjectSummary>();
+  for (const row of current) {
+    byKey.set(row.root_path || row.name, row);
   }
-  const copy = current.slice();
-  copy[index] = { ...copy[index], ...next };
-  return copy;
+  for (const row of discovered) {
+    const key = row.root_path || row.name;
+    const prev = byKey.get(key);
+    byKey.set(key, prev ? { ...prev, ...row } : row);
+  }
+  return Array.from(byKey.values());
 }
 
 function mockDeadSymbols(snapshot: IndexSnapshot): DeadSymbol[] {

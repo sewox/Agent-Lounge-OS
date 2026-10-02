@@ -419,6 +419,129 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             dead: f.deadSymbols.length,
           };
         }
+        case "scan_workspace": {
+          const path = String(args?.path ?? "/tmp/workspace-scan");
+          const discovered =
+            f.projects.length > 0
+              ? f.projects.map((p) => ({
+                  name: p.name,
+                  root_path: p.root_path ?? `${path}/${p.name}`,
+                  nodes: 0,
+                  edges: 0,
+                  files: 0,
+                }))
+              : [
+                  {
+                    name: "alpha",
+                    root_path: `${path}/alpha`,
+                    nodes: 0,
+                    edges: 0,
+                    files: 0,
+                  },
+                  {
+                    name: "beta",
+                    root_path: `${path}/beta`,
+                    nodes: 0,
+                    edges: 0,
+                    files: 0,
+                  },
+                ];
+          const now = new Date().toISOString();
+          const jobs = discovered.map((row, index) => ({
+            id: `qa-job-${index + 1}`,
+            project: row.name,
+            repo_path: row.root_path,
+            status: "queued",
+            error: null,
+            error_code: null,
+            snapshot: null,
+            enqueued_at: now,
+            updated_at: now,
+          }));
+          (window as Window & { __QA_INDEX_JOBS__?: typeof jobs }).__QA_INDEX_JOBS__ = jobs;
+          // Import into fixture projects immediately (registration).
+          f.projects = discovered.map((row) => ({
+            name: row.name,
+            root_path: row.root_path,
+            nodes: 0,
+            edges: 0,
+            files: 0,
+          }));
+          // Background indexing simulation — independent of invoke lifecycle.
+          window.setTimeout(() => {
+            const done = jobs.map((job) => ({
+              ...job,
+              status: "done" as const,
+              snapshot: {
+                project: job.project,
+                status: "ok",
+                nodes: 12,
+                edges: 4,
+                files: 6,
+                dead: 0,
+              },
+              updated_at: new Date().toISOString(),
+            }));
+            (window as Window & { __QA_INDEX_JOBS__?: typeof done }).__QA_INDEX_JOBS__ = done;
+            f.projects = done.map((job) => ({
+              name: job.project,
+              root_path: job.repo_path,
+              nodes: 12,
+              edges: 4,
+              files: 6,
+            }));
+            f.semanticMap = {
+              projects: done.map((job) => ({
+                name: job.project,
+                repo_path: job.repo_path,
+                files: 6,
+                node_count: 12,
+                edge_count: 4,
+                nodes: [],
+                references: [],
+                dead: [],
+              })),
+            };
+            const handlers = listeners.get("lounge://index-job") || [];
+            for (const job of done) {
+              for (const handler of handlers) {
+                runCallback(handler, {
+                  event: "lounge://index-job",
+                  payload: {
+                    job,
+                    progress: {
+                      total: done.length,
+                      queued: 0,
+                      indexing: 0,
+                      done: done.length,
+                      failed: 0,
+                      cancelled: 0,
+                    },
+                    jobs: done,
+                  },
+                });
+              }
+            }
+          }, 250);
+          return {
+            workspace_path: path,
+            discovered,
+            jobs,
+            progress: {
+              total: jobs.length,
+              queued: jobs.length,
+              indexing: 0,
+              done: 0,
+              failed: 0,
+              cancelled: 0,
+            },
+          };
+        }
+        case "list_index_jobs":
+          return (window as Window & { __QA_INDEX_JOBS__?: unknown[] }).__QA_INDEX_JOBS__ ?? [];
+        case "cancel_index_job":
+        case "cancel_all_index_jobs":
+          return true;
         case "probe_bus":
           return {
             id: `probe-${Date.now()}`,

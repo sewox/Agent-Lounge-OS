@@ -1282,7 +1282,95 @@ export type IndexSnapshot = {
 export type IndexNotice = {
   tone: "success" | "error";
   text: string;
+  /** shell namespace key — UI translates; `text` is fallback. */
+  i18nKey?: string;
+  i18nParams?: Record<string, string | number>;
 };
+
+export type IndexJobPhase =
+  | "queued"
+  | "indexing"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export type IndexJob = {
+  id: string;
+  project: string;
+  repo_path: string;
+  status: IndexJobPhase;
+  error?: string | null;
+  error_code?: string | null;
+  snapshot?: IndexSnapshot | null;
+  enqueued_at: string;
+  updated_at: string;
+};
+
+export type IndexProgress = {
+  total: number;
+  queued: number;
+  indexing: number;
+  done: number;
+  failed: number;
+  cancelled: number;
+};
+
+export type WorkspaceScanResult = {
+  workspace_path: string;
+  discovered: ProjectSummary[];
+  jobs: IndexJob[];
+  progress: IndexProgress;
+  error_code?: string | null;
+  message?: string | null;
+};
+
+export type IndexJobEvent = {
+  job: IndexJob;
+  progress: IndexProgress;
+  jobs: IndexJob[];
+};
+
+export const INDEX_JOB_EVENT = "lounge://index-job";
+
+export function emptyIndexProgress(): IndexProgress {
+  return { total: 0, queued: 0, indexing: 0, done: 0, failed: 0, cancelled: 0 };
+}
+
+export function indexProgressActive(progress: IndexProgress | null | undefined): boolean {
+  if (!progress) return false;
+  return (progress.queued ?? 0) > 0 || (progress.indexing ?? 0) > 0;
+}
+
+/** Map Rust scan/index error strings to i18n keys under shell namespace. */
+export function scanErrorI18nKey(error: string): {
+  key: string;
+  detail?: string;
+} {
+  const text = error.trim();
+  const lower = text.toLowerCase();
+  if (text === "cancelled" || lower.includes("cancelled")) {
+    return { key: "scanCancelled" };
+  }
+  if (lower.includes("empty_workspace") || lower.includes("no projects found")) {
+    return { key: "scanEmptyWorkspace" };
+  }
+  if (lower.includes("permission_denied") || lower.includes("permission denied")) {
+    return { key: "scanPermissionDenied" };
+  }
+  if (
+    lower.includes("sidecar_missing") ||
+    lower.includes("codebase-memory-mcp missing") ||
+    lower.includes("codebase-memory-mcp yok") ||
+    lower.includes("bulunamadı")
+  ) {
+    return { key: "scanSidecarMissing" };
+  }
+  if (lower.includes("not_found") || lower.includes("path not found")) {
+    return { key: "scanNotFound" };
+  }
+  const detail = text.replace(/^[a-z_]+:\s*/i, "").trim() || text;
+  return { key: "scanFailed", detail };
+}
 
 export function mockIndexSnapshot(repoPath: string): IndexSnapshot {
   const project = repoPath.split(/[/\\]/).filter(Boolean).at(-1) || "workspace";
@@ -1293,6 +1381,42 @@ export function mockIndexSnapshot(repoPath: string): IndexSnapshot {
     edges: 18,
     files: 24,
     dead: 3,
+  };
+}
+
+export function mockWorkspaceScan(repoPath: string): WorkspaceScanResult {
+  const project = repoPath.split(/[/\\]/).filter(Boolean).at(-1) || "workspace";
+  const nested = ["alpha", "beta"].map((name) => ({
+    name,
+    root_path: `${repoPath.replace(/[/\\]+$/, "")}/${name}`,
+    nodes: 0,
+    edges: 0,
+    files: 0,
+  }));
+  const now = new Date().toISOString();
+  const jobs: IndexJob[] = nested.map((row, index) => ({
+    id: `mock-job-${index + 1}`,
+    project: row.name,
+    repo_path: row.root_path,
+    status: "queued",
+    error: null,
+    error_code: null,
+    snapshot: null,
+    enqueued_at: now,
+    updated_at: now,
+  }));
+  return {
+    workspace_path: repoPath,
+    discovered: nested.length > 0 ? nested : [{ name: project, root_path: repoPath, nodes: 0, edges: 0, files: 0 }],
+    jobs,
+    progress: {
+      total: jobs.length,
+      queued: jobs.length,
+      indexing: 0,
+      done: 0,
+      failed: 0,
+      cancelled: 0,
+    },
   };
 }
 

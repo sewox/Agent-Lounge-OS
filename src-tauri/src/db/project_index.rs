@@ -176,6 +176,22 @@ impl ExperienceStore {
         .context("project_index list join")?
     }
 
+    /// Tarama sonrası hemen UI'da görünsün diye proje kaydı (indeks öncesi).
+    /// Zaten satır varsa dokunulmaz — tam indeks sonra üzerine yazar.
+    pub async fn register_discovered_project(
+        &self,
+        project_id: String,
+        repo_path: String,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            register_discovered_project_blocking(&conn, &project_id, &repo_path)
+        })
+        .await
+        .context("project register join")?
+    }
+
     /// `active_file` / `workspace_root` / açık path → `project_index.repo_path` eşlemesi.
     /// En uzun eşleşen kök kazanır; yoksa `None`.
     pub async fn resolve_project_id(&self, path_hint: impl Into<String>) -> Result<Option<String>> {
@@ -936,6 +952,43 @@ fn project_index_snapshot_blocking(
         files: Some(files as u64),
         dead: dead as u64,
     })
+}
+
+fn register_discovered_project_blocking(
+    conn: &Connection,
+    project_id: &str,
+    repo_path: &str,
+) -> Result<()> {
+    let project = project_id.trim();
+    let repo = repo_path.trim();
+    if project.is_empty() {
+        anyhow::bail!("project_id boş");
+    }
+    if repo.is_empty() {
+        anyhow::bail!("repo_path boş");
+    }
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM project_index WHERE project_id = ?1 LIMIT 1",
+            params![project],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO project_index (
+            id, project_id, repo_path, kind, name, file_path, line, target,
+            ref_count, detail, payload_json, indexed_at
+        ) VALUES (?1, ?2, ?3, 'meta', '__registered__', NULL, NULL, NULL, 0, 'registered', '{}', ?4)
+        "#,
+        params![Uuid::new_v4().to_string(), project, repo, now],
+    )?;
+    Ok(())
 }
 
 fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummary>> {
