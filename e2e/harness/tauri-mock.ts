@@ -55,6 +55,37 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       }
     }
 
+    type QaDestructiveRow = {
+      id: string;
+      kind: string;
+      command: string;
+      pattern: string;
+      source: string;
+      class: string;
+      command_hash: string;
+    };
+
+    const qaSettings = {
+      editor: {
+        preset: "default" as string,
+        custom_program: "",
+        custom_args_template: "{path}",
+      },
+      ttlDays: 90,
+      useCountThreshold: 0,
+    };
+    const qaDestructiveQueue: QaDestructiveRow[] = [];
+
+    function emitPluginEvent(event: string, payload: unknown) {
+      for (const handler of listeners.get(event) || []) {
+        runCallback(handler, {
+          event,
+          id: Math.floor(Math.random() * 1e9),
+          payload,
+        });
+      }
+    }
+
     type ListenerMap = Map<string, number[]>;
     const listeners: ListenerMap = new Map();
     const callbacks = new Map<number, (data: unknown) => void>();
@@ -400,8 +431,70 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           }
           return `data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=`;
         }
-        case "pick_custom_approval_sound":
+        case "pick_custom_approval_sound": {
+          const bytes = Number(args?.bytes ?? args?.size ?? 0);
+          if (bytes > 5 * 1024 * 1024) {
+            throw new Error("custom sound exceeds 5 MB limit");
+          }
           return "custom-alert.wav";
+        }
+        case "list_pending_destructive":
+          return qaDestructiveQueue.slice();
+        case "confirm_destructive": {
+          const id = String(args?.id ?? "");
+          const idx = qaDestructiveQueue.findIndex((row) => row.id === id);
+          if (idx < 0) {
+            throw new Error("unknown destructive confirmation id");
+          }
+          qaDestructiveQueue.splice(idx, 1);
+          emitPluginEvent("approval_resolved", { task_id: id, reason: "confirmed" });
+          return null;
+        }
+        case "reject_destructive": {
+          const id = String(args?.id ?? "");
+          const idx = qaDestructiveQueue.findIndex((row) => row.id === id);
+          if (idx < 0) {
+            throw new Error("unknown destructive confirmation id");
+          }
+          qaDestructiveQueue.splice(idx, 1);
+          emitPluginEvent("approval_resolved", { task_id: id, reason: "rejected" });
+          return null;
+        }
+        case "get_editor_settings":
+          return qaSettings.editor;
+        case "set_editor_settings": {
+          const next = (args?.settings ?? {}) as typeof qaSettings.editor;
+          qaSettings.editor = {
+            preset: String(next.preset ?? qaSettings.editor.preset),
+            custom_program: String(next.custom_program ?? ""),
+            custom_args_template: String(next.custom_args_template ?? "{path}"),
+          };
+          if (
+            qaSettings.editor.preset === "custom" &&
+            !qaSettings.editor.custom_args_template.includes("{path}")
+          ) {
+            throw new Error("editor argument template must include {path}");
+          }
+          return qaSettings.editor;
+        }
+        case "test_editor_settings":
+          return null;
+        case "get_experience_ttl_days":
+          return qaSettings.ttlDays;
+        case "set_experience_ttl_days": {
+          const days = Number(args?.days ?? 90);
+          if (days < 1 || days > 3650) {
+            throw new Error("TTL must be between 1 and 3650 days");
+          }
+          qaSettings.ttlDays = days;
+          return qaSettings.ttlDays;
+        }
+        case "get_experience_use_count_threshold":
+          return qaSettings.useCountThreshold;
+        case "set_experience_use_count_threshold": {
+          qaSettings.useCountThreshold = Math.max(0, Number(args?.threshold ?? 0));
+          return qaSettings.useCountThreshold;
+        }
         case "resolve_routing": {
           const taskId = String(args?.taskId ?? "");
           f.pendingApprovals = f.pendingApprovals.filter((a) => a.task_id !== taskId);

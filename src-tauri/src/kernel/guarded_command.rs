@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 
 use super::destructive_confirm::{command_hash, register_pending, take_confirmed_allowance};
 use super::policy_gate::{
-    classify_destructive, ActionSource, DestructiveClass, PolicyDecision, PolicyGate,
+    classify_argv, classify_destructive, ActionSource, DestructiveClass, PolicyDecision, PolicyGate,
 };
 
 /// Programs allowed to use [`GuardedCommand::internal_daemon`] (F9).
@@ -132,11 +132,11 @@ impl GuardedCommand {
         if self.bypass_gate {
             return Ok(PolicyDecision::Allow);
         }
-        let line = self.command_line();
-        let decision = PolicyGate::evaluate(&line, self.source)?;
+        let prog = self.program.to_string_lossy().into_owned();
+        let args = self.argv_strings();
+        // F22: classify the real argv — never re-join then re-split (loses -c quoting).
+        let decision = PolicyGate::evaluate_argv(&prog, &args, self.source)?;
         if let PolicyDecision::RequireConfirmation { class, .. } = &decision {
-            let prog = self.program.to_string_lossy().into_owned();
-            let args = self.argv_strings();
             let hash = command_hash(&prog, &args);
             if take_confirmed_allowance(&hash) {
                 return Ok(PolicyDecision::Allow);
@@ -145,7 +145,7 @@ impl GuardedCommand {
             bail!(
                 "destructive operation requires user confirmation ({:?}): {} confirm_id={}",
                 class,
-                line,
+                self.command_line(),
                 event.id
             );
         }
@@ -225,12 +225,41 @@ pub fn would_require_confirmation(
     }
 }
 
+/// Classify structured argv without executing (F22).
+pub fn would_require_confirmation_argv(
+    program: &str,
+    args: &[String],
+    source: ActionSource,
+) -> Option<DestructiveClass> {
+    match classify_argv(program, args) {
+        Some(class) => {
+            let _ = source;
+            Some(class)
+        }
+        None => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::destructive_confirm::{
         confirm_destructive, reset_for_tests, take_emitted_for_tests, test_lock,
     };
+
+    fn expect_confirm_id(result: Result<Command>) -> String {
+        let err = result.expect_err("expected confirmation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("confirm_id="),
+            "expected confirm_id= in error, got: {msg}"
+        );
+        msg.split("confirm_id=")
+            .nth(1)
+            .unwrap()
+            .trim()
+            .to_string()
+    }
 
     #[test]
     fn internal_daemon_rejects_rm() {
@@ -312,5 +341,89 @@ mod tests {
             cmd.is_ok(),
             "register_pending and evaluate must hash the same argv"
         );
+    }
+
+    /// F22: argv-preserving classification through GuardedCommand.
+    #[test]
+    fn f22_shell_c_payload_requires_confirmation() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let cases: Vec<(&str, &[&str])> = vec![
+            ("sh", &["-c", "rm -rf x"]),
+            ("bash", &["-lc", "git clean -fdx"]),
+            ("sudo", &["sh", "-c", "rm -rf x"]),
+            ("cmd", &["/c", "del /s /q x"]),
+            ("pwsh", &["-Command", "Remove-Item -Recurse x"]),
+        ];
+        for (prog, args) in cases {
+            reset_for_tests();
+            let result = GuardedCommand::new(prog)
+                .args(args.iter().copied())
+                .source(ActionSource::Agent)
+                .into_std_command();
+            let id = expect_confirm_id(result);
+            assert!(!id.is_empty(), "{prog} {:?}", args);
+        }
+    }
+
+    #[test]
+    fn f22_shell_c_echo_allowed() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let result = GuardedCommand::new("sh")
+            .args(["-c", "echo hi"])
+            .source(ActionSource::User)
+            .into_std_command();
+        assert!(
+            result.is_ok(),
+            "non-destructive -c payload must be Allowed: {}",
+            result.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn f22_k6_git_patterns_via_argv() {
+        let _guard = test_lock();
+        let cases: Vec<(&str, &[&str])> = vec![
+            ("git", &["reset", "--hard"]),
+            ("git", &["push", "--force"]),
+            ("git", &["push", "-f"]),
+            ("git", &["push", "--force-with-lease"]),
+            ("git", &["clean", "-fd"]),
+            ("git", &["clean", "-fdx"]),
+            ("git", &["clean", "-df"]),
+            ("git", &["-C", "/tmp/repo", "reset", "--hard"]),
+            ("git", &["-c", "user.name=x", "push", "--force"]),
+            ("git", &["-C/tmp/repo", "clean", "-fd"]),
+            ("git", &["-cuser.name=x", "push", "-f"]),
+        ];
+        for (prog, args) in cases {
+            reset_for_tests();
+            let result = GuardedCommand::new(prog)
+                .args(args.iter().copied())
+                .source(ActionSource::User)
+                .into_std_command();
+            let _ = expect_confirm_id(result);
+        }
+    }
+
+    #[test]
+    fn f22_windows_style_argv_on_all_oses() {
+        let _guard = test_lock();
+        let cases: Vec<(&str, &[&str])> = vec![
+            ("cmd", &["/c", "del /s /q C:\\tmp\\x"]),
+            ("cmd", &["/c", "rd /s /q build"]),
+            ("powershell", &["-Command", "Remove-Item -Recurse -Force .\\db"]),
+            ("pwsh", &["-Command", "Remove-Item -Recurse x"]),
+            ("powershell.exe", &["-Command", "ri -Recurse x"]),
+        ];
+        for (prog, args) in cases {
+            reset_for_tests();
+            let result = GuardedCommand::new(prog)
+                .args(args.iter().copied())
+                .source(ActionSource::Agent)
+                .into_std_command();
+            let _ = expect_confirm_id(result);
+        }
     }
 }

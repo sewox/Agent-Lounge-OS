@@ -10,6 +10,9 @@ import { useLounge } from "@/components/lounge-provider";
 import { ExperienceDrawer } from "@/components/experience-drawer";
 import { LocaleSwitch } from "@/components/locale-switch";
 import { ApprovalSoundSettingsPanel } from "@/components/approval-sound-settings";
+import { DestructiveGateSettingsPanel } from "@/components/destructive-gate-settings";
+import { EditorSettingsPanel } from "@/components/editor-settings-panel";
+import { ExperienceGovernanceSettingsPanel } from "@/components/experience-governance-settings";
 import { SemanticMap } from "@/components/SemanticMap";
 import {
   formatDisplayPath,
@@ -1263,7 +1266,10 @@ export function SettingsPanel() {
           <LocaleSwitch />
         </div>
       </div>
+      <EditorSettingsPanel />
+      <ExperienceGovernanceSettingsPanel />
       <ApprovalSoundSettingsPanel />
+      <DestructiveGateSettingsPanel />
       <GraphUiSettings />
       <div className="rounded-lg border border-outline-variant bg-surface-container">
         <div className="border-b border-outline-variant bg-surface-container-low p-2.5">

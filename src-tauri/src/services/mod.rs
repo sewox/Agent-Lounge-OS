@@ -60,7 +60,10 @@ pub use ollama::{
     chat_json, embed_model, embed_text, parse_llm_json, private_env, OllamaConfig, OllamaService,
     DEFAULT_EMBED_MODEL,
 };
-pub use open_editor::{open_in_editor as open_path_in_editor, windows_opener_argv};
+pub use open_editor::{
+    load_editor_settings, open_in_editor as open_path_in_editor, save_editor_settings,
+    test_editor_open, windows_opener_argv, EditorPreset, EditorSettings,
+};
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
     data_root, ensure_data_layout, lounge_laya_dir, lounge_ollama_endpoint, nats_monitor_endpoint,

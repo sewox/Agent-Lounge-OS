@@ -183,44 +183,22 @@ test.describe("AP / CP / misc", () => {
     expect(await approve.count()).toBeGreaterThan(0);
   });
 
-  test("AP-06 · Destructive ops always require confirmation UI (POSIX + Windows) [expected-fail until PR-1/5]", async ({
+  test("AP-06 · Destructive ops always require confirmation UI (POSIX + Windows)", async ({
     page,
-  }, testInfo) => {
-    // O4 / §10.2: DB drop/truncate/delete/migrate-down, rm -rf, reset,
-    // and Windows del /s, rd /s, Remove-Item -Recurse, format → always confirm.
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "destructive-operation gate missing (O4 / §10.2)",
-    });
-    test.fail(true, "Destructive confirmation gate not implemented");
+  }) => {
     await openRoute(page, "/settings", "full");
-    const gate = page.getByText(
-      /destructive|yıkıcı|always confirm|her zaman onay|Never Ask.*cannot|atlanamaz|del \/s|Remove-Item|rm -rf/i,
-    );
-    expect(await gate.count(), "destructive gate copy / control").toBeGreaterThan(0);
-    // Contract surface for detector patterns (documented until backend ships).
-    const patterns = [
-      "rm -rf",
-      "del /s",
-      "rd /s",
-      "Remove-Item -Recurse",
-      "format",
-    ];
-    expect(patterns.length).toBe(5);
+    const gate = page.locator('[data-qa="destructive-gate"]');
+    await expect(gate, "destructive gate panel").toBeVisible();
+    await expect(gate.getByText(/Never Ask|atlanamaz|cannot skip/i).first()).toBeVisible();
+    await expect(gate.getByText(/rm -rf|git reset|Remove-Item|format/i).first()).toBeVisible();
   });
 
-  test("AP-07 · Never Ask cannot skip destructive confirmation [expected-fail until PR-1/5]", async ({
-    page,
-  }, testInfo) => {
-    testInfo.annotations.push({
-      type: "expected-fail",
-      description: "Never Ask still bypasses destructive ops (O4 / §10.2)",
-    });
-    test.fail(true, "Destructive ops not forced through DecisionGate");
+  test("AP-07 · Never Ask cannot skip destructive confirmation", async ({ page }) => {
     await openRoute(page, "/dashboard?demo=destructive-reset", "browser");
-    const dialog = page.getByRole("alertdialog").or(page.getByRole("dialog"));
-    expect(await dialog.count(), "destructive confirm alertdialog").toBeGreaterThan(0);
-    await expect(dialog.first()).toContainText(/confirm|onay|reset|delete|sil|Remove-Item|del \/s/i);
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog, "destructive confirm alertdialog").toBeVisible();
+    await expect(dialog).toContainText(/confirm|onay|reset|git reset|yıkıcı|destructive/i);
+    await expect(dialog.getByRole("button", { name: /Confirm|Onayla|Reject|Reddet/i }).first()).toBeVisible();
   });
 
   test("AP-08 · Pending approval plays alert sound (HTML Audio; wav/mp3/ogg)", async ({

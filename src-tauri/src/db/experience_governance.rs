@@ -13,6 +13,9 @@ use crate::models::{
 /// Settings key for auto-archive TTL in days (default 90).
 pub const SETTING_EXPERIENCE_TTL_DAYS: &str = "experience_ttl_days";
 pub const DEFAULT_EXPERIENCE_TTL_DAYS: u64 = 90;
+/// Optional use-count threshold for auto-archive (0 = disabled).
+pub const SETTING_EXPERIENCE_USE_COUNT_THRESHOLD: &str = "experience_use_count_threshold";
+pub const DEFAULT_EXPERIENCE_USE_COUNT_THRESHOLD: u64 = 0;
 /// One-time soft-hide of empty placeholder project_index rows.
 pub const MIGRATION_PLACEHOLDER_CLEANUP_V1: &str = "migrations.placeholder_cleanup_v1";
 
@@ -206,13 +209,36 @@ impl ExperienceStore {
             .await
     }
 
+    pub async fn experience_use_count_threshold(&self) -> Result<u64> {
+        match self
+            .get_setting(SETTING_EXPERIENCE_USE_COUNT_THRESHOLD.into())
+            .await?
+        {
+            Some(raw) => Ok(raw.trim().parse::<u64>().unwrap_or(0)),
+            None => Ok(DEFAULT_EXPERIENCE_USE_COUNT_THRESHOLD),
+        }
+    }
+
+    pub async fn set_experience_use_count_threshold(&self, threshold: u64) -> Result<()> {
+        self.set_setting(
+            SETTING_EXPERIENCE_USE_COUNT_THRESHOLD.into(),
+            threshold.to_string(),
+        )
+        .await
+    }
+
     /// Archive active, unpinned rows unused for `ttl_days` (based on last_used_at or created_at).
-    pub async fn auto_archive_stale(&self, ttl_days: u64, clock: &dyn ArchiveClock) -> Result<u64> {
+    pub async fn auto_archive_stale(
+        &self,
+        ttl_days: u64,
+        use_count_threshold: u64,
+        clock: &dyn ArchiveClock,
+    ) -> Result<u64> {
         let now = clock.now_rfc3339();
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            auto_archive_blocking(&conn, ttl_days, &now)
+            auto_archive_blocking(&conn, ttl_days, use_count_threshold, &now)
         })
         .await
         .context("auto_archive join")?
@@ -396,7 +422,12 @@ fn map_lounge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::Lo
     Ok(map_full_record(row)?.to_lounge())
 }
 
-fn auto_archive_blocking(conn: &Connection, ttl_days: u64, now_rfc: &str) -> Result<u64> {
+fn auto_archive_blocking(
+    conn: &Connection,
+    ttl_days: u64,
+    use_count_threshold: u64,
+    now_rfc: &str,
+) -> Result<u64> {
     let ttl_secs = (ttl_days.max(1) as i64) * 86_400;
     let now = chrono::DateTime::parse_from_rfc3339(now_rfc)
         .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -408,7 +439,7 @@ fn auto_archive_blocking(conn: &Connection, ttl_days: u64, now_rfc: &str) -> Res
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, COALESCE(last_used_at, created_at), is_pinned
+        SELECT id, COALESCE(last_used_at, created_at), is_pinned, use_count
         FROM experiences
         WHERE status = ?1 AND is_pinned = 0
         "#,
@@ -418,13 +449,17 @@ fn auto_archive_blocking(conn: &Connection, ttl_days: u64, now_rfc: &str) -> Res
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
         ))
     })?;
 
     let mut ids = Vec::new();
     for row in rows {
-        let (id, anchor, pinned) = row?;
+        let (id, anchor, pinned, use_count) = row?;
         if pinned != 0 {
+            continue;
+        }
+        if use_count_threshold > 0 && use_count.max(0) as u64 > use_count_threshold {
             continue;
         }
         let Ok(anchor_dt) = chrono::DateTime::parse_from_rfc3339(&anchor) else {
@@ -772,7 +807,7 @@ mod tests {
         let clock = FakeClock {
             now: "2026-09-26T00:00:00+00:00".into(),
         };
-        let n = store.auto_archive_stale(90, &clock).await.unwrap();
+        let n = store.auto_archive_stale(90, 0, &clock).await.unwrap();
         assert_eq!(n, 1, "exactly one stale unpinned row should archive");
         let old_row = store.get_record(old_id).await.unwrap().unwrap();
         assert_eq!(old_row.status, EXPERIENCE_STATUS_ARCHIVED);

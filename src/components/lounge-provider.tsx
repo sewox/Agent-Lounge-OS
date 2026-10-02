@@ -47,8 +47,11 @@ import {
   isSecurityApproval,
   ROUTING_APPROVAL_CLEARED_EVENT,
   ROUTING_APPROVAL_EVENT,
+  APPROVAL_PENDING_EVENT,
+  APPROVAL_RESOLVED_EVENT,
   type ApprovalCleared,
   type ApprovalRequest,
+  type DestructivePending,
   type DeadSymbol,
   type DecisionGateStatus,
   type IndexNotice,
@@ -145,6 +148,8 @@ type LoungeContextValue = {
   indexProgress: IndexProgress;
   policy: RoutingPolicy;
   approval: ApprovalRequest | null;
+  destructiveQueue: DestructivePending[];
+  destructiveQueueCount: number;
   approvalError: string | null;
   decisionGate: DecisionGateStatus | null;
   layaEngine: LayaEngineStatus | null;
@@ -158,6 +163,7 @@ type LoungeContextValue = {
   refresh: () => Promise<void>;
   savePolicy: (next: RoutingPolicy) => Promise<void>;
   resolveApproval: (vote: RoutingVote, taskId?: string) => Promise<void>;
+  resolveDestructive: (id: string, confirmed: boolean) => Promise<void>;
   /** Context Whisper satırını açıkça "faydalı" olarak işaretle (Feedback Loop). */
   markWhisperUseful: (experienceId: string, projectId?: string) => Promise<void>;
   ignoreDeadSymbol: (symbol: DeadSymbol) => Promise<void>;
@@ -217,8 +223,10 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [indexProgress, setIndexProgress] = useState<IndexProgress>(() => emptyIndexProgress());
   const [policy, setPolicy] = useState<RoutingPolicy>(DEFAULT_POLICY);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  const [destructiveQueue, setDestructiveQueue] = useState<DestructivePending[]>([]);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const approvalRef = useRef<ApprovalRequest | null>(null);
+  const destructiveRef = useRef<DestructivePending[]>([]);
   const [decisionGate, setDecisionGate] = useState<DecisionGateStatus | null>(null);
   const [layaEngine, setLayaEngine] = useState<LayaEngineStatus | null>(null);
   const [decisionTelemetry, setDecisionTelemetry] = useState<LoungeTelemetry | null>(null);
@@ -842,6 +850,22 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     approvalRef.current = approval;
   }, [approval]);
 
+  useEffect(() => {
+    destructiveRef.current = destructiveQueue;
+  }, [destructiveQueue]);
+
+  const syncDestructiveQueue = useCallback(async () => {
+    if (!isTauri()) {
+      return;
+    }
+    try {
+      const rows = await invoke<DestructivePending[]>("list_pending_destructive");
+      setDestructiveQueue(rows);
+    } catch {
+      /* command may be unavailable in older builds */
+    }
+  }, []);
+
   const syncPendingApprovals = useCallback(async () => {
     if (!isTauri()) {
       return;
@@ -898,6 +922,31 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timer);
   }, []);
 
+  // Browser-only demo: ?demo=destructive-reset shows destructive confirm dialog (AP-07).
+  useEffect(() => {
+    if (isTauri() || typeof window === "undefined") {
+      return;
+    }
+    const demo = new URLSearchParams(window.location.search).get("demo");
+    if (demo !== "destructive-reset") {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setDestructiveQueue([
+        {
+          id: "demo-destructive-reset",
+          kind: "destructive",
+          command: "git reset --hard HEAD",
+          pattern: "GitResetHard",
+          source: "agent",
+          class: "GitResetHard",
+          command_hash: "demo-hash",
+        },
+      ]);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const resolveApproval = useCallback(async (vote: RoutingVote, taskId?: string) => {
     const current = approvalRef.current;
     const id = (taskId ?? current?.task_id ?? "").trim();
@@ -924,6 +973,36 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       }
     }
   }, []);
+
+  const resolveDestructive = useCallback(
+    async (id: string, confirmed: boolean) => {
+      const trimmed = id.trim();
+      if (!trimmed) {
+        setApprovalError("Bekleyen yıkıcı onay yok");
+        return;
+      }
+      setApprovalError(null);
+      try {
+        if (isTauri()) {
+          if (confirmed) {
+            await invoke("confirm_destructive", { id: trimmed });
+          } else {
+            await invoke("reject_destructive", { id: trimmed });
+          }
+        }
+        setDestructiveQueue((current) => current.filter((row) => row.id !== trimmed));
+        if (!confirmed) {
+          setApprovalError("Yıkıcı komut reddedildi");
+        }
+        await syncDestructiveQueue();
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        setApprovalError(text || "Yıkıcı onay işlenemedi");
+        await syncDestructiveQueue();
+      }
+    },
+    [syncDestructiveQueue],
+  );
 
   const markWhisperUseful = useCallback(async (experienceId: string, projectId?: string) => {
     if (!experienceId.trim()) {
@@ -1122,9 +1201,33 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
             }
           }),
         );
+        unlisteners.push(
+          await listen<{ kind?: string; task_id?: string; confirm_id?: string }>(
+            APPROVAL_PENDING_EVENT,
+            (event) => {
+              if (cancelled) {
+                return;
+              }
+              if (event.payload.kind === "destructive") {
+                void syncDestructiveQueue();
+              }
+            },
+          ),
+        );
+        unlisteners.push(
+          await listen<ApprovalCleared>(APPROVAL_RESOLVED_EVENT, (event) => {
+            if (cancelled) {
+              return;
+            }
+            setDestructiveQueue((current) =>
+              current.filter((row) => row.id !== event.payload.task_id),
+            );
+          }),
+        );
         // Hipotez (a): listener kurulana kadar kaçan event veya state kaybı → backend snapshot.
         if (!cancelled) {
           await syncPendingApprovals();
+          await syncDestructiveQueue();
           try {
             const jobs = await invoke<IndexJob[]>("list_index_jobs");
             if (!cancelled && Array.isArray(jobs)) {
@@ -1145,6 +1248,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     const onVisible = () => {
       if (document.visibilityState === "visible") {
         void syncPendingApprovals();
+        void syncDestructiveQueue();
         if (isTauri()) {
           void invoke<IndexJob[]>("list_index_jobs")
             .then((jobs) => {
@@ -1165,7 +1269,15 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
         void fn();
       });
     };
-  }, [applyIndexJobs, ingestBusMessage, refreshSemantic, syncInstalledModels, syncPendingApprovals]);
+  }, [
+    applyIndexJobs,
+    ingestBusMessage,
+    refreshSemantic,
+    syncInstalledModels,
+    syncPendingApprovals,
+    syncDestructiveQueue,
+  ]);
+
 
   const decisionMsgPerMin = decisionMsgTimes.length;
 
@@ -1321,6 +1433,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexProgress,
       policy,
       approval,
+      destructiveQueue,
+      destructiveQueueCount: destructiveQueue.length,
       approvalError,
       decisionGate,
       layaEngine,
@@ -1334,6 +1448,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      resolveDestructive,
       markWhisperUseful,
       ignoreDeadSymbol,
       unignoreDeadSymbol,
@@ -1395,6 +1510,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       indexProgress,
       policy,
       approval,
+      destructiveQueue,
       approvalError,
       decisionGate,
       layaEngine,
@@ -1408,6 +1524,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       refresh,
       savePolicy,
       resolveApproval,
+      resolveDestructive,
       markWhisperUseful,
       ignoreDeadSymbol,
       unignoreDeadSymbol,

@@ -9,5 +9,11 @@
   "quotaBlocked": "Quota Alert · QUOTA_BLOCKED",
   "noPending": "No pending approval",
   "cleared": "Pending approval cleared — banner closed",
-  "resolveFailed": "Could not process approval"
+  "resolveFailed": "Could not process approval",
+  "destructivePending": "Destructive · PENDING_CONFIRMATION",
+  "destructiveConfirmTitle": "Confirm destructive command",
+  "destructiveSource": "Source",
+  "destructiveQueueNote": "Additional destructive requests are queued (FIFO). Resolve this one first.",
+  "confirmDestructive": "Confirm",
+  "rejectDestructive": "Reject"
 }
