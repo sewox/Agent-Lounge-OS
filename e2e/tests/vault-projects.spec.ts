@@ -229,13 +229,18 @@ test.describe("VP — vault project grouping", () => {
   test("VP-12 · Page expand shows symbols + dead-only filter (TR/EN)", async ({
     browser,
   }) => {
-    for (const [locale, deadLabel] of [
-      ["tr-TR", /Sadece ölü semboller/i],
-      ["en-US", /Dead symbols only/i],
+    for (const [locale, appLocale, deadLabel] of [
+      ["tr-TR", "tr", /Sadece ölü semboller/i],
+      ["en-US", "en", /Dead symbols only/i],
     ] as const) {
       const context = await browser.newContext({ locale });
       const page = await context.newPage();
+      await page.addInitScript((lang) => {
+        localStorage.setItem("lounge.locale", lang);
+        localStorage.setItem("locale", lang);
+      }, appLocale);
       await openRoute(page, "/vault", "full");
+      await expect(page.locator("html")).toHaveAttribute("lang", appLocale);
       await openVaultProject(page, "Agent-Lounge-OS");
       const dispatcher = page
         .locator('[data-qa="vault-page-row"]')
