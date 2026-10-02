@@ -1478,12 +1478,11 @@ async fn set_graph_ui_port(
 mod kernel_log_config_tests {
     #[test]
     fn kernel_log_rotation_is_multi_mb_keep_some() {
-        assert_eq!(super::KERNEL_LOG_MAX_FILE_SIZE, 5 * 1024 * 1024);
-        assert_eq!(super::KERNEL_LOG_KEEP_COUNT, 5);
         // Document plugin defaults we intentionally override (tauri-plugin-log 2.10.0).
         const PLUGIN_DEFAULT_MAX: u128 = 40_000;
-        const PLUGIN_DEFAULT_KEEP_ONE: bool = true;
-        assert!(super::KERNEL_LOG_MAX_FILE_SIZE > PLUGIN_DEFAULT_MAX);
-        assert!(super::KERNEL_LOG_KEEP_COUNT > 1 || !PLUGIN_DEFAULT_KEEP_ONE);
+        const _: () = assert!(super::KERNEL_LOG_MAX_FILE_SIZE == 5 * 1024 * 1024);
+        const _: () = assert!(super::KERNEL_LOG_KEEP_COUNT == 5);
+        const _: () = assert!(super::KERNEL_LOG_MAX_FILE_SIZE > PLUGIN_DEFAULT_MAX);
+        const _: () = assert!(super::KERNEL_LOG_KEEP_COUNT > 1);
     }
 }
