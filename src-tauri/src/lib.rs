@@ -30,10 +30,12 @@ use services::{
     open_path_in_editor, persist_port, record_dead_snapshot, record_whisper_injection,
     resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
     spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, FixDeadSymbolResult,
-    GraphUiState, GraphUiStatus, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
-    SharedServices, GRAPH_WINDOW_LABEL,
+    GraphUiState, GraphUiStatus, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus,
+    MemoryBridge, ModelManager, ServiceManager, SharedServices, WorkspaceScanResult,
+    GRAPH_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 
 const ONBOARDING_ROUTE: &str = "/onboarding";
 const DASHBOARD_ROUTE: &str = "/dashboard";
@@ -146,6 +148,9 @@ pub fn run_with_start_route(start_route: &'static str) {
             let retrieve_bus = bus.clone();
             let registry_listen = workers.clone();
 
+            let index_queue = IndexQueue::new(memory.clone(), store.clone());
+            index_queue.ensure_worker(app.handle().clone());
+
             app.manage(services.clone());
             app.manage(dispatcher.clone());
             app.manage(workers);
@@ -155,6 +160,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(bus.clone());
             app.manage(graph_ui);
             app.manage(memory.clone());
+            app.manage(index_queue);
 
             // Graph UI port — settings'ten MemoryBridge config'e yükle (process-global yok).
             let port_store = store.clone();
@@ -251,6 +257,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             ensure_services,
             service_status,
             index_workspace,
+            scan_workspace,
+            list_index_jobs,
+            cancel_index_job,
+            cancel_all_index_jobs,
             get_dead_symbols,
             get_semantic_map,
             get_kernel_model,
@@ -387,6 +397,69 @@ async fn index_workspace(
         }
     }
     Ok(snapshot)
+}
+
+/// Çalışma alanını tara → projeleri keşfet/import et → arka plan indeks kuyruğuna al.
+/// `path` verilmezse native klasör diyaloğu açılır. İndeksleme istek yaşam döngüsüne bağlı değildir.
+#[tauri::command]
+async fn scan_workspace(
+    app: tauri::AppHandle,
+    queue: tauri::State<'_, std::sync::Arc<IndexQueue>>,
+    path: Option<String>,
+) -> Result<WorkspaceScanResult, String> {
+    let selected = match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => {
+            let app_for_dialog = app.clone();
+            let picked = tauri::async_runtime::spawn_blocking(move || {
+                app_for_dialog
+                    .dialog()
+                    .file()
+                    .set_title("Index Workspace")
+                    .blocking_pick_folder()
+            })
+            .await
+            .map_err(|err| format!("dialog failed: {err}"))?;
+            let Some(folder) = picked else {
+                return Err("cancelled".into());
+            };
+            folder
+                .into_path()
+                .map_err(|err| format!("invalid folder path: {err}"))?
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+
+    match queue.scan_and_enqueue(&app, selected).await {
+        Ok(result) => Ok(result),
+        Err(kind) => Err(format!("{}: {}", kind.code(), kind.message())),
+    }
+}
+
+#[tauri::command]
+async fn list_index_jobs(
+    queue: tauri::State<'_, std::sync::Arc<IndexQueue>>,
+) -> Result<Vec<IndexJob>, String> {
+    Ok(queue.list_jobs().await)
+}
+
+#[tauri::command]
+async fn cancel_index_job(
+    app: tauri::AppHandle,
+    queue: tauri::State<'_, std::sync::Arc<IndexQueue>>,
+    job_id: String,
+) -> Result<bool, String> {
+    Ok(queue.cancel_job(&app, job_id.trim()).await)
+}
+
+#[tauri::command]
+async fn cancel_all_index_jobs(
+    app: tauri::AppHandle,
+    queue: tauri::State<'_, std::sync::Arc<IndexQueue>>,
+) -> Result<IndexProgress, String> {
+    queue.cancel_all(&app).await;
+    Ok(queue.progress().await)
 }
 
 #[tauri::command]

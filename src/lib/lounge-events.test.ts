@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  emptyIndexProgress,
   eventSortKey,
+  indexProgressActive,
+  scanErrorI18nKey,
   sortEventsNewestFirst,
   type NatsEvent,
 } from "./lounge.ts";
@@ -73,5 +76,25 @@ describe("sortEventsNewestFirst", () => {
   it("eventSortKey parses HH:mm:ss.mmm", () => {
     assert.equal(eventSortKey({ time: "00:00:01.500" }), 1500);
     assert.ok(eventSortKey({ time: "21:41:39.349" }) > eventSortKey({ time: "21:41:38.691" }));
+  });
+});
+
+describe("scanErrorI18nKey", () => {
+  it("maps empty workspace and sidecar errors", () => {
+    assert.equal(scanErrorI18nKey("empty_workspace: no projects found").key, "scanEmptyWorkspace");
+    assert.equal(
+      scanErrorI18nKey("sidecar_missing: codebase-memory-mcp missing: /x").key,
+      "scanSidecarMissing",
+    );
+    assert.equal(scanErrorI18nKey("cancelled").key, "scanCancelled");
+    assert.equal(scanErrorI18nKey("permission_denied: denied").key, "scanPermissionDenied");
+  });
+});
+
+describe("indexProgressActive", () => {
+  it("detects active queue", () => {
+    assert.equal(indexProgressActive(emptyIndexProgress()), false);
+    assert.equal(indexProgressActive({ ...emptyIndexProgress(), queued: 1, total: 1 }), true);
+    assert.equal(indexProgressActive({ ...emptyIndexProgress(), indexing: 2, total: 2 }), true);
   });
 });

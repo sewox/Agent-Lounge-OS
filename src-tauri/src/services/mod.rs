@@ -8,6 +8,7 @@ pub mod dead_symbol_actions;
 pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
+pub mod index_queue;
 pub mod lmr_runtime;
 pub mod memory_bridge;
 pub mod model_manager;
@@ -20,6 +21,7 @@ pub mod quota_manager;
 pub mod subscription_usage;
 pub mod supervisor;
 pub mod telemetry;
+pub mod workspace_scan;
 
 use std::sync::Arc;
 
@@ -44,6 +46,10 @@ pub use graph_ui::{
     enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
     open_or_focus_graph_window, persist_port, resolve_cbm_project_name, GraphUiState,
     GraphUiStatus, GRAPH_WINDOW_LABEL,
+};
+pub use index_queue::{
+    IndexJob, IndexJobEvent, IndexJobPhase, IndexProgress, IndexQueue, WorkspaceScanResult,
+    INDEX_CONCURRENCY, INDEX_JOB_EVENT,
 };
 pub use memory_bridge::{
     probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode, DEFAULT_GRAPH_UI_PORT,
@@ -73,6 +79,7 @@ pub use telemetry::{
     build_agent_efficiency_report, record_dead_snapshot, record_whisper_injection,
     AgentEfficiencyReport, EfficiencyReportQuery,
 };
+pub use workspace_scan::{discover_projects, WorkspaceScanErrorKind};
 
 /// Paylaşılan, thread-safe servis yöneticisi (EchoMind `Arc<Mutex<T>>` kalıbı).
 pub type SharedServices = Arc<Mutex<ServiceManager>>;
