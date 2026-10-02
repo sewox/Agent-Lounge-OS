@@ -25,6 +25,7 @@ import {
   type ServiceHealth,
   type ToolQuota,
 } from "@/lib/lounge";
+import { usePlatform } from "@/hooks/use-platform";
 import { paletteShortcutLabel } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -91,7 +92,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [alertOpen, setAlertOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [daemonsChecked, setDaemonsChecked] = useState(false);
-  const shortcutLabel = paletteShortcutLabel();
+  const platform = usePlatform();
+  const shortcutLabel = paletteShortcutLabel(platform);
   const alertRef = useRef<HTMLDivElement | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
 

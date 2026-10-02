@@ -19,6 +19,7 @@ import {
   sortExperiencesForDisplay,
 } from "@/lib/experience";
 import { vaultStrings as vaultS } from "@/lib/strings/vault";
+import { useIsTauri } from "@/hooks/use-is-tauri";
 import { useUiScale } from "@/components/ui-scale-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
@@ -158,7 +159,7 @@ export function OverviewKpis() {
       />
       <Kpi
         label={t("kpi.indexedFiles")}
-        value={indexedFiles.toLocaleString()}
+        value={indexedFiles.toLocaleString("en-US")}
         hint={lastIndex?.project ? `${lastIndex.project} · memory_bridge` : "memory_bridge"}
         badge={
           <span className="font-mono text-meta text-on-surface-variant">
@@ -1614,7 +1615,7 @@ export function TelemetryPanel() {
   const [error, setError] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState<string | null>(null);
   const [savingMd, setSavingMd] = useState(false);
-  const tauriHost = isTauri();
+  const tauriHost = useIsTauri();
 
   useEffect(() => {
     if (!saveToast) return;
@@ -1802,7 +1803,7 @@ export function TelemetryPanel() {
             <div className="space-y-4">
               <p className="text-meta text-outline">
                 {report.scopeLabel}
-                {isTauri() ? "" : " · tarayıcı"}
+                {tauriHost ? "" : " · tarayıcı"}
                 {loading ? " · yenileniyor…" : ""}
               </p>
               <div className="grid gap-2 sm:grid-cols-3">

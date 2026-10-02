@@ -2,6 +2,12 @@
 
 export type LoungePlatform = "macos" | "windows" | "linux";
 
+/**
+ * SSR / first-hydration platform snapshot.
+ * Non-macOS default keeps shortcut labels stable (Ctrl+K) until client mount.
+ */
+export const SSR_DEFAULT_PLATFORM: LoungePlatform = "linux";
+
 function readUaPlatform(): string {
   if (typeof navigator === "undefined") {
     return "";
@@ -34,10 +40,10 @@ export function detectPlatform(): LoungePlatform {
 }
 
 /** Palette shortcut label: ⌘K on macOS, Ctrl+K elsewhere (§10.2 / SH-04b). */
-export function paletteShortcutLabel(platform: LoungePlatform = detectPlatform()): string {
+export function paletteShortcutLabel(platform: LoungePlatform): string {
   return platform === "macos" ? "⌘K" : "Ctrl+K";
 }
 
-export function isApplePlatform(platform: LoungePlatform = detectPlatform()): boolean {
+export function isApplePlatform(platform: LoungePlatform): boolean {
   return platform === "macos";
 }
