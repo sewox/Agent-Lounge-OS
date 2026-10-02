@@ -1,0 +1,95 @@
+name: "✨ Özellik İsteği / Feature Request"
+description: "Yeni bir özellik veya iyileştirme önerin. / Suggest a new feature or improvement."
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fikriniz için teşekkürler! Çözmek istediğiniz problemi anlatmanız, önerdiğiniz çözüm kadar değerli.
+        Thanks for the idea! Describing the problem you want solved is as valuable as the proposed solution.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: "Ön kontrol / Pre-flight"
+      options:
+        - label: "Benzer bir istek için açık issue aradım. / I searched existing issues for a similar request."
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "İlgili alan / Area"
+      options:
+        - "Dashboard / Fleet"
+        - "Bilgi Kasası / Hafıza — Vault / Memory"
+        - "DecisionGate / Güvenlik / Politika — DecisionGate / Security / Policy"
+        - "Onay akışı — Approvals"
+        - "Kota / Modeller (LMR) — Quotas / Models"
+        - "MCP / ajan entegrasyonu — MCP / agent integrations"
+        - "Workers / NATS"
+        - "Cmd+K paleti — Command palette"
+        - "Arayüz / dil desteği — UI / languages"
+        - "Kurulum / platform desteği — Install / platform support"
+        - "Diğer / Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: "Platform (isteğe bağlı / optional)"
+      multiple: true
+      options:
+        - "macOS"
+        - "Windows"
+        - "Linux"
+        - "Tümü / All"
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Hangi problemi çözüyor? / What problem does it solve?"
+      description: "Şu an neyi yapamıyorsunuz veya ne zorlaştırıyor? / What can't you do today, or what is painful?"
+      placeholder: "Birden fazla ajan aynı görevi aldığında ... / When several agents pick up the same task ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Önerilen çözüm / Proposed solution"
+      description: "Nasıl çalışmasını istersiniz? / How would you like it to work?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Düşündüğünüz alternatifler / Alternatives considered"
+
+  - type: dropdown
+    id: privacy
+    attributes:
+      label: "Veri cihazdan çıkmalı mı? / Does it require data to leave the device?"
+      description: "Agent Lounge OS yerel öncelikli ve gizlilik odaklıdır; bu, önceliklendirmeye yardımcı olur. / Agent Lounge OS is local-first and privacy-focused; this helps prioritization."
+      options:
+        - "Hayır, tamamen yerel olabilir / No, can be fully local"
+        - "Evet, bulut servisi gerekir / Yes, needs a cloud service"
+        - "Emin değilim / Not sure"
+
+  - type: dropdown
+    id: importance
+    attributes:
+      label: "Sizin için önemi / Importance to you"
+      options:
+        - "Olsa güzel olur / Nice to have"
+        - "Önemli / Important"
+        - "Kullanmamı engelliyor / Blocking my usage"
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: "Ek bilgi / Additional context"
+      description: "Mockup, örnek uygulama, ekran görüntüsü vb. / Mockups, examples, screenshots, etc."
