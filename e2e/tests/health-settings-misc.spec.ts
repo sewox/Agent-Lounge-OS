@@ -489,25 +489,11 @@ test.describe("AP / CP / misc", () => {
   });
 
   test("OB-01 · Onboarding finish disabled when nothing selected", async ({ page }) => {
-    // Use full fixture (empty IPC dataset currently trips a client error boundary on
-    // /onboarding — documented in baseline). Deselect all tools to assert disabled CTA.
     await openRoute(page, "/onboarding", "full", { waitMs: 1200 });
-    const body = page.locator("body");
-    if (/couldn.?t load|could not be found/i.test(await body.innerText())) {
-      test.fail(true, "Onboarding failed to load under IPC mock");
-      expect(false, "onboarding page load").toBe(true);
-      return;
-    }
-    // Wait out Scanning System…
-    await page.getByRole("button", { name: /Sistemi Başlat|Finish|Start/i }).first()
-      .waitFor({ state: "visible", timeout: 15_000 })
-      .catch(() => undefined);
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText, "onboarding page must load").not.toMatch(/couldn.?t load|could not be found/i);
     const finish = page.getByRole("button", { name: /Sistemi Başlat|Finish|Start/i }).first();
-    if ((await finish.count()) === 0) {
-      test.fail(true, "Finish CTA not found after scan");
-      expect(await finish.count()).toBeGreaterThan(0);
-      return;
-    }
+    await expect(finish).toBeVisible({ timeout: 15_000 });
     // Deselect everything that looks selected.
     const checked = page.locator('input[type="checkbox"]:checked');
     const n = await checked.count();

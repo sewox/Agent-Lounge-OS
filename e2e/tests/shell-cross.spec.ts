@@ -78,18 +78,15 @@ test.describe("SH — global shell", () => {
 
   test("SH-05 · Model select calls set_kernel_model", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
-    const select = page.locator("header select").first();
-    if ((await select.count()) === 0) {
-      test.skip(true, "Model select not visible at this viewport");
-      return;
-    }
+    const select = page.locator('header select[aria-label*="LMR"], header select').first();
+    await expect(select, "model select must be visible").toBeVisible();
+    await expect(select).toBeEnabled({ timeout: 10_000 });
     const options = await select.locator("option").allTextContents();
     const pick = options.find((o) => /qwen|llama/i.test(o)) || options[1];
-    if (pick) {
-      await select.selectOption({ label: pick.trim() }).catch(async () => {
-        await select.selectOption({ index: 1 });
-      });
-    }
+    expect(pick, "model options must exist").toBeTruthy();
+    await select.selectOption({ label: pick!.trim() }).catch(async () => {
+      await select.selectOption({ index: 1 });
+    });
     await page.waitForTimeout(300);
     const log = await getIpcLog(page);
     expect(log.some((e) => e.cmd === "set_kernel_model")).toBeTruthy();
