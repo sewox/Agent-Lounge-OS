@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  assertPathInsideDir,
+  isValidSessionId,
   JsonlLogger,
   readJsonl,
   sanitizeLabel,
@@ -14,6 +16,66 @@ test("sanitizeLabel strips unsafe chars", () => {
   assert.equal(sanitizeLabel("Cursor IDE"), "Cursor_IDE");
   assert.equal(sanitizeLabel("../../../x"), "x");
   assert.equal(sanitizeLabel(""), "client");
+});
+
+test("isValidSessionId rejects path traversal and NUL", () => {
+  assert.equal(isValidSessionId("abc-123"), true);
+  assert.equal(isValidSessionId("x/../../../escaped-poc"), false);
+  assert.equal(isValidSessionId("..\\windows"), false);
+  assert.equal(isValidSessionId("/abs/path"), false);
+  assert.equal(isValidSessionId("bad\0id"), false);
+  assert.equal(isValidSessionId(""), false);
+  assert.equal(isValidSessionId("a".repeat(65)), false);
+});
+
+test("JsonlLogger rejects traversal session ids and keeps files under logDir", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-probe-log-"));
+  assert.throws(
+    () =>
+      new JsonlLogger({
+        logDir: dir,
+        clientLabel: "t",
+        sessionId: "x/../../../escaped-poc",
+      }),
+    /Invalid session id/,
+  );
+  assert.throws(
+    () =>
+      new JsonlLogger({
+        logDir: dir,
+        clientLabel: "t",
+        sessionId: "..\\escaped",
+      }),
+    /Invalid session id/,
+  );
+  assert.throws(
+    () =>
+      new JsonlLogger({
+        logDir: dir,
+        clientLabel: "t",
+        sessionId: "/tmp/abs",
+      }),
+    /Invalid session id/,
+  );
+  assert.throws(
+    () =>
+      new JsonlLogger({
+        logDir: dir,
+        clientLabel: "t",
+        sessionId: "nul\0byte",
+      }),
+    /Invalid session id/,
+  );
+
+  const logger = new JsonlLogger({
+    logDir: dir,
+    clientLabel: "safe",
+    sessionId: "sess-ok-1",
+  });
+  assertPathInsideDir(path.resolve(dir), logger.filePath);
+  logger.write("session_start", { transport: "stdio" });
+  assert.ok(logger.filePath.startsWith(path.resolve(dir)));
+  assert.equal(path.dirname(logger.filePath), path.resolve(dir));
 });
 
 test("JsonlLogger writes session events and summarizeEvents extracts fields", () => {

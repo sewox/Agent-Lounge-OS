@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { StdioFakeClient } from "../src/fake-client.mjs";
 import { readJsonl, summarizeEvents } from "../src/logger.mjs";
+import { CI_WAIT_MS, waitFor } from "./helpers.mjs";
 
 test("stdio fake client: initialize + ping + slow_echo with progress", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-probe-stdio-"));
@@ -56,27 +57,25 @@ test("stdio fake client: timeout cancels long-running call", async () => {
         client.slowEcho({
           delayMs: 5000,
           progress: false,
-          timeoutMs: 120,
+          timeoutMs: 200,
         }),
       (err) => err && err.code === "CLIENT_TIMEOUT",
     );
-    // Allow stdio to deliver notifications/cancelled before tearing down.
-    await new Promise((r) => setTimeout(r, 150));
+    await waitFor(() => {
+      const logFile = fs.readdirSync(dir).find((f) => f.endsWith(".jsonl"));
+      if (!logFile) return false;
+      const events = readJsonl(path.join(dir, logFile));
+      return events.some(
+        (e) =>
+          e.event === "cancelled" ||
+          (e.event === "tools_call_end" &&
+            (e.status === "cancelled_silent" || e.status === "aborted_silent")) ||
+          e.event === "timeout_observed" ||
+          e.event === "call_aborted" ||
+          e.event === "connection_close",
+      );
+    }, { timeoutMs: CI_WAIT_MS, label: "cancel/disconnect log evidence" });
   } finally {
     await client.close();
   }
-
-  const logFile = fs.readdirSync(dir).find((f) => f.endsWith(".jsonl"));
-  const events = readJsonl(path.join(dir, logFile));
-  assert.ok(
-    events.some(
-      (e) =>
-        e.event === "cancelled" ||
-        (e.event === "tools_call_end" && e.status === "cancelled") ||
-        e.event === "timeout_observed" ||
-        e.event === "call_aborted" ||
-        e.event === "connection_close",
-    ),
-    `expected cancel/disconnect evidence, got: ${events.map((e) => e.event).join(",")}`,
-  );
 });

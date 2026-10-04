@@ -19,17 +19,38 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_DELAYS_S = [5, 15, 25, 30, 45, 60, 120];
 
 /**
- * @param {string|undefined} raw
+ * Parse delay list (seconds).
+ * - `undefined` / `null` → default matrix (when caller did not supply an override).
+ * - empty string, non-numeric, negative, or zero-length result → throws (CLI exits non-zero).
+ *
+ * @param {string|undefined|null} raw
  * @returns {number[]}
  */
 export function parseDelays(raw) {
-  if (!raw || !String(raw).trim()) return [...DEFAULT_DELAYS_S];
-  return String(raw)
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => Number(s))
-    .filter((n) => Number.isFinite(n) && n >= 0);
+  if (raw === undefined || raw === null) {
+    return [...DEFAULT_DELAYS_S];
+  }
+  const trimmed = String(raw).trim();
+  if (!trimmed) {
+    throw new Error("MCP_PROBE_DELAYS/delays is empty");
+  }
+  const parts = trimmed.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length === 0) {
+    throw new Error("MCP_PROBE_DELAYS/delays produced zero rows");
+  }
+  /** @type {number[]} */
+  const delays = [];
+  for (const part of parts) {
+    const n = Number(part);
+    if (!Number.isFinite(n) || n < 0) {
+      throw new Error(`invalid delay value: ${part}`);
+    }
+    delays.push(n);
+  }
+  if (delays.length === 0) {
+    throw new Error("MCP_PROBE_DELAYS/delays produced zero rows");
+  }
+  return delays;
 }
 
 /**
@@ -42,7 +63,14 @@ export function parseDelays(raw) {
  * @param {boolean} [opts.progressToken]
  */
 export async function runMatrix(opts = {}) {
-  const delaysS = opts.delaysS || parseDelays(process.env.MCP_PROBE_DELAYS);
+  const delaysS =
+    opts.delaysS ||
+    (process.env.MCP_PROBE_DELAYS !== undefined
+      ? parseDelays(process.env.MCP_PROBE_DELAYS)
+      : parseDelays(undefined));
+  if (!delaysS.length) {
+    throw new Error("run-matrix: zero delay rows");
+  }
   const outDir = path.resolve(opts.outDir || path.join(__dirname, "../logs/matrix"));
   const logDir = path.resolve(opts.logDir || path.join(outDir, "jsonl"));
   fs.mkdirSync(logDir, { recursive: true });
@@ -161,8 +189,9 @@ export async function runMatrix(opts = {}) {
 }
 
 function parseCli(argv) {
+  /** @type {Record<string, string|boolean|null>} */
   const out = {
-    delays: process.env.MCP_PROBE_DELAYS || "",
+    delays: null,
     "log-dir": "",
     "out-dir": path.resolve(__dirname, "../logs/matrix"),
     "client-timeout-ms": "",
@@ -186,21 +215,43 @@ const isMain =
 
 if (isMain) {
   const args = parseCli(process.argv.slice(2));
-  const { result, matrixPath, reportPath } = await runMatrix({
-    delaysS: parseDelays(args.delays),
-    outDir: args["out-dir"],
-    logDir: args["log-dir"] || undefined,
-    withProgress: !args["no-progress"],
-    clientTimeoutMs: args["client-timeout-ms"]
-      ? Number(args["client-timeout-ms"])
-      : undefined,
-  });
-  process.stderr.write(
-    `[mcp-probe] matrix rows=${result.rows.length} json=${matrixPath} report=${reportPath}\n`,
-  );
-  const failed = result.rows.filter((r) => r.status === "error");
-  if (failed.length) {
-    process.stderr.write(`[mcp-probe] ${failed.length} row(s) errored\n`);
-    process.exitCode = 1;
+  try {
+    let delaysS;
+    if (args.delays !== null && args.delays !== undefined) {
+      delaysS = parseDelays(String(args.delays));
+    } else if (process.env.MCP_PROBE_DELAYS !== undefined) {
+      delaysS = parseDelays(process.env.MCP_PROBE_DELAYS);
+    } else {
+      delaysS = parseDelays(undefined);
+    }
+    if (!delaysS.length) {
+      throw new Error("run-matrix: zero delay rows");
+    }
+    const { result, matrixPath, reportPath } = await runMatrix({
+      delaysS,
+      outDir: String(args["out-dir"]),
+      logDir: args["log-dir"] ? String(args["log-dir"]) : undefined,
+      withProgress: !args["no-progress"],
+      clientTimeoutMs: args["client-timeout-ms"]
+        ? Number(args["client-timeout-ms"])
+        : undefined,
+    });
+    process.stderr.write(
+      `[mcp-probe] matrix rows=${result.rows.length} json=${matrixPath} report=${reportPath}\n`,
+    );
+    if (!result.rows.length) {
+      process.stderr.write("[mcp-probe] zero result rows\n");
+      process.exitCode = 1;
+    }
+    const failed = result.rows.filter((r) => r.status === "error");
+    if (failed.length) {
+      process.stderr.write(`[mcp-probe] ${failed.length} row(s) errored\n`);
+      process.exitCode = 1;
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[mcp-probe] ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    process.exit(1);
   }
 }

@@ -5,11 +5,16 @@ import path from "node:path";
 import test from "node:test";
 import { JsonlLogger } from "../src/logger.mjs";
 import {
+  CANCELLED_NO_RESPONSE,
   createSession,
   handleMessage,
+  LATEST_PROTOCOL_VERSION,
+  negotiateProtocolVersion,
   onConnectionClose,
+  PROTOCOL_VERSIONS,
   toolDefs,
 } from "../src/protocol.mjs";
+import { CI_WAIT_MS, waitFor } from "./helpers.mjs";
 
 function makeSession() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-probe-proto-"));
@@ -33,6 +38,15 @@ test("toolDefs exposes ping and slow_echo", () => {
   assert.deepEqual(names, ["ping", "slow_echo"]);
 });
 
+test("protocol negotiation falls back to newest supported", () => {
+  assert.ok(PROTOCOL_VERSIONS.includes("2025-11-25"));
+  assert.equal(LATEST_PROTOCOL_VERSION, "2025-11-25");
+  assert.equal(negotiateProtocolVersion("2024-11-05"), "2024-11-05");
+  assert.equal(negotiateProtocolVersion("2025-11-25"), "2025-11-25");
+  assert.equal(negotiateProtocolVersion("1999-01-01"), LATEST_PROTOCOL_VERSION);
+  assert.equal(negotiateProtocolVersion("unknown"), LATEST_PROTOCOL_VERSION);
+});
+
 test("initialize records clientInfo and capabilities", async () => {
   const { session, logger } = makeSession();
   const res = await handleMessage(session, {
@@ -46,6 +60,7 @@ test("initialize records clientInfo and capabilities", async () => {
     },
   });
   assert.equal(res.result.serverInfo.name, "mcp-probe");
+  assert.equal(res.result.protocolVersion, "2024-11-05");
   assert.equal(session.clientInfo.name, "TestClient");
   assert.equal(session.capabilities.sampling !== undefined, true);
   const events = fs
@@ -54,6 +69,21 @@ test("initialize records clientInfo and capabilities", async () => {
     .split("\n")
     .map((l) => JSON.parse(l));
   assert.ok(events.some((e) => e.event === "initialize"));
+});
+
+test("initialize unknown version negotiates newest", async () => {
+  const { session } = makeSession();
+  const res = await handleMessage(session, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2099-01-01",
+      capabilities: {},
+      clientInfo: { name: "p", version: "1" },
+    },
+  });
+  assert.equal(res.result.protocolVersion, LATEST_PROTOCOL_VERSION);
 });
 
 test("ping tool returns ok payload", async () => {
@@ -111,8 +141,8 @@ test("slow_echo waits and optionally sends progress", async () => {
   );
 });
 
-test("cancelled notification aborts in-flight slow_echo", async () => {
-  const { session } = makeSession();
+test("cancelled notification does not send -32800 response", async () => {
+  const { session, logger } = makeSession();
   await handleMessage(session, {
     jsonrpc: "2.0",
     id: 1,
@@ -134,18 +164,32 @@ test("cancelled notification aborts in-flight slow_echo", async () => {
     },
   });
 
-  // Let the call register
-  await new Promise((r) => setTimeout(r, 20));
+  await waitFor(() => session.activeCalls.has(7), {
+    timeoutMs: CI_WAIT_MS,
+    label: "slow_echo registered",
+  });
   await handleMessage(session, {
     jsonrpc: "2.0",
     method: "notifications/cancelled",
     params: { requestId: 7, reason: "test" },
   });
 
-  // handleMessage maps tool abort to a JSON-RPC error response (does not throw).
   const res = await callPromise;
-  assert.equal(res.error.code, -32800);
-  assert.match(res.error.message, /cancelled/i);
+  assert.equal(res, null, "SHOULD NOT respond to cancelled request");
+  const events = fs
+    .readFileSync(logger.filePath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.ok(events.some((e) => e.event === "cancelled"));
+  assert.ok(
+    events.some(
+      (e) =>
+        e.event === "tools_call_end" &&
+        (e.status === "cancelled_silent" || e.abort_reason === "client_cancelled"),
+    ),
+  );
+  assert.ok(!events.some((e) => e.event === "error" && String(e.message).includes("-32800")));
 });
 
 test("connection close logs timeout_observed for active calls", async () => {
@@ -166,10 +210,14 @@ test("connection close logs timeout_observed for active calls", async () => {
     method: "tools/call",
     params: { name: "slow_echo", arguments: { delay_ms: 10_000 } },
   });
-  await new Promise((r) => setTimeout(r, 20));
+  await waitFor(() => session.activeCalls.has(3), {
+    timeoutMs: CI_WAIT_MS,
+    label: "active call before close",
+  });
   onConnectionClose(session, "test_drop");
   const res = await callPromise;
-  assert.ok(res.error, "expected JSON-RPC error after disconnect");
+  assert.equal(res, null);
+  assert.equal(CANCELLED_NO_RESPONSE.description, "mcp-probe-cancelled-no-response");
   const events = fs
     .readFileSync(logger.filePath, "utf8")
     .trim()

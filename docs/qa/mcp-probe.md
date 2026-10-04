@@ -157,9 +157,11 @@ Uygulamayı yeniden başlatın.
 
 ### Antigravity
 
-Global (tercih): `~/.gemini/config/mcp_config.json`  
-Legacy: `~/.gemini/antigravity/mcp_config.json`  
-Proje: `.agents/mcp_config.json`
+> **Doğrulanmadı:** aşağıdaki config yolları istemci sürümüne göre değişebilir; ölçüm öncesi makinedeki gerçek dosyayı kontrol edin.
+
+Global (tercih, doğrulanmadı): `~/.gemini/config/mcp_config.json`  
+Legacy (doğrulanmadı): `~/.gemini/antigravity/mcp_config.json`  
+Proje (doğrulanmadı): `.agents/mcp_config.json`
 
 ```json
 {
@@ -190,10 +192,23 @@ HTTP dinliyorsa probe’u `--transport http` ile açıp Grok’un URL alanına `
 
 Aynı `command` + `args` kalıbı Claude Code (`.mcp.json`), VS Code (`.vscode/mcp.json` → çoğu sürümde `servers`), Windsurf, Zed (`context_servers`) için uyarlanır. Her istemci için ayrı `--client-label` kullanın.
 
+## Cancel davranışı
+
+İstemci `notifications/cancelled` gönderdiğinde probe iptali **yalnızca loglar** ve in-flight `slow_echo`’yu durdurur; iptal edilen istek için **JSON-RPC `-32800` yanıtı göndermez** (MCP spec: server SHOULD NOT respond to a cancelled request).
+
 ## CI
 
-`ci.yml` içinde `MCP probe` işi (ubuntu / windows / macos matrisi) `tools/mcp-probe` altında `npm test` çalıştırır. Testler sahte istemci kullanır; GUI ölçümü CI dışındadır. `paths-ignore` ve branch korumasına dokunulmamıştır; test gevşetme / `continue-on-error` / skip etiketi yoktur.
+`ci.yml` içinde `MCP probe` işi (ubuntu / windows / macos matrisi) zorunlu aggregate `ci` job’ına `needs` ile bağlıdır (bilinçli: probe regresyonu ana CI’yı kırmızıya çeker).
+
+Adımlar:
+
+1. `cd tools/mcp-probe && npm test` — birim + sahte-istemci entegrasyon testleri
+2. `MCP_PROBE_DELAYS=0.05,0.1 npm run run-matrix` — kısa matrix smoke (JSON + markdown rapor)
+
+Testler sahte istemci kullanır; GUI ölçümü CI dışındadır. `paths-ignore` ve branch korumasına dokunulmamıştır; test gevşetme / `continue-on-error` / skip etiketi yoktur. Zamanlayıcı yarışlarında sabit kısa `sleep` yerine olay beklenir (`waitFor`, cömert timeout).
+
+Geçersiz `MCP_PROBE_DELAYS` (boş, `abc`, negatif) non-zero exit verir; sıfır satırla başarı sayılmaz.
 
 ## Güvenlik notu
 
-Probe yalnızca yerel ölçüm içindir; kimlik doğrulama yok. `127.0.0.1` dışında bind etmeyin. Loglar istemci adını ve yeteneklerini içerir — paylaşımdan önce gözden geçirin.
+Probe yalnızca yerel ölçüm içindir. HTTP yüzeyi loopback `Origin`/`Host` ister, gövde ≤ 1 MiB, oturum sayısı sınırlıdır; `Mcp-Session-Id` `^[A-Za-z0-9._-]{1,64}$` ile doğrulanır (path traversal engeli). `127.0.0.1` dışında bind etmeyin. Loglar istemci adını ve yeteneklerini içerir — paylaşımdan önce gözden geçirin.

@@ -5,27 +5,36 @@ import {
   handleMessage,
   onConnectionClose,
   parseRpc,
+  LATEST_PROTOCOL_VERSION,
   SERVER_NAME,
   SERVER_VERSION,
 } from "./protocol.mjs";
-import { JsonlLogger } from "./logger.mjs";
+import { isValidSessionId, JsonlLogger } from "./logger.mjs";
 
 const HDR_SESSION = "mcp-session-id";
 const HDR_PROTOCOL = "mcp-protocol-version";
+export const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MiB
+export const MAX_SESSIONS = 64;
 
 /**
  * Streamable HTTP + SSE MCP probe server.
  *
  * - POST /mcp  — JSON-RPC (JSON or SSE response when progress/long-running)
- * - GET  /mcp  — SSE stream for server→client messages
+ * - GET  /mcp  — SSE stream for server→client messages (GET channel only)
  * - DELETE /mcp — end session
  * - GET /health — health
+ *
+ * Progress/notifications during a POST SSE response go ONLY to that POST stream
+ * (not duplicated onto GET SSE). GET SSE receives messages only when session.send
+ * is the default fan-out (no active POST SSE response).
  *
  * @param {object} opts
  * @param {string} opts.logDir
  * @param {string} [opts.host]
  * @param {number} [opts.port]
  * @param {string} [opts.clientLabel]
+ * @param {number} [opts.maxSessions]
+ * @param {number} [opts.maxBodyBytes]
  * @returns {Promise<{server: import('node:http').Server, url: string, close: () => Promise<void>}>}
  */
 export async function startHttpServer(opts) {
@@ -33,6 +42,8 @@ export async function startHttpServer(opts) {
   const port = opts.port ?? 19891;
   const logDir = opts.logDir;
   const defaultLabel = opts.clientLabel || process.env.MCP_PROBE_CLIENT || "http";
+  const maxSessions = opts.maxSessions ?? MAX_SESSIONS;
+  const maxBodyBytes = opts.maxBodyBytes ?? MAX_BODY_BYTES;
 
   /** @type {Map<string, ReturnType<typeof makeHttpSession>>} */
   const sessions = new Map();
@@ -40,13 +51,17 @@ export async function startHttpServer(opts) {
   function makeHttpSession(sessionId, clientLabel) {
     /** @type {import('node:http').ServerResponse[]} */
     const sseClients = [];
+    /** Active POST SSE response, if any — progress goes here exclusively. */
+    /** @type {import('node:http').ServerResponse|null} */
+    let postSse = null;
+
     const logger = new JsonlLogger({
       logDir,
       clientLabel,
       sessionId,
     });
 
-    const send = (msg) => {
+    const sendToGetSse = (msg) => {
       const data = `event: message\ndata: ${JSON.stringify(msg)}\n\n`;
       for (const res of [...sseClients]) {
         try {
@@ -57,6 +72,18 @@ export async function startHttpServer(opts) {
       }
     };
 
+    const send = (msg) => {
+      if (postSse && !postSse.writableEnded) {
+        try {
+          postSse.write(`event: message\ndata: ${JSON.stringify(msg)}\n\n`);
+        } catch {
+          /* drop */
+        }
+        return;
+      }
+      sendToGetSse(msg);
+    };
+
     const session = createSession({
       logger,
       transport: "http",
@@ -64,47 +91,78 @@ export async function startHttpServer(opts) {
       send,
     });
 
-    return { session, logger, sseClients, send };
+    return {
+      session,
+      logger,
+      sseClients,
+      send,
+      get postSse() {
+        return postSse;
+      },
+      setPostSse(res) {
+        postSse = res;
+      },
+      clearPostSse(res) {
+        if (postSse === res) postSse = null;
+      },
+    };
   }
 
+  /**
+   * @param {import('node:http').IncomingMessage} req
+   * @param {boolean} isInitialize
+   * @returns {{ entry: ReturnType<typeof makeHttpSession> } | { httpError: number, message: string }}
+   */
   function getOrCreateSession(req, isInitialize) {
     const headerId = header(req, HDR_SESSION);
-    if (headerId && sessions.has(headerId)) {
-      const existing = sessions.get(headerId);
-      existing.session.lastSeenAt = Date.now();
-      if (existing.session.closed) {
-        // Reopen bookkeeping for reconnect observation
-        existing.session.closed = false;
-        existing.logger.write("connection_reconnect", {
-          previous_session_id: headerId,
-          reconnected_at: new Date().toISOString(),
-        });
+
+    if (headerId) {
+      if (!isValidSessionId(headerId)) {
+        return { httpError: 400, message: "invalid Mcp-Session-Id" };
       }
-      return existing;
+      if (sessions.has(headerId)) {
+        const existing = sessions.get(headerId);
+        existing.session.lastSeenAt = Date.now();
+        if (existing.session.closed) {
+          existing.session.closed = false;
+          existing.logger.write("connection_reconnect", {
+            previous_session_id: headerId,
+            reconnected_at: new Date().toISOString(),
+          });
+        }
+        return { entry: existing };
+      }
+      // Unknown session id: never open a new logger for non-initialize traffic.
+      if (!isInitialize) {
+        return { httpError: 404, message: "unknown session" };
+      }
+    } else if (!isInitialize) {
+      return { httpError: 400, message: "Mcp-Session-Id required" };
     }
-    if (headerId && !sessions.has(headerId) && !isInitialize) {
-      // Unknown session id on non-initialize → new session tagged as reconnect attempt
-      const created = makeHttpSession(headerId, defaultLabel);
-      created.logger.write("connection_reconnect", {
-        previous_session_id: headerId,
-        note: "client presented session id unknown to server; new session created",
-        reconnected_at: new Date().toISOString(),
-      });
-      sessions.set(headerId, created);
-      return created;
+
+    if (sessions.size >= maxSessions) {
+      return { httpError: 503, message: "too many sessions" };
     }
+
     const sessionId = headerId || randomUUID();
+    if (!isValidSessionId(sessionId)) {
+      return { httpError: 500, message: "failed to allocate session id" };
+    }
     const created = makeHttpSession(sessionId, defaultLabel);
     sessions.set(sessionId, created);
-    return created;
+    return { entry: created };
   }
 
   const server = http.createServer(async (req, res) => {
     try {
+      if (!assertLocalRequest(req, res)) return;
       await route(req, res);
     } catch (err) {
+      const code = err && typeof err === "object" && "httpCode" in err
+        ? /** @type {any} */ (err).httpCode
+        : 500;
       if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "application/json" });
+        res.writeHead(code, { "content-type": "application/json" });
       }
       res.end(
         JSON.stringify({
@@ -125,6 +183,7 @@ export async function startHttpServer(opts) {
         version: SERVER_VERSION,
         transport: "http",
         sessions: sessions.size,
+        max_sessions: maxSessions,
       });
       return;
     }
@@ -141,7 +200,7 @@ export async function startHttpServer(opts) {
 
     if (req.method === "DELETE") {
       const sid = header(req, HDR_SESSION);
-      if (!sid || !sessions.has(sid)) {
+      if (!sid || !isValidSessionId(sid) || !sessions.has(sid)) {
         json(res, 404, { error: "unknown session" });
         return;
       }
@@ -172,7 +231,7 @@ export async function startHttpServer(opts) {
 
   function handleSseGet(req, res) {
     const sid = header(req, HDR_SESSION);
-    if (!sid || !sessions.has(sid)) {
+    if (!sid || !isValidSessionId(sid) || !sessions.has(sid)) {
       json(res, 400, { error: "Mcp-Session-Id required for SSE" });
       return;
     }
@@ -185,15 +244,15 @@ export async function startHttpServer(opts) {
     });
     res.write(`event: ready\ndata: ${JSON.stringify({ ok: true, session_id: sid })}\n\n`);
     entry.sseClients.push(res);
-    entry.logger.write("sse_attached", {});
+    entry.logger.write("sse_attached", { channel: "get" });
 
     const onClose = () => {
       const idx = entry.sseClients.indexOf(res);
       if (idx >= 0) entry.sseClients.splice(idx, 1);
       entry.logger.write("sse_detached", {
+        channel: "get",
         remaining_sse_clients: entry.sseClients.length,
       });
-      // If no SSE left and there are active long calls, note possible mid-call drop
       if (entry.sseClients.length === 0 && entry.session.activeCalls.size > 0) {
         entry.logger.write("connection_close", {
           reason: "sse_drop_during_active_call",
@@ -210,7 +269,15 @@ export async function startHttpServer(opts) {
   }
 
   async function handlePost(req, res) {
-    const body = await readBody(req);
+    let body;
+    try {
+      body = await readBody(req, maxBodyBytes);
+    } catch (err) {
+      const code = /** @type {any} */ (err).httpCode || 400;
+      json(res, code, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+
     let messages;
     try {
       messages = parseRpc(body);
@@ -227,19 +294,24 @@ export async function startHttpServer(opts) {
     }
 
     const isInitialize = messages.some((m) => m?.method === "initialize");
-    const entry = getOrCreateSession(req, isInitialize);
+    const resolved = getOrCreateSession(req, isInitialize);
+    if ("httpError" in resolved) {
+      json(res, resolved.httpError, { error: resolved.message });
+      return;
+    }
+    const entry = resolved.entry;
     const sid = entry.session.sessionId;
 
-    // Label override from header for multi-client HTTP probes
     const labelHdr = header(req, "x-mcp-probe-client");
-    if (labelHdr) {
-      entry.logger.clientLabel = labelHdr;
+    if (labelHdr && isValidSessionId(labelHdr.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64))) {
+      // label is not session id; keep sanitize via logger API — only override display label safely
+      entry.logger.clientLabel = labelHdr.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64) || entry.logger.clientLabel;
     }
 
     const accept = (header(req, "accept") || "").toLowerCase();
     const wantsSse = accept.includes("text/event-stream");
+    const proto = entry.session.protocolVersion || LATEST_PROTOCOL_VERSION;
 
-    // Notifications-only POST (e.g. cancelled) — 202
     const onlyNotifications = messages.every(
       (m) => m && (m.id === undefined || m.id === null),
     );
@@ -249,13 +321,12 @@ export async function startHttpServer(opts) {
       }
       res.writeHead(202, {
         [HDR_SESSION]: sid,
-        [HDR_PROTOCOL]: entry.session.protocolVersion || "2024-11-05",
+        [HDR_PROTOCOL]: proto,
       });
       res.end();
       return;
     }
 
-    // If any tools/call with progress or delay, prefer SSE response stream
     const longRunning = messages.some(
       (m) =>
         m?.method === "tools/call" &&
@@ -269,15 +340,11 @@ export async function startHttpServer(opts) {
         "cache-control": "no-cache",
         connection: "keep-alive",
         [HDR_SESSION]: sid,
-        [HDR_PROTOCOL]: entry.session.protocolVersion || "2024-11-05",
+        [HDR_PROTOCOL]: proto,
       });
 
-      const originalSend = entry.send;
-      const streamSend = (msg) => {
-        res.write(`event: message\ndata: ${JSON.stringify(msg)}\n\n`);
-        originalSend(msg);
-      };
-      entry.session.send = streamSend;
+      // Route session.send exclusively to this POST SSE (no GET-SSE duplicate).
+      entry.setPostSse(res);
 
       const onReqClose = () => {
         if (entry.session.activeCalls.size > 0) {
@@ -291,7 +358,7 @@ export async function startHttpServer(opts) {
               delay_ms: c.delayMs,
             })),
           });
-          for (const [rid, call] of entry.session.activeCalls) {
+          for (const [rid, call] of [...entry.session.activeCalls]) {
             entry.logger.write("timeout_observed", {
               request_id: rid,
               tool: call.tool,
@@ -300,6 +367,7 @@ export async function startHttpServer(opts) {
               expected_delay_ms: call.delayMs,
               note: "client aborted HTTP SSE while call in flight",
             });
+            call.abortReason = "http_post_sse_client_abort";
             call.abort.abort();
           }
           entry.session.activeCalls.clear();
@@ -315,14 +383,13 @@ export async function startHttpServer(opts) {
           }
         }
       } finally {
-        entry.session.send = originalSend;
+        entry.clearPostSse(res);
         req.off("close", onReqClose);
         res.end();
       }
       return;
     }
 
-    // Simple JSON response (initialize, ping, tools/list, short calls)
     const responses = [];
     for (const msg of messages) {
       const response = await handleMessage(entry.session, msg);
@@ -332,7 +399,7 @@ export async function startHttpServer(opts) {
     res.writeHead(200, {
       "content-type": "application/json",
       [HDR_SESSION]: sid,
-      [HDR_PROTOCOL]: entry.session.protocolVersion || "2024-11-05",
+      [HDR_PROTOCOL]: proto,
     });
     res.end(JSON.stringify(payload));
   }
@@ -359,6 +426,43 @@ export async function startHttpServer(opts) {
   return { server, url, host, port: boundPort, close, sessions };
 }
 
+/** @param {string} hostname */
+export function isLoopbackHost(hostname) {
+  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "0.0.0.0";
+}
+
+/**
+ * Reject non-loopback Origin / Host (probe is localhost-only).
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ */
+export function assertLocalRequest(req, res) {
+  const origin = header(req, "origin");
+  if (origin) {
+    try {
+      const u = new URL(origin);
+      if (!isLoopbackHost(u.hostname)) {
+        json(res, 403, { error: "origin not allowed" });
+        return false;
+      }
+    } catch {
+      json(res, 403, { error: "invalid origin" });
+      return false;
+    }
+  }
+
+  const hostHdr = header(req, "host");
+  if (hostHdr) {
+    const hostname = hostHdr.split(":")[0];
+    if (hostname && !isLoopbackHost(hostname)) {
+      json(res, 403, { error: "host not allowed" });
+      return false;
+    }
+  }
+  return true;
+}
+
 /** @param {import('node:http').IncomingMessage} req @param {string} name */
 function header(req, name) {
   const v = req.headers[name.toLowerCase()];
@@ -366,13 +470,38 @@ function header(req, name) {
   return (v || "").trim();
 }
 
-/** @param {import('node:http').IncomingMessage} req */
-function readBody(req) {
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {number} maxBytes
+ */
+export function readBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    let size = 0;
+    let done = false;
+    req.on("data", (c) => {
+      if (done) return;
+      size += c.length;
+      if (size > maxBytes) {
+        done = true;
+        const err = new Error(`body too large (max ${maxBytes} bytes)`);
+        /** @type {any} */ (err).httpCode = 413;
+        reject(err);
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    });
   });
 }
 

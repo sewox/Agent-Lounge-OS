@@ -6,10 +6,20 @@ import test from "node:test";
 import { generateReport } from "../scripts/report.mjs";
 import { parseDelays, runMatrix, DEFAULT_DELAYS_S } from "../scripts/run-matrix.mjs";
 
-test("parseDelays defaults to full client-matrix seconds", () => {
-  assert.deepEqual(parseDelays(""), DEFAULT_DELAYS_S);
+test("parseDelays defaults only when unset", () => {
+  assert.deepEqual(parseDelays(undefined), DEFAULT_DELAYS_S);
+  assert.deepEqual(parseDelays(null), DEFAULT_DELAYS_S);
   assert.deepEqual(parseDelays("5,15,25"), [5, 15, 25]);
   assert.deepEqual(parseDelays("0.05 0.1"), [0.05, 0.1]);
+});
+
+test("parseDelays rejects empty, non-numeric, negative", () => {
+  assert.throws(() => parseDelays(""), /empty/);
+  assert.throws(() => parseDelays("   "), /empty/);
+  assert.throws(() => parseDelays("abc"), /invalid delay/);
+  assert.throws(() => parseDelays("5,abc,10"), /invalid delay/);
+  assert.throws(() => parseDelays("-1"), /invalid delay/);
+  assert.throws(() => parseDelays("5,-0.1"), /invalid delay/);
 });
 
 test("runMatrix short delays produce JSON + markdown report", async () => {
@@ -29,6 +39,14 @@ test("runMatrix short delays produce JSON + markdown report", async () => {
   assert.match(md, /Run matrix/);
   assert.match(md, /0\.05/);
   assert.match(md, /Session summaries/);
+});
+
+test("runMatrix refuses zero-length delay list", async () => {
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-probe-matrix-z-"));
+  await assert.rejects(
+    () => runMatrix({ delaysS: [], outDir }),
+    /zero delay rows/,
+  );
 });
 
 test("generateReport renders timeout column from fixture", () => {

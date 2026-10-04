@@ -2,12 +2,35 @@ import { randomUUID } from "node:crypto";
 
 export const SERVER_NAME = "mcp-probe";
 export const SERVER_VERSION = "0.1.0";
-export const DEFAULT_PROTOCOL_VERSION = "2024-11-05";
-export const PROTOCOL_VERSIONS = new Set([
+
+/** Supported protocol versions, oldest → newest. */
+export const PROTOCOL_VERSIONS = [
   "2024-11-05",
   "2025-03-26",
   "2025-06-18",
-]);
+  "2025-11-25",
+];
+
+/** Fallback when the client requests an unknown version: newest supported. */
+export const LATEST_PROTOCOL_VERSION =
+  PROTOCOL_VERSIONS[PROTOCOL_VERSIONS.length - 1];
+
+/** @deprecated use LATEST_PROTOCOL_VERSION — kept as alias for newest. */
+export const DEFAULT_PROTOCOL_VERSION = LATEST_PROTOCOL_VERSION;
+
+/** Sentinel: cancelled request must not produce a JSON-RPC response (MCP SHOULD NOT). */
+export const CANCELLED_NO_RESPONSE = Symbol("mcp-probe-cancelled-no-response");
+
+/**
+ * @param {string} requested
+ * @returns {string}
+ */
+export function negotiateProtocolVersion(requested) {
+  if (typeof requested === "string" && PROTOCOL_VERSIONS.includes(requested)) {
+    return requested;
+  }
+  return LATEST_PROTOCOL_VERSION;
+}
 
 /** @typedef {{
  *   sessionId: string,
@@ -32,8 +55,10 @@ export const PROTOCOL_VERSIONS = new Set([
  *   progressToken: string|number|null,
  *   progressSent: number,
  *   abort: AbortController,
+ *   abortReason: string|null,
  *   timer: NodeJS.Timeout|null,
  *   progressTimer: NodeJS.Timeout|null,
+ *   finished: boolean,
  * }} ActiveCall */
 
 export function toolDefs() {
@@ -143,6 +168,8 @@ export async function handleMessage(session, msg) {
       return null;
     }
     const result = await handleRequest(session, id, method, params || {});
+    // Spec: server SHOULD NOT respond to a request cancelled via notifications/cancelled.
+    if (result === CANCELLED_NO_RESPONSE) return null;
     return { jsonrpc: "2.0", id, result };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -218,10 +245,8 @@ async function handleRequest(session, id, method, params) {
 function doInitialize(session, params) {
   const clientInfo = params.clientInfo ?? {};
   const capabilities = params.capabilities ?? {};
-  const requested = params.protocolVersion || DEFAULT_PROTOCOL_VERSION;
-  const protocolVersion = PROTOCOL_VERSIONS.has(requested)
-    ? requested
-    : DEFAULT_PROTOCOL_VERSION;
+  const requested = params.protocolVersion || LATEST_PROTOCOL_VERSION;
+  const protocolVersion = negotiateProtocolVersion(requested);
 
   session.clientInfo = clientInfo;
   session.capabilities = capabilities;
@@ -233,6 +258,7 @@ function doInitialize(session, params) {
     capabilities,
     protocolVersion,
     requestedProtocolVersion: requested,
+    negotiated_fallback: protocolVersion !== requested,
   });
 
   return {
@@ -343,8 +369,10 @@ function runSlowEcho(session, requestId, args, progressToken) {
     progressToken: progressTokenPresent ? progressToken : null,
     progressSent: 0,
     abort,
+    abortReason: null,
     timer: null,
     progressTimer: null,
+    finished: false,
   };
   session.activeCalls.set(requestId, call);
 
@@ -358,6 +386,8 @@ function runSlowEcho(session, requestId, args, progressToken) {
 
   return new Promise((resolve, reject) => {
     const finish = (status, resultOrErr) => {
+      if (call.finished) return;
+      call.finished = true;
       clearTimers(call);
       session.activeCalls.delete(requestId);
       const duration_ms = Date.now() - call.startedAt;
@@ -369,17 +399,23 @@ function runSlowEcho(session, requestId, args, progressToken) {
         delay_ms: delayMs,
         progress_token_present: progressTokenPresent,
         progress_notifications_sent: call.progressSent,
+        abort_reason: call.abortReason,
       });
       if (status === "ok") resolve(resultOrErr);
-      else if (status === "cancelled") {
-        const err = new Error("Request cancelled");
-        /** @type {any} */ (err).code = -32800;
-        reject(err);
+      else if (status === "cancelled_silent") {
+        // MCP: SHOULD NOT send a response for a cancelled request — resolve sentinel.
+        resolve(CANCELLED_NO_RESPONSE);
+      } else if (status === "aborted_silent") {
+        resolve(CANCELLED_NO_RESPONSE);
       } else reject(resultOrErr);
     };
 
     abort.signal.addEventListener("abort", () => {
-      finish("cancelled", null);
+      if (call.abortReason === "client_cancelled") {
+        finish("cancelled_silent", null);
+      } else {
+        finish("aborted_silent", null);
+      }
     });
 
     const sendProgress = (forceProgress) => {
@@ -452,6 +488,7 @@ function runSlowEcho(session, requestId, args, progressToken) {
 export function abortCall(session, requestId, reason) {
   const call = session.activeCalls.get(requestId);
   if (!call) return false;
+  call.abortReason = reason;
   session.logger.write("call_aborted", {
     request_id: requestId,
     tool: call.tool,
@@ -491,7 +528,8 @@ export function onConnectionClose(session, reason) {
     closed_at: new Date().toISOString(),
     active_calls: active,
   });
-  for (const call of session.activeCalls.values()) {
+  for (const call of [...session.activeCalls.values()]) {
+    call.abortReason = reason;
     clearTimers(call);
     call.abort.abort();
   }

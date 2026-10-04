@@ -2,6 +2,29 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
+/** Safe session / file-id fragment (no path separators, no NUL). */
+export const SESSION_ID_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** @param {unknown} id */
+export function isValidSessionId(id) {
+  return typeof id === "string" && SESSION_ID_RE.test(id) && !id.includes("\0");
+}
+
+/**
+ * Ensure resolvedFile stays inside resolvedDir (path.relative guard).
+ * @param {string} resolvedDir
+ * @param {string} resolvedFile
+ */
+export function assertPathInsideDir(resolvedDir, resolvedFile) {
+  const rel = path.relative(resolvedDir, resolvedFile);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(
+      `Refusing path outside directory: file=${resolvedFile} dir=${resolvedDir}`,
+    );
+  }
+  return rel;
+}
+
 /**
  * Append-only JSONL logger. One file per client/session label.
  * Cross-platform path handling via path.join / path.resolve.
@@ -17,12 +40,17 @@ export class JsonlLogger {
   constructor(opts) {
     this.logDir = path.resolve(opts.logDir);
     this.clientLabel = sanitizeLabel(opts.clientLabel || "client");
-    this.sessionId = opts.sessionId || randomUUID();
+    const rawSession = opts.sessionId || randomUUID();
+    if (!isValidSessionId(rawSession)) {
+      throw new Error(`Invalid session id for log filename: ${String(rawSession)}`);
+    }
+    this.sessionId = rawSession;
     this.onEvent = opts.onEvent || null;
-    this.filePath = path.join(
+    this.filePath = path.resolve(
       this.logDir,
       `${this.clientLabel}-${this.sessionId}.jsonl`,
     );
+    assertPathInsideDir(this.logDir, this.filePath);
     fs.mkdirSync(this.logDir, { recursive: true });
     this.closed = false;
   }
@@ -30,6 +58,7 @@ export class JsonlLogger {
   /** @param {string} event @param {Record<string, unknown>} [fields] */
   write(event, fields = {}) {
     if (this.closed) return;
+    assertPathInsideDir(this.logDir, this.filePath);
     const line = {
       ts: new Date().toISOString(),
       event,
