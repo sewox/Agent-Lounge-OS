@@ -1,5 +1,6 @@
 //! SQLite tecrübe deposu ve semantik (kosinüs) arama.
 
+mod a2a;
 mod connected_tools;
 mod embedding;
 mod experience_governance;
@@ -9,6 +10,10 @@ pub mod feedback;
 mod project_index;
 mod vector_memory;
 
+pub use a2a::{
+    admit_task_atomic, configured_max_hops, mark_silent_tasks_needs_human, migrate_a2a, AdmitError,
+    AdmitOk, DEFAULT_AGENT_SILENCE,
+};
 pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experience_governance::{
     migrate_experience_governance, ArchiveClock, ExperienceUpdate, FakeClock, SystemClock,

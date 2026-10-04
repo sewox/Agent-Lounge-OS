@@ -10,22 +10,25 @@ use anyhow::{Context, Result};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
-use crate::db::{lexical_embedding, ExperienceStore, FastRetrieveQuery};
+use crate::db::{
+    configured_max_hops, lexical_embedding, AdmitError, ExperienceStore, FastRetrieveQuery,
+    DEFAULT_AGENT_SILENCE,
+};
 use crate::infra::probe_quotas;
 use crate::kernel::decision_engine::{
     lookup_decision, DecisionCache, DecisionResult, RoutingType, SecurityLevel,
 };
 use crate::kernel::policy_manager::{
     alert_envelope_payload, cancel_envelope_payload, evaluate_security, is_security_approval,
-    is_security_denied_error, resume_envelope_payload, ALERT_SECURITY, SECURITY_DENIED_MARKER,
-    TASK_CANCEL, TASK_RESUME,
+    is_security_denied_error, resume_envelope_payload, ALERT_SECURITY, PENDING_APPROVAL,
+    SECURITY_DENIED_MARKER, TASK_CANCEL, TASK_RESUME,
 };
 use crate::kernel::worker_registry::{route_subject_for, WorkerRegistry};
 use crate::models::{
-    decide_route, default_ollama_model, is_kernel, AnalysisDecision, ApprovalRequest,
+    decide_route, default_ollama_model, is_kernel, AnalysisDecision, ApprovalKind, ApprovalRequest,
     ExperienceContext, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
-    QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, ALERT_QUOTA, EXPERIENCE_REPORTED,
-    KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
+    QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, TaskStatus, ALERT_QUOTA,
+    EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
 };
 use crate::services::{
     chat_json, embed_model, embed_text, evaluate_assignment, is_quota_approval,
@@ -95,6 +98,12 @@ pub struct Dispatcher {
     gate_ready: Arc<AtomicBool>,
     /// Test: kota probe (yavaş TCP) atlanır.
     skip_quota_probe: bool,
+    /// A2A hop üst sınırı (varsayılan 10; `LOUNGE_MAX_HOPS` / with_max_hops).
+    max_hops: u32,
+    /// EXECUTING sessizliği sonrası NEEDS_HUMAN eşiği.
+    agent_silence: Duration,
+    /// Test: A2A admit (idempotency/hop) atlanır — eski birim testleri.
+    skip_a2a_admit: bool,
 }
 
 impl Dispatcher {
@@ -121,6 +130,9 @@ impl Dispatcher {
             approval_timeout: APPROVAL_TIMEOUT,
             gate_ready: Arc::new(AtomicBool::new(false)),
             skip_quota_probe: false,
+            max_hops: configured_max_hops(),
+            agent_silence: DEFAULT_AGENT_SILENCE,
+            skip_a2a_admit: false,
         }
     }
 
@@ -132,6 +144,36 @@ impl Dispatcher {
     pub fn with_skip_quota_probe(mut self) -> Self {
         self.skip_quota_probe = true;
         self
+    }
+
+    pub fn with_max_hops(mut self, max_hops: u32) -> Self {
+        self.max_hops = max_hops.max(1);
+        self
+    }
+
+    pub fn with_agent_silence(mut self, silence: Duration) -> Self {
+        self.agent_silence = silence;
+        self
+    }
+
+    /// Test: A2A admit (SQLite txn) atlanır.
+    pub fn without_a2a_admit(mut self) -> Self {
+        self.skip_a2a_admit = true;
+        self
+    }
+
+    pub fn max_hops(&self) -> u32 {
+        self.max_hops
+    }
+
+    pub fn store(&self) -> &ExperienceStore {
+        &self.store
+    }
+
+    /// Sessiz EXECUTING/DISPATCHED görevleri NEEDS_HUMAN yapar (test edilebilir saat).
+    pub fn recover_silent_tasks(&self, now_rfc3339: &str) -> Result<Vec<String>> {
+        self.store
+            .recover_silent_a2a_tasks(now_rfc3339, self.agent_silence)
     }
 
     pub fn set_gate_ready(&self, ready: bool) {
@@ -285,8 +327,10 @@ impl Dispatcher {
     }
 
     async fn handle_nats_message(&self, nc: &nats::Connection, msg: nats::Message) -> Result<()> {
-        let task: LoungeTask =
+        let mut task: LoungeTask =
             serde_json::from_slice(&msg.data).context("İş Emri shared task şemasına uymuyor")?;
+        // NATS henüz kimlik doğrulamasız (PR-5 öncesi): her zaman doğrulanmamış damgası.
+        task.source_verified = false;
         let context = self.recall_context(&task).await.unwrap_or_else(|err| {
             log::warn!("tecrübe araması atlandı: {err}");
             ExperienceContext::default()
@@ -396,6 +440,8 @@ impl Dispatcher {
         if task.msg_type != "task" {
             anyhow::bail!("beklenen type=task, gelen={}", task.msg_type);
         }
+
+        self.admit_inbound(&mut task)?;
 
         let model = task
             .resolved_model(&self.selected_model().await)
@@ -538,14 +584,71 @@ impl Dispatcher {
         }
     }
 
+    /// A2A kabul: hop zinciri, idempotency (tek txn), lineage normalizasyonu.
+    fn admit_inbound(&self, task: &mut LoungeTask) -> Result<()> {
+        if self.skip_a2a_admit {
+            if task.root_id.as_deref().unwrap_or("").is_empty() {
+                task.root_id = Some(task.id.clone());
+            }
+            return Ok(());
+        }
+        match self.store.admit_a2a_task(task, self.max_hops) {
+            Ok(_) => Ok(()),
+            Err(AdmitError::Duplicate {
+                idempotency_key,
+                existing_task_id,
+            }) => anyhow::bail!(
+                "idempotency_key reddedildi: key={idempotency_key} existing_task={existing_task_id}"
+            ),
+            Err(AdmitError::HopLimitExceeded {
+                hop_count,
+                max_hops,
+            }) => anyhow::bail!("hop limiti aşıldı: hop_count={hop_count} max_hops={max_hops}"),
+            Err(AdmitError::ParentMissing { parent_id }) => {
+                anyhow::bail!("parent_id zinciri kırık: {parent_id}")
+            }
+        }
+    }
+
     /// Kullanıcı tercihi + kota; harici ajan geçişi onaysız olamaz.
     /// Testlerde `stub_decision` varken kota onayı beklenmez; güvenlik askısı stub yokken.
     /// DecisionGate kararı yoksa (soğuk/sınıflandırılamadı) muhafazakâr güvenlik onayı istenir.
+    /// `source_verified=false` → her zaman PENDING_APPROVAL (stub bile olsa).
     async fn apply_routing_policy(
         &self,
         task: &mut LoungeTask,
         decision: &AnalysisDecision,
     ) -> Result<()> {
+        if !task.source_verified {
+            task.status = TaskStatus::PendingApproval;
+            let request = ApprovalRequest {
+                task_id: task.id.clone(),
+                summary: task.summary.clone(),
+                from_agent: task.source_agent.clone(),
+                to_agent: task
+                    .target_agent
+                    .clone()
+                    .unwrap_or_else(|| KERNEL_AGENT.into()),
+                kind: ApprovalKind::SourceUnverified,
+                reason: format!(
+                    "source_verified=false — doğrulanmamış NATS/kaynak talebi · status={PENDING_APPROVAL}"
+                ),
+                expires_at: None,
+                timeout_secs: None,
+            };
+            let policy = self.store.get_routing_policy().await.unwrap_or_default();
+            return self
+                .await_approval(
+                    task,
+                    request,
+                    None,
+                    None,
+                    &policy.local_fallback_agent,
+                    &policy.local_fallback_model,
+                )
+                .await;
+        }
+
         if let Some(gate) = self.gate_decision(&task.id) {
             if let Some(request) =
                 evaluate_security(&task.id, &task.summary, &task.source_agent, &gate)
@@ -1633,5 +1736,133 @@ mod tests {
         let _ = handle.await;
         assert!(dispatcher.pending_approvals().is_empty());
         assert_eq!(dispatcher.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn hop_limit_blocks_chain_at_dispatcher() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "hop".into(),
+            adr_summary: "hop".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        })
+        .with_max_hops(10);
+
+        let root = LoungeTask::new("a", "p", "root");
+        dispatcher.handle_task(root.clone()).await.unwrap();
+
+        let store = dispatcher.store();
+        let mut parent_id = root.id.clone();
+        for hop in 1..10 {
+            let mut child = LoungeTask::new("b", "p", format!("hop-{hop}"));
+            child.parent_task_id = Some(parent_id.clone());
+            child.source_verified = true;
+            store.admit_a2a_task(&mut child, 10).unwrap();
+            assert_eq!(child.hop_count, hop);
+            parent_id = child.id;
+        }
+        let mut over = LoungeTask::new("c", "p", "blocked");
+        over.parent_task_id = Some(parent_id);
+        over.source_verified = true;
+        let err = dispatcher.handle_task(over).await.unwrap_err().to_string();
+        assert!(
+            err.contains("hop limiti") || err.contains("hop_count"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_idempotency_key_rejected_at_dispatcher() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "idem".into(),
+            adr_summary: "idem".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let mut t1 = LoungeTask::new("a", "p", "first");
+        t1.idempotency_key = Some("dispatch-key".into());
+        dispatcher.handle_task(t1.clone()).await.unwrap();
+
+        let mut t2 = LoungeTask::new("a", "p", "second");
+        t2.idempotency_key = Some("dispatch-key".into());
+        let err = dispatcher.handle_task(t2).await.unwrap_err().to_string();
+        assert!(
+            err.contains("idempotency_key") && err.contains("dispatch-key"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_verified_false_goes_pending_approval() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+        let mut task = LoungeTask::new("nats-agent", "agent-lounge-os", "unverified nats");
+        task.source_verified = false;
+        let id = task.id.clone();
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "source_verified=false PENDING_APPROVAL beklemeli"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+
+        let snap = dispatcher.pending_approvals();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].kind, ApprovalKind::SourceUnverified);
+        assert!(
+            snap[0].reason.contains(PENDING_APPROVAL),
+            "reason should mention PENDING_APPROVAL: {}",
+            snap[0].reason
+        );
+
+        dispatcher
+            .resolve_vote(id, RoutingVote::Approve)
+            .expect("Onayla");
+        assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_silence_marks_needs_human() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "silence".into(),
+            adr_summary: "silence".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        })
+        .with_agent_silence(Duration::from_secs(60));
+
+        let task = LoungeTask::new("a", "p", "zombie-agent");
+        dispatcher.handle_task(task.clone()).await.unwrap();
+        dispatcher
+            .store()
+            .set_a2a_task_status(&task.id, TaskStatus::Executing)
+            .unwrap();
+        dispatcher
+            .store()
+            .touch_a2a_updated_at(&task.id, "2026-10-04T10:00:00.000Z")
+            .unwrap();
+
+        let marked = dispatcher
+            .recover_silent_tasks("2026-10-04T10:02:00.000Z")
+            .unwrap();
+        assert_eq!(marked, vec![task.id.clone()]);
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::NeedsHuman)
+        );
     }
 }

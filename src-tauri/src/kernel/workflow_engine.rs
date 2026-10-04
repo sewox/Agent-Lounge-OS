@@ -144,6 +144,9 @@ impl WorkflowEngine {
         task.kind = TaskKind::Test;
         task.target_agent = Some(target_agent.clone());
         task.parent_task_id = Some(completed.id.clone());
+        task.root_id = Some(completed.effective_root_id().to_string());
+        task.hop_count = completed.hop_count.saturating_add(1);
+        task.session_id = completed.session_id.clone();
         task.repo_path = completed.repo_path.clone();
         task.ast_refs = completed.ast_refs.clone();
         task.priority = completed.priority.clone();
