@@ -379,6 +379,7 @@ impl Dispatcher {
                 | TaskStatus::Queued
                 | TaskStatus::RecoveryPending
                 | TaskStatus::NeedsHuman
+                | TaskStatus::WaitTimeoutReached
         );
         if !allowed {
             anyhow::bail!(
@@ -989,6 +990,22 @@ impl Dispatcher {
                 anyhow::bail!("parent_id geçersiz ({parent_id}): {reason}")
             }
             Err(AdmitError::IdConflict { task_id }) => {
+                // MCP köprüsü önceden admit etmiş olabilir — aynı id + session ise devam.
+                if let Ok(Some(existing)) = self.store.load_a2a_task(&task_id) {
+                    if existing.session_id.is_some()
+                        && existing.session_id == task.session_id
+                        && !matches!(
+                            existing.status,
+                            TaskStatus::Completed
+                                | TaskStatus::Failed
+                                | TaskStatus::Cancelled
+                                | TaskStatus::Expired
+                        )
+                    {
+                        *task = existing;
+                        return Ok(None);
+                    }
+                }
                 anyhow::bail!("a2a_tasks id çakışması: {task_id}")
             }
             Err(AdmitError::Storage { message }) => {

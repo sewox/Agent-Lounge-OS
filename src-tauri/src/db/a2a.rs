@@ -8,9 +8,13 @@
 //! | `parent_id` | `parent_task_id` (kanonik; JSON alias `parent_id`) |
 //! | `session_id` | `session_id` (kanonik; JSON alias `source_session_id`) |
 //! | `hop_count` | `hop_count` |
-//! | `idempotency_key` | `idempotency_key` (kapsam: source_agent+project_id) |
+//! | `idempotency_key` | `idempotency_key` (kapsam: session_id veya source_agent + project_id) |
+//! | `claimed_by` | yield lease sahibi MCP oturumu |
+//! | `result_json` | `lounge_yield_result` çıktısı |
 //!
 //! Görev satırı ve idempotency kaydı **tek SQLite transaction** içinde yazılır.
+//! Idempotency kapsamı (PR-3): `session:<mcp_session_id>` varsa spoof edilebilir
+//! `source_agent` yerine oturum kimliği; yoksa legacy `agent:<source_agent>`.
 //!
 //! ## `PRAGMA foreign_keys=ON`
 //! SQLite’da foreign key zorlaması **bağlantı (connection) düzeyinde**dir; process-global
@@ -21,8 +25,8 @@
 //! yalnızca bu pragma açıkken geçerlidir.
 //!
 //! ## `session_lock` / `acquire_session_lock`
-//! **PR-3 hazırlığı** — üretim dispatcher/workflow yoluna bağlı değil; şema + API + birim
-//! testi mevcut. Oturum sahipliği / kilit PR-3’te MCP oturum kimliğiyle bağlanacak.
+//! MCP oturum kimliğiyle bağlandı (PR-3): wait/yield sahiplik kontrolleri
+//! `session_id` / `claimed_by` üzerinden yapılır.
 //!
 //! Şema sürümü: settings `a2a.schema_version`.
 
@@ -38,7 +42,8 @@ pub const ABSOLUTE_MAX_HOPS: u32 = 64;
 
 /// Settings anahtarı — `migrate_a2a` sürümü.
 pub const A2A_SCHEMA_VERSION_KEY: &str = "a2a.schema_version";
-pub const A2A_SCHEMA_VERSION: &str = "2";
+/// v3: session-scoped idempotency + result_json + claimed_by.
+pub const A2A_SCHEMA_VERSION: &str = "3";
 
 /// Varsayılan ajan sessizlik süresi — EXECUTING/DISPATCHED zombi → NEEDS_HUMAN.
 pub const DEFAULT_AGENT_SILENCE: Duration = Duration::from_secs(120);
@@ -136,12 +141,37 @@ pub fn migrate_a2a(conn: &Connection) -> Result<()> {
     .context("a2a schema migrate base")?;
 
     migrate_idempotency_table(conn)?;
+    migrate_a2a_task_columns(conn)?;
 
     conn.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
         params![A2A_SCHEMA_VERSION_KEY, A2A_SCHEMA_VERSION],
     )?;
+    Ok(())
+}
+
+/// Idempotency kapsam anahtarı — oturum varsa spoof’a kapalı.
+pub fn idempotency_scope(task: &LoungeTask) -> String {
+    match task
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(sid) => format!("session:{sid}"),
+        None => format!("agent:{}", task.source_agent),
+    }
+}
+
+fn migrate_a2a_task_columns(conn: &Connection) -> Result<()> {
+    let cols = column_names_fallback(conn, "a2a_tasks")?;
+    if !cols.iter().any(|c| c == "result_json") {
+        conn.execute("ALTER TABLE a2a_tasks ADD COLUMN result_json TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "claimed_by") {
+        conn.execute("ALTER TABLE a2a_tasks ADD COLUMN claimed_by TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -155,12 +185,12 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             r#"
             CREATE TABLE idempotency_keys (
-                source_agent TEXT NOT NULL,
+                scope TEXT NOT NULL,
                 project_id TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL,
                 task_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                PRIMARY KEY (source_agent, project_id, idempotency_key)
+                PRIMARY KEY (scope, project_id, idempotency_key)
             );
             CREATE INDEX IF NOT EXISTS idx_idempotency_created
                 ON idempotency_keys(created_at);
@@ -170,32 +200,14 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
     }
 
     let cols = column_names_fallback(conn, "idempotency_keys")?;
-    let has_composite = cols.iter().any(|c| c == "source_agent")
+    let has_scope_pk = cols.iter().any(|c| c == "scope")
         && cols.iter().any(|c| c == "project_id")
         && cols.iter().any(|c| c == "idempotency_key");
-    // Eski şema: tek kolon PK `idempotency_key` — yeniden kur.
-    let pk_info: Vec<String> = {
-        let mut stmt = conn.prepare("PRAGMA table_info(idempotency_keys)")?;
-        let rows = stmt.query_map([], |row| {
-            let name: String = row.get(1)?;
-            let pk: i64 = row.get(5)?;
-            Ok((name, pk))
-        })?;
-        let mut pks = Vec::new();
-        for row in rows {
-            let (name, pk) = row?;
-            if pk > 0 {
-                pks.push(name);
-            }
-        }
-        pks
-    };
-    let needs_rebuild = !has_composite || (pk_info.len() == 1 && pk_info[0] == "idempotency_key");
-    if !needs_rebuild {
+    if has_scope_pk {
         return Ok(());
     }
 
-    // RENAME→CREATE→INSERT→DROP tek transaction — yarı yolda çökmede tutarlı kalır.
+    // v2 (source_agent+project+key) veya daha eski → scope kolonuna taşı.
     let tx = conn
         .unchecked_transaction()
         .context("idempotency rebuild txn")?;
@@ -203,12 +215,12 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
         r#"
         ALTER TABLE idempotency_keys RENAME TO idempotency_keys_legacy;
         CREATE TABLE idempotency_keys (
-            source_agent TEXT NOT NULL,
+            scope TEXT NOT NULL,
             project_id TEXT NOT NULL,
             idempotency_key TEXT NOT NULL,
             task_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            PRIMARY KEY (source_agent, project_id, idempotency_key)
+            PRIMARY KEY (scope, project_id, idempotency_key)
         );
         CREATE INDEX IF NOT EXISTS idx_idempotency_created
             ON idempotency_keys(created_at);
@@ -217,15 +229,15 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
     .context("idempotency rebuild create")?;
 
     let legacy_cols = column_names_fallback(&tx, "idempotency_keys_legacy")?;
-    let legacy_has_scope = legacy_cols.iter().any(|c| c == "source_agent")
+    let legacy_has_agent = legacy_cols.iter().any(|c| c == "source_agent")
         && legacy_cols.iter().any(|c| c == "project_id");
-    if legacy_has_scope {
+    if legacy_has_agent {
         tx.execute_batch(
             r#"
             INSERT OR IGNORE INTO idempotency_keys
-                (source_agent, project_id, idempotency_key, task_id, created_at)
+                (scope, project_id, idempotency_key, task_id, created_at)
             SELECT
-                COALESCE(NULLIF(source_agent, ''), 'unknown'),
+                'agent:' || COALESCE(NULLIF(source_agent, ''), 'unknown'),
                 COALESCE(NULLIF(project_id, ''), 'unknown'),
                 idempotency_key,
                 task_id,
@@ -234,14 +246,23 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
             "#,
         )
         .context("idempotency rebuild copy scoped")?;
-    } else {
-        // Tek kolon PK (yalnız idempotency_key[+task_id+created_at]) — kapsam bilinmiyor.
+    } else if legacy_cols.iter().any(|c| c == "scope") {
         tx.execute_batch(
             r#"
             INSERT OR IGNORE INTO idempotency_keys
-                (source_agent, project_id, idempotency_key, task_id, created_at)
+                (scope, project_id, idempotency_key, task_id, created_at)
+            SELECT scope, project_id, idempotency_key, task_id, created_at
+            FROM idempotency_keys_legacy;
+            "#,
+        )
+        .context("idempotency rebuild copy scope")?;
+    } else {
+        tx.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO idempotency_keys
+                (scope, project_id, idempotency_key, task_id, created_at)
             SELECT
-                'unknown',
+                'agent:unknown',
                 'unknown',
                 idempotency_key,
                 task_id,
@@ -358,6 +379,7 @@ pub fn normalize_lineage(
                     | TaskStatus::Expired
                     | TaskStatus::NeedsHuman
                     | TaskStatus::Timeout
+                    | TaskStatus::Cancelled
             ) {
                 return Err(AdmitError::ParentInvalid {
                     parent_id: parent_id.clone(),
@@ -366,7 +388,7 @@ pub fn normalize_lineage(
             }
             // source_agent: çocuk, ebeveynin hedefi veya aynı proje ajanı olmalı — gevşek:
             // parent.source_agent veya parent.target_agent ile ilişkisiz ise yine de hop zinciri
-            // server-side; yalnızca proje + durum sert kapı. Not: oturum bağı PR-3.
+            // server-side; yalnızca proje + durum sert kapı. Oturum bağı: MCP admit.
             task.parent_task_id = Some(parent.id.clone());
             task.root_id = Some(parent.effective_root_id().to_string());
             task.hop_count = parent.hop_count.saturating_add(1);
@@ -427,8 +449,9 @@ fn admit_task_atomic_inner(
         let do_lookup = !skip_lookup;
         #[cfg(not(test))]
         let do_lookup = true;
+        let scope = idempotency_scope(task);
         if do_lookup {
-            match lookup_idempotency(conn, &task.source_agent, &task.project_id, k) {
+            match lookup_idempotency(conn, &scope, &task.project_id, k) {
                 Ok(Some(existing)) => {
                     let status = task_status(conn, &existing)
                         .map_err(storage_err)?
@@ -461,7 +484,8 @@ fn admit_task_atomic_inner(
             let _ = tx.rollback();
             if is_unique_violation(&err) {
                 // Gerçek UNIQUE — task satırı geri alındı; replay veya yarış.
-                let existing = lookup_idempotency(conn, &task.source_agent, &task.project_id, k)
+                let scope = idempotency_scope(task);
+                let existing = lookup_idempotency(conn, &scope, &task.project_id, k)
                     .ok()
                     .flatten();
                 if let Some(existing) = existing {
@@ -535,33 +559,28 @@ fn insert_idempotency_row(
     key: &str,
     task: &LoungeTask,
 ) -> rusqlite::Result<usize> {
+    let scope = idempotency_scope(task);
     tx.execute(
         r#"
         INSERT INTO idempotency_keys
-            (source_agent, project_id, idempotency_key, task_id, created_at)
+            (scope, project_id, idempotency_key, task_id, created_at)
         VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
-        params![
-            task.source_agent,
-            task.project_id,
-            key,
-            task.id,
-            now_rfc3339(),
-        ],
+        params![scope, task.project_id, key, task.id, now_rfc3339(),],
     )
 }
 
 pub fn lookup_idempotency(
     conn: &Connection,
-    source_agent: &str,
+    scope: &str,
     project_id: &str,
     key: &str,
 ) -> Result<Option<String>> {
     Ok(conn
         .query_row(
             r#"SELECT task_id FROM idempotency_keys
-               WHERE source_agent = ?1 AND project_id = ?2 AND idempotency_key = ?3"#,
-            params![source_agent, project_id, key],
+               WHERE scope = ?1 AND project_id = ?2 AND idempotency_key = ?3"#,
+            params![scope, project_id, key],
             |row| row.get::<_, String>(0),
         )
         .optional()?)
@@ -582,6 +601,139 @@ pub fn gc_idempotency_keys(conn: &Connection, older_than: &str) -> Result<u64> {
         params![older_than],
     )?;
     Ok(n as u64)
+}
+
+/// Görev sonucu (yield) — JSON metin.
+pub fn load_task_result(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT result_json FROM a2a_tasks WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+pub fn load_task_session_id(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT session_id FROM a2a_tasks WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+pub fn load_claimed_by(conn: &Connection, id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT claimed_by FROM a2a_tasks WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// İlk claim kazanır; aynı oturum yeniden claim edebilir.
+pub fn claim_task(conn: &Connection, task_id: &str, session_id: &str) -> Result<bool> {
+    let now = now_rfc3339();
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT claimed_by FROM a2a_tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    match current {
+        None => {
+            let n = conn.execute(
+                "UPDATE a2a_tasks SET claimed_by = ?1, updated_at = ?2 WHERE id = ?3 AND claimed_by IS NULL",
+                params![session_id, now, task_id],
+            )?;
+            Ok(n > 0)
+        }
+        Some(ref owner) if owner == session_id => Ok(true),
+        Some(_) => Ok(false),
+    }
+}
+
+/// Yield sonucu yaz + status Completed/Failed. Yalnız `claimed_by == session`.
+pub fn yield_task_result(
+    conn: &Connection,
+    task_id: &str,
+    session_id: &str,
+    status: TaskStatus,
+    result_json: &str,
+) -> Result<()> {
+    if !matches!(status, TaskStatus::Completed | TaskStatus::Failed) {
+        anyhow::bail!("yield status completed|failed olmalı");
+    }
+    let claimed = load_claimed_by(conn, task_id)?;
+    match claimed {
+        Some(ref owner) if owner == session_id => {}
+        Some(_) => anyhow::bail!("yetkisiz oturum: görev başka oturum tarafından claim edilmiş"),
+        None => {
+            // Otomatik claim (ilk yield).
+            if !claim_task(conn, task_id, session_id)? {
+                anyhow::bail!("yetkisiz oturum: claim alınamadı");
+            }
+        }
+    }
+    let now = now_rfc3339();
+    let n = conn.execute(
+        r#"
+        UPDATE a2a_tasks
+        SET result_json = ?1, status = ?2, updated_at = ?3, claimed_by = ?4
+        WHERE id = ?5
+        "#,
+        params![result_json, status.as_str(), now, session_id, task_id],
+    )?;
+    if n == 0 {
+        anyhow::bail!("yield: görev bulunamadı: {task_id}");
+    }
+    // payload_json içindeki status'u da senkron tut.
+    if let Ok(Some(mut task)) = load_task_row(conn, task_id) {
+        task.status = status;
+        let _ = rewrite_payload(conn, &task);
+    }
+    Ok(())
+}
+
+fn rewrite_payload(conn: &Connection, task: &LoungeTask) -> Result<()> {
+    let payload = serde_json::to_string(task)?;
+    conn.execute(
+        "UPDATE a2a_tasks SET payload_json = ?1 WHERE id = ?2",
+        params![payload, task.id],
+    )?;
+    Ok(())
+}
+
+/// Kaynak oturum wait/okuma yetkisi.
+pub fn session_can_read_task(conn: &Connection, task_id: &str, session_id: &str) -> Result<bool> {
+    let owner = load_task_session_id(conn, task_id)?;
+    Ok(match owner {
+        Some(ref sid) => sid == session_id,
+        // Oturumsuz (legacy NATS) görevler — okuma açık değil (fail-closed PR-3).
+        None => false,
+    })
+}
+
+/// Kullanıcı iptali.
+pub fn cancel_task(conn: &Connection, task_id: &str, session_id: &str) -> Result<()> {
+    if !session_can_read_task(conn, task_id, session_id)? {
+        anyhow::bail!("yetkisiz oturum: iptal reddedildi");
+    }
+    let current = task_status(conn, task_id)?.unwrap_or(TaskStatus::Queued);
+    if current.is_terminal() && !matches!(current, TaskStatus::NeedsHuman) {
+        return Ok(());
+    }
+    update_task_status(conn, task_id, TaskStatus::Cancelled)?;
+    let _ = release_idempotency_for_task(conn, task_id);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -895,16 +1047,54 @@ impl crate::db::ExperienceStore {
         gc_idempotency_keys(&conn, older_than)
     }
 
-    /// PR-3 hazırlığı — üretim dispatcher'ına bağlı değil.
     pub fn try_lock_session(&self, session_id: &str, holder: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("experience db lock");
         acquire_session_lock(&conn, session_id, holder)
     }
 
-    /// PR-3 hazırlığı — üretim dispatcher'ına bağlı değil.
     pub fn unlock_session(&self, session_id: &str, holder: &str) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         release_session_lock(&conn, session_id, holder)
+    }
+
+    pub fn a2a_task_result(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        load_task_result(&conn, id)
+    }
+
+    pub fn claim_a2a_task(&self, task_id: &str, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        claim_task(&conn, task_id, session_id)
+    }
+
+    pub fn yield_a2a_result(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        status: TaskStatus,
+        result_json: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        yield_task_result(&conn, task_id, session_id, status, result_json)
+    }
+
+    pub fn session_can_read_a2a_task(&self, task_id: &str, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        session_can_read_task(&conn, task_id, session_id)
+    }
+
+    pub fn cancel_a2a_task(&self, task_id: &str, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        cancel_task(&conn, task_id, session_id)
+    }
+
+    pub fn mark_a2a_wait_timeout(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let current = task_status(&conn, task_id)?.unwrap_or(TaskStatus::Queued);
+        if current.is_terminal() || matches!(current, TaskStatus::WaitTimeoutReached) {
+            return Ok(());
+        }
+        update_task_status(&conn, task_id, TaskStatus::WaitTimeoutReached)
     }
 
     pub fn pragma_foreign_keys(&self) -> Result<bool> {
@@ -958,8 +1148,11 @@ mod tests {
         let cols = store.table_columns("agent_sessions").unwrap();
         assert!(cols.iter().any(|c| c == "workspace_path"));
         let id_cols = store.table_columns("idempotency_keys").unwrap();
-        assert!(id_cols.iter().any(|c| c == "source_agent"));
+        assert!(id_cols.iter().any(|c| c == "scope"));
         assert!(id_cols.iter().any(|c| c == "project_id"));
+        let task_cols = store.table_columns("a2a_tasks").unwrap();
+        assert!(task_cols.iter().any(|c| c == "result_json"));
+        assert!(task_cols.iter().any(|c| c == "claimed_by"));
         // ikinci migrate
         {
             let conn = store.conn.lock().unwrap();
@@ -1036,13 +1229,76 @@ mod tests {
             } => assert_eq!(existing_task_id, t1.id),
             AdmitOutcome::Accepted(_) => panic!("expected Replay"),
         }
-        // farklı source → ayrı kapsam
+        // farklı source → ayrı agent: kapsam
         let mut t3 = LoungeTask::new("other-agent", "p", "third");
         t3.idempotency_key = Some("same-key".into());
         assert!(matches!(
             store.admit_a2a_task(&mut t3, 10).unwrap(),
             AdmitOutcome::Accepted(_)
         ));
+    }
+
+    #[test]
+    fn session_scoped_idempotency_blocks_source_agent_spoof() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut t1 = LoungeTask::new("spoofable-a", "p", "first");
+        t1.session_id = Some("sess-1".into());
+        t1.idempotency_key = Some("k".into());
+        store.admit_a2a_task(&mut t1, 10).unwrap();
+
+        // Aynı oturum, farklı source_agent spoof — replay (oturum kapsamı).
+        let mut t2 = LoungeTask::new("spoofable-B", "p", "second");
+        t2.session_id = Some("sess-1".into());
+        t2.idempotency_key = Some("k".into());
+        assert!(matches!(
+            store.admit_a2a_task(&mut t2, 10).unwrap(),
+            AdmitOutcome::Replay { .. }
+        ));
+
+        // Farklı oturum — kabul.
+        let mut t3 = LoungeTask::new("spoofable-a", "p", "third");
+        t3.session_id = Some("sess-2".into());
+        t3.idempotency_key = Some("k".into());
+        assert!(matches!(
+            store.admit_a2a_task(&mut t3, 10).unwrap(),
+            AdmitOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn yield_and_read_require_session_ownership() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut t = LoungeTask::new("mcp:cursor", "p", "work");
+        t.session_id = Some("caller-sess".into());
+        store.admit_a2a_task(&mut t, 10).unwrap();
+
+        assert!(store
+            .session_can_read_a2a_task(&t.id, "caller-sess")
+            .unwrap());
+        assert!(!store
+            .session_can_read_a2a_task(&t.id, "other-sess")
+            .unwrap());
+
+        store
+            .yield_a2a_result(
+                &t.id,
+                "worker-sess",
+                TaskStatus::Completed,
+                r#"{"ok":true}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            store.a2a_task_result(&t.id).unwrap().as_deref(),
+            Some(r#"{"ok":true}"#)
+        );
+        // İkinci oturum yield edemez.
+        let err = store
+            .yield_a2a_result(&t.id, "intruder", TaskStatus::Completed, "{}")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("yetkisiz"),
+            "expected yetkisiz, got {err}"
+        );
     }
 
     #[test]
@@ -1053,8 +1309,8 @@ mod tests {
             let conn = store.conn.lock().unwrap();
             conn.execute(
                 r#"INSERT INTO idempotency_keys
-                   (source_agent, project_id, idempotency_key, task_id, created_at)
-                   VALUES ('a', 'p', 'race-key', 'existing-task', ?1)"#,
+                   (scope, project_id, idempotency_key, task_id, created_at)
+                   VALUES ('agent:a', 'p', 'race-key', 'existing-task', ?1)"#,
                 params![now_rfc3339()],
             )
             .unwrap();
@@ -1259,14 +1515,14 @@ mod tests {
         migrate_a2a(&conn).unwrap();
 
         let cols = column_names_fallback(&conn, "idempotency_keys").unwrap();
-        assert!(cols.iter().any(|c| c == "source_agent"));
+        assert!(cols.iter().any(|c| c == "scope"));
         assert!(cols.iter().any(|c| c == "project_id"));
         assert_eq!(count_idempotency_keys(&conn).unwrap(), 2);
 
         let task_id: String = conn
             .query_row(
                 r#"SELECT task_id FROM idempotency_keys
-                   WHERE source_agent = 'unknown' AND project_id = 'unknown'
+                   WHERE scope = 'agent:unknown' AND project_id = 'unknown'
                      AND idempotency_key = 'legacy-key-1'"#,
                 [],
                 |row| row.get(0),
