@@ -185,10 +185,21 @@ const CUSTOM_EDITOR_DENIED_STEMS: &[&str] = &[
 
 /// Windows editor launcher scripts that are safe as custom-editor programs.
 /// Random `.cmd` / `.bat` / `.ps1` remain denied.
-/// Allow-list applies only to a **bare** basename (PATH lookup) or a **known
-/// install path** suffix — never arbitrary absolute / relative / UNC paths that
-/// merely end in `code.cmd` / `cursor.cmd`.
+/// Allow-list applies only to a **bare** basename (PATH lookup) or an absolute
+/// path under a **trusted install root** (env-resolved) with a known relative
+/// layout — never suffix-only matches, relative paths, or UNC.
 const CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES: &[&str] = &["code.cmd", "cursor.cmd"];
+
+/// Relative layouts under trusted roots (`PROGRAMFILES`, `ProgramFiles(x86)`,
+/// `%LOCALAPPDATA%\Programs`). Compared case-insensitively after `/` normalize.
+const CODE_CMD_TRUSTED_RELATIVE: &[&str] = &[
+    "microsoft vs code/bin/code.cmd",
+    "microsoft vs code insiders/bin/code.cmd",
+];
+const CURSOR_CMD_TRUSTED_RELATIVE: &[&str] = &[
+    "cursor/resources/app/bin/cursor.cmd",
+    "cursor/bin/cursor.cmd",
+];
 
 fn home_dir_for_editor() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
@@ -254,9 +265,34 @@ fn editor_program_looks_like_path(program: &str) -> bool {
     t.len() >= 2 && t.as_bytes()[1] == b':'
 }
 
-fn editor_program_is_unc(program: &str) -> bool {
+/// Windows path kind after peeling extended-length prefixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WinEditorPathKind<'a> {
+    /// Local path; `\\?\` / `//?/` drive prefix already stripped when present.
+    Local(&'a str),
+    /// Real UNC (`\\server\…`, `//server/…`, or `\\?\UNC\…` / `//?/UNC/…`).
+    Unc,
+}
+
+/// Classify a Windows path for allow-list matching.
+///
+/// - `\\?\C:\…` / `//?/C:/…` → local (`C:\…`)
+/// - `\\?\UNC\server\share\…` → UNC (rejected)
+/// - `\\server\share\…` / `//server/share/…` → UNC (rejected)
+fn classify_windows_editor_path(program: &str) -> WinEditorPathKind<'_> {
     let t = program.trim();
-    t.starts_with("\\\\") || t.starts_with("//")
+    if let Some(rest) = t.strip_prefix(r"\\?\").or_else(|| t.strip_prefix("//?/")) {
+        let unc = rest.len() >= 4
+            && (rest[..4].eq_ignore_ascii_case(r"UNC\") || rest[..4].eq_ignore_ascii_case("UNC/"));
+        if unc {
+            return WinEditorPathKind::Unc;
+        }
+        return WinEditorPathKind::Local(rest);
+    }
+    if t.starts_with(r"\\") || t.starts_with("//") {
+        return WinEditorPathKind::Unc;
+    }
+    WinEditorPathKind::Local(t)
 }
 
 fn normalize_editor_path_for_match(program: &str) -> String {
@@ -267,40 +303,126 @@ fn normalize_editor_path_for_match(program: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Absolute path under a known VS Code / Cursor install layout.
-fn is_known_windows_editor_install_path(program: &str) -> bool {
-    if editor_program_is_unc(program) {
+fn editor_path_is_absolute_local(local: &str) -> bool {
+    let t = local.trim();
+    if t.is_empty() {
         return false;
     }
-    if !editor_program_looks_like_path(program) {
-        return false;
+    // POSIX absolute (canonical forms on non-Windows tests / rare mixed input).
+    if t.starts_with('/') {
+        return true;
     }
-    // Relative paths (`.\\code.cmd`, `bin\\code.cmd`) are never "known installs".
-    let t = program.trim();
-    let absolute = t.starts_with('/')
-        || (t.len() >= 3
-            && t.as_bytes()[1] == b':'
-            && (t.as_bytes()[2] == b'\\' || t.as_bytes()[2] == b'/'));
-    if !absolute {
-        return false;
-    }
-    let n = normalize_editor_path_for_match(program);
-    let base = custom_editor_program_basename(program);
-    let cleaned = strip_trailing_windows_junk(&base);
-    match cleaned {
-        "code.cmd" => {
-            n.ends_with("/microsoft vs code/bin/code.cmd")
-                || n.ends_with("/microsoft vs code insiders/bin/code.cmd")
+    // Windows drive-absolute: `C:\…` / `C:/…` (not `C:code.cmd`).
+    t.len() >= 3 && t.as_bytes()[1] == b':' && (t.as_bytes()[2] == b'\\' || t.as_bytes()[2] == b'/')
+}
+
+/// Trusted install roots from the environment — never hard-coded user-writable paths.
+/// `%PROGRAMFILES%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%\Programs`.
+/// When a root exists it is canonicalized so it aligns with script canonicalize
+/// (`\\?\C:\…` on Windows); missing roots keep the raw env path.
+fn trusted_windows_editor_roots_from_env() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    for key in ["PROGRAMFILES", "ProgramFiles(x86)"] {
+        if let Some(v) = std::env::var_os(key) {
+            if !v.is_empty() {
+                roots.push(std::path::PathBuf::from(v));
+            }
         }
-        "cursor.cmd" => {
-            n.ends_with("/cursor/resources/app/bin/cursor.cmd")
-                || n.ends_with("/cursor/bin/cursor.cmd")
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        if !local.is_empty() {
+            roots.push(std::path::PathBuf::from(local).join("Programs"));
         }
-        _ => false,
+    }
+    roots
+        .into_iter()
+        .map(|root| std::fs::canonicalize(&root).unwrap_or(root))
+        .collect()
+}
+
+fn trusted_relative_layouts_for_basename(
+    cleaned_basename: &str,
+) -> Option<&'static [&'static str]> {
+    match cleaned_basename {
+        "code.cmd" => Some(CODE_CMD_TRUSTED_RELATIVE),
+        "cursor.cmd" => Some(CURSOR_CMD_TRUSTED_RELATIVE),
+        _ => None,
     }
 }
 
-/// Allow-listed Windows launcher: bare name (PATH) or known install absolute path.
+/// Pure string check: absolute local path equals `root/relative` for a trusted root.
+/// Used by unit tests on every OS; runtime also runs this on the canonicalize result.
+fn is_known_windows_editor_install_path_with_roots(
+    program: &str,
+    roots: &[std::path::PathBuf],
+) -> bool {
+    let local = match classify_windows_editor_path(program) {
+        WinEditorPathKind::Local(s) => s,
+        WinEditorPathKind::Unc => return false,
+    };
+    if !editor_path_is_absolute_local(local) {
+        return false;
+    }
+    let n = normalize_editor_path_for_match(local);
+    let base = custom_editor_program_basename(local);
+    let cleaned = strip_trailing_windows_junk(&base);
+    let Some(relatives) = trusted_relative_layouts_for_basename(cleaned) else {
+        return false;
+    };
+    for root in roots {
+        let root_cow = root.to_string_lossy();
+        let root_local = match classify_windows_editor_path(&root_cow) {
+            WinEditorPathKind::Local(s) => s,
+            // Env roots should never be UNC; skip rather than match remotely.
+            WinEditorPathKind::Unc => continue,
+        };
+        let root_n = normalize_editor_path_for_match(root_local);
+        let root_n = root_n.trim_end_matches('/');
+        if root_n.is_empty() {
+            continue;
+        }
+        for rel in relatives {
+            let expected = format!("{root_n}/{rel}");
+            if n == expected {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Path-shaped allow-list: canonicalize (fail-closed) then trusted-root match.
+fn is_trusted_windows_editor_script_path(program: &str) -> bool {
+    let trimmed = program.trim();
+    if trimmed.is_empty() || !editor_program_looks_like_path(trimmed) {
+        return false;
+    }
+    if matches!(
+        classify_windows_editor_path(trimmed),
+        WinEditorPathKind::Unc
+    ) {
+        return false;
+    }
+    let expanded = expand_home_prefix(trimmed);
+    let local = match classify_windows_editor_path(&expanded) {
+        WinEditorPathKind::Local(s) => s.to_string(),
+        WinEditorPathKind::Unc => return false,
+    };
+    if !editor_path_is_absolute_local(&local) {
+        return false;
+    }
+    // Fail-closed: missing path / I/O error must not fall back to raw string match.
+    let canon = match std::fs::canonicalize(&local) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    is_known_windows_editor_install_path_with_roots(
+        &canon.to_string_lossy(),
+        &trusted_windows_editor_roots_from_env(),
+    )
+}
+
+/// Allow-listed Windows launcher: bare name (PATH) or trusted-root absolute path.
 fn is_allowed_editor_script_program(program: &str) -> bool {
     let trimmed = program.trim();
     let base = custom_editor_program_basename(trimmed);
@@ -310,7 +432,7 @@ fn is_allowed_editor_script_program(program: &str) -> bool {
     if !editor_program_looks_like_path(trimmed) {
         return true;
     }
-    is_known_windows_editor_install_path(trimmed)
+    is_trusted_windows_editor_script_path(trimmed)
 }
 
 fn is_denied_script_extension(basename_lower: &str) -> bool {
@@ -687,16 +809,14 @@ mod tests {
         assert!(validate_custom_editor("code", "-g {path}").is_ok());
         assert!(validate_custom_editor("code.cmd", "--goto {path}").is_ok());
         assert!(validate_custom_editor("cursor.cmd", "--goto {path}").is_ok());
+        // Absolute `.cmd` paths require canonicalize + trusted roots (see
+        // logic / Windows temp-file tests). Non-existent Program Files strings
+        // must not pass on raw suffix match alone.
         assert!(validate_custom_editor(
             r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
             "--goto {path}"
         )
-        .is_ok());
-        assert!(validate_custom_editor(
-            r"C:\Users\alice\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd",
-            "--goto {path}"
-        )
-        .is_ok());
+        .is_err());
         assert!(validate_custom_editor("/usr/local/bin/nvim", "{path}").is_ok());
         assert!(validate_custom_editor("subl", "{path}").is_ok());
         // Not a python* version family.
@@ -715,54 +835,263 @@ mod tests {
         assert!(!custom_editor_program_is_denied("nvim"));
     }
 
+    fn sample_trusted_editor_roots() -> Vec<std::path::PathBuf> {
+        vec![
+            std::path::PathBuf::from(r"C:\Program Files"),
+            std::path::PathBuf::from(r"C:\Program Files (x86)"),
+            std::path::PathBuf::from(r"C:\Users\alice\AppData\Local\Programs"),
+        ]
+    }
+
     #[test]
-    fn windows_editor_script_allowlist_bare_and_known_install_only() {
-        // Bare PATH names — allowed.
+    fn windows_editor_path_classify_strips_extended_rejects_unc() {
+        assert_eq!(
+            classify_windows_editor_path(r"\\?\C:\Program Files\Microsoft VS Code\bin\code.cmd"),
+            WinEditorPathKind::Local(r"C:\Program Files\Microsoft VS Code\bin\code.cmd")
+        );
+        assert_eq!(
+            classify_windows_editor_path(r"//?/C:/Program Files/Microsoft VS Code/bin/code.cmd"),
+            WinEditorPathKind::Local(r"C:/Program Files/Microsoft VS Code/bin/code.cmd")
+        );
+        assert_eq!(
+            classify_windows_editor_path(r"\\?\UNC\server\share\code.cmd"),
+            WinEditorPathKind::Unc
+        );
+        assert_eq!(
+            classify_windows_editor_path(r"\\?\unc\server\share\code.cmd"),
+            WinEditorPathKind::Unc
+        );
+        assert_eq!(
+            classify_windows_editor_path(r"//?/UNC/server/share/code.cmd"),
+            WinEditorPathKind::Unc
+        );
+        assert_eq!(
+            classify_windows_editor_path(r"\\server\share\code.cmd"),
+            WinEditorPathKind::Unc
+        );
+        assert_eq!(
+            classify_windows_editor_path("//server/share/cursor.cmd"),
+            WinEditorPathKind::Unc
+        );
+        assert_eq!(
+            classify_windows_editor_path(r"C:\Program Files\code.cmd"),
+            WinEditorPathKind::Local(r"C:\Program Files\code.cmd")
+        );
+    }
+
+    #[test]
+    fn windows_editor_script_allowlist_trusted_root_logic() {
+        let roots = sample_trusted_editor_roots();
+        // Under trusted roots + known relative layout — allowed (string logic).
+        assert!(is_known_windows_editor_install_path_with_roots(
+            r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        assert!(is_known_windows_editor_install_path_with_roots(
+            r"C:\Program Files (x86)\Microsoft VS Code Insiders\bin\code.cmd",
+            &roots
+        ));
+        assert!(is_known_windows_editor_install_path_with_roots(
+            r"C:\Users\alice\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        assert!(is_known_windows_editor_install_path_with_roots(
+            r"C:\Users\alice\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd",
+            &roots
+        ));
+        assert!(is_known_windows_editor_install_path_with_roots(
+            r"C:\Users\alice\AppData\Local\Programs\cursor\bin\cursor.cmd",
+            &roots
+        ));
+        // Canonicalize-style extended prefix must match after strip.
+        assert!(is_known_windows_editor_install_path_with_roots(
+            r"\\?\C:\Program Files\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        // Suffix-only under Public (or any non-root) — rejected.
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r"C:\Users\Public\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r"C:\Users\Public\code.cmd",
+            &roots
+        ));
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r"C:\Users\alice\AppData\Local\Programs\evil\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        // UNC / extended UNC — rejected.
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r"\\server\share\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r"\\?\UNC\server\share\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        // Relative — rejected.
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r".\Microsoft VS Code\bin\code.cmd",
+            &roots
+        ));
+        assert!(!is_known_windows_editor_install_path_with_roots(
+            r"bin\code.cmd",
+            &roots
+        ));
+    }
+
+    #[test]
+    fn windows_editor_script_allowlist_bare_and_untrusted_paths() {
+        // Bare PATH names — allowed without filesystem / env roots.
         assert!(!custom_editor_program_is_denied("code.cmd"));
         assert!(!custom_editor_program_is_denied("cursor.cmd"));
-        // Known install absolute paths — allowed.
-        assert!(!custom_editor_program_is_denied(
+        assert!(validate_custom_editor("code.cmd", "--goto {path}").is_ok());
+        assert!(validate_custom_editor("cursor.cmd", "--goto {path}").is_ok());
+        // Path-shaped: missing file → canonicalize fail-closed → denied
+        // (even when the string matches a known layout under a typical root).
+        assert!(custom_editor_program_is_denied(
             r"C:\Program Files\Microsoft VS Code\bin\code.cmd"
         ));
-        assert!(!custom_editor_program_is_denied(
-            r"C:\Users\alice\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd"
-        ));
-        assert!(!custom_editor_program_is_denied(
+        assert!(custom_editor_program_is_denied(
             r"C:\Users\alice\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd"
         ));
-        // Random / user-controlled paths with the same basename — denied.
+        // Suffix spoof / relative / UNC — denied.
+        assert!(custom_editor_program_is_denied(
+            r"C:\Users\Public\Microsoft VS Code\bin\code.cmd"
+        ));
         assert!(custom_editor_program_is_denied(r"C:\Users\Public\code.cmd"));
         assert!(custom_editor_program_is_denied(r".\code.cmd"));
         assert!(custom_editor_program_is_denied(r"..\code.cmd"));
         assert!(custom_editor_program_is_denied(r"bin\code.cmd"));
         assert!(custom_editor_program_is_denied(r"\\server\share\code.cmd"));
         assert!(custom_editor_program_is_denied("//server/share/cursor.cmd"));
+        assert!(custom_editor_program_is_denied(
+            r"\\?\UNC\server\share\code.cmd"
+        ));
         assert!(custom_editor_program_is_denied("notepad.cmd"));
         assert!(custom_editor_program_is_denied("code.bat"));
         assert!(custom_editor_program_is_denied("cursor.ps1"));
     }
 
-    /// Windows-only: path-shaped allow-list rejects must stay hard errors on the
-    /// platform where `.cmd` launchers are actually spawned.
+    /// Windows-only: real temp roots + files; env-resolved trusted roots;
+    /// canonicalize (`\\?\…`) must allow trusted and deny Public suffix spoof.
     #[cfg(windows)]
     #[test]
-    fn windows_editor_script_allowlist_rejects_untrusted_paths() {
-        for prog in [
-            r"C:\Users\Public\code.cmd",
-            r".\code.cmd",
-            r"temp\code.cmd",
-            r"\\evil\share\code.cmd",
-            r"C:\Users\Public\cursor.cmd",
-        ] {
-            let err = validate_custom_editor(prog, "--goto {path}").expect_err(prog);
-            assert!(err.to_string().contains("denylist"), "{prog}: {err}");
+    fn windows_editor_script_allowlist_real_temp_trusted_roots() {
+        use std::sync::{Mutex, OnceLock};
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp =
+            std::env::temp_dir().join(format!("lounge-editor-roots-{}", uuid::Uuid::new_v4()));
+        let program_files = tmp.join("ProgramFiles");
+        let local_programs = tmp.join("LocalApp").join("Programs");
+        let public_spoof = tmp.join("Public").join("Microsoft VS Code").join("bin");
+        let code_dir = program_files.join("Microsoft VS Code").join("bin");
+        let cursor_dir = local_programs
+            .join("cursor")
+            .join("resources")
+            .join("app")
+            .join("bin");
+        std::fs::create_dir_all(&code_dir).unwrap();
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::create_dir_all(&public_spoof).unwrap();
+        let code_cmd = code_dir.join("code.cmd");
+        let cursor_cmd = cursor_dir.join("cursor.cmd");
+        let public_cmd = public_spoof.join("code.cmd");
+        std::fs::write(&code_cmd, "@echo off\n").unwrap();
+        std::fs::write(&cursor_cmd, "@echo off\n").unwrap();
+        std::fs::write(&public_cmd, "@echo off\n").unwrap();
+
+        let prev_pf = std::env::var_os("PROGRAMFILES");
+        let prev_pf86 = std::env::var_os("ProgramFiles(x86)");
+        let prev_local = std::env::var_os("LOCALAPPDATA");
+        // Serialized by ENV_LOCK; restored below (same pattern as lmr_runtime tests).
+        std::env::set_var("PROGRAMFILES", &program_files);
+        std::env::set_var("ProgramFiles(x86)", tmp.join("ProgramFilesX86"));
+        std::env::set_var("LOCALAPPDATA", tmp.join("LocalApp"));
+
+        let restore = || {
+            match &prev_pf {
+                Some(v) => std::env::set_var("PROGRAMFILES", v),
+                None => std::env::remove_var("PROGRAMFILES"),
+            }
+            match &prev_pf86 {
+                Some(v) => std::env::set_var("ProgramFiles(x86)", v),
+                None => std::env::remove_var("ProgramFiles(x86)"),
+            }
+            match &prev_local {
+                Some(v) => std::env::set_var("LOCALAPPDATA", v),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+        };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(
+                validate_custom_editor(code_cmd.to_str().unwrap(), "--goto {path}").is_ok(),
+                "trusted Program Files code.cmd must pass"
+            );
+            assert!(
+                validate_custom_editor(cursor_cmd.to_str().unwrap(), "--goto {path}").is_ok(),
+                "trusted Local\\Programs cursor.cmd must pass"
+            );
+            // Canonicalize on Windows often yields \\?\ — allow-list must accept it.
+            let canon = std::fs::canonicalize(&code_cmd).expect("canonicalize code.cmd");
+            let canon_s = canon.to_string_lossy();
+            assert!(
+                !custom_editor_program_is_denied(canon_s.as_ref()),
+                "canonical trusted path must pass allow-list (got {canon_s})"
+            );
+            if canon_s.starts_with(r"\\?\") {
+                assert!(
+                    matches!(
+                        classify_windows_editor_path(canon_s.as_ref()),
+                        WinEditorPathKind::Local(_)
+                    ),
+                    "drive canonicalize must classify as local, not UNC: {canon_s}"
+                );
+                assert!(
+                    is_known_windows_editor_install_path_with_roots(
+                        canon_s.as_ref(),
+                        &trusted_windows_editor_roots_from_env()
+                    ),
+                    "\\\\?\\ stripped path must match trusted roots"
+                );
+            }
+            // Public suffix spoof exists on disk but is outside trusted roots.
+            let err = validate_custom_editor(public_cmd.to_str().unwrap(), "--goto {path}")
+                .expect_err("public spoof");
+            assert!(err.to_string().contains("denylist"), "public spoof: {err}");
+            for prog in [
+                r".\code.cmd",
+                r"temp\code.cmd",
+                r"\\evil\share\code.cmd",
+                r"\\?\UNC\evil\share\code.cmd",
+            ] {
+                let err = validate_custom_editor(prog, "--goto {path}").expect_err(prog);
+                assert!(err.to_string().contains("denylist"), "{prog}: {err}");
+            }
+            assert!(validate_custom_editor("code.cmd", "--goto {path}").is_ok());
+            // Missing file under trusted layout — canonicalize fail-closed.
+            let missing = program_files
+                .join("Microsoft VS Code Insiders")
+                .join("bin")
+                .join("code.cmd");
+            assert!(
+                custom_editor_program_is_denied(missing.to_str().unwrap()),
+                "missing trusted-layout path must fail closed"
+            );
+        }));
+
+        restore();
+        let _ = std::fs::remove_dir_all(&tmp);
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
         }
-        assert!(validate_custom_editor("code.cmd", "--goto {path}").is_ok());
-        assert!(validate_custom_editor(
-            r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
-            "--goto {path}"
-        )
-        .is_ok());
     }
 
     #[test]
