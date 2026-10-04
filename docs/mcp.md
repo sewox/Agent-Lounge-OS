@@ -90,11 +90,39 @@ Claude yalnızca stdio başlatır; `lounge-mcp` Kernel HTTP’ye köprü kurar.
 | `lounge_search_experience` | `mcp_search_experience.schema.json` | `active_file` / `workspace_root` → project |
 | `lounge_record_experience` | MCP args + `experience.schema.json` | Atomik SQLite↔vektör |
 | `lounge_record_decision` | aynı | ADR alias |
-| `lounge_dispatch_task` | MCP args + `task.schema.json` | NATS; PENDING_APPROVAL baypas yok |
+| `lounge_call_agent` | `mcp_call_agent.schema.json` | Mod A→B; `timeout_limit` içinde sonuç veya `backgrounded` |
+| `lounge_wait_task` | `mcp_wait_task.schema.json` | Aynı oturum long-poll; eşik aşımında `still_running` |
+| `lounge_yield_result` | `mcp_yield_result.schema.json` | Claim sahibi worker oturumu yazar |
+| `lounge_dispatch_task` | `mcp_dispatch_task.schema.json` | Fire-and-forget (yeni A2A altyapısı); sonuç → `lounge_wait_task` |
 | `lounge_ask_agent` | aynı | Dispatch alias |
-| `lounge_status` | `mcp_status.schema.json` | Bağlı ajanlar + sağlık |
+| `lounge_status` | `mcp_status.schema.json` | Bağlı ajanlar + sağlık + `timeout_limit_secs` |
 
 Serbest biçim / `additionalProperties` → net MCP `isError` yanıtı.
+
+## Timeout manager (PR-3)
+
+Oturum başına tek eşik: `timeout_limit` (`bridge/timeout_manager.rs`).
+
+| İstemci (`clientInfo.name` → normalize) | Varsayılan |
+|---|---|
+| Antigravity | **150 sn** (180 sn sert limit − 30 sn marj) |
+| Cursor / Claude Desktop / Claude Code / Grok | **45 sn** (geçici; ölçüm bekleniyor) |
+| Bilinmeyen | **30 sn** (güvenli düşük) |
+
+Override: Settings `mcp.timeout_secs` veya env `LOUNGE_MCP_TIMEOUT_SECS` (global). Tablo `TimeoutManager::set_client_timeout` ile güncellenir.
+
+**Progress bildirimleri süreyi uzatmaz** — yalnız UI nabzı.
+
+### `notifications/cancelled`
+
+| reason | Davranış |
+|---|---|
+| `context canceled` (kullanıcı Stop) | Görev `CANCELLED`; NATS `lounge.control.stop` |
+| `context deadline exceeded` | Görev arka planda sürer (`WAIT_TIMEOUT_REACHED` / backgrounded) |
+
+### Sonuç teslimi (deadline sonrası, bağlantı açık)
+
+Ölçüm (Antigravity): zaman aşımında istemci `cancelled` gönderir, **bağlantıyı kapatmaz**. Bridge yanıtı zaten `backgrounded` + `task_id` döndürmüştür (veya iptal sonrası sessiz). Aynı `Mcp-Session-Id` ile ajan `lounge_wait_task(task_id)` çağırır; worker `lounge_yield_result` yazmışsa `completed`/`failed` + sonuç döner. Yetkisiz oturum okuyamaz/yield edemez.
 
 ## Manuel duman testi
 

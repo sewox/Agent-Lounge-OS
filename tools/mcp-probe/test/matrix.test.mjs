@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { generateReport } from "../scripts/report.mjs";
 import { parseDelays, runMatrix, DEFAULT_DELAYS_S } from "../scripts/run-matrix.mjs";
+import { ANTIGRAVITY_CLIFF_DELAYS_S } from "../scripts/run-antigravity-cliff.mjs";
+
+test("antigravity cliff delay list is 150/170/180/190 (manual script only)", () => {
+  assert.deepEqual(ANTIGRAVITY_CLIFF_DELAYS_S, [150, 170, 180, 190]);
+});
 
 test("parseDelays defaults only when unset", () => {
   assert.deepEqual(parseDelays(undefined), DEFAULT_DELAYS_S);

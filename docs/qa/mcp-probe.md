@@ -91,6 +91,17 @@ node scripts/report.mjs --log-dir ./logs --matrix ./logs/matrix/matrix-results.j
 
 Çıktı: `logs/matrix/matrix-results.json` + `matrix-report.md` (markdown tablo).
 
+### Antigravity cliff (yalnız manuel — CI’da yok)
+
+120–180 sn aralığını doğrulamak için:
+
+```bash
+npm run run-antigravity-cliff
+# veya: node scripts/run-antigravity-cliff.mjs --out-dir ./logs/antigravity-cliff
+```
+
+Gecikmeler: **150, 170, 180, 190** sn (progress açık/kapalı). Duvar süresi ~20+ dk. Ölçüm beklentisi: ~180 sn’de `deadline exceeded`; progress süreyi uzatmaz.
+
 ## İstemci MCP config örnekleri
 
 Yolları kendi makinenize göre mutlak yapın. Log etiketini `--client-label` / `MCP_PROBE_CLIENT` ile ayırın.
