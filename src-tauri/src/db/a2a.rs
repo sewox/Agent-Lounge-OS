@@ -16,7 +16,8 @@
 //! - Yalnız `target_agent` ile `agent_sessions` üzerinden bağlanmış oturum
 //!   (veya zaten `claimed_by` sahibi) yield edebilir.
 //! - Durum: `QUEUED` (PENDING) / `DISPATCHED` / `EXECUTING` / `WAIT_TIMEOUT_REACHED`.
-//! - Terminal (`Completed`/`Failed`/`Cancelled`/`Expired`/`Timeout`/`NeedsHuman`) → ret.
+//! - Terminal (`Completed`/`Failed`/`Cancelled`/`Expired`/`Timeout`) → ret.
+//!   `NeedsHuman` soft: cancel izinli; wait `needs_human` bayrağı döner.
 //!
 //! Görev satırı ve idempotency kaydı **tek SQLite transaction** içinde yazılır.
 //! Idempotency kapsamı (PR-3): `session:<mcp_session_id>` varsa spoof edilebilir
@@ -952,7 +953,10 @@ pub fn mark_silent_tasks_needs_human(
     Ok(marked)
 }
 
-/// PR-3 hazırlığı — üretim yoluna bağlı değil (bkz. modül dokümantasyonu).
+/// Hub / DB agent_sessions üst sınırı (MCP in-memory ile aynı).
+pub const MAX_AGENT_SESSIONS: usize = 256;
+
+/// PR-3 — MCP initialize üretim yolu da yazar; üst sınırda eski satırlar temizlenir.
 pub fn upsert_agent_session(conn: &Connection, session: &AgentSession) -> Result<()> {
     conn.execute(
         r#"
@@ -984,7 +988,46 @@ pub fn upsert_agent_session(conn: &Connection, session: &AgentSession) -> Result
             session.replaced_by,
         ],
     )?;
+    prune_agent_sessions(conn, MAX_AGENT_SESSIONS, &session.id)?;
     Ok(())
+}
+
+/// `last_seen` FIFO: en eski bağlantısız oturumları sil (canlı `keep` düşmesin).
+pub fn prune_agent_sessions(conn: &Connection, max: usize, keep: &str) -> Result<u64> {
+    let count = count_agent_sessions(conn)? as usize;
+    if count <= max {
+        return Ok(0);
+    }
+    let excess = (count - max) as i64;
+    // FK: session_lock → agent_sessions; önce kilitleri temizle.
+    // SQLite: aynı tabloya DELETE+subquery için iç içe SELECT gerekir.
+    conn.execute(
+        r#"
+        DELETE FROM session_lock WHERE session_id IN (
+            SELECT id FROM (
+                SELECT id FROM agent_sessions
+                WHERE id != ?1
+                ORDER BY last_seen ASC
+                LIMIT ?2
+            )
+        )
+        "#,
+        params![keep, excess],
+    )?;
+    let n = conn.execute(
+        r#"
+        DELETE FROM agent_sessions WHERE id IN (
+            SELECT id FROM (
+                SELECT id FROM agent_sessions
+                WHERE id != ?1
+                ORDER BY last_seen ASC
+                LIMIT ?2
+            )
+        )
+        "#,
+        params![keep, excess],
+    )?;
+    Ok(n as u64)
 }
 
 /// PR-3 hazırlığı — üretim yoluna bağlı değil.
@@ -1655,6 +1698,36 @@ mod tests {
         let s = AgentSession::new("p", "cursor", "gui", "/tmp/ws", "user_pin");
         store.upsert_session(&s).unwrap();
         assert_eq!(store.session_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn agent_sessions_pruned_to_cap_keeping_newest() {
+        let store = ExperienceStore::memory().unwrap();
+        // Küçük tavan ile spam → en yeni keep kalır.
+        {
+            let conn = store.conn.lock().unwrap();
+            for i in 0..5 {
+                let mut s = AgentSession::new("p", "worker", "mcp", "", "mcp_meta");
+                s.id = format!("sess-{i}");
+                s.last_seen = format!("2026-10-04T12:00:0{i}.000Z");
+                upsert_agent_session(&conn, &s).unwrap();
+            }
+            let mut keep = AgentSession::new("p", "worker", "mcp", "", "mcp_meta");
+            keep.id = "sess-keep".into();
+            keep.last_seen = "2026-10-04T13:00:00.000Z".into();
+            upsert_agent_session(&conn, &keep).unwrap();
+            let pruned = prune_agent_sessions(&conn, 3, "sess-keep").unwrap();
+            assert!(pruned >= 3, "expected prune, got {pruned}");
+            assert_eq!(count_agent_sessions(&conn).unwrap(), 3);
+            let keep_exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_sessions WHERE id = 'sess-keep'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(keep_exists, 1);
+        }
     }
 
     #[test]
