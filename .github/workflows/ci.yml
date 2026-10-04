@@ -81,6 +81,18 @@ jobs:
       - name: Stage externalBin stub
         run: bash src-tauri/scripts/prepare-sidecar.sh --stub
 
+      # Required by nats_manager::event_pump_receives_non_bus_message_on_wildcard
+      # (fails loud if missing — see docs/qa/rust-opt-in-tests.md).
+      - name: Install nats-server
+        run: |
+          set -euo pipefail
+          NATS_VERSION=v2.10.24
+          ARCH=amd64
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-linux-${ARCH}.tar.gz" \
+            | tar -xz
+          sudo install -m 0755 "nats-server-${NATS_VERSION}-linux-${ARCH}/nats-server" /usr/local/bin/nats-server
+          nats-server -v
+
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 

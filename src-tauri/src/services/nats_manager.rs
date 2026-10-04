@@ -542,10 +542,13 @@ mod tests {
 
     #[test]
     fn event_pump_receives_non_bus_message_on_wildcard() {
-        let Some((url, mut child)) = spawn_ephemeral_nats() else {
-            eprintln!("skip: nats-server bulunamadı");
-            return;
-        };
+        // Fail loud when nats-server is missing — no silent green.
+        // CI installs the binary (ci.yml / qa-cross-platform.yml); local: see docs/qa/rust-opt-in-tests.md.
+        let (url, mut child) = spawn_ephemeral_nats().unwrap_or_else(|err| {
+            panic!(
+                "nats-server required for event_pump_receives_non_bus_message_on_wildcard: {err}"
+            );
+        });
         let result = (|| -> Result<()> {
             let (nc, sub) = connect_and_subscribe(&url)?;
             let payload = br#"{"id":"pump-infer","type":"task","source_agent":"test"}"#;
@@ -568,33 +571,41 @@ mod tests {
         result.expect("event pump wildcard subscribe");
     }
 
-    fn spawn_ephemeral_nats() -> Option<(String, std::process::Child)> {
-        let binary = find_executable("nats-server")?;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-        let port = listener.local_addr().ok()?.port();
+    fn spawn_ephemeral_nats() -> Result<(String, std::process::Child)> {
+        let binary = find_executable("nats-server").ok_or_else(|| {
+            anyhow::anyhow!("nats-server not on PATH (install locally or rely on CI install step)")
+        })?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind ephemeral port for nats-server")?;
+        let port = listener
+            .local_addr()
+            .context("ephemeral listener local_addr")?
+            .port();
         drop(listener);
         let mut command = GuardedCommand::new(binary)
             .args(["-a", "127.0.0.1", "-p", &port.to_string()])
             .internal_daemon()
             .into_std_command()
-            .ok()?;
+            .context("nats-server GuardedCommand")?;
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .ok()?;
+            .context("spawn nats-server")?;
         let url = format!("nats://127.0.0.1:{port}");
         for _ in 0..80 {
             if nats::connect(&url).is_ok() {
-                return Some((url, child));
+                return Ok((url, child));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut child = child;
         let _ = child.kill();
         let _ = child.wait();
-        None
+        Err(anyhow::anyhow!(
+            "nats-server spawned but did not accept connections at {url} within ~4s"
+        ))
     }
 
     #[test]
