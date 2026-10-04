@@ -2,9 +2,11 @@
 //!
 //! `lounge.task.completed` / `lounge.task.failed` → `broadcast` task_id.
 //! Abone kapanırsa alıcılar `Closed` görür; select! kolu devre dışı kalır.
+//! İlk connect başarısız olursa aynı görev geri çekilmeli yeniden dener.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::broadcast;
 
@@ -53,10 +55,28 @@ impl NatsTerminalHub {
         }
         let url = self.nats_url.clone();
         let tx = self.tx.clone();
+        let started = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            #[allow(deprecated)]
-            let Ok(nc) = nats::connect(&url) else {
-                return;
+            let mut backoff = Duration::from_secs(1);
+            let nc = loop {
+                #[allow(deprecated)]
+                match nats::connect(&url) {
+                    Ok(nc) => break nc,
+                    Err(err) => {
+                        log::warn!(
+                            "NatsTerminalHub connect failed ({err}); retry in {:?}",
+                            backoff
+                        );
+                        // Allow a later subscribe to re-spawn if this task exits unexpectedly.
+                        started.started.store(false, Ordering::SeqCst);
+                        std::thread::sleep(backoff);
+                        if started.started.swap(true, Ordering::SeqCst) {
+                            // Another ensure_started won — exit this worker.
+                            return;
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                    }
+                }
             };
             for subject in [TASK_COMPLETED, TASK_FAILED] {
                 let sub_nc = nc.clone();
@@ -76,12 +96,8 @@ impl NatsTerminalHub {
                     })
                     .ok();
             }
-            // Keep connect alive for child subscription threads.
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(60));
-                if tx.receiver_count() == 0 {
-                    // idle — still keep (receivers come and go per wait)
-                }
+                std::thread::sleep(Duration::from_secs(60));
             }
         });
     }

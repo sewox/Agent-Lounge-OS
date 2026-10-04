@@ -17,8 +17,8 @@ pub const DEFAULT_UNKNOWN_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_GUI_TIMEOUT: Duration = Duration::from_secs(45);
 /// Antigravity: 180 sn sert limit − 30 sn marj.
 pub const DEFAULT_ANTIGRAVITY_TIMEOUT: Duration = Duration::from_secs(150);
-/// Global override üst sınırı (istemci hard-timeout 180 sn).
-pub const MAX_TIMEOUT_OVERRIDE_SECS: u64 = 180;
+/// Global override üst sınırı — Antigravity eşiğinin biraz üstü, istemci hard 180'den düşük.
+pub const MAX_TIMEOUT_OVERRIDE_SECS: u64 = 170;
 
 /// Settings anahtarı — saniye cinsinden global override (tüm istemciler).
 pub const SETTING_MCP_TIMEOUT_SECS: &str = "mcp.timeout_secs";
@@ -109,43 +109,49 @@ impl TimeoutManager {
     }
 
     /// Bu oturumun kullanacağı tek eşik değişkeni.
-    /// Env > settings (canlı) > tablo. Override 180 sn ile sınırlı.
+    /// Env > settings (try_lock canlı cache) > tablo. Override ≤170 sn.
     pub fn timeout_limit(&self, client_name: &str) -> Duration {
-        // Env her çağrıda — process env nadiren değişir ama settings’ten yüksek öncelik.
         if let Some(over) = parse_secs_env(ENV_MCP_TIMEOUT_SECS).map(cap_override) {
             return over;
         }
-        // Settings canlı yenile.
-        if let Some(store) = self
-            .settings_store
-            .read()
-            .expect("settings store lock")
-            .as_ref()
-        {
-            if let Ok(conn) = store.conn.lock() {
-                if let Ok(raw) = conn.query_row(
-                    "SELECT value_json FROM settings WHERE key = ?1",
-                    rusqlite::params![SETTING_MCP_TIMEOUT_SECS],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    if let Some(secs) = parse_timeout_setting(&raw) {
-                        let capped = cap_override_secs(secs);
-                        if capped != secs {
-                            log::warn!(
-                                "mcp.timeout_secs={secs} > {MAX_TIMEOUT_OVERRIDE_SECS}; {MAX_TIMEOUT_OVERRIDE_SECS}sn’ye kırpıldı"
-                            );
-                        }
-                        return Duration::from_secs(capped);
-                    }
-                }
-            }
-        }
+        // Async bağlamda std Mutex bloğunu önle — try_lock; başarısızsa cache'e düş.
+        self.try_refresh_settings_cache();
         if let Some(over) = *self.global_override.read().expect("timeout override lock") {
             return over;
         }
         let key = normalize_client_host(client_name);
         let table = self.table.read().expect("timeout table lock");
         table.get(&key).copied().unwrap_or(self.unknown_default)
+    }
+
+    /// Settings'i try_lock ile oku; kilit meşgulse önceki global_override kalır.
+    fn try_refresh_settings_cache(&self) {
+        let Ok(store_guard) = self.settings_store.try_read() else {
+            return;
+        };
+        let Some(store) = store_guard.as_ref() else {
+            return;
+        };
+        let Ok(conn) = store.conn.try_lock() else {
+            return;
+        };
+        let Ok(raw) = conn.query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            rusqlite::params![SETTING_MCP_TIMEOUT_SECS],
+            |row| row.get::<_, String>(0),
+        ) else {
+            return;
+        };
+        if let Some(secs) = parse_timeout_setting(&raw) {
+            let capped = cap_override_secs(secs);
+            if capped != secs {
+                log::warn!(
+                    "mcp.timeout_secs={secs} > {MAX_TIMEOUT_OVERRIDE_SECS}; {MAX_TIMEOUT_OVERRIDE_SECS}sn’ye kırpıldı"
+                );
+            }
+            *self.global_override.write().expect("timeout override lock") =
+                Some(Duration::from_secs(capped));
+        }
     }
 
     pub fn unknown_default(&self) -> Duration {
@@ -243,13 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn override_capped_at_180() {
+    fn override_capped_at_170() {
         let tm = TimeoutManager::with_defaults();
         tm.set_global_override_secs(Some(300));
         assert_eq!(
             tm.timeout_limit("antigravity"),
             Duration::from_secs(MAX_TIMEOUT_OVERRIDE_SECS)
         );
+        assert_eq!(MAX_TIMEOUT_OVERRIDE_SECS, 170);
     }
 
     #[test]
