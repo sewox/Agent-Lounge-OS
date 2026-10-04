@@ -151,7 +151,7 @@ fn build_cursor_argv(os: OsFamily, path: &str, line: Option<i64>) -> (String, Ve
 }
 
 /// Denied program stems (case-insensitive; `.exe`/`.com` stripped before match).
-/// Python family (`python`, `python3.12`, …) handled separately.
+/// Python family (`python`, `python3.12`, `pythonw`, …) handled separately.
 const CUSTOM_EDITOR_DENIED_STEMS: &[&str] = &[
     "sh",
     "bash",
@@ -166,6 +166,8 @@ const CUSTOM_EDITOR_DENIED_STEMS: &[&str] = &[
     "pwsh",
     "node",
     "nodejs",
+    "deno",
+    "bun",
     "perl",
     "ruby",
     "php",
@@ -178,7 +180,13 @@ const CUSTOM_EDITOR_DENIED_STEMS: &[&str] = &[
     "busybox",
     "env",
     "wsl",
+    "ssh",
 ];
+
+/// Windows editor launcher scripts that are safe as custom-editor programs.
+/// Random `.cmd` / `.bat` / `.ps1` remain denied; only this explicit allow-list passes.
+/// Basenames are compared case-insensitively after stripping trailing `.` / spaces.
+const CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES: &[&str] = &["code.cmd", "cursor.cmd"];
 
 fn home_dir_for_editor() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
@@ -226,14 +234,28 @@ fn editor_program_stem(basename_lower: &str) -> &str {
     cleaned
 }
 
+fn is_allowed_editor_script_basename(basename_lower: &str) -> bool {
+    let cleaned = strip_trailing_windows_junk(basename_lower);
+    CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES
+        .iter()
+        .any(|allowed| cleaned == *allowed)
+}
+
 fn is_denied_script_extension(basename_lower: &str) -> bool {
     let cleaned = strip_trailing_windows_junk(basename_lower);
+    if is_allowed_editor_script_basename(cleaned) {
+        return false;
+    }
     cleaned.ends_with(".bat") || cleaned.ends_with(".cmd") || cleaned.ends_with(".ps1")
 }
 
 fn is_python_family_stem(stem: &str) -> bool {
-    if stem == "python" || stem == "py" {
+    if stem == "python" || stem == "py" || stem == "pythonw" {
         return true;
+    }
+    if let Some(rest) = stem.strip_prefix("pythonw") {
+        // pythonw3, pythonw3.12 — windowless launcher still runs Python
+        return rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit() || c == '.');
     }
     if let Some(rest) = stem.strip_prefix("python") {
         // python3, python3.12, python310 — not "pythonium"
@@ -243,6 +265,9 @@ fn is_python_family_stem(stem: &str) -> bool {
 }
 
 fn basename_is_denied_editor(basename_lower: &str) -> bool {
+    if is_allowed_editor_script_basename(basename_lower) {
+        return false;
+    }
     if is_denied_script_extension(basename_lower) {
         return true;
     }
@@ -443,6 +468,13 @@ fn open_with_settings(settings: &EditorSettings, path: &str, line: Option<i64>) 
         ),
         preset => {
             let (program, args) = build_preset_argv(OsFamily::current(), preset, path, line);
+            // Presets use fixed argv builders but still pass the denylist so
+            // Windows launchers like `code.cmd` are allow-listed explicitly —
+            // never an unchecked bypass of script-extension denial.
+            if custom_editor_program_is_denied(&program) {
+                let base = custom_editor_program_basename(&program);
+                bail!("editor program is not allowed (shell/interpreter denylist): {base}");
+            }
             spawn_editor_argv(&program, &args)
         }
     }
@@ -554,7 +586,14 @@ mod tests {
             "python3.12",
             "PYTHON3.12",
             "/usr/bin/python3",
+            "pythonw",
+            "pythonw3",
+            "pythonw.exe",
             "node",
+            "deno",
+            "bun",
+            "ssh",
+            "ssh.exe",
             r"C:\Windows\System32\cmd.exe",
             "PowerShell",
             "curl",
@@ -577,6 +616,13 @@ mod tests {
             );
         }
         assert!(validate_custom_editor("code", "-g {path}").is_ok());
+        assert!(validate_custom_editor("code.cmd", "--goto {path}").is_ok());
+        assert!(validate_custom_editor("cursor.cmd", "--goto {path}").is_ok());
+        assert!(validate_custom_editor(
+            r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
+            "--goto {path}"
+        )
+        .is_ok());
         assert!(validate_custom_editor("/usr/local/bin/nvim", "{path}").is_ok());
         assert!(validate_custom_editor("subl", "{path}").is_ok());
         // Not a python* version family.
@@ -588,9 +634,37 @@ mod tests {
         assert!(custom_editor_program_is_denied("BaSh.EXE"));
         assert!(custom_editor_program_is_denied("python3.11"));
         assert!(custom_editor_program_is_denied("Py.exe"));
-        assert!(custom_editor_program_is_denied("code.cmd")); // .cmd script ext → denied
         assert!(custom_editor_program_is_denied("helper.cmd"));
+        assert!(custom_editor_program_is_denied("CODE.BAT"));
+        assert!(!custom_editor_program_is_denied("code.cmd")); // allow-listed Windows launcher
+        assert!(!custom_editor_program_is_denied("CURSOR.CMD"));
         assert!(!custom_editor_program_is_denied("nvim"));
+    }
+
+    #[test]
+    fn windows_editor_script_allowlist_keeps_random_cmd_denied() {
+        assert!(!custom_editor_program_is_denied("code.cmd"));
+        assert!(!custom_editor_program_is_denied("cursor.cmd"));
+        assert!(custom_editor_program_is_denied("notepad.cmd"));
+        assert!(custom_editor_program_is_denied("code.bat")); // only .cmd launchers allow-listed
+        assert!(custom_editor_program_is_denied("cursor.ps1"));
+    }
+
+    #[test]
+    fn preset_programs_pass_denylist_on_all_oses() {
+        for os in [OsFamily::Linux, OsFamily::Macos, OsFamily::Windows] {
+            for preset in [
+                EditorPreset::Default,
+                EditorPreset::VsCode,
+                EditorPreset::Cursor,
+            ] {
+                let (prog, _) = build_preset_argv(os, preset, "/tmp/x.rs", Some(1));
+                assert!(
+                    !custom_editor_program_is_denied(&prog),
+                    "preset {preset:?} on {os:?} program {prog:?} must pass denylist (allow-list Windows .cmd launchers)"
+                );
+            }
+        }
     }
 
     #[cfg(windows)]
