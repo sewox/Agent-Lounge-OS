@@ -31,7 +31,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::mcp_server::{default_mcp_http_bind, ClientCtx, McpServer};
-use super::session_id::{is_valid_session_id, normalize_or_mint_session_id, MAX_MCP_SESSIONS};
+use super::session_id::{normalize_or_mint_session_id, MAX_MCP_SESSIONS};
 use crate::db::ExperienceStore;
 use crate::kernel::WorkerRegistry;
 
@@ -363,7 +363,7 @@ mod tests {
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        assert!(is_valid_session_id(sid));
+        assert!(super::super::session_id::is_valid_session_id(sid));
         assert_ne!(sid, "../evil");
     }
 }
