@@ -51,7 +51,7 @@ Step-by-step: [CHECKLIST.md](./CHECKLIST.md) · Runtime: [RUNTIME_DEPS.md](./RUN
 | DS-03 | Open in editor uses `xdg-open` / opener; Settings Editor override | ☐ | |
 | AP-08 | Approval alert sound while pending (also when window unfocused) | ☐ | |
 | AP-09 | Settings sound prefs + Dinle; wav/mp3/ogg upload | ☐ | |
-| AP-10 | **Linux** desktop notification via Tauri plugin; click focuses app + banner | ☐ | |
+| AP-10 | Optional S2 smoke (not CI): **Linux** toast/activation → banner focus; see `docs/qa/ap-10-notification-click.md` | ☐ | |
 | AP-06/07 | Destructive POSIX patterns (`rm -rf`, …) require confirm | ☐ | |
 | Paths | Absolute `/home/…` paths and symlinks behave | ☐ | |
 

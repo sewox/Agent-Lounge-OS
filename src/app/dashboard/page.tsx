@@ -12,13 +12,13 @@ export default function DashboardPage() {
       <div className="w-full shrink-0">
         <OverviewKpis />
       </div>
-      {/* xl (1280): side-by-side so embedded Vault is in the first fold (DB-04). */}
-      <div className="grid w-full flex-1 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] xl:items-stretch">
+      {/* ≥960px + landscape: side-by-side (DB-04 / D960). Portrait (D3) stays stacked for L6. */}
+      <div className="grid w-full flex-1 grid-cols-1 gap-3 min-[960px]:landscape:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] min-[960px]:landscape:items-stretch">
         <CollapsiblePanel
           id="dash-event-stream"
           title={t("panels.eventStream")}
           className="flex h-full min-h-[20rem] w-full flex-col"
-          bodyClassName="flex min-h-[16rem] flex-1 flex-col xl:min-h-[var(--panel-min-h)]"
+          bodyClassName="flex min-h-[16rem] flex-1 flex-col min-[960px]:landscape:min-h-[var(--panel-min-h)]"
         >
           <EventStreamPanel embedded />
         </CollapsiblePanel>

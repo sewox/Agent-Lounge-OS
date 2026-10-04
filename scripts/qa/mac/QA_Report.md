@@ -71,7 +71,7 @@ Mark Pass / Fail. Failures are [B] layout blockers per plan §6.
 | DS-03 | Open in editor uses `open` / opener; Settings Editor override | ☐ | |
 | AP-08 | Approval alert sound (HTML Audio or rodio; wav/mp3/ogg) while pending / background | ☐ | |
 | AP-09 | Settings sound prefs + Dinle; wav/mp3/ogg/aiff upload | ☐ | |
-| AP-10 | **macOS** notification via Tauri plugin; click focuses app + banner | ☐ | |
+| AP-10 | Optional S2 smoke (not CI): **macOS** toast/activation → banner focus; see `docs/qa/ap-10-notification-click.md` | ☐ | |
 | AP-06/07 | Destructive POSIX patterns require confirm (Windows patterns covered on Win checklist) | ☐ | |
 | Paths | Absolute `/Users/…` paths behave | ☐ | |
 

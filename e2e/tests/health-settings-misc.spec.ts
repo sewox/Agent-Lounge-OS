@@ -126,14 +126,16 @@ test.describe("ST — settings", () => {
     await openRoute(page, "/settings", "full");
     const region = page.locator('[data-qa="routing-table"]');
     await expect(region).toBeVisible();
+    // Settings stack is tall — first-fold on load is out of scope (docs/qa/playwright-tolerances.md).
+    // After scroll: top in viewport, meaningful visible height, overflow scrolls internally.
     await region.scrollIntoViewIfNeeded();
     const box = await region.boundingBox();
     expect(box, "routing table must have a layout box").toBeTruthy();
     const vp = page.viewportSize()!;
-    // Tightened: after scrollIntoView, the table top must sit in the viewport
-    // and either fully fit or have an explicit scroll container.
     expect(box!.y, "routing table top must be in viewport").toBeGreaterThanOrEqual(-2);
     expect(box!.y, "routing table top must not sit below the fold").toBeLessThan(vp.height);
+    const visibleH = Math.min(box!.y + box!.height, vp.height) - Math.max(box!.y, 0);
+    expect(visibleH, "routing table must expose ≥48px in the viewport").toBeGreaterThanOrEqual(48);
     const scrollable = await region.evaluate((el) => {
       let node: HTMLElement | null = el;
       while (node) {
@@ -150,6 +152,7 @@ test.describe("ST — settings", () => {
       return el.scrollHeight > el.clientHeight + 1;
     });
     const bottom = box!.y + box!.height;
+    // Keep prior −4px edge (stricter than +1): treat near-fold overflow as needing a scroll parent.
     if (bottom > vp.height - 4) {
       expect(scrollable, "overflowing routing table must scroll inside a parent").toBe(true);
     }
@@ -451,13 +454,13 @@ test.describe("AP / CP / misc", () => {
   test("AP-10 · Native OS notification → focus_app_for_approval + banner focus", async ({
     page,
   }, testInfo) => {
-    // Front-end contract only: the harness mock of focus_app_for_approval emits
-    // approval_banner_focus and focuses the banner. Rust raise/slot behaviour is
-    // covered by unit tests; live OS toast click is S2 manual (NOT YET RUN).
+    // CI gate = front-end contract (mock focus_app_for_approval → banner focus).
+    // Live OS toast click is RETIRED from CI (plugin onAction is mobile-only; desktop
+    // uses Focused/Reopen — see docs/qa/ap-10-notification-click.md).
     testInfo.annotations.push({
-      type: "manual",
+      type: "s2-optional",
       description:
-        "S2 live NOT YET RUN: real OS toast → activate → banner. Automated AP-10 = front-end contract via mock; see docs/qa/ap-10-notification-click.md.",
+        "AP-10 CI = FE contract. Live OS toast S2 retired from CI gate; optional platform smoke only.",
     });
     await openRoute(page, "/dashboard", "full");
     expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();

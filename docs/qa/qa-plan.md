@@ -168,7 +168,7 @@ Etiketler: **[B]** bloklayıcı (merge'ü engeller), **[A]** otomatik (S1/S3), *
 |----|------|---------------|--------|
 | DS-01 | Tüm liste | 8 limiti kalkar. Virtual list ya da infinite scroll ile tümü görünür, toplam sayı gösterilir | A, B |
 | DS-02 | Detay | Satıra tıklanınca name, kind, file:line, detail, project ve `last_ref` görünür | A, B |
-| DS-03 | Editörde aç | OPEN_IN_EDITOR ilgili dosyayı doğru satırda açar: macOS `open` · Windows `start` · Linux `xdg-open` (veya Tauri opener); Settings Editor override (bkz. O3 / §10.2) | M, B |
+| DS-03 | Editörde aç | OPEN_IN_EDITOR ilgili dosyayı doğru satırda açar: macOS `open` · Windows `explorer.exe` · Linux `xdg-open` (veya Tauri opener); Settings Editor override (bkz. O3 / §10.2) | M, B |
 | DS-04 | Yolu kopyala | Pano içeriği `file:line` olur | A |
 | DS-05 | Ignore | Sembol listeden anında kalkar, KPI 1 azalır, `ignored_symbols`'a yazılır. Reload ve yeniden index sonrası da gizli kalır | A, S3, B |
 | DS-06 | Ignore listesi | `/health` → "Ignore List" sekmesinde görünür ve oradan geri alınabilir | A |
@@ -312,7 +312,7 @@ Not: Gemini "NATS heartbeat iyileştirmesi"ni PR-1'e koymuştu. Fleet test'leri 
 |---|-------|--------------|
 | O1 | UI'da **Türkçe / İngilizce seçimi** olacak (i18n) | X-01 "tek dil" yerine: tüm string'ler i18n sözlüğünden gelir, TR/EN geçişi Settings'te, seçim kalıcı; hardcoded string yok. PR-2'ye i18n altyapısı eklenir |
 | O2 | Kalıcı silme yok, **arşiv**. Ajan aktif tecrübelerde sonuç bulamazsa **arşive de bakar** | EX-03 aynen. Yeni S3 case: `lounge_search_experience` aktifte sonuç yoksa arşivden döner ve sonucu "archived" diye işaretler (PR-1) |
-| O3 | "Editörde aç" **sistem varsayılan editörü** ile; kullanıcı Settings'ten başka editör seçebilir | DS-03: macOS `open` · Windows `start` · Linux `xdg-open` (veya Tauri opener); Settings'e "Editor" seçimi (Varsayılan / VS Code / Cursor / özel komut) eklenir (PR-4/PR-5). Bkz. §10.2 |
+| O3 | "Editörde aç" **sistem varsayılan editörü** ile; kullanıcı Settings'ten başka editör seçebilir | DS-03: macOS `open` · Windows `explorer.exe` · Linux `xdg-open` (veya Tauri opener); Settings'e "Editor" seçimi (Varsayılan / VS Code / Cursor / özel komut) eklenir (PR-4/PR-5). Bkz. §10.2 |
 | O4 | Veritabanı vb. **yıkıcı işlemlerde kullanıcıya sorulmalı ve teyit alınmalı** | Yeni özellik: destructive-operation gate. POSIX (`rm -rf`, …) **ve** Windows (`del /s`, `rd /s`, `Remove-Item -Recurse`, `format`) + DB drop/truncate/delete/migrate-down/reset DecisionGate'te her zaman onay ister, "Never Ask" ile bile atlanamaz. AP-06/AP-07 (PR-1 + PR-5). Bkz. §10.2 |
 | O5 | **TTL + kullanım sayısı** ile otomatik arşiv | Şemaya `use_count`, `last_used_at`; TTL ve eşik Settings'te ayarlanabilir; arşive giden kayıt geri alınabilir. Yeni case EX-13 (PR-1/PR-3) |
 | O6 | Ajan tecrübeleri **otomatik onaylanır**; incelenmemiş olanların sayısı **rozetle** gösterilir | K2 (Draft) değişti: MCP kaydı doğrudan aktif olur ama `reviewed=false`; sidebar Knowledge Vault'ta rozet = incelenmemiş sayısı; detayı açmak ya da "incelendi" demek rozeti azaltır. EX-05 buna göre güncellenir |
@@ -327,7 +327,7 @@ Routing, security, quota ve yıkıcı-işlem onayları beklerken kullanıcıyı 
 |----|------|---------------|--------|-----|
 | AP-08 | Onay sesi | Routing / security / quota / destructive onay beklerken ses çalar (webview `HTMLAudioElement` veya Rust `rodio`; paketlenen wav/mp3/ogg). Uygulama arka planda veya pencere gizliyken de çalar. Kullanıcı karar verene kadar varsayılan **60 sn** aralıkla tekrar eder; karar sonrası durur. Otomasyon: audio playback spy | A, M, B | Backend tetik PR-1; UI/prefs PR-5 |
 | AP-09 | Ses ayarları | Settings'te: aç/kapa, yerleşik ses seçimi, özel dosya yükleme (**wav/mp3/ogg/aiff**), ses seviyesi, tekrar aralığı, **Dinle** (preview). Seçim kalıcıdır ve anında uygulanır | A, B | PR-5 |
-| AP-10 | OS bildirimi | Onay beklerken **Tauri notification plugin** ile yerel bildirim (üç OS). Tıklanınca uygulama öne gelir ve ilgili onay banner'ı odaklanır | M, B | Tetik PR-1; odak PR-5 |
+| AP-10 | OS bildirimi | Onay beklerken **Tauri notification plugin** ile yerel bildirim (üç OS). Desktop'ta `onAction` yok; odak `Focused`/`Reopen` + FE contract. CI gate = Playwright FE + Rust slot testleri; canlı toast S2 CI dışı (bkz. `ap-10-notification-click.md`) | A | Tetik PR-1; odak PR-5 |
 
 Not: Ses, görünürlük API'sine bağlı olmamalı (background/hidden). Tekrar aralığı ve ses dosyası prefs'te saklanır.
 
@@ -339,11 +339,11 @@ Uygulama **macOS, Windows ve Linux** üzerinde çalışır. Platforma özel vars
 |------|------|
 | Bildirim (AP-10) | Tauri **notification** plugin; üç OS'ta yerel bildirim + tıklayınca odak |
 | Ses (AP-08/09) | Webview HTML Audio **veya** Rust `rodio`; paketlenen **wav/mp3/ogg** (+ aiff yükleme opsiyonel) |
-| Editörde aç (DS-03) | macOS `open` · Windows `start` · Linux `xdg-open` — veya Tauri **opener** plugin; Settings override |
+| Editörde aç (DS-03) | macOS `open` · Windows `explorer.exe` · Linux `xdg-open` — veya Tauri **opener** plugin; Settings override |
 | Yıkıcı komut algılama (AP-06/07) | POSIX (`rm -rf`, …) **ve** Windows (`del /s`, `rd /s`, `Remove-Item -Recurse`, `format`, …) |
 | Yollar | `/` ve `\` ayırıcıları + Windows sürücü harfleri (`C:\…`) doğru işlenir |
 | Palette kısayolu | Windows/Linux **Ctrl+K**, macOS **⌘K**; UI etiketi platforma göre uyarlanır (SH-04) |
-| CI | Linux: ana Playwright runner. Ayrıca `windows-latest` ve `macos-latest` üzerinde en az `cargo test` + frontend build — **ayrı non-blocking** (`qa-cross-platform.yml`). S2-Linux paketi: **non-blocking** `linux-bundle.yml` (AppImage + `.deb` → artifact `agent-lounge-linux`; yalnızca `main` + `workflow_dispatch`) |
+| CI | Linux Playwright (`qa-e2e.yml`) yeşil kalmalı (`continue-on-error` yok). `windows-latest` / `macos-latest` `cargo test` + frontend build — **non-blocking** (`qa-cross-platform.yml`). S2-Linux paketi: **non-blocking** `linux-bundle.yml` (AppImage + `.deb` → artifact `agent-lounge-linux`; yalnızca `main` + `workflow_dispatch`) |
 | Canlı test (S2) | Mac script'leri Mac'e özel kalır. Windows / Linux checklist: `scripts/qa/windows/`, `scripts/qa/linux/` (Linux: 1280×800 + portrait window resize; runtime deps `RUNTIME_DEPS.md`) |
 
 Canlı test şablonları: `scripts/qa/mac/QA_Report.md`, `scripts/qa/windows/QA_Report.md`, `scripts/qa/linux/{README,CHECKLIST,QA_Report,RUNTIME_DEPS}.md`.

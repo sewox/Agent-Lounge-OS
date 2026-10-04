@@ -114,7 +114,7 @@ if (unexpectedFail > 0) {
   );
 } else if (expectedFail === 0 && skipped === 0) {
   lines.push(
-    "PR-5 zero-failure target met: 0 expected-fail, 0 unexpected, 0 skipped. L1–L6 layout green across D0–D4. AP-10 remains manual S2 per-OS.",
+    "PR-5 zero-failure target met: 0 expected-fail, 0 unexpected, 0 skipped. L1–L6 layout green across D0–D4. AP-10 CI gate = FE contract; live OS toast S2 retired from CI (optional platform smoke).",
   );
 } else {
   lines.push(
@@ -167,16 +167,16 @@ if (!blockerExpected.length) lines.push("_None._");
 lines.push("");
 lines.push("## Untestable / plan corrections from PR-0");
 lines.push("");
-lines.push("- **GR-*** / **SH-06** / **DS-03** / **ST-04**: require live Tauri + OS dialogs / Graph child process (S2; Mac scripts Mac-specific; Win/Linux checklists under `scripts/qa/windows|linux/`).");
-lines.push("- **AP-10**: native OS notification (Tauri plugin) on macOS/Windows/Linux — S2 live checklists (§10.2).");
+lines.push("Historical PR-0 notes — current suite is green (0 expected-fail / 0 skipped).");
+lines.push("- **GR-*** / **SH-06** / **DS-03** / **ST-04**: live Tauri + OS dialogs / Graph for full S2; Win/Linux checklists under `scripts/qa/windows|linux/`.");
+lines.push("- **AP-10**: Playwright FE contract = CI gate; live OS toast S2 retired from CI — see `ap-10-notification-click.md`.");
 lines.push("- **AP-03** `?demo=routing-banner` only works when `isTauri()===false`; harness uses `browser` fixture.");
-lines.push("- **X-01** is TR/EN i18n (O1); **X-02** dotted-İ / `lang=tr` (live G2) — expected-fail until PR-2.");
-lines.push("- **O2–O6** / §10.1–10.2: EX-05/EX-13/EX-14/EX-15, AP-06…10, SR-02, PATH-01, SH-04b — expected-fail until PR-2…5. **EX-14 + PATH-01 owned by PR-3 (UI wiring).**");
+lines.push("- **X-01 / X-02 / O2–O6 cases**: automated in S1; former “expected-fail until PR-2…5” wording is obsolete.");
 lines.push("- **FL-01/02** live NATS heartbeat needs real workers (S3); S1 page-render smoke + SR-02 default filter contract.");
 lines.push("- **Empty fixture + `/onboarding`**: client error boundary under IPC mock — OB-01 uses full fixture + deselect.");
-lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** in product this PR (`data-qa` hooks only).");
+lines.push("- Deep-link for Mac route automation proposed in `scripts/qa/mac/` — **not** in product (`data-qa` hooks only).");
 lines.push("- Gemini’s `toHaveJSProperty('clientWidth', …)` is invalid in Playwright; L1–L6 use `getBoundingClientRect`.");
-lines.push("- **§10.2 CI**: Playwright on Linux (`qa-e2e.yml`); Win/macOS `cargo test`+build (`qa-cross-platform.yml`); Linux AppImage/deb (`linux-bundle.yml`) — all non-blocking.");
+lines.push("- **§10.2 CI**: `qa-e2e.yml` must stay green (no continue-on-error). `qa-cross-platform.yml` + `linux-bundle.yml` remain non-blocking. Tolerances: `playwright-tolerances.md`.");
 lines.push("");
 lines.push("## Live vs automated (S2 Mac 716f42c → harness)");
 lines.push("");

@@ -45,7 +45,7 @@ Keep one display; resize the app window to **≈1080×1920** or **800×1280**.
 | SH-04 | **Ctrl+K** opens palette; UI shows `Ctrl+K` | ☐ |
 | DS-03 | Open in editor → `xdg-open` / opener | ☐ |
 | AP-08/09 | Approval sound prefs (if built) | ☐ |
-| AP-10 | Desktop notification + click focus | ☐ |
+| AP-10 | Optional S2 smoke (not CI): desktop notification / activation → banner focus | ☐ |
 | Paths | `/home/…` paths in index/open | ☐ |
 
 ## D — Degraded-mode smoke (optional)

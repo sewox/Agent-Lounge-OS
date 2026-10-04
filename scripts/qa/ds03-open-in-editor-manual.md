@@ -10,5 +10,5 @@ Automated Playwright covers the UI button + `open_dead_symbol_in_editor` IPC
 | Linux | `xdg-open <file>` | File opens in default association |
 
 Notes:
-- Optional custom editor command is Settings (PR-5); until then system default is used.
+- Settings Editor preset (Default / VS Code / Cursor / custom) ships; default = OS opener above.
 - Spoofed webview paths must be ignored — Rust resolves by project_id + name + kind.
