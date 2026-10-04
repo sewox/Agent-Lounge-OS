@@ -21,11 +21,12 @@ Presets (`default` / `vscode` / `cursor`) use fixed argv builders (not a free pr
 
 ### Windows `.cmd` allow-list
 
-| Basename | Allowed? | Why |
-|----------|----------|-----|
-| `code.cmd` | yes | Official VS Code CLI shim on Windows (preset + custom) |
-| `cursor.cmd` | yes | Official Cursor CLI shim on Windows |
-| other `*.cmd` / `*.bat` / `*.ps1` | **no** | Arbitrary script execution risk |
+| Form | Allowed? | Why |
+|------|----------|-----|
+| Bare `code.cmd` / `cursor.cmd` | yes | PATH lookup for official CLI shims (preset + custom) |
+| `…\Microsoft VS Code\bin\code.cmd` (absolute) | yes | Known VS Code install layout |
+| `…\cursor\resources\app\bin\cursor.cmd` or `…\cursor\bin\cursor.cmd` (absolute) | yes | Known Cursor install layout |
+| `C:\Users\Public\code.cmd`, `.\code.cmd`, UNC `\\server\share\code.cmd`, other `*.cmd`/`.bat`/`.ps1` | **no** | Basename alone is not enough — arbitrary path script execution risk |
 
 
 ## Destructive confirm `command_hash`

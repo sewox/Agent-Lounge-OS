@@ -184,8 +184,10 @@ const CUSTOM_EDITOR_DENIED_STEMS: &[&str] = &[
 ];
 
 /// Windows editor launcher scripts that are safe as custom-editor programs.
-/// Random `.cmd` / `.bat` / `.ps1` remain denied; only this explicit allow-list passes.
-/// Basenames are compared case-insensitively after stripping trailing `.` / spaces.
+/// Random `.cmd` / `.bat` / `.ps1` remain denied.
+/// Allow-list applies only to a **bare** basename (PATH lookup) or a **known
+/// install path** suffix — never arbitrary absolute / relative / UNC paths that
+/// merely end in `code.cmd` / `cursor.cmd`.
 const CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES: &[&str] = &["code.cmd", "cursor.cmd"];
 
 fn home_dir_for_editor() -> Option<std::path::PathBuf> {
@@ -239,11 +241,80 @@ fn is_allowed_editor_script_basename(basename_lower: &str) -> bool {
     CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES.contains(&cleaned)
 }
 
-fn is_denied_script_extension(basename_lower: &str) -> bool {
-    let cleaned = strip_trailing_windows_junk(basename_lower);
-    if is_allowed_editor_script_basename(cleaned) {
+/// True when `program` looks like a filesystem path (not a bare PATH command).
+fn editor_program_looks_like_path(program: &str) -> bool {
+    let t = program.trim();
+    if t.is_empty() {
         return false;
     }
+    if t.contains('/') || t.contains('\\') {
+        return true;
+    }
+    // Windows drive form: `C:code.cmd` / `C:\...`
+    t.len() >= 2 && t.as_bytes()[1] == b':'
+}
+
+fn editor_program_is_unc(program: &str) -> bool {
+    let t = program.trim();
+    t.starts_with("\\\\") || t.starts_with("//")
+}
+
+fn normalize_editor_path_for_match(program: &str) -> String {
+    program
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches([' ', '.'])
+        .to_ascii_lowercase()
+}
+
+/// Absolute path under a known VS Code / Cursor install layout.
+fn is_known_windows_editor_install_path(program: &str) -> bool {
+    if editor_program_is_unc(program) {
+        return false;
+    }
+    if !editor_program_looks_like_path(program) {
+        return false;
+    }
+    // Relative paths (`.\\code.cmd`, `bin\\code.cmd`) are never "known installs".
+    let t = program.trim();
+    let absolute = t.starts_with('/')
+        || (t.len() >= 3
+            && t.as_bytes()[1] == b':'
+            && (t.as_bytes()[2] == b'\\' || t.as_bytes()[2] == b'/'));
+    if !absolute {
+        return false;
+    }
+    let n = normalize_editor_path_for_match(program);
+    let base = custom_editor_program_basename(program);
+    let cleaned = strip_trailing_windows_junk(&base);
+    match cleaned {
+        "code.cmd" => {
+            n.ends_with("/microsoft vs code/bin/code.cmd")
+                || n.ends_with("/microsoft vs code insiders/bin/code.cmd")
+        }
+        "cursor.cmd" => {
+            n.ends_with("/cursor/resources/app/bin/cursor.cmd")
+                || n.ends_with("/cursor/bin/cursor.cmd")
+        }
+        _ => false,
+    }
+}
+
+/// Allow-listed Windows launcher: bare name (PATH) or known install absolute path.
+fn is_allowed_editor_script_program(program: &str) -> bool {
+    let trimmed = program.trim();
+    let base = custom_editor_program_basename(trimmed);
+    if !is_allowed_editor_script_basename(&base) {
+        return false;
+    }
+    if !editor_program_looks_like_path(trimmed) {
+        return true;
+    }
+    is_known_windows_editor_install_path(trimmed)
+}
+
+fn is_denied_script_extension(basename_lower: &str) -> bool {
+    let cleaned = strip_trailing_windows_junk(basename_lower);
     cleaned.ends_with(".bat") || cleaned.ends_with(".cmd") || cleaned.ends_with(".ps1")
 }
 
@@ -263,9 +334,6 @@ fn is_python_family_stem(stem: &str) -> bool {
 }
 
 fn basename_is_denied_editor(basename_lower: &str) -> bool {
-    if is_allowed_editor_script_basename(basename_lower) {
-        return false;
-    }
     if is_denied_script_extension(basename_lower) {
         return true;
     }
@@ -302,6 +370,9 @@ fn editor_denylist_path_candidates(program: &str) -> Vec<String> {
 /// True when program (or its resolved symlink target) is a denied shell/interpreter.
 pub fn custom_editor_program_is_denied(program: &str) -> bool {
     for candidate in editor_denylist_path_candidates(program) {
+        if is_allowed_editor_script_program(&candidate) {
+            continue;
+        }
         let base = custom_editor_program_basename(&candidate);
         if basename_is_denied_editor(&base) {
             return true;
@@ -621,6 +692,11 @@ mod tests {
             "--goto {path}"
         )
         .is_ok());
+        assert!(validate_custom_editor(
+            r"C:\Users\alice\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd",
+            "--goto {path}"
+        )
+        .is_ok());
         assert!(validate_custom_editor("/usr/local/bin/nvim", "{path}").is_ok());
         assert!(validate_custom_editor("subl", "{path}").is_ok());
         // Not a python* version family.
@@ -634,18 +710,59 @@ mod tests {
         assert!(custom_editor_program_is_denied("Py.exe"));
         assert!(custom_editor_program_is_denied("helper.cmd"));
         assert!(custom_editor_program_is_denied("CODE.BAT"));
-        assert!(!custom_editor_program_is_denied("code.cmd")); // allow-listed Windows launcher
+        assert!(!custom_editor_program_is_denied("code.cmd")); // bare allow-listed launcher
         assert!(!custom_editor_program_is_denied("CURSOR.CMD"));
         assert!(!custom_editor_program_is_denied("nvim"));
     }
 
     #[test]
-    fn windows_editor_script_allowlist_keeps_random_cmd_denied() {
+    fn windows_editor_script_allowlist_bare_and_known_install_only() {
+        // Bare PATH names — allowed.
         assert!(!custom_editor_program_is_denied("code.cmd"));
         assert!(!custom_editor_program_is_denied("cursor.cmd"));
+        // Known install absolute paths — allowed.
+        assert!(!custom_editor_program_is_denied(
+            r"C:\Program Files\Microsoft VS Code\bin\code.cmd"
+        ));
+        assert!(!custom_editor_program_is_denied(
+            r"C:\Users\alice\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd"
+        ));
+        assert!(!custom_editor_program_is_denied(
+            r"C:\Users\alice\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd"
+        ));
+        // Random / user-controlled paths with the same basename — denied.
+        assert!(custom_editor_program_is_denied(r"C:\Users\Public\code.cmd"));
+        assert!(custom_editor_program_is_denied(r".\code.cmd"));
+        assert!(custom_editor_program_is_denied(r"..\code.cmd"));
+        assert!(custom_editor_program_is_denied(r"bin\code.cmd"));
+        assert!(custom_editor_program_is_denied(r"\\server\share\code.cmd"));
+        assert!(custom_editor_program_is_denied("//server/share/cursor.cmd"));
         assert!(custom_editor_program_is_denied("notepad.cmd"));
-        assert!(custom_editor_program_is_denied("code.bat")); // only .cmd launchers allow-listed
+        assert!(custom_editor_program_is_denied("code.bat"));
         assert!(custom_editor_program_is_denied("cursor.ps1"));
+    }
+
+    /// Windows-only: path-shaped allow-list rejects must stay hard errors on the
+    /// platform where `.cmd` launchers are actually spawned.
+    #[cfg(windows)]
+    #[test]
+    fn windows_editor_script_allowlist_rejects_untrusted_paths() {
+        for prog in [
+            r"C:\Users\Public\code.cmd",
+            r".\code.cmd",
+            r"temp\code.cmd",
+            r"\\evil\share\code.cmd",
+            r"C:\Users\Public\cursor.cmd",
+        ] {
+            let err = validate_custom_editor(prog, "--goto {path}").expect_err(prog);
+            assert!(err.to_string().contains("denylist"), "{prog}: {err}");
+        }
+        assert!(validate_custom_editor("code.cmd", "--goto {path}").is_ok());
+        assert!(validate_custom_editor(
+            r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
+            "--goto {path}"
+        )
+        .is_ok());
     }
 
     #[test]
