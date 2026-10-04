@@ -51,6 +51,14 @@ pub fn stamp_external_nats_ingress(task: &mut LoungeTask) {
     task.source_verified = false;
 }
 
+/// NATS JSON → LoungeTask + dış giriş damgası (spoof `source_verified` yok sayılır).
+pub fn parse_nats_task(data: &[u8]) -> Result<LoungeTask> {
+    let mut task: LoungeTask =
+        serde_json::from_slice(data).context("İş Emri shared task şemasına uymuyor")?;
+    stamp_external_nats_ingress(&mut task);
+    Ok(task)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ApprovalCleared {
     pub task_id: String,
@@ -121,6 +129,8 @@ pub struct Dispatcher {
     agent_silence: Duration,
     /// Periyodik zombi tarama aralığı.
     silence_scan_interval: Duration,
+    /// Paylaşılan NATS bağlantısı (lazy); her trusted görevde yeniden bağlanma yok.
+    nats_conn: Arc<StdMutex<Option<nats::Connection>>>,
     /// Test: kota tükendi senaryosu (RouteIntent::Stop vb.).
     #[cfg(test)]
     force_quota_blocked: bool,
@@ -156,6 +166,7 @@ impl Dispatcher {
             max_hops: configured_max_hops(),
             agent_silence: configured_agent_silence(),
             silence_scan_interval: configured_silence_scan_interval(),
+            nats_conn: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             force_quota_blocked: false,
             #[cfg(test)]
@@ -260,13 +271,14 @@ impl Dispatcher {
         });
     }
 
-    /// Workflow / kernel içi güvenilir giriş — NATS payload spoof’una kapalı.
+    /// Workflow / kernel iç kanal — DB parent’tan gelen `source_verified` korunur
+    /// (zorla true yapılmaz; unverified parent → SourceUnverified kapısı).
     pub fn spawn_trusted_ingress(self: &Dispatcher, mut rx: mpsc::Receiver<LoungeTask>) {
         let this = self.clone();
         tokio::spawn(async move {
             while let Some(task) = rx.recv().await {
-                if let Err(err) = this.handle_trusted_task(task).await {
-                    log::error!("trusted ingress görev hatası: {err}");
+                if let Err(err) = this.handle_workflow_followup(task).await {
+                    log::error!("workflow ingress görev hatası: {err}");
                 }
             }
         });
@@ -323,7 +335,13 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// NATS tamamlanma/hata zarfından `a2a_tasks` güncelle.
+    /// NATS tamamlanma/hata zarfından `a2a_tasks` güncelle — yalnız izinli geçişler.
+    ///
+    /// İzinli: DISPATCHED | EXECUTING | QUEUED | RECOVERY_PENDING → Completed/Failed.
+    /// Terminal (Completed/Failed/NeedsHuman/…) değişmez. Failed → idempotency release.
+    ///
+    /// Not (PR-5): NATS yayıncı kimlik doğrulaması yok; `target_agent` eşleşmesi
+    /// mümkün olduğunda kontrol edilir, aksi halde durum makinesi tek kapıdır.
     pub fn apply_bus_terminal(&self, data: &[u8], failed: bool) -> Result<()> {
         let value: serde_json::Value =
             serde_json::from_slice(data).context("lifecycle payload json")?;
@@ -333,12 +351,72 @@ impl Dispatcher {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("lifecycle payload'da id/task_id yok"))?
             .to_string();
+
+        let current = self
+            .store
+            .a2a_task_status(&task_id)?
+            .ok_or_else(|| anyhow::anyhow!("lifecycle: a2a_tasks'ta id yok: {task_id}"))?;
+
+        let allowed = matches!(
+            current,
+            TaskStatus::Dispatched
+                | TaskStatus::Executing
+                | TaskStatus::Queued
+                | TaskStatus::RecoveryPending
+        );
+        if !allowed {
+            anyhow::bail!(
+                "lifecycle geçiş reddedildi: {task_id} status={} → terminal (yalnız DISPATCHED/EXECUTING/QUEUED/RECOVERY_PENDING)",
+                current.as_str()
+            );
+        }
+
+        // Mümkünse target_agent eşleşmesi (payload.target_agent veya task.target_agent).
+        if let Ok(Some(row)) = self.store.load_a2a_task(&task_id) {
+            if let Some(expected) = row.target_agent.as_deref().filter(|s| !s.trim().is_empty()) {
+                let claimed = value
+                    .get("target_agent")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| value.pointer("/task/target_agent").and_then(|v| v.as_str()));
+                if let Some(claimed) = claimed {
+                    if !claimed.eq_ignore_ascii_case(expected) {
+                        anyhow::bail!(
+                            "lifecycle target_agent uyuşmazlığı: task={task_id} expected={expected} claimed={claimed}"
+                        );
+                    }
+                }
+                // claimed yoksa PR-5 notu: NATS auth yok; durum makinesi yeterli.
+            }
+        }
+
         if failed {
             self.fail_and_release_idempotency(&task_id);
         } else {
             self.persist_status(&task_id, TaskStatus::Completed);
         }
         Ok(())
+    }
+
+    /// Paylaşılan NATS bağlantısı (lazy connect + cache).
+    fn shared_nats(&self) -> Option<nats::Connection> {
+        {
+            let guard = self.nats_conn.lock().expect("nats_conn lock");
+            if let Some(nc) = guard.as_ref() {
+                return Some(nc.clone());
+            }
+        }
+        let url = self.nats_url.clone();
+        match nats::connect(&url) {
+            Ok(nc) => {
+                let mut guard = self.nats_conn.lock().expect("nats_conn lock");
+                *guard = Some(nc.clone());
+                Some(nc)
+            }
+            Err(err) => {
+                log::warn!("NATS paylaşılan bağlantı kurulamadı: {err}");
+                None
+            }
+        }
     }
 
     pub fn set_gate_ready(&self, ready: bool) {
@@ -492,10 +570,7 @@ impl Dispatcher {
     }
 
     async fn handle_nats_message(&self, nc: &nats::Connection, msg: nats::Message) -> Result<()> {
-        let mut task: LoungeTask =
-            serde_json::from_slice(&msg.data).context("İş Emri shared task şemasına uymuyor")?;
-        // Dış NATS — payload/source_agent güven kararı vermez; her zaman unverified.
-        stamp_external_nats_ingress(&mut task);
+        let task = parse_nats_task(&msg.data)?;
         let context = self.recall_context(&task).await.unwrap_or_else(|err| {
             log::warn!("tecrübe araması atlandı: {err}");
             ExperienceContext::default()
@@ -554,37 +629,42 @@ impl Dispatcher {
         }
     }
 
-    /// Workflow / kernel iç kanal — NATS spoof’una kapalı trusted damga.
+    /// Explicit trusted entry — `source_verified=true` zorlar (kernel API).
     pub async fn handle_trusted_task(&self, mut task: LoungeTask) -> Result<()> {
         task.source_verified = true;
+        self.dispatch_with_shared_nats(task).await
+    }
+
+    /// Workflow follow-up — DB parent’tan gelen `source_verified` korunur (zorla true yok).
+    pub async fn handle_workflow_followup(&self, task: LoungeTask) -> Result<()> {
+        self.dispatch_with_shared_nats(task).await
+    }
+
+    async fn dispatch_with_shared_nats(&self, task: LoungeTask) -> Result<()> {
         let context = self.recall_context(&task).await.unwrap_or_else(|err| {
             log::warn!("tecrübe araması atlandı: {err}");
             ExperienceContext::default()
         });
-        let url = self.nats_url.clone();
-        let nc = match tokio::task::spawn_blocking(move || nats::connect(&url)).await {
-            Ok(Ok(nc)) => Some(nc),
-            Ok(Err(err)) => {
-                log::warn!("trusted task NATS bağlanamadı (yerel/delege sınırlı): {err}");
-                None
-            }
-            Err(err) => {
-                log::warn!("trusted task NATS join: {err}");
-                None
-            }
-        };
+        let nc = self.shared_nats();
         let nc_ref = nc.as_ref();
         match self.execute_task(task.clone(), context, nc_ref).await {
             Ok(TaskExecution::Local(experience)) => {
                 if let Some(nc) = nc_ref {
                     publish_json(nc, TASK_COMPLETED, &task).await?;
                     publish_json(nc, EXPERIENCE_REPORTED, experience.as_ref()).await?;
+                } else {
+                    // NATS yok: yerel tamamlandı ama bus’a yazılmadı — sessizlik / workflow tetiklenmez.
+                    log::warn!(
+                        "görev {} Local tamamlandı ama NATS yok — TASK_COMPLETED/EXPERIENCE yayınlanmadı \
+                         (workflow follow-up ve dış tüketiciler bu tamamlanmayı görmez)",
+                        task.id
+                    );
                 }
                 Ok(())
             }
             Ok(TaskExecution::Delegated { bot_id, subject }) => {
                 log::info!(
-                    "trusted görev {} dış worker'a: {bot_id} → {subject}",
+                    "internal görev {} dış worker'a: {bot_id} → {subject}",
                     task.id
                 );
                 Ok(())
@@ -594,7 +674,7 @@ impl Dispatcher {
                 status,
             }) => {
                 log::info!(
-                    "trusted idempotency replay: existing={existing_task_id} status={}",
+                    "internal idempotency replay: existing={existing_task_id} status={}",
                     status.as_str()
                 );
                 Ok(())
@@ -1075,6 +1155,10 @@ impl Dispatcher {
         local_agent: &str,
         local_model: &str,
     ) -> Result<()> {
+        // Her onay beklerken PENDING_APPROVAL — QUEUED watchdog NEEDS_HUMAN üretmesin.
+        task.status = TaskStatus::PendingApproval;
+        self.persist_status(&task.id, TaskStatus::PendingApproval);
+
         let request = request.stamp_timeout(self.approval_timeout);
         let (tx, rx) = oneshot::channel();
         let task_id = request.task_id.clone();
@@ -1168,6 +1252,8 @@ impl Dispatcher {
                     }
                 }
                 task.target_agent = Some(request.to_agent);
+                task.status = TaskStatus::Queued;
+                self.persist_status(&task.id, TaskStatus::Queued);
                 Ok(())
             }
             RoutingVote::ApproveLocal => {
@@ -1183,6 +1269,8 @@ impl Dispatcher {
                 if let Err(err) = self.publish_subject(TASK_RESUME, &payload).await {
                     log::warn!("lounge.task.resume (quota→LMR) yayınlanamadı: {err}");
                 }
+                task.status = TaskStatus::Queued;
+                self.persist_status(&task.id, TaskStatus::Queued);
                 Ok(())
             }
             RoutingVote::Deny => {
@@ -2198,12 +2286,19 @@ mod tests {
             "  ",
             "dispatcher",
         ] {
-            let mut task = LoungeTask::new(spoof, "p", "spoofed");
-            task.source_verified = true;
-            stamp_external_nats_ingress(&mut task);
+            let raw = serde_json::json!({
+                "id": "spoof-id",
+                "type": "task",
+                "source_agent": spoof,
+                "project_id": "p",
+                "summary": "spoofed",
+                "source_verified": true,
+                "created_at": "2026-10-04T12:00:00.000Z",
+            });
+            let task = parse_nats_task(raw.to_string().as_bytes()).unwrap();
             assert!(
                 !task.source_verified,
-                "NATS damgası spoof source_agent={spoof:?} için false olmalı"
+                "parse_nats_task spoof source_agent={spoof:?} için false olmalı"
             );
         }
     }
@@ -2212,10 +2307,20 @@ mod tests {
     async fn spoofed_nats_workflow_engine_requires_unverified_approval() {
         let dispatcher = live_dispatcher(Duration::from_secs(5));
         dispatcher.set_gate_ready(true);
-        let mut task = LoungeTask::new("workflow_engine", "agent-lounge-os", "nats spoof");
-        stamp_external_nats_ingress(&mut task);
+        let raw = serde_json::json!({
+            "id": "spoof-nats-wf-engine",
+            "type": "task",
+            "source_agent": "workflow_engine",
+            "project_id": "agent-lounge-os",
+            "summary": "nats spoof",
+            "source_verified": true,
+            "created_at": "2026-10-04T12:00:00.000Z",
+        });
+        let task = parse_nats_task(raw.to_string().as_bytes()).unwrap();
         assert!(!task.source_verified);
         let id = task.id.clone();
+        // parse keeps client id from JSON
+        assert_eq!(id, "spoof-nats-wf-engine");
         let d = dispatcher.clone();
         let handle = tokio::spawn(async move { d.handle_task(task).await });
 
@@ -2230,6 +2335,10 @@ mod tests {
         assert_eq!(
             dispatcher.pending_approvals()[0].kind,
             ApprovalKind::SourceUnverified
+        );
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&id).unwrap(),
+            Some(TaskStatus::PendingApproval)
         );
         dispatcher
             .resolve_vote(id, RoutingVote::Approve)
@@ -2603,33 +2712,115 @@ mod tests {
         let mut task = LoungeTask::new("a", "p", "bus-fail");
         task.idempotency_key = Some("bus-fail-key".into());
         dispatcher.handle_task(task.clone()).await.unwrap();
-        // Yeniden admit için önce Completed → Failed bus
-        dispatcher
-            .store()
-            .set_a2a_task_status(&task.id, TaskStatus::Dispatched)
-            .unwrap();
-        // Anahtar hâlâ duruyor; bus failed serbest bırakmalı
-        // (tamamlanmış görevde anahtar yanmış olabilir — yeniden admit ile yeni görev)
-        let mut t2 = LoungeTask::new("a", "p", "still-held");
-        t2.idempotency_key = Some("bus-fail-key".into());
-        // İlk görev Completed sonrası anahtar hâlâ var → Replay
-        match dispatcher.store().admit_a2a_task(&mut t2, 10).unwrap() {
-            AdmitOutcome::Replay { .. } => {}
-            other => panic!("Replay beklenir: {other:?}"),
-        }
+        // Completed → Failed yasak
         let payload = serde_json::json!({ "id": task.id, "type": "task" });
-        dispatcher
+        let err = dispatcher
             .apply_bus_terminal(payload.to_string().as_bytes(), true)
-            .unwrap();
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("geçiş reddedildi") || err.contains("terminal"),
+            "Completed→Failed reddedilmeli: {err}"
+        );
         assert_eq!(
             dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
+        // Anahtar hâlâ yanık
+        let mut t2 = LoungeTask::new("a", "p", "still-held");
+        t2.idempotency_key = Some("bus-fail-key".into());
+        assert!(matches!(
+            dispatcher.store().admit_a2a_task(&mut t2, 10).unwrap(),
+            AdmitOutcome::Replay { .. }
+        ));
+
+        // İzinli yol: Dispatched → Failed → anahtar serbest
+        let mut t3 = LoungeTask::new("a", "p", "dispatched-fail");
+        t3.idempotency_key = Some("bus-disp-fail".into());
+        dispatcher.handle_task(t3.clone()).await.unwrap();
+        dispatcher
+            .store()
+            .set_a2a_task_status(&t3.id, TaskStatus::Dispatched)
+            .unwrap();
+        dispatcher
+            .apply_bus_terminal(
+                serde_json::json!({ "id": t3.id }).to_string().as_bytes(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&t3.id).unwrap(),
             Some(TaskStatus::Failed)
         );
-        let mut t3 = LoungeTask::new("a", "p", "after-bus-fail");
-        t3.idempotency_key = Some("bus-fail-key".into());
+        let mut t4 = LoungeTask::new("a", "p", "after-disp-fail");
+        t4.idempotency_key = Some("bus-disp-fail".into());
         assert!(matches!(
-            dispatcher.store().admit_a2a_task(&mut t3, 10).unwrap(),
+            dispatcher.store().admit_a2a_task(&mut t4, 10).unwrap(),
             AdmitOutcome::Accepted(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn bus_terminal_rejects_completed_to_failed() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "term".into(),
+            adr_summary: "term".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let task = LoungeTask::new("a", "p", "done");
+        dispatcher.handle_task(task.clone()).await.unwrap();
+        let err = dispatcher
+            .apply_bus_terminal(
+                serde_json::json!({ "id": task.id }).to_string().as_bytes(),
+                true,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("geçiş reddedildi") || err.contains("COMPLETED"));
+    }
+
+    #[tokio::test]
+    async fn security_approval_stays_pending_not_needs_human() {
+        let dispatcher =
+            live_dispatcher(Duration::from_secs(30)).with_agent_silence(Duration::from_secs(60));
+        dispatcher.set_gate_ready(true);
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "wipe secrets critical");
+        let id = task.id.clone();
+        dispatcher.inject_decision(critical_decision(&id));
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move { d.handle_task(task).await });
+
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id) {
+            assert!(started.elapsed() < Duration::from_secs(10));
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&id).unwrap(),
+            Some(TaskStatus::PendingApproval),
+            "security onayı beklerken PENDING_APPROVAL"
+        );
+        // Eski updated_at simüle et — silence eşiği aşılsın
+        dispatcher
+            .store()
+            .touch_a2a_updated_at(&id, "2026-10-04T10:00:00.000Z")
+            .unwrap();
+        let marked = dispatcher
+            .recover_silent_tasks("2026-10-04T10:05:00.000Z")
+            .unwrap();
+        assert!(
+            !marked.contains(&id),
+            "PENDING_APPROVAL NEEDS_HUMAN olmamalı: {marked:?}"
+        );
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&id).unwrap(),
+            Some(TaskStatus::PendingApproval)
+        );
+        dispatcher.resolve_vote(id, RoutingVote::Deny).unwrap();
+        let _ = handle.await;
     }
 }

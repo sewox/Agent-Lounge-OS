@@ -604,7 +604,25 @@ pub fn load_task_row(conn: &Connection, id: &str) -> Result<Option<LoungeTask>> 
         )
         .optional()?;
     match payload {
-        Some(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+        Some(raw) => {
+            let mut task: LoungeTask = serde_json::from_str(&raw)?;
+            // Status kolonu kanonik — payload eski kalabilir.
+            if let Some(status) = task_status(conn, id)? {
+                task.status = status;
+            }
+            // source_verified kolonu da kanonik tut.
+            let verified: Option<i64> = conn
+                .query_row(
+                    "SELECT source_verified FROM a2a_tasks WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(v) = verified {
+                task.source_verified = v != 0;
+            }
+            Ok(Some(task))
+        }
         None => Ok(None),
     }
 }
@@ -818,6 +836,12 @@ impl crate::db::ExperienceStore {
     ) -> Result<AdmitOutcome, AdmitError> {
         let conn = self.conn.lock().expect("experience db lock");
         admit_task_atomic(&conn, task, max_hops)
+    }
+
+    /// Workflow / lifecycle — NATS payload yerine DB kaydı.
+    pub fn load_a2a_task(&self, id: &str) -> Result<Option<LoungeTask>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        load_task_row(&conn, id)
     }
 
     pub fn a2a_task_status(&self, id: &str) -> Result<Option<TaskStatus>> {

@@ -156,8 +156,9 @@ pub fn run_with_start_route(start_route: &'static str) {
                 "nats://127.0.0.1:4222".into(),
             );
             let (trusted_tx, trusted_rx) = tokio::sync::mpsc::channel(64);
-            let workflow =
-                WorkflowEngine::new("nats://127.0.0.1:4222").with_trusted_ingress(trusted_tx);
+            let workflow = WorkflowEngine::new("nats://127.0.0.1:4222")
+                .with_trusted_ingress(trusted_tx)
+                .with_store(store.clone());
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let models = ModelManager::with_nats_url(bus.nats_url());
             let handle = app.handle().clone();
