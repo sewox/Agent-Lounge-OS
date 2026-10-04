@@ -1581,8 +1581,12 @@ mod tests {
         );
     }
 
+    /// Opt-in live Candle inference against real Laya weights.
+    ///
+    /// Not run in default CI: weights are large and not present on runners.
+    /// See `docs/qa/rust-opt-in-tests.md`.
     #[test]
-    #[ignore]
+    #[ignore = "requires LAYA_MODEL_DIR with real Candle weights; run: cargo test --manifest-path src-tauri/Cargo.toml -- --ignored live_laya_infer"]
     fn live_laya_infer() {
         let dir = std::env::var("LAYA_MODEL_DIR")
             .map(PathBuf::from)

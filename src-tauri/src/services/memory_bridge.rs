@@ -1488,16 +1488,37 @@ mod tests {
         assert!(err.to_string().contains("path boş"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn lists_projects_when_binary_present() {
-        let Ok(bridge) = MemoryBridge::discover() else {
-            return;
-        };
-        if !bridge.binary_path().is_file() || is_compile_stub(bridge.binary_path()) {
-            return;
-        }
+    async fn lists_projects_via_cli_stub() {
+        // Always runs with an in-tree shell fixture — no silent skip when sidecar is stub/missing.
+        let dir = std::env::temp_dir().join(format!("lounge-cbm-list-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("codebase-memory-mcp");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+if printf '%s' "$*" | grep -q list_projects; then
+  echo '{"projects":[{"name":"fixture-demo","root_path":"/tmp/fixture-demo","nodes":2,"edges":1}]}'
+  exit 0
+fi
+echo '{}'
+exit 1
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let bridge = MemoryBridge::from_binary(&script);
         let projects = bridge.list_projects().await.expect("list_projects parse");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "fixture-demo");
         assert!(projects.iter().all(|project| !project.name.is_empty()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
@@ -1544,18 +1565,43 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn tauri_command_path_indexes_protocol_crate() {
-        let Ok(bridge) = MemoryBridge::discover() else {
-            return;
-        };
-        if !bridge.binary_path().is_file() || is_compile_stub(bridge.binary_path()) {
-            return;
-        }
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace")
-            .join("shared/lounge_protocol");
+    async fn tauri_command_path_indexes_and_persists_snapshot() {
+        // Fixture CLI stub — no silent skip when real sidecar is missing in CI.
+        let dir = std::env::temp_dir().join(format!("lounge-cbm-idx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("codebase-memory-mcp");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+if printf '%s' "$*" | grep -q index_repository; then
+  echo '{"project":"protocol-fixture","status":"indexed","nodes":1,"edges":0,"files":1,"ast_nodes":[{"id":"n1","name":"NodeOne","kind":"function","file":"src/lib.rs","line":1}],"references":[]}'
+  exit 0
+fi
+if printf '%s' "$*" | grep -q get_dead_symbols; then
+  echo '{"dead_symbols":[]}'
+  exit 0
+fi
+echo '{}'
+exit 0
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let repo = dir.join("shared_lounge_protocol");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            b"[package]\nname=\"lounge_protocol\"\n",
+        )
+        .unwrap();
+
+        let bridge = MemoryBridge::from_binary(&script);
         let graph = bridge
             .index_workspace(repo.to_string_lossy().into_owned())
             .await
@@ -1578,6 +1624,7 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
             !map.projects.is_empty() || snapshot.nodes > 0,
             "indeks sonrası harita/sayı boş"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

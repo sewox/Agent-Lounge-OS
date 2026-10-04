@@ -54,6 +54,35 @@ jobs:
         shell: bash
         run: bash src-tauri/scripts/prepare-sidecar.sh --stub
 
+      # Required by nats_manager::event_pump_receives_non_bus_message_on_wildcard
+      # (fails loud if missing — see docs/qa/rust-opt-in-tests.md).
+      - name: Install nats-server (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          NATS_VERSION=v2.10.24
+          case "$(uname -m)" in
+            arm64|aarch64) NATS_ARCH=arm64 ;;
+            *) NATS_ARCH=amd64 ;;
+          esac
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-darwin-${NATS_ARCH}.tar.gz" \
+            | tar -xz
+          sudo install -m 0755 "nats-server-${NATS_VERSION}-darwin-${NATS_ARCH}/nats-server" /usr/local/bin/nats-server
+          nats-server -v
+
+      - name: Install nats-server (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NATS_VERSION=v2.10.24
+          curl -fsSL -o nats.zip "https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-windows-amd64.zip"
+          unzip -o nats.zip
+          mkdir -p "$HOME/bin"
+          cp "nats-server-${NATS_VERSION}-windows-amd64/nats-server.exe" "$HOME/bin/nats-server.exe"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/nats-server.exe" -v
+
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
