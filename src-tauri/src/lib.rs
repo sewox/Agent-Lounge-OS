@@ -1065,12 +1065,8 @@ async fn focus_app_for_approval(
 /// `command_hash` is required and must match the pending token (UI/QA binding).
 #[tauri::command]
 async fn confirm_destructive(id: String, command_hash: Option<String>) -> Result<(), String> {
-    let hash = command_hash
-        .as_deref()
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .ok_or_else(|| "command_hash required".to_string())?;
-    kernel::assert_destructive_hash(&id, hash).map_err(|err| err.to_string())?;
+    kernel::validate_destructive_ipc_hash(&id, command_hash.as_deref())
+        .map_err(|err| err.to_string())?;
     kernel::confirm_destructive(&id).map_err(|err| err.to_string())
 }
 
@@ -1078,12 +1074,8 @@ async fn confirm_destructive(id: String, command_hash: Option<String>) -> Result
 /// `command_hash` is required and must match the pending token (UI/QA binding).
 #[tauri::command]
 async fn reject_destructive(id: String, command_hash: Option<String>) -> Result<(), String> {
-    let hash = command_hash
-        .as_deref()
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .ok_or_else(|| "command_hash required".to_string())?;
-    kernel::assert_destructive_hash(&id, hash).map_err(|err| err.to_string())?;
+    kernel::validate_destructive_ipc_hash(&id, command_hash.as_deref())
+        .map_err(|err| err.to_string())?;
     kernel::reject_destructive(&id).map_err(|err| err.to_string())
 }
 

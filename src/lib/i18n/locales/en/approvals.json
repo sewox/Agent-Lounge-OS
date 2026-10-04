@@ -18,5 +18,7 @@
   "rejectDestructive": "Reject",
   "destructiveNoPending": "No pending destructive confirmation",
   "destructiveRejected": "Destructive command rejected",
+  "destructiveStaleConfirm": "This destructive prompt is stale or missing its command hash — cannot confirm. Dismiss it or wait for a fresh prompt.",
+  "destructiveStaleRejected": "Stale destructive prompt dismissed (no longer pending).",
   "destructiveResolveFailed": "Could not process destructive confirmation"
 }

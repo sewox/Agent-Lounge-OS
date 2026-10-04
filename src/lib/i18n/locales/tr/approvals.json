@@ -18,5 +18,7 @@
   "rejectDestructive": "Reddet",
   "destructiveNoPending": "Bekleyen yıkıcı onay yok",
   "destructiveRejected": "Yıkıcı komut reddedildi",
+  "destructiveStaleConfirm": "Bu yıkıcı onay bayat veya komut özeti eksik — onaylanamaz. Kapatın veya yeni bir istem bekleyin.",
+  "destructiveStaleRejected": "Bayat yıkıcı onay kapatıldı (artık bekleyen değil).",
   "destructiveResolveFailed": "Yıkıcı onay işlenemedi"
 }

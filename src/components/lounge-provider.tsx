@@ -957,7 +957,6 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const resolveDestructive = useCallback(
     async (id: string, confirmed: boolean) => {
       const trimmed = id.trim();
-      const row = destructiveRef.current.find((item) => item.id === trimmed);
       if (!trimmed) {
         setApprovalError(i18n.t("destructiveNoPending", { ns: "approvals" }));
         return;
@@ -966,9 +965,23 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       try {
         if (isTauri()) {
           // Rust requires command_hash and asserts it matches the pending token.
-          const commandHash = row?.command_hash?.trim();
+          let row = destructiveRef.current.find((item) => item.id === trimmed);
+          let commandHash = row?.command_hash?.trim() ?? "";
           if (!commandHash) {
-            setApprovalError(i18n.t("destructiveNoPending", { ns: "approvals" }));
+            // Stale local row — refresh from backend before giving up.
+            await syncDestructiveQueue();
+            row = destructiveRef.current.find((item) => item.id === trimmed);
+            commandHash = row?.command_hash?.trim() ?? "";
+          }
+          if (!commandHash) {
+            // Still missing: allow reject to clear local stale UI; block confirm.
+            setDestructiveQueue((current) => current.filter((item) => item.id !== trimmed));
+            if (confirmed) {
+              setApprovalError(i18n.t("destructiveStaleConfirm", { ns: "approvals" }));
+            } else {
+              setApprovalError(i18n.t("destructiveStaleRejected", { ns: "approvals" }));
+            }
+            await syncDestructiveQueue();
             return;
           }
           const args = { id: trimmed, commandHash };

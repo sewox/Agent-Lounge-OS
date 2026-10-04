@@ -7,7 +7,7 @@
 | Path for test open | Rust chooses `app_data_dir` only — webview cannot pick the path |
 | Spawn | `GuardedCommand` + `ActionSource::User` (no shell) |
 | Template | Must include `{path}`; rejects shell metacharacters and `-c` / `--command` |
-| Program denylist | Basename deny for shells/interpreters (`sh`, `python*`, `node`, `cmd.exe`, `powershell`, `curl`, …). Legitimate editors (`code`, `nvim`, `subl`, …) remain allowed |
+| Program denylist | Case-insensitive stem match after stripping trailing `.`/spaces and `.exe`/`.com`. Denies shells/interpreters (`sh`, `bash`, `cmd`, `powershell`, `node`, `env`, `wsl`, …), **python family** (`python`, `python3`, `python3.12`, …), and script suffixes (`.bat` / `.cmd` / `.ps1`). Resolves `~` and **canonicalizes symlinks** when the path exists so `~/bin/editor → /bin/sh` is denied. Legitimate editors (`code`, `nvim`, `subl`, …) remain allowed |
 
 Presets (`default` / `vscode` / `cursor`) use fixed argv builders and never accept a free program string.
 
@@ -16,7 +16,8 @@ Presets (`default` / `vscode` / `cursor`) use fixed argv builders and never acce
 | Layer | Rule |
 |-------|------|
 | Spawn authorization | Always hash-bound via `take_confirmed_allowance` (SHA-256 of program+args) |
+| Pure IPC gate | `require_destructive_command_hash` + `validate_destructive_ipc_hash` (unit-tested) |
 | IPC `confirm_destructive` / `reject_destructive` | **`command_hash` required** — must match the pending token |
-| UI | Always sends the queue row’s `command_hash`; refuses invoke if missing |
+| UI | Sends queue row hash; on stale/missing row syncs from backend; reject can dismiss stale local UI with a specific message; confirm still blocked without hash |
 
 Omitting the hash is a hard error (defense-in-depth against confirming the wrong pending id while showing another command).
