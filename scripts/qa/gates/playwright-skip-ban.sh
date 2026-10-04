@@ -14,8 +14,10 @@ if ! qa_search_selftest; then
   exit 1
 fi
 
-# Covers: test.skip|fixme|fail|only, describe.*, test.describe.*, testInfo.skip
-PATTERN='(test\.describe|describe|test)\.(skip|fixme|fail|only)|testInfo\.skip'
+# Covers chained modifiers too, e.g.:
+#   test.describe.parallel.only / test.describe.serial.only / test.describe.parallel.skip
+# Also: test.skip, describe.only, test.describe.fixme, testInfo.skip
+PATTERN='(test\.describe|describe|test)(\.[A-Za-z_]+)*\.(skip|fixme|fail|only)|testInfo\.skip'
 
 # Search e2e/ with the chosen tool (qa_search_hits excludes e2e by design).
 qa_search_e2e_hits() {
@@ -39,7 +41,7 @@ qa_search_e2e_hits() {
   return 0
 }
 
-# Self-test: planted forbidden forms must be detected (incl. describe.fixme / test.describe.fixme).
+# Self-test: planted forbidden forms must be detected (incl. chained .parallel/.serial).
 qa_playwright_skip_ban_selftest() {
   local probe dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/qa-pw-skip-ban.XXXXXX")"
@@ -57,7 +59,11 @@ test.describe.skip('i', () => {});
 test.describe.fixme('j', () => {});
 test.describe.fail('k', () => {});
 test.describe.only('l', () => {});
-testInfo.skip(true, 'm');
+test.describe.parallel.only('m', () => {});
+test.describe.serial.only('n', () => {});
+test.describe.parallel.skip('o', () => {});
+test.describe.serial.fixme('p', () => {});
+testInfo.skip(true, 'q');
 EOF
   local hits missing=0
   case "$qa_search_tool" in
@@ -77,6 +83,8 @@ EOF
     'test.skip' 'test.fixme' 'test.fail' 'test.only' \
     'describe.skip' 'describe.fixme' 'describe.fail' 'describe.only' \
     'test.describe.skip' 'test.describe.fixme' 'test.describe.fail' 'test.describe.only' \
+    'test.describe.parallel.only' 'test.describe.serial.only' \
+    'test.describe.parallel.skip' 'test.describe.serial.fixme' \
     'testInfo.skip'
   do
     if ! printf '%s\n' "$hits" | grep -Fq "$needle"; then
