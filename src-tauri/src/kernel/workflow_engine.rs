@@ -123,8 +123,9 @@ impl WorkflowEngine {
     }
 
     /// NATS `lounge.task.completed` — yalnız `id` okunur; görev DB’den doğrulanır.
+    /// Lifecycle ile yarış için Completed görünene kadar bounded retry.
     async fn handle_completed(&self, nc: &nats::Connection, data: &[u8]) -> Result<()> {
-        let Some(dispatch) = self.resolve_followup_from_bus(data)? else {
+        let Some(dispatch) = self.resolve_followup_from_bus_async(data).await? else {
             return Ok(());
         };
         let followup_id = dispatch.task.id.clone();
@@ -142,6 +143,37 @@ impl WorkflowEngine {
         }
         log::info!("workflow_engine Test tetiklendi: {parent_id} → {followup_id} ({chain})");
         Ok(())
+    }
+
+    /// Lifecycle yazımı ile yarış: status henüz Completed değilse kısa retry.
+    pub async fn resolve_followup_from_bus_async(
+        &self,
+        data: &[u8],
+    ) -> Result<Option<TestDispatch>> {
+        const ATTEMPTS: u32 = 5;
+        const DELAY: Duration = Duration::from_millis(200);
+        let mut last_not_ready: Option<String> = None;
+        for attempt in 0..ATTEMPTS {
+            match self.resolve_followup_from_bus(data) {
+                Ok(v) => return Ok(v),
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("Completed değil") {
+                        last_not_ready = Some(msg);
+                        if attempt + 1 < ATTEMPTS {
+                            tokio::time::sleep(DELAY).await;
+                            continue;
+                        }
+                        break;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        anyhow::bail!(
+            "{}",
+            last_not_ready.unwrap_or_else(|| "follow-up: Completed beklenirken zaman aşımı".into())
+        )
     }
 
     /// Bus payload → DB doğrulama → follow-up planı.
@@ -205,7 +237,10 @@ impl WorkflowEngine {
         task.root_id = Some(completed.effective_root_id().to_string());
         task.hop_count = completed.hop_count.saturating_add(1);
         task.session_id = completed.session_id.clone();
+        // Aynı parent için tekrar completed → tek Test (idempotency replay).
+        task.idempotency_key = Some(format!("workflow-test:{}", completed.id));
         // Parent doğrulanmamışsa follow-up da unverified → SourceUnverified kapısı.
+        // (Onaylanmış unverified Coding parent → ikinci SourceUnverified: bilinçli güvenlik kararı.)
         task.source_verified = completed.source_verified;
         // summary/repo/ast/priority yalnız DB parent’tan.
         task.repo_path = completed.repo_path.clone();
@@ -374,6 +409,11 @@ mod tests {
         assert!(
             dispatch.task.source_verified,
             "verified parent → verified child"
+        );
+        let expected_key = format!("workflow-test:{}", parent.id);
+        assert_eq!(
+            dispatch.task.idempotency_key.as_deref(),
+            Some(expected_key.as_str())
         );
         assert_eq!(
             dispatch.chain_label,
@@ -558,6 +598,8 @@ mod tests {
         assert!(triggers_followup_test(&TaskKind::CodeAnalysis));
         assert!(!triggers_followup_test(&TaskKind::Review));
         assert!(!triggers_followup_test(&TaskKind::Test));
+        assert!(!triggers_followup_test(&TaskKind::General));
+        assert!(!triggers_followup_test(&TaskKind::Orchestration));
     }
 
     #[test]
@@ -582,6 +624,97 @@ mod tests {
         assert_eq!(
             format_workflow_chain(&parent, &child),
             "implement workflow engine -> Triggered Auto-Test after Code"
+        );
+
+        // Yalın id etiketi (boş summary) + parent_task_id kurulumu.
+        let mut bare_parent = LoungeTask::new("claude", "p", "");
+        bare_parent.id = "task-parent-id".into();
+        bare_parent.summary = String::new();
+        bare_parent.kind = TaskKind::CodeAnalysis;
+        let mut bare_child = LoungeTask::new("workflow_engine", "p", "");
+        bare_child.id = "task-child-id".into();
+        bare_child.summary = String::new();
+        bare_child.kind = TaskKind::Test;
+        bare_child.parent_task_id = Some(bare_parent.id.clone());
+        assert_eq!(
+            format_workflow_chain(&bare_parent, &bare_child),
+            "task-parent-id -> Triggered task-child-id"
+        );
+        assert_eq!(bare_child.parent_task_id.as_deref(), Some("task-parent-id"));
+    }
+
+    #[test]
+    fn followup_idempotency_key_replays_on_duplicate_completed() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut parent = LoungeTask::new("claude", "p", "coding done");
+        parent.kind = TaskKind::CodeAnalysis;
+        parent.source_verified = true;
+        store.admit_a2a_task(&mut parent, 10).unwrap();
+        store
+            .set_a2a_task_status(&parent.id, TaskStatus::Completed)
+            .unwrap();
+
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(true)
+            .with_store(store.clone());
+        let d1 = engine.plan_test_followup(&parent).expect("first follow-up");
+        let expected_key = format!("workflow-test:{}", parent.id);
+        assert_eq!(
+            d1.task.idempotency_key.as_deref(),
+            Some(expected_key.as_str())
+        );
+        let mut first = d1.task;
+        assert!(matches!(
+            store.admit_a2a_task(&mut first, 10).unwrap(),
+            crate::db::AdmitOutcome::Accepted(_)
+        ));
+
+        let d2 = engine.plan_test_followup(&parent).expect("second plan");
+        let mut second = d2.task;
+        match store.admit_a2a_task(&mut second, 10).unwrap() {
+            crate::db::AdmitOutcome::Replay {
+                existing_task_id, ..
+            } => assert_eq!(existing_task_id, first.id),
+            other => panic!("Replay beklenir: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegated_completion_race_retries_until_db_completed() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut parent = LoungeTask::new("claude", "p", "delegated coding");
+        parent.kind = TaskKind::CodeAnalysis;
+        parent.source_verified = true;
+        store.admit_a2a_task(&mut parent, 10).unwrap();
+        // Worker henüz lifecycle yazmadı — DISPATCHED.
+        store
+            .set_a2a_task_status(&parent.id, TaskStatus::Dispatched)
+            .unwrap();
+
+        let engine = WorkflowEngine::new("nats://127.0.0.1:4222")
+            .with_grok_in_fleet(true)
+            .with_store(store.clone());
+        let payload = serde_json::json!({ "id": parent.id, "type": "task" });
+        let bytes = payload.to_string().into_bytes();
+
+        let store_late = store.clone();
+        let parent_id = parent.id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            store_late
+                .set_a2a_task_status(&parent_id, TaskStatus::Completed)
+                .unwrap();
+        });
+
+        let dispatch = engine
+            .resolve_followup_from_bus_async(&bytes)
+            .await
+            .unwrap()
+            .expect("retry sonrası follow-up");
+        assert_eq!(dispatch.task.kind, TaskKind::Test);
+        assert_eq!(
+            dispatch.task.parent_task_id.as_deref(),
+            Some(parent.id.as_str())
         );
     }
 

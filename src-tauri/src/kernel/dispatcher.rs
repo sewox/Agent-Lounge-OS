@@ -328,8 +328,17 @@ impl Dispatcher {
         log::info!("dispatcher lifecycle dinliyor: {url} ({TASK_COMPLETED}|{TASK_FAILED})");
         while let Some((subject, data)) = rx.recv().await {
             let failed = subject == TASK_FAILED;
-            if let Err(err) = self.apply_bus_terminal(&data, failed) {
-                log::warn!("lifecycle status güncellemesi: {err}");
+            match self.apply_bus_terminal(&data, failed) {
+                Ok(()) => {}
+                Err(err) => {
+                    let msg = err.to_string();
+                    // Kendi TASK_COMPLETED yankısı (zaten Completed) — log gürültüsü yok.
+                    if msg.contains("lifecycle_echo_completed") {
+                        log::debug!("lifecycle echo ignored: {msg}");
+                    } else {
+                        log::warn!("lifecycle status güncellemesi: {err}");
+                    }
+                }
             }
         }
         Ok(())
@@ -337,8 +346,9 @@ impl Dispatcher {
 
     /// NATS tamamlanma/hata zarfından `a2a_tasks` güncelle — yalnız izinli geçişler.
     ///
-    /// İzinli: DISPATCHED | EXECUTING | QUEUED | RECOVERY_PENDING → Completed/Failed.
-    /// Terminal (Completed/Failed/NeedsHuman/…) değişmez. Failed → idempotency release.
+    /// İzinli: DISPATCHED | EXECUTING | QUEUED | RECOVERY_PENDING | **NeedsHuman**
+    /// → Completed/Failed. NeedsHuman kurtarma: watchdog sonrası geç gelen worker sonucu.
+    /// Zaten Completed + !failed → sessiz no-op (kendi yayın yankısı).
     ///
     /// Not (PR-5): NATS yayıncı kimlik doğrulaması yok; `target_agent` eşleşmesi
     /// mümkün olduğunda kontrol edilir, aksi halde durum makinesi tek kapıdır.
@@ -357,16 +367,22 @@ impl Dispatcher {
             .a2a_task_status(&task_id)?
             .ok_or_else(|| anyhow::anyhow!("lifecycle: a2a_tasks'ta id yok: {task_id}"))?;
 
+        // Kendi Local TASK_COMPLETED yankısı — sessiz yok say.
+        if matches!(current, TaskStatus::Completed) && !failed {
+            anyhow::bail!("lifecycle_echo_completed: {task_id}");
+        }
+
         let allowed = matches!(
             current,
             TaskStatus::Dispatched
                 | TaskStatus::Executing
                 | TaskStatus::Queued
                 | TaskStatus::RecoveryPending
+                | TaskStatus::NeedsHuman
         );
         if !allowed {
             anyhow::bail!(
-                "lifecycle geçiş reddedildi: {task_id} status={} → terminal (yalnız DISPATCHED/EXECUTING/QUEUED/RECOVERY_PENDING)",
+                "lifecycle geçiş reddedildi: {task_id} status={} → terminal",
                 current.as_str()
             );
         }
@@ -397,8 +413,8 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// Paylaşılan NATS bağlantısı (lazy connect + cache).
-    fn shared_nats(&self) -> Option<nats::Connection> {
+    /// Paylaşılan NATS bağlantısı (lazy connect + cache; async yolunda spawn_blocking).
+    async fn shared_nats(&self) -> Option<nats::Connection> {
         {
             let guard = self.nats_conn.lock().expect("nats_conn lock");
             if let Some(nc) = guard.as_ref() {
@@ -406,14 +422,22 @@ impl Dispatcher {
             }
         }
         let url = self.nats_url.clone();
-        match nats::connect(&url) {
-            Ok(nc) => {
+        match tokio::task::spawn_blocking(move || nats::connect(&url)).await {
+            Ok(Ok(nc)) => {
                 let mut guard = self.nats_conn.lock().expect("nats_conn lock");
                 *guard = Some(nc.clone());
                 Some(nc)
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 log::warn!("NATS paylaşılan bağlantı kurulamadı: {err}");
+                let mut guard = self.nats_conn.lock().expect("nats_conn lock");
+                *guard = None;
+                None
+            }
+            Err(err) => {
+                log::warn!("NATS paylaşılan bağlantı join: {err}");
+                let mut guard = self.nats_conn.lock().expect("nats_conn lock");
+                *guard = None;
                 None
             }
         }
@@ -629,7 +653,8 @@ impl Dispatcher {
         }
     }
 
-    /// Explicit trusted entry — `source_verified=true` zorlar (kernel API).
+    /// Explicit trusted entry — yalnız testler (üretim workflow DB `source_verified` kullanır).
+    #[cfg(test)]
     pub async fn handle_trusted_task(&self, mut task: LoungeTask) -> Result<()> {
         task.source_verified = true;
         self.dispatch_with_shared_nats(task).await
@@ -645,7 +670,7 @@ impl Dispatcher {
             log::warn!("tecrübe araması atlandı: {err}");
             ExperienceContext::default()
         });
-        let nc = self.shared_nats();
+        let nc = self.shared_nats().await;
         let nc_ref = nc.as_ref();
         match self.execute_task(task.clone(), context, nc_ref).await {
             Ok(TaskExecution::Local(experience)) => {
@@ -2780,7 +2805,69 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(err.contains("geçiş reddedildi") || err.contains("COMPLETED"));
+        assert!(
+            err.contains("geçiş reddedildi") || err.contains("COMPLETED"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bus_terminal_echo_completed_is_noop_error() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "echo".into(),
+            adr_summary: "echo".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let task = LoungeTask::new("a", "p", "local-done");
+        dispatcher.handle_task(task.clone()).await.unwrap();
+        let err = dispatcher
+            .apply_bus_terminal(
+                serde_json::json!({ "id": task.id }).to_string().as_bytes(),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("lifecycle_echo_completed"),
+            "Completed→Completed yankı: {err}"
+        );
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn needs_human_allows_late_worker_completion() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "late".into(),
+            adr_summary: "late".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let task = LoungeTask::new("a", "p", "zombie-then-done");
+        dispatcher.handle_task(task.clone()).await.unwrap();
+        dispatcher
+            .store()
+            .set_a2a_task_status(&task.id, TaskStatus::NeedsHuman)
+            .unwrap();
+        dispatcher
+            .apply_bus_terminal(
+                serde_json::json!({ "id": task.id }).to_string().as_bytes(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
     }
 
     #[tokio::test]
