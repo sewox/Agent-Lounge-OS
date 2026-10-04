@@ -236,9 +236,7 @@ fn editor_program_stem(basename_lower: &str) -> &str {
 
 fn is_allowed_editor_script_basename(basename_lower: &str) -> bool {
     let cleaned = strip_trailing_windows_junk(basename_lower);
-    CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES
-        .iter()
-        .any(|allowed| cleaned == *allowed)
+    CUSTOM_EDITOR_ALLOWED_SCRIPT_BASENAMES.contains(&cleaned)
 }
 
 fn is_denied_script_extension(basename_lower: &str) -> bool {
