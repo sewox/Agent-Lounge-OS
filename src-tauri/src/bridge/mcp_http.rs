@@ -111,7 +111,7 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let client_provided = raw_session.map(|s| is_valid_session_id(s)).unwrap_or(false);
+    let client_provided = raw_session.map(is_valid_session_id).unwrap_or(false);
     let session_id = normalize_or_mint_session_id(raw_session);
 
     let mut client = {

@@ -645,6 +645,7 @@ async fn poll_terminal_match(
     }
 }
 
+#[cfg(test)]
 fn terminal_payload_matches_task(data: &[u8], task_id: &str) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(data) else {
         return false;

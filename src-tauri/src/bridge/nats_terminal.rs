@@ -32,12 +32,11 @@ impl NatsTerminalHub {
     /// Test / skip_nats — hiç bağlanma.
     pub fn inert() -> Arc<Self> {
         let (tx, _) = broadcast::channel(BROADCAST_CAP);
-        let hub = Arc::new(Self {
+        Arc::new(Self {
             nats_url: String::new(),
             tx,
             started: AtomicBool::new(true), // ensure_started no-op
-        });
-        hub
+        })
     }
 
     pub fn subscribe(self: &Arc<Self>) -> broadcast::Receiver<String> {
