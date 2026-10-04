@@ -10,15 +10,20 @@
 //!
 //! İptal: `notifications/cancelled` reason `context canceled` → görev iptal +
 //! `lounge.control.stop`. `deadline exceeded` → görev arka planda sürer.
+//!
+//! NATS: paylaşılan [`NatsTerminalHub`] (çağrı başına connect yok). Sender
+//! kapanınca select kolu devre dışı kalır (busy-loop yok).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
+use super::nats_terminal::NatsTerminalHub;
+use super::session_id::is_valid_session_id;
 use super::timeout_manager::TimeoutManager;
 use super::wait_clock::WaitClock;
 use crate::db::{configured_max_hops, AdmitOutcome, ExperienceStore};
@@ -62,6 +67,36 @@ pub struct CallAgentArgs {
     pub wait: bool,
 }
 
+/// NATS / test yayın aracı — control.stop doğrulaması için enjekte edilir.
+pub trait ControlStopPublisher: Send + Sync {
+    fn publish_control_stop(&self, task_id: &str, session_id: &str) -> Result<()>;
+}
+
+struct NatsControlStopPublisher {
+    nats_url: String,
+}
+
+impl ControlStopPublisher for NatsControlStopPublisher {
+    fn publish_control_stop(&self, task_id: &str, session_id: &str) -> Result<()> {
+        let url = self.nats_url.clone();
+        let subject = CONTROL_STOP.to_string();
+        let payload = json!({
+            "task_id": task_id,
+            "session_id": session_id,
+            "reason": "context canceled",
+            "at": now_rfc3339(),
+            "id": Uuid::new_v4().to_string(),
+        });
+        let bytes = serde_json::to_vec(&payload)?;
+        #[allow(deprecated)]
+        let nc = nats::connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
+        nc.publish(&subject, bytes)
+            .map_err(|e| anyhow!("NATS publish: {e}"))?;
+        nc.flush().map_err(|e| anyhow!("NATS flush: {e}"))?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct Orchestrator {
     store: ExperienceStore,
@@ -70,6 +105,10 @@ pub struct Orchestrator {
     clock: Arc<dyn WaitClock>,
     /// Testlerde NATS atlanır; yalnız DB poll.
     skip_nats: bool,
+    terminal_hub: Arc<NatsTerminalHub>,
+    control_publisher: Arc<dyn ControlStopPublisher>,
+    /// `with_control_publisher` ile enjekte edildiyse skip_nats'ta da çağrılır.
+    control_publisher_forced: bool,
 }
 
 impl Orchestrator {
@@ -79,17 +118,40 @@ impl Orchestrator {
         timeouts: Arc<TimeoutManager>,
         clock: Arc<dyn WaitClock>,
     ) -> Self {
+        let nats_url = nats_url.into();
+        let terminal_hub = NatsTerminalHub::new(nats_url.clone());
+        let control_publisher: Arc<dyn ControlStopPublisher> =
+            Arc::new(NatsControlStopPublisher {
+                nats_url: nats_url.clone(),
+            });
         Self {
             store,
-            nats_url: nats_url.into(),
+            nats_url,
             timeouts,
             clock,
             skip_nats: false,
+            terminal_hub,
+            control_publisher,
+            control_publisher_forced: false,
         }
     }
 
     pub fn with_skip_nats(mut self, skip: bool) -> Self {
         self.skip_nats = skip;
+        if skip {
+            self.terminal_hub = NatsTerminalHub::inert();
+        }
+        self
+    }
+
+    pub fn with_terminal_hub(mut self, hub: Arc<NatsTerminalHub>) -> Self {
+        self.terminal_hub = hub;
+        self
+    }
+
+    pub fn with_control_publisher(mut self, pub_: Arc<dyn ControlStopPublisher>) -> Self {
+        self.control_publisher = pub_;
+        self.control_publisher_forced = true;
         self
     }
 
@@ -113,6 +175,9 @@ impl Orchestrator {
         args: CallAgentArgs,
         mut cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
     ) -> Result<Value> {
+        if !is_valid_session_id(session_id) {
+            return Err(anyhow!("geçersiz session_id"));
+        }
         let timeout_limit = self.timeouts.timeout_limit(client_name);
         let source = format!(
             "mcp:{}",
@@ -122,11 +187,11 @@ impl Orchestrator {
         let mut task = LoungeTask::new(source, args.project_id.clone(), args.task.clone());
         task.target_agent = Some(args.target_agent.clone());
         task.session_id = Some(session_id.to_string());
-        task.source_verified = true;
+        // P1-1: token/parent-PID doğrulaması gelene kadar MCP görevleri unverified.
+        task.source_verified = false;
         task.idempotency_key = args.idempotency_key.clone();
         task.repo_path = args.repo_path.clone();
         // parent_task_id istemci değeri yok sayılır — yalnız sunucu enjekte eder.
-        // MCP şu an parent enjekte etmez (lease yok); istemci spoof'unu temizle.
         let _ = args.parent_task_id;
         task.parent_task_id = None;
 
@@ -170,9 +235,10 @@ impl Orchestrator {
                 "summary": args.task,
                 "source_agent": task.source_agent,
                 "session_id": session_id,
+                "source_verified": false,
                 "timeout_limit_secs": timeout_limit.as_secs(),
                 "replay_status": replay_status.map(|s| s.as_str()),
-                "note": "Görev NATS'a yazıldı. Sonuç için lounge_wait_task kullanın (Mod B)."
+                "note": "Görev NATS'a yazıldı. Sonuç için lounge_wait_task kullanın (Mod B). source_verified=false — onay kapısı uygulanabilir."
             }));
         }
 
@@ -193,11 +259,13 @@ impl Orchestrator {
             .now_ms()
             .saturating_add(timeout_limit.as_millis() as u64);
 
-        // NATS completed|failed dinleyicisi — select! ile eşik zamanlayıcısı yarışır.
-        let mut nats_rx = self.spawn_nats_terminal_watcher(task_id);
+        let mut nats_rx = self.subscribe_terminal(task_id);
+        // Sender kapandıysa kolu tamamen bırak (pending future → CPU yok).
+        let mut nats_alive = !self.skip_nats;
 
         loop {
-            if let Some(kind) = cancel_rx.as_ref().and_then(|rx| *rx.borrow()) {
+            let pending_cancel = cancel_rx.as_ref().and_then(|rx| *rx.borrow());
+            if let Some(kind) = pending_cancel {
                 return self.handle_cancel(task_id, session_id, kind).await;
             }
 
@@ -219,67 +287,47 @@ impl Orchestrator {
                 }));
             }
 
-            // select!: timeout dilimi | NATS terminal | iptal.
             let slice = poll.min(Duration::from_millis(
                 deadline_ms.saturating_sub(self.clock.now_ms()).max(1),
             ));
+            let nats_fut = poll_terminal_match(&mut nats_rx, task_id, nats_alive);
             if let Some(rx) = cancel_rx.as_mut() {
                 tokio::select! {
                     _ = self.clock.sleep(slice) => {}
-                    maybe = nats_rx.recv() => {
-                        let _ = maybe;
+                    closed = nats_fut => {
+                        if closed {
+                            nats_alive = false;
+                        }
                     }
                     changed = rx.changed() => {
-                        let kind = if changed.is_ok() { *rx.borrow() } else { None };
-                        if let Some(kind) = kind {
-                            return self.handle_cancel(task_id, session_id, kind).await;
+                        match changed {
+                            Ok(()) => {
+                                let kind = *rx.borrow();
+                                if let Some(kind) = kind {
+                                    return self.handle_cancel(task_id, session_id, kind).await;
+                                }
+                            }
+                            Err(_) => {
+                                cancel_rx = None;
+                            }
                         }
                     }
                 }
             } else {
                 tokio::select! {
                     _ = self.clock.sleep(slice) => {}
-                    maybe = nats_rx.recv() => {
-                        let _ = maybe;
+                    closed = nats_fut => {
+                        if closed {
+                            nats_alive = false;
+                        }
                     }
                 }
             }
         }
     }
 
-    /// `lounge.task.completed|failed` — task_id eşleşince kanal uyarısı.
-    fn spawn_nats_terminal_watcher(&self, task_id: &str) -> mpsc::Receiver<()> {
-        let (tx, rx) = mpsc::channel::<()>(4);
-        if self.skip_nats {
-            return rx;
-        }
-        let url = self.nats_url.clone();
-        let want = task_id.to_string();
-        for subject in [TASK_COMPLETED, TASK_FAILED] {
-            let url = url.clone();
-            let want = want.clone();
-            let tx = tx.clone();
-            let subject = subject.to_string();
-            tokio::task::spawn_blocking(move || {
-                #[allow(deprecated)]
-                let Ok(nc) = nats::connect(&url) else {
-                    return;
-                };
-                let Ok(sub) = nc.subscribe(&subject) else {
-                    return;
-                };
-                for msg in sub.messages() {
-                    if terminal_payload_matches_task(&msg.data, &want) {
-                        let _ = tx.blocking_send(());
-                        return;
-                    }
-                    if tx.is_closed() {
-                        return;
-                    }
-                }
-            });
-        }
-        rx
+    fn subscribe_terminal(&self, _task_id: &str) -> broadcast::Receiver<String> {
+        self.terminal_hub.subscribe()
     }
 
     fn try_read_result(&self, task_id: &str, session_id: &str) -> Result<Option<Value>> {
@@ -290,9 +338,15 @@ impl Orchestrator {
             Some(s) => s,
             None => return Ok(None),
         };
+        // Completed/Failed/Cancelled + NeedsHuman/Expired/Timeout → wait biter (sonsuz still_running yok).
         if matches!(
             status,
-            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+            TaskStatus::Completed
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::NeedsHuman
+                | TaskStatus::Expired
+                | TaskStatus::Timeout
         ) {
             let result = self.store.a2a_task_result(task_id)?;
             return Ok(Some(json!({
@@ -314,16 +368,36 @@ impl Orchestrator {
         match kind {
             CancelKind::UserStop => {
                 self.store.cancel_a2a_task(task_id, session_id)?;
-                if !self.skip_nats {
-                    let _ = self.publish_control_stop(task_id, session_id).await;
+                let mut control_stop = false;
+                let mut control_stop_error: Option<String> = None;
+                if !self.skip_nats || self.control_publisher_forced {
+                    let publisher = Arc::clone(&self.control_publisher);
+                    let tid = task_id.to_string();
+                    let sid = session_id.to_string();
+                    match tokio::task::spawn_blocking(move || {
+                        publisher.publish_control_stop(&tid, &sid)
+                    })
+                    .await
+                    .context("control.stop join")?
+                    {
+                        Ok(()) => control_stop = true,
+                        Err(err) => {
+                            control_stop_error = Some(err.to_string());
+                            log::warn!("control.stop yayınlanamadı: {err}");
+                        }
+                    }
                 }
-                Ok(json!({
+                let mut body = json!({
                     "status": "cancelled",
                     "task_id": task_id,
                     "reason": "context canceled",
-                    "control_stop": true,
+                    "control_stop": control_stop,
                     "subject": CONTROL_STOP,
-                }))
+                });
+                if let Some(err) = control_stop_error {
+                    body["control_stop_error"] = json!(err);
+                }
+                Ok(body)
             }
             CancelKind::DeadlineExceeded => {
                 let _ = self.store.mark_a2a_wait_timeout(task_id);
@@ -367,10 +441,16 @@ impl Orchestrator {
             .now_ms()
             .saturating_add(budget.as_millis() as u64);
         let poll = Duration::from_millis(50);
-        let mut nats_rx = self.spawn_nats_terminal_watcher(task_id);
+        let mut nats_rx = self.subscribe_terminal(task_id);
+        let mut nats_alive = !self.skip_nats;
+        let mut cancel_alive = cancel_rx.is_some();
 
         loop {
-            let cancel_kind = cancel_rx.as_ref().and_then(|rx| *rx.borrow());
+            let cancel_kind = if cancel_alive {
+                cancel_rx.as_ref().and_then(|rx| *rx.borrow())
+            } else {
+                None
+            };
             if let Some(kind) = cancel_kind {
                 if kind == CancelKind::UserStop {
                     return self.handle_cancel(task_id, session_id, kind).await;
@@ -399,22 +479,33 @@ impl Orchestrator {
             let slice = poll.min(Duration::from_millis(
                 deadline_ms.saturating_sub(self.clock.now_ms()).max(1),
             ));
-            if let Some(rx) = cancel_rx.as_mut() {
-                tokio::select! {
-                    _ = self.clock.sleep(slice) => {}
-                    maybe = nats_rx.recv() => { let _ = maybe; }
-                    _ = rx.changed() => {}
+            let nats_fut = poll_terminal_match(&mut nats_rx, task_id, nats_alive);
+            if cancel_alive {
+                if let Some(rx) = cancel_rx.as_mut() {
+                    tokio::select! {
+                        _ = self.clock.sleep(slice) => {}
+                        closed = nats_fut => { if closed { nats_alive = false; } }
+                        changed = rx.changed() => {
+                            match changed {
+                                Ok(()) => {}
+                                Err(_) => {
+                                    cancel_alive = false;
+                                    cancel_rx = None;
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
-            } else {
-                tokio::select! {
-                    _ = self.clock.sleep(slice) => {}
-                    maybe = nats_rx.recv() => { let _ = maybe; }
-                }
+            }
+            tokio::select! {
+                _ = self.clock.sleep(slice) => {}
+                closed = nats_fut => { if closed { nats_alive = false; } }
             }
         }
     }
 
-    pub fn yield_result(
+    pub async fn yield_result(
         &self,
         session_id: &str,
         task_id: &str,
@@ -438,14 +529,32 @@ impl Orchestrator {
         });
         let raw = serde_json::to_string(&envelope)?;
         self.store
-            .yield_a2a_result(task_id, session_id, status, &raw)?;
+            .yield_a2a_result(task_id, session_id, status.clone(), &raw)?;
 
-        Ok(json!({
+        // Workflow engine / UI: yield Completed|Failed → bus terminal yayını.
+        let mut published = false;
+        let mut publish_error: Option<String> = None;
+        if !self.skip_nats {
+            match self.publish_task_terminal(task_id, status, &envelope).await {
+                Ok(()) => published = true,
+                Err(err) => {
+                    publish_error = Some(err.to_string());
+                    log::warn!("yield terminal publish: {err}");
+                }
+            }
+        }
+
+        let mut body = json!({
             "ok": true,
             "task_id": task_id,
             "status": status_label,
             "session_id": session_id,
-        }))
+            "published": published,
+        });
+        if let Some(err) = publish_error {
+            body["publish_error"] = json!(err);
+        }
+        Ok(body)
     }
 
     async fn publish_task_requested(&self, task: &LoungeTask) -> Result<()> {
@@ -465,15 +574,25 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn publish_control_stop(&self, task_id: &str, session_id: &str) -> Result<()> {
+    async fn publish_task_terminal(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        envelope: &Value,
+    ) -> Result<()> {
+        let subject = if matches!(status, TaskStatus::Failed) {
+            TASK_FAILED
+        } else {
+            TASK_COMPLETED
+        };
         let url = self.nats_url.clone();
-        let subject = CONTROL_STOP.to_string();
+        let subject = subject.to_string();
         let payload = json!({
+            "id": task_id,
             "task_id": task_id,
-            "session_id": session_id,
-            "reason": "context canceled",
+            "status": status.as_str(),
+            "result": envelope,
             "at": now_rfc3339(),
-            "id": Uuid::new_v4().to_string(),
         });
         let bytes = serde_json::to_vec(&payload)?;
         tokio::task::spawn_blocking(move || {
@@ -485,8 +604,28 @@ impl Orchestrator {
             Ok::<(), anyhow::Error>(())
         })
         .await
-        .context("control.stop join")??;
+        .context("terminal publish join")??;
         Ok(())
+    }
+}
+
+/// `true` ⇒ hub kapandı (kolu bırak). `alive=false` ⇒ sonsuza pending.
+async fn poll_terminal_match(
+    rx: &mut broadcast::Receiver<String>,
+    want: &str,
+    alive: bool,
+) -> bool {
+    if !alive {
+        std::future::pending::<()>().await;
+        return true;
+    }
+    loop {
+        match rx.recv().await {
+            Ok(id) if id == want => return false,
+            Ok(_) => continue,
+            Err(broadcast::error::RecvError::Closed) => return true,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        }
     }
 }
 
@@ -505,13 +644,37 @@ fn terminal_payload_matches_task(data: &[u8], task_id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::bridge::wait_clock::ManualWaitClock;
+    use crate::models::AgentSession;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    struct RecordingPublisher {
+        calls: AtomicUsize,
+        fail: bool,
+    }
+
+    impl ControlStopPublisher for RecordingPublisher {
+        fn publish_control_stop(&self, _task_id: &str, _session_id: &str) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(anyhow!("simulated publish fail"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn bind_worker(store: &ExperienceStore, session_id: &str, agent: &str) {
+        let mut sess = AgentSession::new("p", agent, "worker", "/tmp", "test");
+        sess.id = session_id.into();
+        store.upsert_session(&sess).unwrap();
+    }
 
     fn orch_manual() -> (Orchestrator, Arc<ManualWaitClock>, String) {
         let store = ExperienceStore::memory().unwrap();
         let clock = Arc::new(ManualWaitClock::new());
         let timeouts = Arc::new(TimeoutManager::with_defaults());
-        timeouts.set_global_override_secs(Some(2)); // 2s eşik — clock ile ilerletilir
+        timeouts.set_global_override_secs(Some(2));
         let orch = Orchestrator::new(
             store,
             "nats://127.0.0.1:9",
@@ -536,6 +699,7 @@ mod tests {
             wait: true,
         };
         let store = orch.store().clone();
+        bind_worker(&store, "worker-sess", "worker");
         let (cancel_tx, cancel_rx) = watch::channel(None);
         let call = tokio::spawn({
             let orch = orch.clone();
@@ -545,7 +709,6 @@ mod tests {
                     .await
             }
         });
-        // Eşik dolmadan yield — call admit eder.
         tokio::task::yield_now().await;
         clock.advance(Duration::from_millis(20));
         let mut found = None;
@@ -584,6 +747,7 @@ mod tests {
             parent_task_id: None,
             wait: true,
         };
+        bind_worker(orch.store(), "w", "worker");
         let (cancel_tx, cancel_rx) = watch::channel(None);
         let call = tokio::spawn({
             let orch = orch.clone();
@@ -594,7 +758,6 @@ mod tests {
             }
         });
         tokio::task::yield_now().await;
-        // 2s eşiği aş
         clock.advance(Duration::from_secs(3));
         let bg = call.await.unwrap().unwrap();
         assert_eq!(bg["status"], "backgrounded");
@@ -613,8 +776,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_canceled_publishes_stop_and_cancels() {
-        let (orch, clock, session) = orch_manual();
+    async fn context_canceled_reports_control_stop_honestly() {
+        let store = ExperienceStore::memory().unwrap();
+        let clock = Arc::new(ManualWaitClock::new());
+        let timeouts = Arc::new(TimeoutManager::with_defaults());
+        timeouts.set_global_override_secs(Some(2));
+        let publisher = Arc::new(RecordingPublisher {
+            calls: AtomicUsize::new(0),
+            fail: false,
+        });
+        let orch = Orchestrator::new(
+            store,
+            "nats://127.0.0.1:9",
+            timeouts,
+            clock.clone() as Arc<dyn WaitClock>,
+        )
+        .with_skip_nats(true)
+        .with_control_publisher(publisher.clone() as Arc<dyn ControlStopPublisher>);
+        let session = Uuid::new_v4().to_string();
+
         let args = CallAgentArgs {
             target_agent: "worker".into(),
             task: "x".into(),
@@ -640,6 +820,40 @@ mod tests {
         let out = call.await.unwrap().unwrap();
         assert_eq!(out["status"], "cancelled");
         assert_eq!(out["control_stop"], true);
+        assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn context_canceled_skip_nats_reports_control_stop_false() {
+        let (orch, clock, session) = orch_manual();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "x".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent(&session, "cursor", args, Some(cancel_rx))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        clock.advance(Duration::from_millis(10));
+        let _ = cancel_tx.send(Some(CancelKind::UserStop));
+        clock.advance(Duration::from_millis(50));
+        let out = call.await.unwrap().unwrap();
+        assert_eq!(out["status"], "cancelled");
+        assert_eq!(
+            out["control_stop"], false,
+            "skip_nats iken control_stop:false olmalı"
+        );
     }
 
     #[tokio::test]
@@ -684,6 +898,47 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("yetkisiz"));
+    }
+
+    #[tokio::test]
+    async fn needs_human_ends_wait_task() {
+        let (orch, _clock, session) = orch_manual();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "t");
+        task.session_id = Some(session.clone());
+        orch.store().admit_a2a_task(&mut task, 10).unwrap();
+        orch.store()
+            .set_a2a_task_status(&task.id, TaskStatus::NeedsHuman)
+            .unwrap();
+        let out = orch
+            .wait_task(&session, "cursor", &task.id, Some(50), None)
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "needs_human");
+    }
+
+    #[tokio::test]
+    async fn mcp_tasks_are_unverified() {
+        let (orch, _clock, session) = orch_manual();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "x".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: false,
+        };
+        let out = orch
+            .call_agent(&session, "cursor", args, None)
+            .await
+            .unwrap();
+        assert_eq!(out["source_verified"], false);
+        let task = orch
+            .store()
+            .load_a2a_task(out["task_id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!task.source_verified);
     }
 
     #[test]
