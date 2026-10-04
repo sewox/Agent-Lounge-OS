@@ -9,8 +9,14 @@
 //! | `session_id` | `session_id` (kanonik; JSON alias `source_session_id`) |
 //! | `hop_count` | `hop_count` |
 //! | `idempotency_key` | `idempotency_key` (kapsam: session_id veya source_agent + project_id) |
-//! | `claimed_by` | yield lease sahibi MCP oturumu |
+//! | `claimed_by` | yield lease sahibi MCP oturumu (`target_agent` bağlı) |
 //! | `result_json` | `lounge_yield_result` çıktısı |
+//!
+//! ## Yield kuralları (PR-3 review)
+//! - Yalnız `target_agent` ile `agent_sessions` üzerinden bağlanmış oturum
+//!   (veya zaten `claimed_by` sahibi) yield edebilir.
+//! - Durum: `QUEUED` (PENDING) / `DISPATCHED` / `EXECUTING` / `WAIT_TIMEOUT_REACHED`.
+//! - Terminal (`Completed`/`Failed`/`Cancelled`/`Expired`/`Timeout`/`NeedsHuman`) → ret.
 //!
 //! Görev satırı ve idempotency kaydı **tek SQLite transaction** içinde yazılır.
 //! Idempotency kapsamı (PR-3): `session:<mcp_session_id>` varsa spoof edilebilir
@@ -661,7 +667,44 @@ pub fn claim_task(conn: &Connection, task_id: &str, session_id: &str) -> Result<
     }
 }
 
-/// Yield sonucu yaz + status Completed/Failed. Yalnız `claimed_by == session`.
+/// Yield edilebilir ara durumlar (PENDING≈QUEUED).
+pub fn is_yieldable_status(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Queued
+            | TaskStatus::Dispatched
+            | TaskStatus::Executing
+            | TaskStatus::WaitTimeoutReached
+    )
+}
+
+/// Oturum, görevin `target_agent`'ına `agent_sessions` ile bağlı mı?
+pub fn session_bound_to_target(
+    conn: &Connection,
+    session_id: &str,
+    target_agent: Option<&str>,
+) -> Result<bool> {
+    let Some(target) = target_agent.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+    let found: Option<i64> = conn
+        .query_row(
+            r#"
+            SELECT 1 FROM agent_sessions
+            WHERE id = ?1 AND lower(agent_id) = lower(?2)
+            LIMIT 1
+            "#,
+            params![session_id, target],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Yield sonucu yaz + status Completed/Failed.
+///
+/// Yetki: `claimed_by == session` **veya** (boş claim + `target_agent` oturum bağları).
+/// Durum: yalnız yieldable; terminal satırlar ezilemez.
 pub fn yield_task_result(
     conn: &Connection,
     task_id: &str,
@@ -672,33 +715,58 @@ pub fn yield_task_result(
     if !matches!(status, TaskStatus::Completed | TaskStatus::Failed) {
         anyhow::bail!("yield status completed|failed olmalı");
     }
+    let task = load_task_row(conn, task_id)?
+        .ok_or_else(|| anyhow::anyhow!("yield: görev bulunamadı: {task_id}"))?;
+    let current = task_status(conn, task_id)?.unwrap_or(task.status.clone());
+    if current.is_terminal() || matches!(current, TaskStatus::Cancelled) {
+        anyhow::bail!(
+            "yield reddedildi: görev terminal durumda ({})",
+            current.as_str()
+        );
+    }
+    if !is_yieldable_status(current.clone()) {
+        anyhow::bail!(
+            "yield reddedildi: durum {} yield edilemez (QUEUED|DISPATCHED|EXECUTING|WAIT_TIMEOUT_REACHED)",
+            current.as_str()
+        );
+    }
+
     let claimed = load_claimed_by(conn, task_id)?;
     match claimed {
         Some(ref owner) if owner == session_id => {}
         Some(_) => anyhow::bail!("yetkisiz oturum: görev başka oturum tarafından claim edilmiş"),
         None => {
-            // Otomatik claim (ilk yield).
+            if !session_bound_to_target(conn, session_id, task.target_agent.as_deref())? {
+                anyhow::bail!(
+                    "yetkisiz oturum: yield yalnız target_agent'a bağlı oturumdan kabul edilir"
+                );
+            }
             if !claim_task(conn, task_id, session_id)? {
                 anyhow::bail!("yetkisiz oturum: claim alınamadı");
             }
         }
     }
+
     let now = now_rfc3339();
     let n = conn.execute(
         r#"
         UPDATE a2a_tasks
         SET result_json = ?1, status = ?2, updated_at = ?3, claimed_by = ?4
         WHERE id = ?5
+          AND status IN ('QUEUED', 'DISPATCHED', 'EXECUTING', 'WAIT_TIMEOUT_REACHED')
         "#,
         params![result_json, status.as_str(), now, session_id, task_id],
     )?;
     if n == 0 {
-        anyhow::bail!("yield: görev bulunamadı: {task_id}");
+        anyhow::bail!("yield: görev bulunamadı veya durum yarışında terminal oldu: {task_id}");
     }
     // payload_json içindeki status'u da senkron tut.
-    if let Ok(Some(mut task)) = load_task_row(conn, task_id) {
-        task.status = status;
-        let _ = rewrite_payload(conn, &task);
+    if let Ok(Some(mut updated)) = load_task_row(conn, task_id) {
+        updated.status = status.clone();
+        let _ = rewrite_payload(conn, &updated);
+    }
+    if matches!(status, TaskStatus::Failed) {
+        let _ = release_idempotency_for_task(conn, task_id);
     }
     Ok(())
 }
@@ -838,8 +906,9 @@ pub fn touch_dispatched_for_target(conn: &Connection, target_agent: &str) -> Res
     Ok(n as u64)
 }
 
-/// EXECUTING / DISPATCHED / RECOVERY_PENDING / QUEUED sessizliği → NEEDS_HUMAN.
-/// `PENDING_APPROVAL` bilinçli olarak dışarıda (kullanıcı onayı bekleniyor).
+/// EXECUTING / DISPATCHED / RECOVERY_PENDING / QUEUED / WAIT_TIMEOUT_REACHED sessizliği
+/// → NEEDS_HUMAN. `PENDING_APPROVAL` bilinçli olarak dışarıda (kullanıcı onayı bekleniyor).
+/// `WAIT_TIMEOUT_REACHED`: MCP backgrounded — worker ölürse sonsuz still_running olmasın.
 pub fn mark_silent_tasks_needs_human(
     conn: &Connection,
     now_rfc3339: &str,
@@ -849,7 +918,7 @@ pub fn mark_silent_tasks_needs_human(
     let mut stmt = conn.prepare(
         r#"
         SELECT id, updated_at FROM a2a_tasks
-        WHERE status IN ('EXECUTING', 'DISPATCHED', 'RECOVERY_PENDING', 'QUEUED')
+        WHERE status IN ('EXECUTING', 'DISPATCHED', 'RECOVERY_PENDING', 'QUEUED', 'WAIT_TIMEOUT_REACHED')
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1076,6 +1145,20 @@ impl crate::db::ExperienceStore {
     ) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         yield_task_result(&conn, task_id, session_id, status, result_json)
+    }
+
+    /// NATS `lounge.task.completed|failed` — claim kontrolü yok; yalnız result_json yaz.
+    pub fn store_a2a_bus_result(&self, task_id: &str, result_json: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let now = now_rfc3339();
+        let n = conn.execute(
+            "UPDATE a2a_tasks SET result_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![result_json, now, task_id],
+        )?;
+        if n == 0 {
+            anyhow::bail!("bus result: görev bulunamadı: {task_id}");
+        }
+        Ok(())
     }
 
     pub fn session_can_read_a2a_task(&self, task_id: &str, session_id: &str) -> Result<bool> {
@@ -1321,6 +1404,7 @@ mod tests {
         let store = ExperienceStore::memory().unwrap();
         let mut t = LoungeTask::new("mcp:cursor", "p", "work");
         t.session_id = Some("caller-sess".into());
+        t.target_agent = Some("worker".into());
         store.admit_a2a_task(&mut t, 10).unwrap();
 
         assert!(store
@@ -1329,6 +1413,19 @@ mod tests {
         assert!(!store
             .session_can_read_a2a_task(&t.id, "other-sess")
             .unwrap());
+
+        // Bağsız oturum yield edemez (eski test bunu meşru sayıyordu — yanlış).
+        let unbound = store
+            .yield_a2a_result(&t.id, "worker-sess", TaskStatus::Completed, r#"{"ok":true}"#)
+            .unwrap_err();
+        assert!(
+            unbound.to_string().contains("yetkisiz"),
+            "expected yetkisiz unbound, got {unbound}"
+        );
+
+        let mut sess = AgentSession::new("p", "worker", "worker", "/tmp", "test");
+        sess.id = "worker-sess".into();
+        store.upsert_session(&sess).unwrap();
 
         store
             .yield_a2a_result(
@@ -1342,13 +1439,43 @@ mod tests {
             store.a2a_task_result(&t.id).unwrap().as_deref(),
             Some(r#"{"ok":true}"#)
         );
-        // İkinci oturum yield edemez.
+        // Terminal görev ezilemez.
+        let terminal = store
+            .yield_a2a_result(&t.id, "worker-sess", TaskStatus::Failed, "{}")
+            .unwrap_err();
+        assert!(
+            terminal.to_string().contains("terminal") || terminal.to_string().contains("reddedildi"),
+            "expected terminal reject, got {terminal}"
+        );
+        // İzinsiz oturum.
         let err = store
             .yield_a2a_result(&t.id, "intruder", TaskStatus::Completed, "{}")
             .unwrap_err();
         assert!(
-            err.to_string().contains("yetkisiz"),
-            "expected yetkisiz, got {err}"
+            err.to_string().contains("yetkisiz") || err.to_string().contains("terminal"),
+            "expected yetkisiz/terminal, got {err}"
+        );
+    }
+
+    #[test]
+    fn yield_rejects_non_yieldable_and_unbound() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut t = LoungeTask::new("mcp:cursor", "p", "work");
+        t.session_id = Some("caller".into());
+        t.target_agent = Some("worker".into());
+        store.admit_a2a_task(&mut t, 10).unwrap();
+        store
+            .set_a2a_task_status(&t.id, TaskStatus::PendingApproval)
+            .unwrap();
+        let mut sess = AgentSession::new("p", "worker", "worker", "/tmp", "test");
+        sess.id = "worker-sess".into();
+        store.upsert_session(&sess).unwrap();
+        let err = store
+            .yield_a2a_result(&t.id, "worker-sess", TaskStatus::Completed, "{}")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("yield edilemez") || err.to_string().contains("reddedildi"),
+            "got {err}"
         );
     }
 
