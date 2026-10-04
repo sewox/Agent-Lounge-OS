@@ -1040,6 +1040,20 @@ fn count_a2a_tasks(conn: &Connection) -> Result<u64> {
     Ok(n as u64)
 }
 
+/// Oturum başına açık (non-terminal) görev sayısı.
+pub fn count_open_tasks_for_session(conn: &Connection, session_id: &str) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM a2a_tasks
+        WHERE session_id = ?1
+          AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED', 'TIMEOUT', 'NEEDS_HUMAN')
+        "#,
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    Ok(n as u64)
+}
+
 #[cfg(test)]
 fn count_idempotency_keys(conn: &Connection) -> Result<u64> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM idempotency_keys", [], |row| {
@@ -1104,6 +1118,11 @@ impl crate::db::ExperienceStore {
     pub fn session_count(&self) -> Result<u64> {
         let conn = self.conn.lock().expect("experience db lock");
         count_agent_sessions(&conn)
+    }
+
+    pub fn count_open_a2a_tasks_for_session(&self, session_id: &str) -> Result<u64> {
+        let conn = self.conn.lock().expect("experience db lock");
+        count_open_tasks_for_session(&conn, session_id)
     }
 
     pub fn release_a2a_idempotency(&self, task_id: &str) -> Result<()> {

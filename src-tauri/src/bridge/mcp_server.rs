@@ -741,12 +741,32 @@ impl McpServer {
     async fn register_inflight(&self, request_key: &str) -> watch::Receiver<Option<CancelKind>> {
         let (tx, rx) = watch::channel(None);
         let mut map = self.in_flight.lock().await;
-        // P1-1: uçuş map üst sınırı — en eski girdileri düşür.
+        // Global üst sınır.
         while map.len() >= super::session_id::MAX_IN_FLIGHT {
             if let Some(evict) = map.keys().next().cloned() {
                 map.remove(&evict);
             } else {
                 break;
+            }
+        }
+        // Oturum başına eşzamanlı bekleme sınırı (P2-f).
+        let session_prefix = request_key
+            .split_once(':')
+            .map(|(s, _)| format!("{s}:"))
+            .unwrap_or_default();
+        if !session_prefix.is_empty() {
+            let mut session_keys: Vec<String> = map
+                .keys()
+                .filter(|k| k.starts_with(&session_prefix))
+                .cloned()
+                .collect();
+            while session_keys.len() >= super::session_id::MAX_IN_FLIGHT_PER_SESSION {
+                if let Some(evict) = session_keys.first().cloned() {
+                    map.remove(&evict);
+                    session_keys.remove(0);
+                } else {
+                    break;
+                }
             }
         }
         map.insert(request_key.to_string(), tx);

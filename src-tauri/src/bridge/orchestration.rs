@@ -178,6 +178,16 @@ impl Orchestrator {
         if !is_valid_session_id(session_id) {
             return Err(anyhow!("geçersiz session_id"));
         }
+        let open = self
+            .store
+            .count_open_a2a_tasks_for_session(session_id)
+            .unwrap_or(0);
+        if open >= super::session_id::MAX_OPEN_TASKS_PER_SESSION as u64 {
+            return Err(anyhow!(
+                "oturum başına açık görev limiti aşıldı ({})",
+                super::session_id::MAX_OPEN_TASKS_PER_SESSION
+            ));
+        }
         let timeout_limit = self.timeouts.timeout_limit(client_name);
         let source = format!(
             "mcp:{}",
@@ -528,6 +538,13 @@ impl Orchestrator {
             "yielded_by_session": session_id,
         });
         let raw = serde_json::to_string(&envelope)?;
+        const MAX_YIELD_JSON: usize = 262_144; // 256 KiB
+        if raw.len() > MAX_YIELD_JSON {
+            return Err(anyhow!(
+                "yield output çok büyük ({} bayt > {MAX_YIELD_JSON})",
+                raw.len()
+            ));
+        }
         self.store
             .yield_a2a_result(task_id, session_id, status.clone(), &raw)?;
 

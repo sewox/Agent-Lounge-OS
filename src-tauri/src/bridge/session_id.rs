@@ -8,6 +8,10 @@ pub const SESSION_ID_PATTERN: &str = r"^[A-Za-z0-9._-]{1,64}$";
 pub const MAX_MCP_SESSIONS: usize = 256;
 /// Uçuştaki tools/call üst sınırı (tüm oturumlar).
 pub const MAX_IN_FLIGHT: usize = 128;
+/// Oturum başına eşzamanlı tools/call (wait dahil).
+pub const MAX_IN_FLIGHT_PER_SESSION: usize = 8;
+/// Oturum başına açık (non-terminal) A2A görev üst sınırı.
+pub const MAX_OPEN_TASKS_PER_SESSION: usize = 32;
 
 /// Geçerli istemci oturum id'si mi?
 pub fn is_valid_session_id(raw: &str) -> bool {
