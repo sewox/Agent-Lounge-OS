@@ -1,12 +1,112 @@
 #!/usr/bin/env bash
-# Fail if Playwright suite reintroduces skip / fixme / expected-fail / only.
+# Fail if Playwright suite reintroduces skip / fixme / fail / only.
+# Uses shared _search.sh (rg → grep fallback; neither → FAIL; self-test required).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
+# shellcheck source=scripts/qa/gates/_search.sh
+source "$(dirname "$0")/_search.sh"
 
-pattern='test\.(skip|fixme|fail|only)|describe\.(skip|only)|testInfo\.skip'
-if rg -n --glob 'e2e/**/*.{ts,tsx,js,jsx}' -e "$pattern" .; then
-  echo "playwright-skip-ban: forbidden skip/fixme/fail/only found under e2e/" >&2
+if ! qa_search_init; then
+  exit 2
+fi
+if ! qa_search_selftest; then
+  exit 1
+fi
+
+# Covers: test.skip|fixme|fail|only, describe.*, test.describe.*, testInfo.skip
+PATTERN='(test\.describe|describe|test)\.(skip|fixme|fail|only)|testInfo\.skip'
+
+# Search e2e/ with the chosen tool (qa_search_hits excludes e2e by design).
+qa_search_e2e_hits() {
+  local pattern="$1"
+  case "$qa_search_tool" in
+    rg)
+      rg -n --glob 'e2e/**/*.{ts,tsx,js,jsx}' -e "$pattern" . 2>/dev/null || true
+      ;;
+    grep)
+      # Portable: walk known e2e trees; ignore binary noise.
+      if [[ -d e2e ]]; then
+        grep -REn --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
+          "$pattern" e2e 2>/dev/null || true
+      fi
+      ;;
+    *)
+      echo "FAIL: qa_search_tool unset; call qa_search_init first" >&2
+      return 2
+      ;;
+  esac
+  return 0
+}
+
+# Self-test: planted forbidden forms must be detected (incl. describe.fixme / test.describe.fixme).
+qa_playwright_skip_ban_selftest() {
+  local probe dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/qa-pw-skip-ban.XXXXXX")"
+  probe="$dir/probe.spec.ts"
+  cat >"$probe" <<'EOF'
+test.skip('a', async () => {});
+test.fixme('b', async () => {});
+test.fail('c', async () => {});
+test.only('d', async () => {});
+describe.skip('e', () => {});
+describe.fixme('f', () => {});
+describe.fail('g', () => {});
+describe.only('h', () => {});
+test.describe.skip('i', () => {});
+test.describe.fixme('j', () => {});
+test.describe.fail('k', () => {});
+test.describe.only('l', () => {});
+testInfo.skip(true, 'm');
+EOF
+  local hits missing=0
+  case "$qa_search_tool" in
+    rg)
+      hits="$(rg -n -e "$PATTERN" "$probe" 2>/dev/null || true)"
+      ;;
+    grep)
+      hits="$(grep -En "$PATTERN" "$probe" 2>/dev/null || true)"
+      ;;
+    *)
+      rm -rf "$dir"
+      echo "FAIL: qa_search_tool unset" >&2
+      return 1
+      ;;
+  esac
+  for needle in \
+    'test.skip' 'test.fixme' 'test.fail' 'test.only' \
+    'describe.skip' 'describe.fixme' 'describe.fail' 'describe.only' \
+    'test.describe.skip' 'test.describe.fixme' 'test.describe.fail' 'test.describe.only' \
+    'testInfo.skip'
+  do
+    if ! printf '%s\n' "$hits" | grep -Fq "$needle"; then
+      echo "FAIL: playwright-skip-ban self-test missed '$needle' via $qa_search_tool" >&2
+      missing=1
+    fi
+  done
+  rm -rf "$dir"
+  if [[ "$missing" -ne 0 ]]; then
+    echo "FAIL: self-test hits were:" >&2
+    echo "$hits" >&2
+    return 1
+  fi
+  return 0
+}
+
+if ! qa_playwright_skip_ban_selftest; then
+  exit 1
+fi
+
+HITS="$(qa_search_e2e_hits "$PATTERN")"
+COUNT=0
+if [[ -n "$HITS" ]]; then
+  COUNT="$(printf '%s\n' "$HITS" | grep -c . || true)"
+fi
+
+echo "== playwright-skip-ban (tool=$qa_search_tool) =="
+if [[ -n "$HITS" ]]; then
+  echo "FAIL: found $COUNT forbidden skip/fixme/fail/only line(s) under e2e/:" >&2
+  echo "$HITS" >&2
   exit 1
 fi
 

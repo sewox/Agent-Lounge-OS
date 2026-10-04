@@ -152,7 +152,8 @@ test.describe("ST — settings", () => {
       return el.scrollHeight > el.clientHeight + 1;
     });
     const bottom = box!.y + box!.height;
-    if (bottom > vp.height + 1) {
+    // Keep prior −4px edge (stricter than +1): treat near-fold overflow as needing a scroll parent.
+    if (bottom > vp.height - 4) {
       expect(scrollable, "overflowing routing table must scroll inside a parent").toBe(true);
     }
     // Controls inside the table must be interactable (not zero-size / opacity-0 clipped).
