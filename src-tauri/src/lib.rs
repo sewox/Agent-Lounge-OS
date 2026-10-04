@@ -155,7 +155,10 @@ pub fn run_with_start_route(start_route: &'static str) {
                 app.handle().clone(),
                 "nats://127.0.0.1:4222".into(),
             );
-            let workflow = WorkflowEngine::new("nats://127.0.0.1:4222");
+            let (trusted_tx, trusted_rx) = tokio::sync::mpsc::channel(64);
+            let workflow = WorkflowEngine::new("nats://127.0.0.1:4222")
+                .with_trusted_ingress(trusted_tx)
+                .with_store(store.clone());
             let bus = BusManager::new("nats://127.0.0.1:4222");
             let models = ModelManager::with_nats_url(bus.nats_url());
             let handle = app.handle().clone();
@@ -282,6 +285,10 @@ pub fn run_with_start_route(start_route: &'static str) {
                         log::error!("worker_registry durdu: {err}");
                     }
                 });
+                // A2A zombi tarama + idempotency GC; trusted workflow girişi; worker lifecycle.
+                dispatcher.spawn_trusted_ingress(trusted_rx);
+                dispatcher.spawn_lifecycle_listener();
+                dispatcher.spawn_silence_watchdog();
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
                 }

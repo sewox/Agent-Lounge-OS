@@ -163,4 +163,37 @@ mod tests {
         });
         assert!(validate(SchemaKind::WorkerRegistration, &bad).is_err());
     }
+
+    #[test]
+    fn accepts_task_v2_fields() {
+        let good = json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "type": "task",
+            "source_agent": "cursor",
+            "project_id": "demo",
+            "summary": "delegate work",
+            "created_at": "2026-09-18T12:00:00.000Z",
+            "root_id": "11111111-1111-4111-8111-111111111111",
+            "parent_task_id": null,
+            "idempotency_key": "k1",
+            "hop_count": 0,
+            "session_id": "sess-1",
+            "source_verified": false,
+            "status": "QUEUED"
+        });
+        validate(SchemaKind::Task, &good).expect("task v2 fields");
+    }
+
+    #[test]
+    fn accepts_legacy_task_without_v2_fields() {
+        let good = json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "type": "task",
+            "source_agent": "cursor",
+            "project_id": "demo",
+            "summary": "legacy",
+            "created_at": "2026-09-18T12:00:00.000Z"
+        });
+        validate(SchemaKind::Task, &good).expect("legacy task");
+    }
 }

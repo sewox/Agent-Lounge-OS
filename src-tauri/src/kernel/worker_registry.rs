@@ -152,6 +152,14 @@ impl WorkerRegistry {
         };
 
         self.persist(&snapshot, action == "unregister")?;
+        // Heartbeat / register → DISPATCHED görevlerin sessizlik sayacını yenile.
+        if matches!(action.as_str(), "register" | "heartbeat") {
+            if let Some(store) = &self.store {
+                if let Err(err) = store.touch_dispatched_for_agent(&bot_id) {
+                    log::warn!("dispatch touch (heartbeat) {bot_id}: {err}");
+                }
+            }
+        }
         Ok(snapshot)
     }
 

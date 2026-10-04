@@ -80,6 +80,8 @@ pub enum ApprovalKind {
     QuotaAbort,
     SecurityCritical,
     SecurityRisky,
+    /// Kimliği doğrulanmamış NATS / `source_verified=false` talebi.
+    SourceUnverified,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

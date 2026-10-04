@@ -23,14 +23,15 @@ pub use policy::{
     RouteIntent, RoutingPolicy, RoutingVote, KERNEL_AGENT,
 };
 pub use protocol::{
-    default_ollama_model, now_rfc3339, worker_tasks_subject, AnalysisDecision, CodeSnippet,
-    ExperienceContext, ExperienceHit, ExperienceOutcome, ExperienceRecord, LoungeExperience,
-    LoungeTask, SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority, AGENT_HEARTBEAT,
-    AGENT_PROMPT, AGENT_STATUS, ALERT_QUOTA, ALERT_SECURITY, ARCHIVED_BY_TTL, ARCHIVED_BY_USER,
-    CONTEXT_WHISPER, DEFAULT_OLLAMA_MODEL, EXPERIENCE_REPORTED, EXPERIENCE_STATUS_ACTIVE,
-    EXPERIENCE_STATUS_ARCHIVED, INFRA_STATUS, TASKS_INBOX_PREFIX, TASK_ASSIGNED, TASK_COMPLETED,
-    TASK_FAILED, TASK_REQUESTED, TASK_RESUME, TELEMETRY_DECISION, TEST_COMPLETED, TEST_REQUESTED,
-    WORKERS_HEARTBEAT, WORKERS_REGISTER, WORKERS_UNREGISTER,
+    default_ollama_model, now_rfc3339, worker_tasks_subject, AgentSession, AnalysisDecision,
+    CodeSnippet, ExperienceContext, ExperienceHit, ExperienceOutcome, ExperienceRecord,
+    LoungeExperience, LoungeTask, SystemPromptAddon, TaskAssignment, TaskKind, TaskPriority,
+    TaskStatus, AGENT_HEARTBEAT, AGENT_PROMPT, AGENT_STATUS, ALERT_QUOTA, ALERT_SECURITY,
+    ARCHIVED_BY_TTL, ARCHIVED_BY_USER, CONTEXT_WHISPER, DEFAULT_MAX_HOPS, DEFAULT_OLLAMA_MODEL,
+    EXPERIENCE_REPORTED, EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED, INFRA_STATUS,
+    TASKS_INBOX_PREFIX, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED, TASK_RESUME,
+    TELEMETRY_DECISION, TEST_COMPLETED, TEST_REQUESTED, WORKERS_HEARTBEAT, WORKERS_REGISTER,
+    WORKERS_UNREGISTER,
 };
 pub use quota::{
     NatsUiEvent, QuotaState, QuotaVerdict, ToolQuota, AMBER_THRESHOLD, LIMIT_POLICY_PERCENT,

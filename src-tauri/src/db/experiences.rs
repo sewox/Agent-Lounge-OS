@@ -399,6 +399,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;
     crate::db::feedback::migrate_feedback(conn)?;
+    crate::db::a2a::migrate_a2a(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;

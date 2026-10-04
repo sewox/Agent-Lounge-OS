@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/task.schema.json",
   "title": "LoungeTask",
-  "description": "Ajanlar arası görev mesajı. Tam kod transfer edilmez; yalnızca özet ve AST referansları taşınır.",
+  "description": "Ajanlar arası görev mesajı. Tam kod transfer edilmez; yalnızca özet ve AST referansları taşınır. v2 alanları isteğe bağlıdır (serde default).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -61,6 +61,72 @@
     "model": {
       "type": ["string", "null"],
       "description": "Ollama model etiketi. Boşsa kernel varsayılanı (llama3.1:8b) kullanılır."
+    },
+    "file": {
+      "type": ["string", "null"]
+    },
+    "line": {
+      "type": ["integer", "null"]
+    },
+    "symbol": {
+      "type": ["string", "null"]
+    },
+    "parent_task_id": {
+      "type": ["string", "null"],
+      "description": "Ebeveyn görev id (sunucu enjekte eder). Alias: parent_id."
+    },
+    "parent_id": {
+      "type": ["string", "null"],
+      "description": "parent_task_id için JSON alias."
+    },
+    "workflow_chain": {
+      "type": ["string", "null"]
+    },
+    "root_id": {
+      "type": ["string", "null"],
+      "description": "Kök görev id. Alias: root_task_id."
+    },
+    "root_task_id": {
+      "type": ["string", "null"],
+      "description": "root_id için JSON alias."
+    },
+    "idempotency_key": {
+      "type": ["string", "null"]
+    },
+    "hop_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "session_id": {
+      "type": ["string", "null"],
+      "description": "Çağıran oturum. Alias: source_session_id."
+    },
+    "source_session_id": {
+      "type": ["string", "null"],
+      "description": "session_id için JSON alias."
+    },
+    "source_verified": {
+      "type": "boolean",
+      "default": false,
+      "description": "false → PENDING_APPROVAL (doğrulanmamış NATS)."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "QUEUED",
+        "PENDING_APPROVAL",
+        "DISPATCHED",
+        "EXECUTING",
+        "COMPLETED",
+        "FAILED",
+        "NEEDS_HUMAN",
+        "RECOVERY_PENDING",
+        "EXPIRED",
+        "TIMEOUT",
+        "WAIT_TIMEOUT_REACHED"
+      ],
+      "default": "QUEUED"
     }
   }
 }

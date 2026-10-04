@@ -666,6 +666,39 @@ test.describe("AP / CP / misc", () => {
     await expect(finish).toBeDisabled();
   });
 
+  test("AP-11 · source_unverified approval banner (TR/EN chrome)", async ({ page }) => {
+    await openRoute(page, "/dashboard", "full");
+    expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBeTruthy();
+
+    await page.evaluate(() => {
+      const f = window.__QA_FIXTURE__;
+      if (!f) throw new Error("missing fixture");
+      f.pendingApprovals = [
+        {
+          task_id: "ap11-unverified-task",
+          summary: "AP-11 unverified NATS task",
+          from_agent: "nats-agent",
+          to_agent: "lounge-kernel",
+          kind: "source_unverified",
+          reason: "source_verified=false · PENDING_APPROVAL",
+          expires_at: new Date(Date.now() + 90_000).toISOString(),
+          timeout_secs: 90,
+        },
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    const banner = page.locator('[data-qa="approval-banner"]');
+    await expect(banner).toBeVisible({ timeout: 5_000 });
+    const text = await banner.innerText();
+    expect(
+      /Unverified source|Doğrulanmamış kaynak|PENDING_APPROVAL|ONAY_BEKLİYOR/i.test(text),
+      `banner should mention unverified source: ${text}`,
+    ).toBeTruthy();
+    await expect(banner.getByRole("button", { name: /Approve|Onayla/i })).toBeVisible();
+    await expect(banner.getByRole("button", { name: /Deny|Reddet/i })).toBeVisible();
+  });
+
   test("FL-01 · Fleet page renders", async ({ page }) => {
     await openRoute(page, "/fleet", "full");
     await expect(page.locator("main")).toBeVisible();

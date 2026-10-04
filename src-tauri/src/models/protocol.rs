@@ -60,6 +60,113 @@ pub enum ExperienceOutcome {
     Partial,
 }
 
+/// A2A görev yaşam döngüsü (Atomic Core). Eksik JSON alanı → `Queued`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TaskStatus {
+    #[default]
+    Queued,
+    PendingApproval,
+    Dispatched,
+    Executing,
+    Completed,
+    Failed,
+    NeedsHuman,
+    RecoveryPending,
+    Expired,
+    Timeout,
+    WaitTimeoutReached,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "QUEUED",
+            Self::PendingApproval => "PENDING_APPROVAL",
+            Self::Dispatched => "DISPATCHED",
+            Self::Executing => "EXECUTING",
+            Self::Completed => "COMPLETED",
+            Self::Failed => "FAILED",
+            Self::NeedsHuman => "NEEDS_HUMAN",
+            Self::RecoveryPending => "RECOVERY_PENDING",
+            Self::Expired => "EXPIRED",
+            Self::Timeout => "TIMEOUT",
+            Self::WaitTimeoutReached => "WAIT_TIMEOUT_REACHED",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_uppercase().as_str() {
+            "PENDING_APPROVAL" => Self::PendingApproval,
+            "DISPATCHED" => Self::Dispatched,
+            "EXECUTING" => Self::Executing,
+            "COMPLETED" => Self::Completed,
+            "FAILED" => Self::Failed,
+            "NEEDS_HUMAN" => Self::NeedsHuman,
+            "RECOVERY_PENDING" => Self::RecoveryPending,
+            "EXPIRED" => Self::Expired,
+            "TIMEOUT" => Self::Timeout,
+            "WAIT_TIMEOUT_REACHED" => Self::WaitTimeoutReached,
+            _ => Self::Queued,
+        }
+    }
+}
+
+/// Dispatcher hop üst sınırı (varsayılan). `LOUNGE_MAX_HOPS` veya Dispatcher alanı ile aşılır.
+pub const DEFAULT_MAX_HOPS: u32 = 10;
+
+/// Oturum sürekliliği kaydı (§12.2). SQLite `agent_sessions`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSession {
+    pub id: String,
+    pub project_id: String,
+    pub agent_id: String,
+    /// `cli` | `gui` | `worker`
+    pub app_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_ref: Option<String>,
+    pub workspace_path: String,
+    #[serde(default)]
+    pub is_primary: bool,
+    /// `active` | `idle` | `busy` | `stale` | `unknown`
+    pub state: String,
+    /// `lounge` | `user`
+    pub owner: String,
+    /// `launcher` | `transcript_scan` | `mcp_meta` | `user_pin`
+    pub created_by: String,
+    pub last_seen: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
+}
+
+impl AgentSession {
+    pub fn new(
+        project_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        app_kind: impl Into<String>,
+        workspace_path: impl Into<String>,
+        created_by: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            project_id: project_id.into(),
+            agent_id: agent_id.into(),
+            app_kind: app_kind.into(),
+            native_id: None,
+            native_ref: None,
+            workspace_path: workspace_path.into(),
+            is_primary: true,
+            state: "unknown".into(),
+            owner: "lounge".into(),
+            created_by: created_by.into(),
+            last_seen: now_rfc3339(),
+            replaced_by: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoungeTask {
     pub id: String,
@@ -90,12 +197,39 @@ pub struct LoungeTask {
     /// Structured symbol name for fix tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
-    /// Zincirleme workflow: bu görevi tetikleyen tamamlanmış ebeveyn id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Zincirleme workflow: ebeveyn görev id (sunucu enjekte eder). JSON alias: `parent_id`.
+    #[serde(default, alias = "parent_id", skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
     /// Event Stream etiketi — örn. `Task A -> Triggered Task B`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_chain: Option<String>,
+    /// Kök görev id (sunucu atar). JSON alias: `root_task_id`.
+    #[serde(
+        default,
+        alias = "root_task_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub root_id: Option<String>,
+    /// İstemci üretir; SQLite `idempotency_keys` ile tek-seferlik kabul.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Sunucu: `parent.hop_count + 1`. İstemci değeri yok sayılır.
+    #[serde(default)]
+    pub hop_count: u32,
+    /// Çağıran oturum (sunucu doğrular). JSON alias: `source_session_id`.
+    #[serde(
+        default,
+        alias = "source_session_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_id: Option<String>,
+    /// Kimliği doğrulanmamış NATS için `false` → PENDING_APPROVAL.
+    /// Programatik `LoungeTask::new` güvenilir kabul eder (`true`); eksik JSON → `false`.
+    #[serde(default)]
+    pub source_verified: bool,
+    /// Görev yaşam döngüsü durumu.
+    #[serde(default)]
+    pub status: TaskStatus,
 }
 
 impl LoungeTask {
@@ -104,8 +238,9 @@ impl LoungeTask {
         project_id: impl Into<String>,
         summary: impl Into<String>,
     ) -> Self {
+        let id = Uuid::new_v4().to_string();
         Self {
-            id: Uuid::new_v4().to_string(),
+            id: id.clone(),
             msg_type: "task".into(),
             source_agent: source_agent.into(),
             target_agent: None,
@@ -122,7 +257,18 @@ impl LoungeTask {
             symbol: None,
             parent_task_id: None,
             workflow_chain: None,
+            root_id: Some(id),
+            idempotency_key: None,
+            hop_count: 0,
+            session_id: None,
+            // Yerel / programatik oluşturma güvenilir; NATS ham JSON varsayılanı false.
+            source_verified: true,
+            status: TaskStatus::Queued,
         }
+    }
+
+    pub fn effective_root_id(&self) -> &str {
+        self.root_id.as_deref().unwrap_or(self.id.as_str())
     }
 
     pub fn resolved_model<'a>(&'a self, fallback: &'a str) -> &'a str {
@@ -613,6 +759,91 @@ mod tests {
         let parsed: LoungeTask = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.kind, TaskKind::CodeAnalysis);
         assert_eq!(parsed.resolved_model("other"), "llama3.1:8b");
+    }
+
+    #[test]
+    fn old_task_json_loads_with_v2_defaults() {
+        // v1 şekli — parent/root/hop/idempotency/session yok.
+        let raw = serde_json::json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "type": "task",
+            "source_agent": "cursor",
+            "project_id": "agent-lounge-os",
+            "summary": "legacy payload",
+            "created_at": "2026-09-18T12:00:00.000Z"
+        });
+        let parsed: LoungeTask = serde_json::from_value(raw).unwrap();
+        assert_eq!(parsed.parent_task_id, None);
+        assert_eq!(parsed.root_id, None);
+        assert_eq!(parsed.idempotency_key, None);
+        assert_eq!(parsed.hop_count, 0);
+        assert_eq!(parsed.session_id, None);
+        assert!(!parsed.source_verified, "eksik JSON → doğrulanmamış");
+        assert_eq!(parsed.status, TaskStatus::Queued);
+        assert_eq!(parsed.effective_root_id(), parsed.id);
+    }
+
+    #[test]
+    fn parent_id_and_root_task_id_aliases_deserialize() {
+        let raw = serde_json::json!({
+            "id": "22222222-2222-4222-8222-222222222222",
+            "type": "task",
+            "source_agent": "cursor",
+            "project_id": "p",
+            "summary": "alias fields",
+            "created_at": "2026-09-18T12:00:00.000Z",
+            "parent_id": "parent-1",
+            "root_task_id": "root-1",
+            "source_session_id": "sess-1",
+            "idempotency_key": "idem-1",
+            "hop_count": 3,
+            "status": "EXECUTING"
+        });
+        let parsed: LoungeTask = serde_json::from_value(raw).unwrap();
+        assert_eq!(parsed.parent_task_id.as_deref(), Some("parent-1"));
+        assert_eq!(parsed.root_id.as_deref(), Some("root-1"));
+        assert_eq!(parsed.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(parsed.idempotency_key.as_deref(), Some("idem-1"));
+        assert_eq!(parsed.hop_count, 3);
+        assert_eq!(parsed.status, TaskStatus::Executing);
+    }
+
+    #[test]
+    fn dual_alias_same_json_is_rejected_by_serde() {
+        // Aynı JSON'da hem alias hem kanonik ad → serde duplicate field hatası (fail-closed).
+        let raw = serde_json::json!({
+            "id": "33333333-3333-4333-8333-333333333333",
+            "type": "task",
+            "source_agent": "cursor",
+            "project_id": "p",
+            "summary": "dual",
+            "created_at": "2026-09-18T12:00:00.000Z",
+            "parent_id": "from-alias",
+            "parent_task_id": "from-canonical",
+            "root_task_id": "root-alias",
+            "root_id": "root-canonical"
+        });
+        let err = serde_json::from_value::<LoungeTask>(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "unexpected: {err}"
+        );
+        // Çıktıda yalnızca kanonik adlar.
+        let task = LoungeTask::new("a", "p", "out");
+        let out = serde_json::to_value(&task).unwrap();
+        assert!(out.get("root_id").is_some());
+        assert!(out.get("root_task_id").is_none());
+        assert!(out.get("parent_id").is_none());
+    }
+
+    #[test]
+    fn agent_session_roundtrip() {
+        let session = AgentSession::new("proj", "cursor", "gui", "/tmp/ws", "mcp_meta");
+        let json = serde_json::to_value(&session).unwrap();
+        let parsed: AgentSession = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.project_id, "proj");
+        assert_eq!(parsed.app_kind, "gui");
+        assert_eq!(parsed.state, "unknown");
     }
 
     #[test]
