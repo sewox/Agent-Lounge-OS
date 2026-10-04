@@ -16,16 +16,16 @@ Do **not** add new bare `#[ignore]` without a reason string and a row in this ta
 
 | Binary | Used by | CI install |
 |--------|---------|------------|
-| `nats-server` | `event_pump_receives_non_bus_message_on_wildcard` (`nats_manager`) | `.github/workflows/ci.yml` (Linux) and `qa-cross-platform.yml` (Win/mac). Missing binary **fails** the test — never soft-returns. |
+| `nats-server` | `event_pump_receives_non_bus_message_on_wildcard` (`nats_manager`) | `scripts/ci/install-nats-server.sh` from `ci.yml` (Linux) and `qa-cross-platform.yml` (Win/mac). Version **pinned** with **sha256** checks; mismatch fails the job. Missing binary **fails** the test — never soft-returns. |
 
 Local development without NATS:
 
 ```bash
-# macOS
-brew install nats-server
+# Prefer the same pin + hash path CI uses:
+bash scripts/ci/install-nats-server.sh
 
-# Linux (example — match CI version when debugging)
-# download from https://github.com/nats-io/nats-server/releases
+# macOS alternative
+brew install nats-server
 ```
 
 ## Memory-bridge CLI fixtures
