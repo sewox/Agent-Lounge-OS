@@ -347,7 +347,7 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// CONTROL_STOP payload → görev iptal (oturum eşleşirse).
+    /// CONTROL_STOP payload → görev iptal (oturum eşleşirse; terminal ezilmez).
     pub fn apply_control_stop(&self, data: &[u8]) -> Result<()> {
         let value: serde_json::Value =
             serde_json::from_slice(data).context("control.stop payload json")?;
@@ -360,16 +360,15 @@ impl Dispatcher {
         let session_id = value
             .get("session_id")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         if session_id.is_empty() {
-            // Oturumsuz stop — yalnız status Cancelled (fail-open değil: session yoksa
-            // cancel_a2a_task yetkisiz der; doğrudan status yaz).
-            self.persist_status(&task_id, TaskStatus::Cancelled);
-            let _ = self.store.release_a2a_idempotency(&task_id);
-            return Ok(());
+            // Fail-closed: oturumsuz stop reddedilir (önceki yol terminal dahil ezebiliyordu).
+            anyhow::bail!("control.stop: session_id gerekli");
         }
+        // cancel_a2a_task: yetki + terminal koruma (NeedsHuman iptal edilebilir).
         self.store
-            .cancel_a2a_task(&task_id, session_id)
+            .cancel_a2a_task(&task_id, &session_id)
             .with_context(|| format!("control.stop cancel {task_id}"))?;
         Ok(())
     }
@@ -1042,8 +1041,18 @@ impl Dispatcher {
             .insert_record(record.clone())
             .await
             .context("tecrübe SQLite'a yazılamadı")?;
-        self.persist_status(&task.id, TaskStatus::Completed);
-        Ok(TaskExecution::Local(Box::new(record.to_lounge())))
+        let experience = record.to_lounge();
+        let result_json = serde_json::to_string(&experience).unwrap_or_else(|_| "{}".into());
+        if let Err(err) = self.store.complete_a2a_with_result(
+            &task.id,
+            TaskStatus::Completed,
+            Some(&result_json),
+            false,
+        ) {
+            log::warn!("a2a local complete+result yazılamadı {}: {err}", task.id);
+            self.persist_status(&task.id, TaskStatus::Completed);
+        }
+        Ok(TaskExecution::Local(Box::new(experience)))
     }
 
     async fn analyze_work_order(
@@ -3114,6 +3123,62 @@ mod tests {
         assert_eq!(
             dispatcher.store().a2a_task_status(&task.id).unwrap(),
             Some(TaskStatus::Cancelled)
+        );
+    }
+
+    #[test]
+    fn apply_control_stop_rejects_missing_session_and_spares_terminal() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "stop".into(),
+            adr_summary: "stop".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let mut open = LoungeTask::new("mcp:cursor", "p", "open");
+        open.session_id = Some("sess-a".into());
+        dispatcher.store().admit_a2a_task(&mut open, 10).unwrap();
+
+        let err = dispatcher
+            .apply_control_stop(
+                serde_json::json!({ "task_id": open.id, "reason": "no-session" })
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("session_id"),
+            "empty session must fail-closed: {err}"
+        );
+        assert_ne!(
+            dispatcher.store().a2a_task_status(&open.id).unwrap(),
+            Some(TaskStatus::Cancelled),
+            "oturumsuz stop görev durumunu değiştirmemeli"
+        );
+
+        let mut done = LoungeTask::new("mcp:cursor", "p", "done");
+        done.session_id = Some("sess-a".into());
+        dispatcher.store().admit_a2a_task(&mut done, 10).unwrap();
+        dispatcher
+            .store()
+            .set_a2a_task_status(&done.id, TaskStatus::Completed)
+            .unwrap();
+        dispatcher
+            .apply_control_stop(
+                serde_json::json!({
+                    "task_id": done.id,
+                    "session_id": "sess-a",
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&done.id).unwrap(),
+            Some(TaskStatus::Completed),
+            "terminal Completed ezilmemeli"
         );
     }
 

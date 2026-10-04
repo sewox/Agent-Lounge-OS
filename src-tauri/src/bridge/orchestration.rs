@@ -347,23 +347,21 @@ impl Orchestrator {
             Some(s) => s,
             None => return Ok(None),
         };
-        // NeedsHuman: soft — geç gelen worker Completed yazabilir; wait bitirme (P2-7).
+        // NeedsHuman: soft — wait bitmez; istemciye needs_human bayrağı + ipucu.
         // Expired/Timeout/Cancelled: sert terminal.
-        // Completed: result_json yoksa henüz yazılmamış olabilir (P1-A yarış) → bekle.
+        // Completed: result yoksa da bitir (P1-D). complete_a2a_with_result atomik;
+        // sonuçsuz Completed yolları (yerel yürütme / boş bus zarfı) artık hang olmaz.
         match status {
             TaskStatus::Completed => {
                 let result = self.store.a2a_task_result(task_id)?;
-                if result.is_none() {
-                    // Atomik yazım sonrası nadir; yine de kayıpsız poll.
-                    Ok(None)
-                } else {
-                    Ok(Some(json!({
-                        "status": "completed",
-                        "task_id": task_id,
-                        "result": result.as_ref().and_then(|s| serde_json::from_str::<Value>(s).ok()),
-                        "result_text": result,
-                    })))
-                }
+                let missing = result.as_ref().map(|s| s.is_empty()).unwrap_or(true);
+                Ok(Some(json!({
+                    "status": "completed",
+                    "task_id": task_id,
+                    "result": result.as_ref().and_then(|s| serde_json::from_str::<Value>(s).ok()),
+                    "result_text": result,
+                    "result_missing": missing,
+                })))
             }
             TaskStatus::Failed
             | TaskStatus::Cancelled
@@ -378,9 +376,15 @@ impl Orchestrator {
                 })))
             }
             TaskStatus::NeedsHuman => {
-                // Soft terminal: bilgilendir ama wait döngüsü still_running ile sürer
-                // (çağıran deadline'ında task_status=NEEDS_HUMAN görür).
-                Ok(None)
+                // Soft: wait döngüsünü bitir ama completed sayma — istemci onay beklesin.
+                Ok(Some(json!({
+                    "status": "still_running",
+                    "needs_human": true,
+                    "task_id": task_id,
+                    "task_status": "NEEDS_HUMAN",
+                    "hint": "Kullanıcı onayı gerekli — tekrar bekleme; UI/karar sonrası yeniden dene.",
+                    "message": "Görev insan onayı bekliyor (NEEDS_HUMAN).",
+                })))
             }
             _ => Ok(None),
         }
@@ -493,14 +497,21 @@ impl Orchestrator {
                     .store
                     .a2a_task_status(task_id)?
                     .unwrap_or(TaskStatus::WaitTimeoutReached);
-                return Ok(json!({
+                let mut body = json!({
                     "status": "still_running",
                     "task_id": task_id,
                     "task_status": status.as_str(),
                     "retry_after_ms": 1000,
                     "timeout_limit_secs": timeout_limit.as_secs(),
                     "message": "Görev hâlâ çalışıyor — lounge_wait_task tekrar çağrılabilir."
-                }));
+                });
+                if matches!(status, TaskStatus::NeedsHuman) {
+                    body["needs_human"] = json!(true);
+                    body["hint"] = json!(
+                        "Kullanıcı onayı gerekli — tekrar bekleme; UI/karar sonrası yeniden dene."
+                    );
+                }
+                return Ok(body);
             }
 
             let slice = poll.min(Duration::from_millis(
@@ -936,48 +947,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn needs_human_does_not_end_wait_as_terminal() {
-        // NeedsHuman soft: wait deadline → still_running + task_status NEEDS_HUMAN
-        // (geç gelen worker Completed yazabilir).
-        let (orch, clock, session) = orch_manual();
+    async fn needs_human_surfaces_flag_without_treating_as_completed() {
+        // NeedsHuman soft: still_running + needs_human:true (completed değil).
+        // Geç gelen worker Completed yazabilir; istemci onay sonrası yeniden dener.
+        let (orch, _clock, session) = orch_manual();
         let mut task = LoungeTask::new("mcp:cursor", "p", "t");
         task.session_id = Some(session.clone());
         orch.store().admit_a2a_task(&mut task, 10).unwrap();
         orch.store()
             .set_a2a_task_status(&task.id, TaskStatus::NeedsHuman)
             .unwrap();
-        let wait = tokio::spawn({
-            let orch = orch.clone();
-            let session = session.clone();
-            let id = task.id.clone();
-            async move {
-                orch.wait_task(&session, "cursor", &id, Some(500), None)
-                    .await
-            }
-        });
-        tokio::task::yield_now().await;
-        clock.advance(Duration::from_secs(3));
-        let out = wait.await.unwrap().unwrap();
+        let out = orch
+            .wait_task(&session, "cursor", &task.id, Some(500), None)
+            .await
+            .unwrap();
         assert_eq!(out["status"], "still_running");
         assert_eq!(out["task_status"], "NEEDS_HUMAN");
+        assert_eq!(out["needs_human"], true);
+        assert!(
+            out["hint"].as_str().unwrap_or("").contains("onay"),
+            "hint must discourage blind re-wait: {out}"
+        );
     }
 
     #[tokio::test]
-    async fn completed_without_result_keeps_waiting() {
+    async fn completed_without_result_finishes_with_result_missing() {
+        // P1-D: Completed + boş result_json → completed (hang yok); result_missing:true.
         let (orch, _clock, session) = orch_manual();
         let mut task = LoungeTask::new("mcp:cursor", "p", "race");
         task.session_id = Some(session.clone());
         orch.store().admit_a2a_task(&mut task, 10).unwrap();
-        // Status Completed ama result_json yok — P1-A yarış senaryosu.
         orch.store()
             .set_a2a_task_status(&task.id, TaskStatus::Completed)
             .unwrap();
-        let none = orch.try_read_result(&task.id, &session).unwrap();
-        assert!(
-            none.is_none(),
-            "Completed+empty result must not return completed/null"
-        );
-        // Atomik yazım sonrası result görünür.
+        let got = orch.try_read_result(&task.id, &session).unwrap().unwrap();
+        assert_eq!(got["status"], "completed");
+        assert_eq!(got["result_missing"], true);
+        assert!(got["result"].is_null());
+
         orch.store()
             .complete_a2a_with_result(
                 &task.id,
@@ -988,6 +995,7 @@ mod tests {
             .unwrap();
         let got = orch.try_read_result(&task.id, &session).unwrap().unwrap();
         assert_eq!(got["status"], "completed");
+        assert_eq!(got["result_missing"], false);
         assert!(got["result"].is_object() || got["result_text"].is_string());
     }
 
