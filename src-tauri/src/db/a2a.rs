@@ -1239,6 +1239,57 @@ mod tests {
     }
 
     #[test]
+    fn hop_and_session_idempotency_interact() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut root = LoungeTask::new("mcp:cursor", "p", "root");
+        root.session_id = Some("sess-h".into());
+        root.idempotency_key = Some("root-k".into());
+        root.source_verified = true;
+        store.admit_a2a_task(&mut root, 3).unwrap();
+
+        let mut child = LoungeTask::new("mcp:worker", "p", "child");
+        child.session_id = Some("sess-h".into());
+        child.parent_task_id = Some(root.id.clone());
+        child.idempotency_key = Some("child-k".into());
+        child.source_verified = true;
+        store.admit_a2a_task(&mut child, 3).unwrap();
+        assert_eq!(child.hop_count, 1);
+        assert_eq!(child.root_id.as_deref(), Some(root.id.as_str()));
+
+        // Aynı oturum + aynı key → replay (hop artırılmaz / yeni satır yok).
+        let mut replay = LoungeTask::new("mcp:spoof", "p", "child-again");
+        replay.session_id = Some("sess-h".into());
+        replay.parent_task_id = Some(root.id.clone());
+        replay.idempotency_key = Some("child-k".into());
+        match store.admit_a2a_task(&mut replay, 3).unwrap() {
+            AdmitOutcome::Replay {
+                existing_task_id, ..
+            } => assert_eq!(existing_task_id, child.id),
+            AdmitOutcome::Accepted(_) => panic!("expected Replay"),
+        }
+
+        // Hop limiti session + key'den bağımsız uygulanır.
+        let mut mid = child;
+        for hop in 2..3 {
+            let mut next = LoungeTask::new("mcp:worker", "p", format!("h{hop}"));
+            next.session_id = Some("sess-h".into());
+            next.parent_task_id = Some(mid.id.clone());
+            next.idempotency_key = Some(format!("k-{hop}"));
+            store.admit_a2a_task(&mut next, 3).unwrap();
+            assert_eq!(next.hop_count, hop);
+            mid = next;
+        }
+        let mut over = LoungeTask::new("mcp:worker", "p", "over");
+        over.session_id = Some("sess-h".into());
+        over.parent_task_id = Some(mid.id.clone());
+        over.idempotency_key = Some("over-k".into());
+        assert!(matches!(
+            store.admit_a2a_task(&mut over, 3).unwrap_err(),
+            AdmitError::HopLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
     fn session_scoped_idempotency_blocks_source_agent_spoof() {
         let store = ExperienceStore::memory().unwrap();
         let mut t1 = LoungeTask::new("spoofable-a", "p", "first");

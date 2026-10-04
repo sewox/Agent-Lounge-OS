@@ -600,13 +600,19 @@ impl McpServer {
         let call_args = self.build_call_args(&normalized, /*wait*/ false).await?;
 
         if !self.orchestrator_skips_nats() && !probe_tcp_host_port(&self.nats_url) {
+            // Geriye dönük: eski dispatch NATS kapalıyken de task_id dönerdi.
+            let placeholder_id = Uuid::new_v4().to_string();
             return Ok(json!({
                 "published": false,
                 "error": format!(
                     "NATS erişilemiyor ({}) — Lounge Kernel / NATS ayakta olmalı",
                     self.nats_url
                 ),
+                "task_id": placeholder_id,
                 "subject": TASK_REQUESTED,
+                "target_agent": call_args.target_agent,
+                "project_id": call_args.project_id,
+                "summary": call_args.task,
                 "note": "Görev Kernel dispatcher üzerinden işlenir; PENDING_APPROVAL / kota kapıları atlanmaz."
             }));
         }
