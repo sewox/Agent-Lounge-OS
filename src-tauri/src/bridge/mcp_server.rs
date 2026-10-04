@@ -8,22 +8,30 @@
 //! ayarları değiştirilemez (yalnızca UI). Tool girdileri `lounge_protocol`
 //! şemalarına göre doğrulanır (`additionalProperties: false`).
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use lounge_protocol::{validate_schema, SchemaKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
+use super::orchestration::{CallAgentArgs, CancelKind, Orchestrator};
+use super::timeout_manager::{
+    parse_timeout_setting, TimeoutManager, ENV_MCP_TIMEOUT_SECS, SETTING_MCP_TIMEOUT_SECS,
+};
+use super::wait_clock::{SystemWaitClock, WaitClock};
 use crate::db::ExperienceStore;
 use crate::kernel::worker_registry::{workers_status_json, WorkerRegistry};
 use crate::models::{
     host_display_name, now_rfc3339, DiscoveredTool, ExperienceOutcome, ExperienceRecord,
-    LoungeExperience, LoungeTask, EXPERIENCE_REPORTED, TASK_REQUESTED,
+    LoungeExperience, EXPERIENCE_REPORTED, TASK_REQUESTED,
 };
 use crate::services::nats_manager::default_nats_url;
 use crate::services::{lounge_ollama_endpoint, system_ollama_endpoint};
@@ -43,6 +51,8 @@ pub struct ClientCtx {
     pub name: String,
     pub version: String,
     pub initialized: bool,
+    /// MCP oturum kimliği (`Mcp-Session-Id` / stdio süreç kimliği).
+    pub session_id: String,
 }
 
 impl Default for ClientCtx {
@@ -51,6 +61,7 @@ impl Default for ClientCtx {
             name: "mcp-client".into(),
             version: "0".into(),
             initialized: false,
+            session_id: Uuid::new_v4().to_string(),
         }
     }
 }
@@ -61,9 +72,13 @@ impl ClientCtx {
             "name": self.name,
             "version": self.version,
             "initialized": self.initialized,
+            "session_id": self.session_id,
         })
     }
 }
+
+/// Uçuştaki tools/call — `notifications/cancelled` ile eşleşir.
+type InFlightMap = Arc<Mutex<HashMap<String, watch::Sender<Option<CancelKind>>>>>;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -72,6 +87,9 @@ pub struct McpServer {
     /// Embedded stdio / tek istemci yolu.
     client: ClientCtx,
     workers: Option<WorkerRegistry>,
+    orchestrator: Orchestrator,
+    timeouts: Arc<TimeoutManager>,
+    in_flight: InFlightMap,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,11 +126,36 @@ struct JsonRpcError {
 
 impl McpServer {
     pub fn new(store: ExperienceStore, nats_url: impl Into<String>) -> Self {
+        let nats_url = nats_url.into();
+        let timeouts = Arc::new(TimeoutManager::with_defaults());
+        // Settings (varsa) sonra env — env en yüksek öncelik.
+        if let Ok(conn) = store.conn.lock() {
+            if let Ok(raw) = conn.query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                rusqlite::params![SETTING_MCP_TIMEOUT_SECS],
+                |row| row.get::<_, String>(0),
+            ) {
+                if let Some(secs) = parse_timeout_setting(&raw) {
+                    timeouts.set_global_override_secs(Some(secs));
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var(ENV_MCP_TIMEOUT_SECS) {
+            if let Some(secs) = parse_timeout_setting(&raw) {
+                timeouts.set_global_override_secs(Some(secs));
+            }
+        }
+        let clock: Arc<dyn WaitClock> = Arc::new(SystemWaitClock);
+        let orchestrator =
+            Orchestrator::new(store.clone(), nats_url.clone(), timeouts.clone(), clock);
         Self {
             store,
-            nats_url: nats_url.into(),
+            nats_url,
             client: ClientCtx::default(),
             workers: None,
+            orchestrator,
+            timeouts,
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -125,6 +168,29 @@ impl McpServer {
         self.client.name = name.into();
         self.client.version = version.into();
         self
+    }
+
+    pub fn with_orchestrator_clock(mut self, clock: Arc<dyn WaitClock>) -> Self {
+        self.orchestrator = Orchestrator::new(
+            self.store.clone(),
+            self.nats_url.clone(),
+            self.timeouts.clone(),
+            clock,
+        );
+        self
+    }
+
+    pub fn with_skip_nats(mut self, skip: bool) -> Self {
+        self.orchestrator = self.orchestrator.with_skip_nats(skip);
+        self
+    }
+
+    pub fn timeouts(&self) -> &TimeoutManager {
+        &self.timeouts
+    }
+
+    pub fn in_flight(&self) -> InFlightMap {
+        self.in_flight.clone()
     }
 
     pub fn client_label(&self) -> Value {
@@ -167,9 +233,10 @@ impl McpServer {
             return Ok(None);
         }
         let id = req.id.clone().unwrap_or(Value::Null);
+        let request_key = request_id_key(&client.session_id, &id);
 
         match self
-            .dispatch(req.method.as_str(), &req.params, client)
+            .dispatch(req.method.as_str(), &req.params, client, &request_key)
             .await
         {
             Ok(result) => Ok(Some(ok_response(id, result))),
@@ -180,7 +247,7 @@ impl McpServer {
     async fn handle_notification(
         &mut self,
         method: &str,
-        _params: &Value,
+        params: &Value,
         client: &mut ClientCtx,
     ) -> Result<()> {
         match method {
@@ -190,7 +257,25 @@ impl McpServer {
                     eprintln!("[lounge-mcp] client kaydı: {err}");
                 }
             }
-            "notifications/cancelled" => {}
+            "notifications/cancelled" => {
+                let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                let kind = CancelKind::from_reason(reason);
+                let req_id = params.get("requestId").cloned().unwrap_or(Value::Null);
+                let key = request_id_key(&client.session_id, &req_id);
+                let mut map = self.in_flight.lock().await;
+                if let Some(tx) = map.remove(&key) {
+                    let _ = tx.send(Some(kind));
+                    eprintln!(
+                        "[lounge-mcp] cancelled session={} reason={reason:?} kind={kind:?}",
+                        client.session_id
+                    );
+                } else {
+                    eprintln!(
+                        "[lounge-mcp] cancelled (no in-flight) session={} reason={reason:?}",
+                        client.session_id
+                    );
+                }
+            }
             other => eprintln!("[lounge-mcp] bilinmeyen bildirim: {other}"),
         }
         Ok(())
@@ -201,12 +286,13 @@ impl McpServer {
         method: &str,
         params: &Value,
         client: &mut ClientCtx,
+        request_key: &str,
     ) -> Result<Value> {
         match method {
             "initialize" => self.initialize(params, client).await,
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tool_defs() })),
-            "tools/call" => self.tools_call(params, client).await,
+            "tools/call" => self.tools_call(params, client, request_key).await,
             "resources/list" => Ok(json!({ "resources": [] })),
             "prompts/list" => Ok(json!({ "prompts": [] })),
             other => Err(anyhow!("method bulunamadı: {other}")),
@@ -264,7 +350,12 @@ impl McpServer {
         Ok(())
     }
 
-    async fn tools_call(&self, params: &Value, client: &ClientCtx) -> Result<Value> {
+    async fn tools_call(
+        &self,
+        params: &Value,
+        client: &ClientCtx,
+        request_key: &str,
+    ) -> Result<Value> {
         let name = params
             .get("name")
             .and_then(|v| v.as_str())
@@ -294,11 +385,23 @@ impl McpServer {
                 }
             }
             "lounge_ask_agent" | "lounge_dispatch_task" => {
-                match self.tool_dispatch(&args, client).await {
+                match self.tool_dispatch(&args, client, request_key).await {
                     Ok(v) => (v, false),
                     Err(err) => (json!({ "error": err.to_string() }), true),
                 }
             }
+            "lounge_call_agent" => match self.tool_call_agent(&args, client, request_key).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
+            "lounge_wait_task" => match self.tool_wait_task(&args, client, request_key).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
+            "lounge_yield_result" => match self.tool_yield_result(&args, client).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
             "lounge_status" => match self.tool_status(&args, client).await {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
@@ -485,84 +588,160 @@ impl McpServer {
         Ok(())
     }
 
-    async fn tool_dispatch(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
-        // target_agent + task zorunlu; agent/summary alias'larını şema öncesi normalize et.
-        let mut normalized = args.clone();
-        if let Some(obj) = normalized.as_object_mut() {
-            if !obj.contains_key("target_agent") {
-                if let Some(agent) = obj.get("agent").cloned() {
-                    obj.insert("target_agent".into(), agent);
-                }
-            }
-            if !obj.contains_key("task") {
-                if let Some(summary) = obj.get("summary").cloned() {
-                    obj.insert("task".into(), summary);
-                }
-            }
-        }
+    /// Geriye dönük: fire-and-forget; yeni altyapı (oturum + idempotency + admit).
+    async fn tool_dispatch(
+        &self,
+        args: &Value,
+        client: &ClientCtx,
+        request_key: &str,
+    ) -> Result<Value> {
+        let normalized = normalize_dispatch_args(args);
         validate_schema(SchemaKind::McpDispatch, &normalized).map_err(|e| anyhow!(e))?;
+        let call_args = self.build_call_args(&normalized, /*wait*/ false).await?;
 
-        let target = arg_str(&normalized, "target_agent")
-            .ok_or_else(|| anyhow!("target_agent gerekli"))?
-            .to_string();
-        let task_text = arg_str(&normalized, "task")
-            .ok_or_else(|| anyhow!("task gerekli"))?
-            .to_string();
-        let project = self
-            .resolve_project_arg(&normalized)
-            .await?
-            .unwrap_or_else(|| "agent-lounge-os".into());
-
-        let source = format!("mcp:{}", normalize_client_host(&client.name));
-        let mut task = LoungeTask::new(source, project.clone(), task_text.clone());
-        task.target_agent = Some(target.clone());
-        if let Some(repo) =
-            arg_str(&normalized, "repo_path").or_else(|| arg_str(&normalized, "workspace_root"))
-        {
-            task.repo_path = Some(repo.to_string());
-        }
-
-        let task_json = serde_json::to_value(&task)?;
-        validate_schema(SchemaKind::Task, &task_json).map_err(|e| anyhow!(e))?;
-
-        let nats_ok = probe_tcp_host_port(&self.nats_url);
-        if !nats_ok {
+        if !self.orchestrator_skips_nats() && !probe_tcp_host_port(&self.nats_url) {
             return Ok(json!({
                 "published": false,
                 "error": format!(
                     "NATS erişilemiyor ({}) — Lounge Kernel / NATS ayakta olmalı",
                     self.nats_url
                 ),
-                "task_id": task.id,
                 "subject": TASK_REQUESTED,
                 "note": "Görev Kernel dispatcher üzerinden işlenir; PENDING_APPROVAL / kota kapıları atlanmaz."
             }));
         }
 
-        let url = self.nats_url.clone();
-        let subject = TASK_REQUESTED.to_string();
-        let bytes = serde_json::to_vec(&task)?;
-        tokio::task::spawn_blocking(move || {
-            #[allow(deprecated)]
-            let nc = nats::connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
-            nc.publish(&subject, bytes)
-                .map_err(|e| anyhow!("NATS publish: {e}"))?;
-            nc.flush().map_err(|e| anyhow!("NATS flush: {e}"))?;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("NATS publish join")??;
+        let cancel_rx = self.register_inflight(request_key).await;
+        let result = self
+            .orchestrator
+            .call_agent(&client.session_id, &client.name, call_args, Some(cancel_rx))
+            .await;
+        self.clear_inflight(request_key).await;
+        let mut payload = result?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.entry("note".to_string()).or_insert(json!(
+                "Görev NATS'a yazıldı. Kernel DecisionGate / security (PENDING_APPROVAL) / quota uygular; UI yoksa onay bekleyen işler kalabilir. Sonuç: lounge_wait_task."
+            ));
+        }
+        Ok(payload)
+    }
 
-        Ok(json!({
-            "published": true,
-            "task_id": task.id,
-            "subject": TASK_REQUESTED,
-            "target_agent": target,
-            "project_id": project,
-            "summary": task_text,
-            "source_agent": task.source_agent,
-            "note": "Görev NATS'a yazıldı. Kernel DecisionGate / security (PENDING_APPROVAL) / quota uygular; UI yoksa onay bekleyen işler kalabilir."
-        }))
+    async fn tool_call_agent(
+        &self,
+        args: &Value,
+        client: &ClientCtx,
+        request_key: &str,
+    ) -> Result<Value> {
+        let normalized = normalize_dispatch_args(args);
+        validate_schema(SchemaKind::McpCallAgent, &normalized).map_err(|e| anyhow!(e))?;
+        let wait = normalized
+            .get("wait")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let call_args = self.build_call_args(&normalized, wait).await?;
+
+        if wait && !self.orchestrator_skips_nats() && !probe_tcp_host_port(&self.nats_url) {
+            return Ok(json!({
+                "published": false,
+                "error": format!(
+                    "NATS erişilemiyor ({}) — Lounge Kernel / NATS ayakta olmalı",
+                    self.nats_url
+                ),
+                "subject": TASK_REQUESTED,
+            }));
+        }
+
+        let cancel_rx = self.register_inflight(request_key).await;
+        let result = self
+            .orchestrator
+            .call_agent(&client.session_id, &client.name, call_args, Some(cancel_rx))
+            .await;
+        self.clear_inflight(request_key).await;
+        result
+    }
+
+    async fn tool_wait_task(
+        &self,
+        args: &Value,
+        client: &ClientCtx,
+        request_key: &str,
+    ) -> Result<Value> {
+        validate_schema(SchemaKind::McpWaitTask, args).map_err(|e| anyhow!(e))?;
+        let task_id = arg_str(args, "task_id")
+            .ok_or_else(|| anyhow!("task_id gerekli"))?
+            .to_string();
+        let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64());
+        let cancel_rx = self.register_inflight(request_key).await;
+        let result = self
+            .orchestrator
+            .wait_task(
+                &client.session_id,
+                &client.name,
+                &task_id,
+                timeout_ms,
+                Some(cancel_rx),
+            )
+            .await;
+        self.clear_inflight(request_key).await;
+        result
+    }
+
+    async fn tool_yield_result(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
+        validate_schema(SchemaKind::McpYieldResult, args).map_err(|e| anyhow!(e))?;
+        let task_id = arg_str(args, "task_id")
+            .ok_or_else(|| anyhow!("task_id gerekli"))?
+            .to_string();
+        let status = arg_str(args, "status").unwrap_or("completed");
+        let output = args.get("output").cloned().unwrap_or(json!(null));
+        self.orchestrator.yield_result(
+            &client.session_id,
+            &task_id,
+            status,
+            &output,
+            args.get("artifacts"),
+            args.get("metrics"),
+        )
+    }
+
+    async fn build_call_args(&self, normalized: &Value, wait: bool) -> Result<CallAgentArgs> {
+        let target = arg_str(normalized, "target_agent")
+            .ok_or_else(|| anyhow!("target_agent gerekli"))?
+            .to_string();
+        let task_text = arg_str(normalized, "task")
+            .ok_or_else(|| anyhow!("task gerekli"))?
+            .to_string();
+        let project = self
+            .resolve_project_arg(normalized)
+            .await?
+            .unwrap_or_else(|| "agent-lounge-os".into());
+        Ok(CallAgentArgs {
+            target_agent: target,
+            task: task_text,
+            project_id: project,
+            idempotency_key: arg_str(normalized, "idempotency_key").map(str::to_string),
+            repo_path: arg_str(normalized, "repo_path")
+                .or_else(|| arg_str(normalized, "workspace_root"))
+                .map(str::to_string),
+            parent_task_id: None,
+            wait,
+        })
+    }
+
+    async fn register_inflight(&self, request_key: &str) -> watch::Receiver<Option<CancelKind>> {
+        let (tx, rx) = watch::channel(None);
+        self.in_flight
+            .lock()
+            .await
+            .insert(request_key.to_string(), tx);
+        rx
+    }
+
+    async fn clear_inflight(&self, request_key: &str) {
+        self.in_flight.lock().await.remove(request_key);
+    }
+
+    fn orchestrator_skips_nats(&self) -> bool {
+        self.orchestrator.skips_nats()
     }
 
     async fn tool_status(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
@@ -664,10 +843,12 @@ impl McpServer {
                 "note": "Host Ollama (:11434) bilinçli olarak dokunulmaz",
                 "system_ollama": system_ollama,
             },
+            "timeout_manager": self.timeouts.snapshot(),
+            "timeout_limit_secs": self.timeouts.timeout_limit(&client.name).as_secs(),
             "connected_agents": connected,
             "workers": workers,
             "dispatch_requires_kernel": true,
-            "hint": "lounge_dispatch_task için NATS + çalışan Agent Lounge OS (Kernel) gerekir. Arama/kayıt SQLite (+ atomik vektör) ile çalışır. Dış botlar workers/*.py ile lounge.workers.register üzerinden bağlanır."
+            "hint": "lounge_call_agent / lounge_dispatch_task için NATS + Kernel gerekir. Sonuç: lounge_wait_task (aynı oturum). Progress süreyi uzatmaz."
         }))
     }
 
@@ -714,8 +895,23 @@ fn tool_defs() -> Vec<Value> {
             include_schema("mcp_record_experience.schema.json"),
         ),
         tool_def(
+            "lounge_call_agent",
+            "Mod A→B: başka ajana görev ver; timeout_limit içinde sonuç veya backgrounded. parent_task_id yok sayılır.",
+            include_schema("mcp_call_agent.schema.json"),
+        ),
+        tool_def(
+            "lounge_wait_task",
+            "Aynı oturumda görev sonucu long-poll. Eşik aşımında still_running; tekrar çağrılabilir. Progress süreyi uzatmaz.",
+            include_schema("mcp_wait_task.schema.json"),
+        ),
+        tool_def(
+            "lounge_yield_result",
+            "Worker oturumu görev sonucunu yazar (claim lease). Yetkisiz oturum reddedilir.",
+            include_schema("mcp_yield_result.schema.json"),
+        ),
+        tool_def(
             "lounge_dispatch_task",
-            "NATS lounge.task.requested → Kernel (PENDING_APPROVAL / kota baypas yok).",
+            "NATS lounge.task.requested → Kernel (fire-and-forget; yeni A2A altyapısı). Sonuç: lounge_wait_task.",
             include_schema("mcp_dispatch_task.schema.json"),
         ),
         tool_def(
@@ -725,7 +921,7 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "lounge_status",
-            "Bağlı ajanlar + NATS/LMR/MCP HTTP sağlık. Ayar değiştirmez.",
+            "Bağlı ajanlar + NATS/LMR/MCP HTTP sağlık + timeout_limit. Ayar değiştirmez.",
             include_schema("mcp_status.schema.json"),
         ),
     ]
@@ -746,12 +942,42 @@ fn include_schema(file: &str) -> Value {
         "mcp_dispatch_task.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_dispatch_task.schema.json")
         }
+        "mcp_call_agent.schema.json" => {
+            include_str!("../../../shared/lounge_protocol/schemas/mcp_call_agent.schema.json")
+        }
+        "mcp_wait_task.schema.json" => {
+            include_str!("../../../shared/lounge_protocol/schemas/mcp_wait_task.schema.json")
+        }
+        "mcp_yield_result.schema.json" => {
+            include_str!("../../../shared/lounge_protocol/schemas/mcp_yield_result.schema.json")
+        }
         "mcp_status.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_status.schema.json")
         }
         other => panic!("bilinmeyen schema: {other}"),
     };
     serde_json::from_str(raw).expect("schema json")
+}
+
+fn normalize_dispatch_args(args: &Value) -> Value {
+    let mut normalized = args.clone();
+    if let Some(obj) = normalized.as_object_mut() {
+        if !obj.contains_key("target_agent") {
+            if let Some(agent) = obj.get("agent").cloned() {
+                obj.insert("target_agent".into(), agent);
+            }
+        }
+        if !obj.contains_key("task") {
+            if let Some(summary) = obj.get("summary").cloned() {
+                obj.insert("task".into(), summary);
+            }
+        }
+    }
+    normalized
+}
+
+fn request_id_key(session_id: &str, id: &Value) -> String {
+    format!("{session_id}:{}", id)
 }
 
 fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
@@ -925,8 +1151,14 @@ pub async fn run_stdio_embedded(store: ExperienceStore, nats_url: impl Into<Stri
 /// sonraki isteklere `X-Lounge-Client-Name` ile de eklenir (kimlik karışması yok).
 pub async fn run_stdio_http_proxy() -> Result<()> {
     let base = default_mcp_http_url();
+    // Antigravity eşiği 150 sn + marj; proxy istemci hard-timeout'undan önce dönmeli.
+    let proxy_timeout_secs = std::env::var("LOUNGE_MCP_PROXY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(210);
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(proxy_timeout_secs))
         .build()
         .context("HTTP client")?;
     let session_id = Uuid::new_v4().to_string();
@@ -1328,11 +1560,13 @@ mod tests {
             name: "Cursor".into(),
             version: "1".into(),
             initialized: true,
+            session_id: "sess-cursor".into(),
         };
         let mut claude = ClientCtx {
             name: "Claude Desktop".into(),
             version: "2".into(),
             initialized: true,
+            session_id: "sess-claude".into(),
         };
 
         let status_cursor = server

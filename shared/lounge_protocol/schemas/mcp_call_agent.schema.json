@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-lounge-os.local/schemas/mcp_dispatch_task.schema.json",
-  "title": "McpDispatchTaskArgs",
-  "description": "lounge_dispatch_task / lounge_ask_agent tool girdileri. Sonuç LoungeTask şemasına dönüştürülüp doğrulanır.",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_call_agent.schema.json",
+  "title": "McpCallAgentArgs",
+  "description": "lounge_call_agent — Mod A delegate_and_wait. parent_task_id istemci değeri yok sayılır.",
   "type": "object",
   "additionalProperties": false,
   "required": ["target_agent", "task"],
@@ -11,11 +11,20 @@
     "agent": { "type": "string", "minLength": 1 },
     "task": { "type": "string", "minLength": 1 },
     "summary": { "type": "string", "minLength": 1 },
+    "idempotency_key": { "type": "string", "minLength": 1 },
     "project": { "type": "string", "minLength": 1 },
     "project_id": { "type": "string", "minLength": 1 },
     "active_file": { "type": "string", "minLength": 1 },
     "workspace_root": { "type": "string", "minLength": 1 },
     "repo_path": { "type": "string", "minLength": 1 },
-    "idempotency_key": { "type": "string", "minLength": 1 }
+    "parent_task_id": {
+      "type": ["string", "null"],
+      "description": "İstemci değeri yok sayılır (sunucu enjekte eder)."
+    },
+    "wait": {
+      "type": "boolean",
+      "default": true,
+      "description": "false ise hemen task_id (Mod B fire-and-forget)."
+    }
   }
 }

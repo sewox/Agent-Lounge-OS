@@ -7,6 +7,11 @@
 //!
 //! İstemci kimliği istek başına: `Mcp-Session-Id` oturum eşlemesi (+ isteğe bağlı
 //! `X-Lounge-Client-Name`). Tam Streamable HTTP bu PR kapsamı dışında.
+//!
+//! ## Sonuç teslimi (deadline exceeded sonrası)
+//! Antigravity ölçümü: istemci `notifications/cancelled` (`deadline exceeded`) gönderir
+//! ama **bağlantıyı kapatmaz**. Bridge görevi `WAIT_TIMEOUT_REACHED` / backgrounded
+//! bırakır; aynı `Mcp-Session-Id` ile sonraki `lounge_wait_task` sonucu çeker.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,11 +73,16 @@ pub async fn serve(
 
 async fn health(State(hub): State<Hub>) -> impl IntoResponse {
     let sessions = hub.sessions.lock().await.len();
+    let timeout_snapshot = {
+        let guard = hub.server.lock().await;
+        guard.timeouts().snapshot()
+    };
     Json(serde_json::json!({
         "ok": true,
         "server": "agent-lounge-os",
         "transport": "http",
         "sessions": sessions,
+        "timeout_manager": timeout_snapshot,
     }))
 }
 
@@ -89,9 +99,13 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
         let mut sessions = hub.sessions.lock().await;
         sessions
             .entry(session_id.clone())
-            .or_insert_with(ClientCtx::default)
+            .or_insert_with(|| ClientCtx {
+                session_id: session_id.clone(),
+                ..ClientCtx::default()
+            })
             .clone()
     };
+    client.session_id = session_id.clone();
 
     if let Some(name) = header_str(&headers, HDR_CLIENT_NAME) {
         client.name = name;

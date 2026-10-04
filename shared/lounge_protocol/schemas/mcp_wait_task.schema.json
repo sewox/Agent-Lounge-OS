@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_wait_task.schema.json",
+  "title": "McpWaitTaskArgs",
+  "description": "lounge_wait_task — aynı oturumda sonuç long-poll. Eşik istemci timeout_limit ile sınırlı.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id"],
+  "properties": {
+    "task_id": { "type": "string", "minLength": 1 },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "İstenen bekleme (ms); timeout_limit ile min alınır."
+    }
+  }
+}
