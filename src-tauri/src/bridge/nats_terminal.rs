@@ -2,7 +2,7 @@
 //!
 //! `lounge.task.completed` / `lounge.task.failed` → `broadcast` task_id.
 //! Abone kapanırsa alıcılar `Closed` görür; select! kolu devre dışı kalır.
-//! İlk connect başarısız olursa aynı görev geri çekilmeli yeniden dener.
+//! Connect fail veya bağlantı kopması → geri çekilmeli yeniden bağlan + yeniden abone.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -55,49 +55,61 @@ impl NatsTerminalHub {
         }
         let url = self.nats_url.clone();
         let tx = self.tx.clone();
-        let started = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let mut backoff = Duration::from_secs(1);
-            let nc = loop {
+            loop {
                 #[allow(deprecated)]
-                match nats::connect(&url) {
-                    Ok(nc) => break nc,
+                let nc = match nats::connect(&url) {
+                    Ok(nc) => {
+                        backoff = Duration::from_secs(1);
+                        nc
+                    }
                     Err(err) => {
                         log::warn!(
                             "NatsTerminalHub connect failed ({err}); retry in {:?}",
                             backoff
                         );
-                        // Allow a later subscribe to re-spawn if this task exits unexpectedly.
-                        started.started.store(false, Ordering::SeqCst);
                         std::thread::sleep(backoff);
-                        if started.started.swap(true, Ordering::SeqCst) {
-                            // Another ensure_started won — exit this worker.
-                            return;
-                        }
                         backoff = (backoff * 2).min(Duration::from_secs(60));
+                        continue;
+                    }
+                };
+
+                let mut handles = Vec::with_capacity(2);
+                for subject in [TASK_COMPLETED, TASK_FAILED] {
+                    let sub_nc = nc.clone();
+                    let tx = tx.clone();
+                    let subject = subject.to_string();
+                    let label = subject.clone();
+                    match std::thread::Builder::new()
+                        .name(format!("nats-term-{subject}"))
+                        .spawn(move || {
+                            let Ok(sub) = sub_nc.subscribe(&subject) else {
+                                return;
+                            };
+                            for msg in sub.messages() {
+                                if let Some(id) = extract_task_id(&msg.data) {
+                                    let _ = tx.send(id);
+                                }
+                            }
+                        }) {
+                        Ok(h) => handles.push(h),
+                        Err(err) => {
+                            log::warn!("NatsTerminalHub spawn {label}: {err}");
+                        }
                     }
                 }
-            };
-            for subject in [TASK_COMPLETED, TASK_FAILED] {
-                let sub_nc = nc.clone();
-                let tx = tx.clone();
-                let subject = subject.to_string();
-                std::thread::Builder::new()
-                    .name(format!("nats-term-{subject}"))
-                    .spawn(move || {
-                        let Ok(sub) = sub_nc.subscribe(&subject) else {
-                            return;
-                        };
-                        for msg in sub.messages() {
-                            if let Some(id) = extract_task_id(&msg.data) {
-                                let _ = tx.send(id);
-                            }
-                        }
-                    })
-                    .ok();
-            }
-            loop {
-                std::thread::sleep(Duration::from_secs(60));
+
+                // Bağlantı düşünce messages() biter → thread'ler çıkar → yeniden abone.
+                for h in handles {
+                    let _ = h.join();
+                }
+                log::warn!(
+                    "NatsTerminalHub subscription ended; reconnecting in {:?}",
+                    backoff
+                );
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(60));
             }
         });
     }
