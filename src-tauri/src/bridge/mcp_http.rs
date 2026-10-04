@@ -111,7 +111,6 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let client_provided = raw_session.map(is_valid_session_id).unwrap_or(false);
     let session_id = normalize_or_mint_session_id(raw_session);
 
     let mut client = {
@@ -157,9 +156,6 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
         HeaderName::from_static(HDR_SESSION),
         HeaderValue::from_str(&session_id).unwrap_or_else(|_| HeaderValue::from_static("unknown")),
     );
-
-    // Geçersiz istemci id'si mint edildiyse yine de yeni id döner (istemci günceller).
-    let _ = client_provided;
 
     match handled {
         Ok(Some(response)) => {
