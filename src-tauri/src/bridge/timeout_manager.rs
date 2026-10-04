@@ -17,6 +17,8 @@ pub const DEFAULT_UNKNOWN_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_GUI_TIMEOUT: Duration = Duration::from_secs(45);
 /// Antigravity: 180 sn sert limit − 30 sn marj.
 pub const DEFAULT_ANTIGRAVITY_TIMEOUT: Duration = Duration::from_secs(150);
+/// Global override üst sınırı (istemci hard-timeout 180 sn).
+pub const MAX_TIMEOUT_OVERRIDE_SECS: u64 = 180;
 
 /// Settings anahtarı — saniye cinsinden global override (tüm istemciler).
 pub const SETTING_MCP_TIMEOUT_SECS: &str = "mcp.timeout_secs";
@@ -24,13 +26,34 @@ pub const SETTING_MCP_TIMEOUT_SECS: &str = "mcp.timeout_secs";
 pub const ENV_MCP_TIMEOUT_SECS: &str = "LOUNGE_MCP_TIMEOUT_SECS";
 
 /// Oturum başına eşik yöneticisi. Tek kaynak: [`TimeoutManager::timeout_limit`].
-#[derive(Debug)]
 pub struct TimeoutManager {
     /// `normalize_client_host` anahtarı → süre.
     table: RwLock<HashMap<String, Duration>>,
     /// Global override (env / settings); `None` → tabloya bak.
     global_override: RwLock<Option<Duration>>,
     unknown_default: Duration,
+    /// Settings canlı okuma için store (opsiyonel).
+    settings_store: RwLock<Option<crate::db::ExperienceStore>>,
+}
+
+impl std::fmt::Debug for TimeoutManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeoutManager")
+            .field("unknown_default", &self.unknown_default)
+            .field(
+                "global_override",
+                &*self.global_override.read().expect("timeout override lock"),
+            )
+            .field(
+                "has_settings_store",
+                &self
+                    .settings_store
+                    .read()
+                    .expect("settings store lock")
+                    .is_some(),
+            )
+            .finish()
+    }
 }
 
 impl Default for TimeoutManager {
@@ -54,18 +77,25 @@ impl TimeoutManager {
         table.insert("vscode".into(), DEFAULT_GUI_TIMEOUT);
         table.insert("zed".into(), DEFAULT_GUI_TIMEOUT);
 
-        let global = parse_secs_env(ENV_MCP_TIMEOUT_SECS);
+        let global = parse_secs_env(ENV_MCP_TIMEOUT_SECS).map(cap_override);
         Self {
             table: RwLock::new(table),
             global_override: RwLock::new(global),
             unknown_default: DEFAULT_UNKNOWN_TIMEOUT,
+            settings_store: RwLock::new(None),
         }
     }
 
+    /// Settings canlı okuma — `timeout_limit` her çağrıda settings’i yeniler.
+    pub fn attach_settings_store(&self, store: crate::db::ExperienceStore) {
+        *self.settings_store.write().expect("settings store lock") = Some(store);
+    }
+
     /// Settings / env global override (saniye). `None` veya 0 → override kaldır.
+    /// 180 sn üstü kırpılır ve uyarılır.
     pub fn set_global_override_secs(&self, secs: Option<u64>) {
         let mut guard = self.global_override.write().expect("timeout override lock");
-        *guard = secs.filter(|&s| s > 0).map(Duration::from_secs);
+        *guard = secs.filter(|&s| s > 0).map(cap_override_secs).map(Duration::from_secs);
     }
 
     /// Tek istemci eşiğini güncelle (ölçüm sonrası tablo güncellemesi).
@@ -76,7 +106,32 @@ impl TimeoutManager {
     }
 
     /// Bu oturumun kullanacağı tek eşik değişkeni.
+    /// Env > settings (canlı) > tablo. Override 180 sn ile sınırlı.
     pub fn timeout_limit(&self, client_name: &str) -> Duration {
+        // Env her çağrıda — process env nadiren değişir ama settings’ten yüksek öncelik.
+        if let Some(over) = parse_secs_env(ENV_MCP_TIMEOUT_SECS).map(cap_override) {
+            return over;
+        }
+        // Settings canlı yenile.
+        if let Some(store) = self.settings_store.read().expect("settings store lock").as_ref() {
+            if let Ok(conn) = store.conn.lock() {
+                if let Ok(raw) = conn.query_row(
+                    "SELECT value_json FROM settings WHERE key = ?1",
+                    rusqlite::params![SETTING_MCP_TIMEOUT_SECS],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    if let Some(secs) = parse_timeout_setting(&raw) {
+                        let capped = cap_override_secs(secs);
+                        if capped != secs {
+                            log::warn!(
+                                "mcp.timeout_secs={secs} > {MAX_TIMEOUT_OVERRIDE_SECS}; {MAX_TIMEOUT_OVERRIDE_SECS}sn’ye kırpıldı"
+                            );
+                        }
+                        return Duration::from_secs(capped);
+                    }
+                }
+            }
+        }
         if let Some(over) = *self.global_override.read().expect("timeout override lock") {
             return over;
         }
@@ -116,7 +171,23 @@ fn parse_secs_env(key: &str) -> Option<Duration> {
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
+        .map(cap_override_secs)
         .map(Duration::from_secs)
+}
+
+fn cap_override(d: Duration) -> Duration {
+    Duration::from_secs(cap_override_secs(d.as_secs()))
+}
+
+fn cap_override_secs(secs: u64) -> u64 {
+    if secs > MAX_TIMEOUT_OVERRIDE_SECS {
+        log::warn!(
+            "timeout override {secs}s > {MAX_TIMEOUT_OVERRIDE_SECS}s — kırpıldı"
+        );
+        MAX_TIMEOUT_OVERRIDE_SECS
+    } else {
+        secs
+    }
 }
 
 /// Settings JSON değerinden saniye oku (`"45"` veya `45`).
@@ -163,6 +234,16 @@ mod tests {
         assert_eq!(tm.timeout_limit("Cursor"), Duration::from_secs(12));
         tm.set_global_override_secs(None);
         assert_eq!(tm.timeout_limit("antigravity"), DEFAULT_ANTIGRAVITY_TIMEOUT);
+    }
+
+    #[test]
+    fn override_capped_at_180() {
+        let tm = TimeoutManager::with_defaults();
+        tm.set_global_override_secs(Some(300));
+        assert_eq!(
+            tm.timeout_limit("antigravity"),
+            Duration::from_secs(MAX_TIMEOUT_OVERRIDE_SECS)
+        );
     }
 
     #[test]

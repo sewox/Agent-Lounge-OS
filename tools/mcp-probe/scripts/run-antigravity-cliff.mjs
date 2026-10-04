@@ -2,13 +2,14 @@
 /**
  * Antigravity cliff matrix — MANUAL ONLY (not in CI / npm test).
  *
- * Verifies the 120–180s window around the measured 180s hard client timeout:
- * delays 150, 170, 180, 190 seconds (plain + progress variants).
+ * Probes server/bridge behavior around long delays (150–190s) with a **fake**
+ * client timeout. This does NOT reproduce the real Antigravity IDE ~180s
+ * "deadline exceeded" hard cut — that requires a manual IDE session.
  *
- * Expected (from 2026-10-04 measurement):
- * - progress does NOT extend the timeout
- * - hard cut at ~180.0s with notifications/cancelled reason "deadline exceeded"
- * - connection stays open
+ * What this validates:
+ * - server accepts long-running tools/call
+ * - probe-side abort / cancel framing
+ * - progress does not extend server timeout_limit
  *
  * Usage:
  *   node scripts/run-antigravity-cliff.mjs

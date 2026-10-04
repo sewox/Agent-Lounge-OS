@@ -1,13 +1,13 @@
 //! Enjekte edilebilir bekleme saati — testlerde gerçek duvar saati yok.
 //!
-//! Üretim: [`SystemWaitClock`] → `tokio::time::sleep`.
+//! Üretim: [`SystemWaitClock`] → monotonik `Instant` + `tokio::time::sleep`.
 //! Test: [`ManualWaitClock`] → `advance` ile süre ilerletilir.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
@@ -19,17 +19,23 @@ pub trait WaitClock: Send + Sync {
     fn sleep(&self, duration: Duration) -> WaitFuture<'_>;
 }
 
-/// Üretim saati — gerçek tokio sleep.
-#[derive(Debug, Default, Clone)]
-pub struct SystemWaitClock;
+/// Üretim saati — process-start `Instant` (NTP sıçramasından etkilenmez).
+#[derive(Debug, Clone)]
+pub struct SystemWaitClock {
+    origin: Instant,
+}
+
+impl Default for SystemWaitClock {
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
 
 impl WaitClock for SystemWaitClock {
     fn now_ms(&self) -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
+        self.origin.elapsed().as_millis() as u64
     }
 
     fn sleep(&self, duration: Duration) -> WaitFuture<'_> {
@@ -68,7 +74,8 @@ impl ManualWaitClock {
         let mut waiters = self.waiters.lock().expect("manual clock waiters");
         waiters.retain(|(deadline, notify)| {
             if now >= *deadline {
-                notify.notify_waiters();
+                // notified() önce oluşturulmuş olmalı; notify_one kayıp uyandırma riskini azaltır.
+                notify.notify_one();
                 false
             } else {
                 true
@@ -81,7 +88,7 @@ impl ManualWaitClock {
         let mut waiters = self.waiters.lock().expect("manual clock waiters");
         waiters.retain(|(deadline, notify)| {
             if ms >= *deadline {
-                notify.notify_waiters();
+                notify.notify_one();
                 false
             } else {
                 true
@@ -103,6 +110,8 @@ impl WaitClock for ManualWaitClock {
             }
             let deadline = self.now_ms() + ms;
             let notify = Arc::new(Notify::new());
+            // P2(d): notified() permit'ini KAYITTAN ÖNCE al — advance notify_one kaçırmasın.
+            let notified = notify.notified();
             {
                 let mut waiters = self.waiters.lock().expect("manual clock waiters");
                 if self.now_ms() >= deadline {
@@ -110,7 +119,7 @@ impl WaitClock for ManualWaitClock {
                 }
                 waiters.push((deadline, notify.clone()));
             }
-            notify.notified().await;
+            notified.await;
         })
     }
 }
@@ -131,5 +140,13 @@ mod tests {
         clock.advance(Duration::from_secs(10));
         handle.await.unwrap();
         assert_eq!(clock.now_ms(), 10_000);
+    }
+
+    #[test]
+    fn system_clock_is_monotonic_instant() {
+        let clock = SystemWaitClock::default();
+        let a = clock.now_ms();
+        let b = clock.now_ms();
+        assert!(b >= a);
     }
 }

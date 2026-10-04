@@ -47,8 +47,14 @@ pub const TASK_NEEDS_HUMAN_EVENT: &str = "lounge://task-needs-human";
 
 /// NATS giriş damgası — güven kararı payload/`source_agent`'tan türetilmez.
 /// Her dış NATS mesajı sabit `source_verified=false`.
+/// Geçersiz `session_id` yok sayılır (P2-h).
 pub fn stamp_external_nats_ingress(task: &mut LoungeTask) {
     task.source_verified = false;
+    if let Some(ref sid) = task.session_id {
+        if !crate::bridge::session_id::is_valid_session_id(sid) {
+            task.session_id = None;
+        }
+    }
 }
 
 /// NATS JSON → LoungeTask + dış giriş damgası (spoof `source_verified` yok sayılır).
@@ -410,6 +416,29 @@ impl Dispatcher {
             self.fail_and_release_idempotency(&task_id);
         } else {
             self.persist_status(&task_id, TaskStatus::Completed);
+        }
+        // P1-3: eski NATS completed yolu result_json yazmıyordu → wait_task result null.
+        if let Some(result_val) = value
+            .get("result")
+            .cloned()
+            .or_else(|| value.get("output").cloned())
+            .or_else(|| {
+                value
+                    .get("result_json")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+            })
+        {
+            let raw = if result_val.is_string() {
+                result_val.as_str().unwrap_or("").to_string()
+            } else {
+                result_val.to_string()
+            };
+            if !raw.is_empty() {
+                if let Err(err) = self.store.store_a2a_bus_result(&task_id, &raw) {
+                    log::warn!("lifecycle result_json yazılamadı {task_id}: {err}");
+                }
+            }
         }
         Ok(())
     }
@@ -991,6 +1020,7 @@ impl Dispatcher {
             }
             Err(AdmitError::IdConflict { task_id }) => {
                 // MCP köprüsü önceden admit etmiş olabilir — aynı id + session ise devam.
+                // P1-1: NATS girişi verified yükseltmez (#82 garantisi).
                 if let Ok(Some(existing)) = self.store.load_a2a_task(&task_id) {
                     if existing.session_id.is_some()
                         && existing.session_id == task.session_id
@@ -1002,7 +1032,16 @@ impl Dispatcher {
                                 | TaskStatus::Expired
                         )
                     {
+                        let preserved_session = existing.session_id.clone();
                         *task = existing;
+                        // NATS stamp again — DB'deki verified=true MCP satırı trust yükseltmez.
+                        task.source_verified = false;
+                        // Geçersiz NATS session_id yok sayılır (P2-h).
+                        if let Some(ref sid) = preserved_session {
+                            if !crate::bridge::session_id::is_valid_session_id(sid) {
+                                task.session_id = None;
+                            }
+                        }
                         return Ok(None);
                     }
                 }
