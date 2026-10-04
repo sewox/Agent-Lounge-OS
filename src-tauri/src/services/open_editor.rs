@@ -150,7 +150,60 @@ fn build_cursor_argv(os: OsFamily, path: &str, line: Option<i64>) -> (String, Ve
     }
 }
 
-/// Validate custom editor template — no shell metacharacters.
+/// Interpreters / shells that must not be used as a custom editor program.
+/// Basename match (case-insensitive); blocks e.g. `/bin/sh` and `cmd.exe`.
+const CUSTOM_EDITOR_PROGRAM_DENYLIST: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "python",
+    "python3",
+    "python.exe",
+    "py",
+    "py.exe",
+    "node",
+    "node.exe",
+    "nodejs",
+    "perl",
+    "perl.exe",
+    "ruby",
+    "ruby.exe",
+    "php",
+    "php.exe",
+    "osascript",
+    "wscript",
+    "wscript.exe",
+    "cscript",
+    "cscript.exe",
+    "mshta",
+    "mshta.exe",
+    "curl",
+    "curl.exe",
+    "wget",
+    "wget.exe",
+    "busybox",
+];
+
+fn custom_editor_program_basename(program: &str) -> String {
+    // Cross-platform: treat both `/` and `\` as separators so Windows paths
+    // deny correctly when validated on Linux CI (and vice versa).
+    let trimmed = program.trim();
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
+    base.to_ascii_lowercase()
+}
+
+/// Validate custom editor template — no shell metacharacters; deny interpreters.
 pub fn validate_custom_editor(program: &str, args_template: &str) -> Result<()> {
     let prog = program.trim();
     if prog.is_empty() {
@@ -164,6 +217,10 @@ pub fn validate_custom_editor(program: &str, args_template: &str) -> Result<()> 
         || prog.contains('\n')
     {
         bail!("editor program must not contain shell metacharacters");
+    }
+    let base = custom_editor_program_basename(prog);
+    if CUSTOM_EDITOR_PROGRAM_DENYLIST.contains(&base.as_str()) {
+        bail!("editor program is not allowed (shell/interpreter denylist): {base}");
     }
     let args = args_template.trim();
     if args.is_empty() {
@@ -404,6 +461,27 @@ mod tests {
         assert!(validate_custom_editor("sh", "-c {path}").is_err());
         assert!(validate_custom_editor("code", "-g {path}").is_ok());
         assert!(validate_custom_editor("code", "-g").is_err());
+    }
+
+    #[test]
+    fn validate_custom_editor_denies_interpreters_by_basename() {
+        for prog in [
+            "python3",
+            "/usr/bin/python3",
+            "node",
+            r"C:\Windows\System32\cmd.exe",
+            "PowerShell",
+            "curl",
+        ] {
+            let err = validate_custom_editor(prog, "{path}").expect_err(prog);
+            assert!(
+                err.to_string().contains("denylist") || err.to_string().contains("shell"),
+                "{prog}: {err}"
+            );
+        }
+        assert!(validate_custom_editor("code", "-g {path}").is_ok());
+        assert!(validate_custom_editor("/usr/local/bin/nvim", "{path}").is_ok());
+        assert!(validate_custom_editor("subl", "{path}").is_ok());
     }
 
     #[test]

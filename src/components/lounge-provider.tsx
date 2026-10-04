@@ -965,8 +965,13 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       setApprovalError(null);
       try {
         if (isTauri()) {
-          // Pass commandHash so QA can assert id+hash; Rust uses id only.
-          const args = { id: trimmed, commandHash: row?.command_hash ?? null };
+          // Rust requires command_hash and asserts it matches the pending token.
+          const commandHash = row?.command_hash?.trim();
+          if (!commandHash) {
+            setApprovalError(i18n.t("destructiveNoPending", { ns: "approvals" }));
+            return;
+          }
+          const args = { id: trimmed, commandHash };
           if (confirmed) {
             await invoke("confirm_destructive", args);
           } else {
