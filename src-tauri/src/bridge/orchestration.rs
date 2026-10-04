@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use super::timeout_manager::TimeoutManager;
@@ -193,6 +193,9 @@ impl Orchestrator {
             .now_ms()
             .saturating_add(timeout_limit.as_millis() as u64);
 
+        // NATS completed|failed dinleyicisi — select! ile eşik zamanlayıcısı yarışır.
+        let mut nats_rx = self.spawn_nats_terminal_watcher(task_id);
+
         loop {
             if let Some(kind) = cancel_rx.as_ref().and_then(|rx| *rx.borrow()) {
                 return self.handle_cancel(task_id, session_id, kind).await;
@@ -216,28 +219,67 @@ impl Orchestrator {
                 }));
             }
 
-            // select!-benzeri: kısa uyku + iptal/kanal kontrolü.
+            // select!: timeout dilimi | NATS terminal | iptal.
             let slice = poll.min(Duration::from_millis(
                 deadline_ms.saturating_sub(self.clock.now_ms()).max(1),
             ));
             if let Some(rx) = cancel_rx.as_mut() {
                 tokio::select! {
                     _ = self.clock.sleep(slice) => {}
+                    maybe = nats_rx.recv() => {
+                        let _ = maybe;
+                    }
                     changed = rx.changed() => {
-                        let kind = if changed.is_ok() {
-                            *rx.borrow()
-                        } else {
-                            None
-                        };
+                        let kind = if changed.is_ok() { *rx.borrow() } else { None };
                         if let Some(kind) = kind {
                             return self.handle_cancel(task_id, session_id, kind).await;
                         }
                     }
                 }
             } else {
-                self.clock.sleep(slice).await;
+                tokio::select! {
+                    _ = self.clock.sleep(slice) => {}
+                    maybe = nats_rx.recv() => {
+                        let _ = maybe;
+                    }
+                }
             }
         }
+    }
+
+    /// `lounge.task.completed|failed` — task_id eşleşince kanal uyarısı.
+    fn spawn_nats_terminal_watcher(&self, task_id: &str) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::channel::<()>(4);
+        if self.skip_nats {
+            return rx;
+        }
+        let url = self.nats_url.clone();
+        let want = task_id.to_string();
+        for subject in [TASK_COMPLETED, TASK_FAILED] {
+            let url = url.clone();
+            let want = want.clone();
+            let tx = tx.clone();
+            let subject = subject.to_string();
+            tokio::task::spawn_blocking(move || {
+                #[allow(deprecated)]
+                let Ok(nc) = nats::connect(&url) else {
+                    return;
+                };
+                let Ok(sub) = nc.subscribe(&subject) else {
+                    return;
+                };
+                for msg in sub.messages() {
+                    if terminal_payload_matches_task(&msg.data, &want) {
+                        let _ = tx.blocking_send(());
+                        return;
+                    }
+                    if tx.is_closed() {
+                        return;
+                    }
+                }
+            });
+        }
+        rx
     }
 
     fn try_read_result(&self, task_id: &str, session_id: &str) -> Result<Option<Value>> {
@@ -325,6 +367,7 @@ impl Orchestrator {
             .now_ms()
             .saturating_add(budget.as_millis() as u64);
         let poll = Duration::from_millis(50);
+        let mut nats_rx = self.spawn_nats_terminal_watcher(task_id);
 
         loop {
             let cancel_kind = cancel_rx.as_ref().and_then(|rx| *rx.borrow());
@@ -359,10 +402,14 @@ impl Orchestrator {
             if let Some(rx) = cancel_rx.as_mut() {
                 tokio::select! {
                     _ = self.clock.sleep(slice) => {}
+                    maybe = nats_rx.recv() => { let _ = maybe; }
                     _ = rx.changed() => {}
                 }
             } else {
-                self.clock.sleep(slice).await;
+                tokio::select! {
+                    _ = self.clock.sleep(slice) => {}
+                    maybe = nats_rx.recv() => { let _ = maybe; }
+                }
             }
         }
     }
@@ -439,9 +486,19 @@ impl Orchestrator {
         })
         .await
         .context("control.stop join")??;
-        let _ = (TASK_COMPLETED, TASK_FAILED); // subjects referenced for docs/link
         Ok(())
     }
+}
+
+fn terminal_payload_matches_task(data: &[u8], task_id: &str) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(data) else {
+        return false;
+    };
+    value
+        .get("id")
+        .or_else(|| value.get("task_id"))
+        .and_then(|v| v.as_str())
+        == Some(task_id)
 }
 
 #[cfg(test)]
@@ -639,5 +696,18 @@ mod tests {
             CancelKind::from_reason("context deadline exceeded"),
             CancelKind::DeadlineExceeded
         );
+    }
+
+    #[test]
+    fn nats_terminal_payload_matches_task_id() {
+        assert!(terminal_payload_matches_task(
+            br#"{"id":"abc","type":"task"}"#,
+            "abc"
+        ));
+        assert!(terminal_payload_matches_task(
+            br#"{"task_id":"xyz"}"#,
+            "xyz"
+        ));
+        assert!(!terminal_payload_matches_task(br#"{"id":"abc"}"#, "other"));
     }
 }
