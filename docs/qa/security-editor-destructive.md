@@ -24,9 +24,10 @@ Presets (`default` / `vscode` / `cursor`) use fixed argv builders (not a free pr
 | Form | Allowed? | Why |
 |------|----------|-----|
 | Bare `code.cmd` / `cursor.cmd` | yes | PATH lookup for official CLI shims (preset + custom) |
-| `…\Microsoft VS Code\bin\code.cmd` (absolute) | yes | Known VS Code install layout |
-| `…\cursor\resources\app\bin\cursor.cmd` or `…\cursor\bin\cursor.cmd` (absolute) | yes | Known Cursor install layout |
-| `C:\Users\Public\code.cmd`, `.\code.cmd`, UNC `\\server\share\code.cmd`, other `*.cmd`/`.bat`/`.ps1` | **no** | Basename alone is not enough — arbitrary path script execution risk |
+| Absolute under trusted roots + known relative layout | yes | Roots from `%PROGRAMFILES%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%\Programs` (env-resolved; no hard-coded user-writable roots). Layouts: `Microsoft VS Code\bin\code.cmd`, `Microsoft VS Code Insiders\bin\code.cmd`, `cursor\resources\app\bin\cursor.cmd`, `cursor\bin\cursor.cmd`. Path must **canonicalize** successfully (fail-closed); `\\?\C:\…` extended prefix is stripped for matching |
+| `C:\Users\Public\Microsoft VS Code\bin\code.cmd` (suffix spoof), other non-root absolutes | **no** | Suffix-only matching is insufficient — must bind to trusted roots |
+| Missing file / canonicalize error for path-shaped allow-list | **no** | Fail-closed — raw candidate must not pass |
+| `.\code.cmd`, relative, UNC `\\server\…`, `\\?\UNC\…`, other `*.cmd`/`.bat`/`.ps1` | **no** | Relative / remote / arbitrary script execution risk |
 
 
 ## Destructive confirm `command_hash`
