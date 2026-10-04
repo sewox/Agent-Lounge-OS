@@ -79,6 +79,7 @@ impl ClientCtx {
 
 /// Uçuştaki tools/call — `notifications/cancelled` ile eşleşir.
 type InFlightMap = Arc<Mutex<HashMap<String, watch::Sender<Option<CancelKind>>>>>;
+type InFlightOrder = Arc<Mutex<std::collections::VecDeque<String>>>;
 
 #[derive(Clone)]
 pub struct McpServer {
@@ -90,6 +91,7 @@ pub struct McpServer {
     orchestrator: Orchestrator,
     timeouts: Arc<TimeoutManager>,
     in_flight: InFlightMap,
+    in_flight_order: InFlightOrder,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +159,7 @@ impl McpServer {
             orchestrator,
             timeouts,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            in_flight_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
@@ -351,6 +354,17 @@ impl McpServer {
         tool.endpoint = Some(default_mcp_http_url());
         tool.available = true;
         self.store.upsert_connected_tool(tool).await?;
+
+        // P1-B: MCP oturumunu agent_sessions'a bağla — yield target_agent eşleşmesi.
+        // agent_id = normalize(clientInfo.name); session id = Mcp-Session-Id.
+        // Not: gerçek yetki token'a bağlı değil; session id istemci seçimli (kabul edilen risk).
+        let mut sess = crate::models::AgentSession::new("mcp", &host, "mcp", "", "mcp_meta");
+        sess.id = client.session_id.clone();
+        sess.state = "active".into();
+        sess.last_seen = crate::models::now_rfc3339();
+        if let Err(err) = self.store.upsert_session(&sess) {
+            eprintln!("[lounge-mcp] agent_session bağlama: {err}");
+        }
         Ok(())
     }
 
@@ -741,40 +755,46 @@ impl McpServer {
     async fn register_inflight(&self, request_key: &str) -> watch::Receiver<Option<CancelKind>> {
         let (tx, rx) = watch::channel(None);
         let mut map = self.in_flight.lock().await;
-        // Global üst sınır.
+        let mut order = self.in_flight_order.lock().await;
+        // Global FIFO üst sınır.
         while map.len() >= super::session_id::MAX_IN_FLIGHT {
-            if let Some(evict) = map.keys().next().cloned() {
+            if let Some(evict) = order.pop_front() {
                 map.remove(&evict);
             } else {
                 break;
             }
         }
-        // Oturum başına eşzamanlı bekleme sınırı (P2-f).
+        // Oturum başına FIFO.
         let session_prefix = request_key
             .split_once(':')
             .map(|(s, _)| format!("{s}:"))
             .unwrap_or_default();
         if !session_prefix.is_empty() {
-            let mut session_keys: Vec<String> = map
-                .keys()
+            let session_count = order
+                .iter()
                 .filter(|k| k.starts_with(&session_prefix))
-                .cloned()
-                .collect();
-            while session_keys.len() >= super::session_id::MAX_IN_FLIGHT_PER_SESSION {
-                if let Some(evict) = session_keys.first().cloned() {
+                .count();
+            if session_count >= super::session_id::MAX_IN_FLIGHT_PER_SESSION {
+                if let Some(pos) = order.iter().position(|k| k.starts_with(&session_prefix)) {
+                    let evict = order.remove(pos).unwrap();
                     map.remove(&evict);
-                    session_keys.remove(0);
-                } else {
-                    break;
                 }
             }
         }
+        if let Some(pos) = order.iter().position(|k| k == request_key) {
+            order.remove(pos);
+        }
+        order.push_back(request_key.to_string());
         map.insert(request_key.to_string(), tx);
         rx
     }
 
     async fn clear_inflight(&self, request_key: &str) {
         self.in_flight.lock().await.remove(request_key);
+        let mut order = self.in_flight_order.lock().await;
+        if let Some(pos) = order.iter().position(|k| k == request_key) {
+            order.remove(pos);
+        }
     }
 
     fn orchestrator_skips_nats(&self) -> bool {

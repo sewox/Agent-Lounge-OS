@@ -18,7 +18,7 @@
 //! ama **bağlantıyı kapatmaz**. Bridge görevi `WAIT_TIMEOUT_REACHED` / backgrounded
 //! bırakır; aynı `Mcp-Session-Id` ile sonraki `lounge_wait_task` sonucu çeker.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -43,6 +43,32 @@ const HDR_CLIENT_VERSION: &str = "x-lounge-client-version";
 struct Hub {
     server: Arc<Mutex<McpServer>>,
     sessions: Arc<Mutex<HashMap<String, ClientCtx>>>,
+    /// LRU sıra — dokunulan oturum sona; eviction front'tan (canlı oturum düşmesin).
+    session_order: Arc<Mutex<VecDeque<String>>>,
+}
+
+fn touch_session_order(order: &mut VecDeque<String>, session_id: &str) {
+    if let Some(pos) = order.iter().position(|s| s == session_id) {
+        order.remove(pos);
+    }
+    order.push_back(session_id.to_string());
+}
+
+fn evict_lru_sessions(
+    sessions: &mut HashMap<String, ClientCtx>,
+    order: &mut VecDeque<String>,
+    keep: &str,
+) {
+    while sessions.len() >= MAX_MCP_SESSIONS && !sessions.contains_key(keep) {
+        let Some(evict) = order.pop_front() else {
+            break;
+        };
+        if evict == keep {
+            order.push_back(evict);
+            break;
+        }
+        sessions.remove(&evict);
+    }
 }
 
 /// Tauri setup'tan spawn edilir.
@@ -64,6 +90,7 @@ pub async fn serve(
     let hub = Hub {
         server: Arc::new(Mutex::new(server)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        session_order: Arc::new(Mutex::new(VecDeque::new())),
     };
     let app = Router::new()
         .route("/mcp", post(mcp_post))
@@ -81,6 +108,7 @@ pub fn router_from_server(server: McpServer) -> Router {
     let hub = Hub {
         server: Arc::new(Mutex::new(server)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        session_order: Arc::new(Mutex::new(VecDeque::new())),
     };
     Router::new()
         .route("/mcp", post(mcp_post))
@@ -115,21 +143,17 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
 
     let mut client = {
         let mut sessions = hub.sessions.lock().await;
-        // Üst sınır — en eski oturumları düşür (FIFO yaklaşık: HashMap sırası).
-        while sessions.len() >= MAX_MCP_SESSIONS && !sessions.contains_key(&session_id) {
-            if let Some(evict) = sessions.keys().next().cloned() {
-                sessions.remove(&evict);
-            } else {
-                break;
-            }
-        }
-        sessions
+        let mut order = hub.session_order.lock().await;
+        evict_lru_sessions(&mut sessions, &mut order, &session_id);
+        let entry = sessions
             .entry(session_id.clone())
             .or_insert_with(|| ClientCtx {
                 session_id: session_id.clone(),
                 ..ClientCtx::default()
             })
-            .clone()
+            .clone();
+        touch_session_order(&mut order, &session_id);
+        entry
     };
     client.session_id = session_id.clone();
 
@@ -149,7 +173,9 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
 
     {
         let mut sessions = hub.sessions.lock().await;
+        let mut order = hub.session_order.lock().await;
         sessions.insert(session_id.clone(), client);
+        touch_session_order(&mut order, &session_id);
     }
 
     let session_header = (
@@ -206,7 +232,6 @@ async fn sse_ready(State(hub): State<Hub>) -> impl IntoResponse {
 mod tests {
     use super::*;
     use crate::bridge::wait_clock::{ManualWaitClock, WaitClock};
-    use crate::models::AgentSession;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -217,13 +242,30 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
-        // Kısa bind oturması.
         tokio::time::sleep(Duration::from_millis(20)).await;
         format!("http://{addr}")
     }
 
+    async fn mcp_post_json(
+        http: &reqwest::Client,
+        base: &str,
+        session: &str,
+        client_name: &str,
+        body: Value,
+    ) -> reqwest::Response {
+        http.post(format!("{base}/mcp"))
+            .header("content-type", "application/json")
+            .header("mcp-session-id", session)
+            .header("x-lounge-client-name", client_name)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Üretim yolu: worker initialize → agent_sessions bağlanır → yield (elle upsert yok).
     #[tokio::test]
-    async fn concurrent_call_agent_allows_yield_health_and_cancel() {
+    async fn concurrent_call_agent_yield_via_initialize_binding() {
         let store = ExperienceStore::memory().unwrap();
         let clock = Arc::new(ManualWaitClock::new());
         let server = McpServer::new(store.clone(), "nats://127.0.0.1:9")
@@ -234,6 +276,23 @@ mod tests {
         let http = reqwest::Client::new();
 
         let caller = "caller-sess-http-1";
+        let worker = "worker-http-1";
+
+        // Worker üretim bağlama: initialize (clientInfo.name=worker).
+        let init = mcp_post_json(
+            &http,
+            &base,
+            worker,
+            "worker",
+            serde_json::json!({
+                "jsonrpc":"2.0","id":0,"method":"initialize",
+                "params":{"protocolVersion":"2025-03-26","capabilities":{},
+                    "clientInfo":{"name":"worker","version":"1"}}
+            }),
+        )
+        .await;
+        assert!(init.status().is_success());
+
         let call_body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -248,7 +307,6 @@ mod tests {
                 }
             }
         });
-
         let base_call = base.clone();
         let http_call = http.clone();
         let call_fut = tokio::spawn(async move {
@@ -279,69 +337,112 @@ mod tests {
         }
         let task_id = task_id.expect("call_agent admit etmeli");
 
-        let mut sess = AgentSession::new("p", "worker", "worker", "/tmp", "test");
-        sess.id = "worker-http-1".into();
-        store.upsert_session(&sess).unwrap();
-
-        // call_agent sürerken health yanıt vermeli (kilit tutulmuyor).
         let health = http.get(format!("{base}/health")).send().await.unwrap();
         assert!(health.status().is_success());
-        assert!(health.json::<Value>().await.unwrap()["ok"]
-            .as_bool()
-            .unwrap());
 
-        // Eşzamanlı yield
-        let yield_res = http
-            .post(format!("{base}/mcp"))
-            .header("content-type", "application/json")
-            .header("mcp-session-id", "worker-http-1")
-            .header("x-lounge-client-name", "worker")
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "lounge_yield_result",
-                    "arguments": {
-                        "task_id": task_id,
-                        "status": "completed",
-                        "output": {"ok": true}
-                    }
-                }
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert!(yield_res.status().is_success());
+        let yield_res = mcp_post_json(
+            &http,
+            &base,
+            worker,
+            "worker",
+            serde_json::json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"lounge_yield_result","arguments":{
+                    "task_id": task_id, "status":"completed", "output":{"ok":true}
+                }}
+            }),
+        )
+        .await;
         let yield_json: Value = yield_res.json().await.unwrap();
         assert_ne!(yield_json["result"]["isError"], true, "{yield_json}");
 
-        // cancelled bildirimi in_flight'ta kayıt bulabilmeli (kilit dışı).
-        let cancel_res = http
-            .post(format!("{base}/mcp"))
-            .header("content-type", "application/json")
-            .header("mcp-session-id", caller)
-            .header("x-lounge-client-name", "cursor")
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/cancelled",
-                "params": {"requestId": 1, "reason": "deadline exceeded"}
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert!(cancel_res.status() == StatusCode::NO_CONTENT || cancel_res.status().is_success());
-
         clock.advance(Duration::from_millis(100));
         let call_res = call_fut.await.unwrap();
-        assert!(call_res.status().is_success());
         let call_json: Value = call_res.json().await.unwrap();
         let text = call_json["result"]["content"][0]["text"]
             .as_str()
             .unwrap_or("");
         assert!(
-            text.contains("completed") || text.contains("backgrounded"),
-            "concurrent call_agent outcome: {call_json}"
+            text.contains("\"status\":\"completed\"") || text.contains("\"status\": \"completed\""),
+            "exact completed expected: {call_json}"
+        );
+        assert!(
+            text.contains("ok") || text.contains("result"),
+            "{call_json}"
+        );
+    }
+
+    /// Uçuştayken context canceled → cancelled (not completed/backgrounded).
+    #[tokio::test]
+    async fn in_flight_context_canceled_via_http() {
+        let store = ExperienceStore::memory().unwrap();
+        let clock = Arc::new(ManualWaitClock::new());
+        let server = McpServer::new(store.clone(), "nats://127.0.0.1:9")
+            .with_skip_nats(true)
+            .with_orchestrator_clock(clock.clone() as Arc<dyn WaitClock>);
+        server.timeouts().set_global_override_secs(Some(30));
+        let base = start_test_server(server).await;
+        let http = reqwest::Client::new();
+        let caller = "caller-cancel-1";
+
+        let call_body = serde_json::json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"lounge_call_agent","arguments":{
+                "target_agent":"worker","task":"x","project_id":"p","wait":true
+            }}
+        });
+        let base_c = base.clone();
+        let http_c = http.clone();
+        let call_fut = tokio::spawn(async move {
+            http_c
+                .post(format!("{base_c}/mcp"))
+                .header("content-type", "application/json")
+                .header("mcp-session-id", caller)
+                .header("x-lounge-client-name", "cursor")
+                .json(&call_body)
+                .send()
+                .await
+                .unwrap()
+        });
+
+        for _ in 0..80 {
+            clock.advance(Duration::from_millis(5));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let n: i64 = {
+                let conn = store.conn.lock().unwrap();
+                conn.query_row("SELECT COUNT(*) FROM a2a_tasks", [], |r| r.get(0))
+                    .unwrap_or(0)
+            };
+            if n > 0 {
+                break;
+            }
+        }
+
+        let cancel_res = mcp_post_json(
+            &http,
+            &base,
+            caller,
+            "cursor",
+            serde_json::json!({
+                "jsonrpc":"2.0","method":"notifications/cancelled",
+                "params":{"requestId":7,"reason":"context canceled"}
+            }),
+        )
+        .await;
+        assert!(cancel_res.status() == StatusCode::NO_CONTENT || cancel_res.status().is_success());
+
+        clock.advance(Duration::from_millis(100));
+        let call_json: Value = call_fut.await.unwrap().json().await.unwrap();
+        let text = call_json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            text.contains("cancelled") || text.contains("canceled"),
+            "expected cancelled, got {call_json}"
+        );
+        assert!(
+            !text.contains("\"status\":\"completed\""),
+            "must not complete after user stop: {call_json}"
         );
     }
 

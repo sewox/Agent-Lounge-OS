@@ -92,7 +92,7 @@ Claude yalnızca stdio başlatır; `lounge-mcp` Kernel HTTP’ye köprü kurar.
 | `lounge_record_decision` | aynı | ADR alias |
 | `lounge_call_agent` | `mcp_call_agent.schema.json` | Mod A→B; `timeout_limit` içinde sonuç veya `backgrounded` |
 | `lounge_wait_task` | `mcp_wait_task.schema.json` | Aynı oturum long-poll; eşik aşımında `still_running` |
-| `lounge_yield_result` | `mcp_yield_result.schema.json` | `target_agent` bağlı (veya claim sahibi) worker oturumu; terminal görev ezilemez |
+| `lounge_yield_result` | `mcp_yield_result.schema.json` | `target_agent` = normalize(`clientInfo.name`) ile `agent_sessions` bağlı oturum (initialize kaydı); terminal ezilemez |
 | `lounge_dispatch_task` | `mcp_dispatch_task.schema.json` | Fire-and-forget (yeni A2A altyapısı); sonuç → `lounge_wait_task` |
 | `lounge_ask_agent` | aynı | Dispatch alias |
 | `lounge_status` | `mcp_status.schema.json` | Bağlı ajanlar + sağlık + `timeout_limit_secs` |
@@ -117,7 +117,7 @@ Override: Settings `mcp.timeout_secs` veya env `LOUNGE_MCP_TIMEOUT_SECS` (global
 
 | reason | Davranış |
 |---|---|
-| `context canceled` (kullanıcı Stop) | Görev `CANCELLED`; NATS `lounge.control.stop` |
+| `context canceled` (kullanıcı Stop) | Görev `CANCELLED`; NATS `lounge.control.stop` → dispatcher tüketir ve iptal eder |
 | `context deadline exceeded` | Görev arka planda sürer (`WAIT_TIMEOUT_REACHED` / backgrounded) |
 
 ### Sonuç teslimi (deadline sonrası, bağlantı açık)
