@@ -148,9 +148,36 @@ jobs:
       - name: Playwright config coverage (no silent grep/testIgnore)
         run: bash scripts/qa/gates/playwright-config-coverage.sh
 
+  # Independent MCP client-matrix probe (tools/mcp-probe). No product code.
+  # Cross-platform; required gate — no continue-on-error / skip labels.
+  mcp-probe:
+    name: MCP probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Unit + integration tests
+        working-directory: tools/mcp-probe
+        shell: bash
+        run: npm test
+
+      - name: Short run-matrix smoke
+        working-directory: tools/mcp-probe
+        shell: bash
+        run: MCP_PROBE_DELAYS=0.05,0.1 npm run run-matrix
+
   ci:
     name: CI
-    needs: [frontend, rust, workers, static-gates]
+    needs: [frontend, rust, workers, static-gates, mcp-probe]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -160,3 +187,4 @@ jobs:
           test "${{ needs.rust.result }}" = "success"
           test "${{ needs.workers.result }}" = "success"
           test "${{ needs.static-gates.result }}" = "success"
+          test "${{ needs.mcp-probe.result }}" = "success"
