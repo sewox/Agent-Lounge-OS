@@ -1687,7 +1687,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_client_contexts_do_not_clobber_source_agent() {
         let store = ExperienceStore::memory().expect("db");
-        let mut server = McpServer::new(store, "nats://127.0.0.1:9");
+        let server = McpServer::new(store, "nats://127.0.0.1:9");
 
         let mut cursor = ClientCtx {
             name: "Cursor".into(),
