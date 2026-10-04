@@ -147,6 +147,8 @@ impl WorkflowEngine {
         task.root_id = Some(completed.effective_root_id().to_string());
         task.hop_count = completed.hop_count.saturating_add(1);
         task.session_id = completed.session_id.clone();
+        // Kernel içi workflow zinciri — NATS geçidinde trusted kalır.
+        task.source_verified = true;
         task.repo_path = completed.repo_path.clone();
         task.ast_refs = completed.ast_refs.clone();
         task.priority = completed.priority.clone();

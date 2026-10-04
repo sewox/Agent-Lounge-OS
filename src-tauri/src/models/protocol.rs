@@ -809,6 +809,34 @@ mod tests {
     }
 
     #[test]
+    fn dual_alias_same_json_is_rejected_by_serde() {
+        // Aynı JSON'da hem alias hem kanonik ad → serde duplicate field hatası (fail-closed).
+        let raw = serde_json::json!({
+            "id": "33333333-3333-4333-8333-333333333333",
+            "type": "task",
+            "source_agent": "cursor",
+            "project_id": "p",
+            "summary": "dual",
+            "created_at": "2026-09-18T12:00:00.000Z",
+            "parent_id": "from-alias",
+            "parent_task_id": "from-canonical",
+            "root_task_id": "root-alias",
+            "root_id": "root-canonical"
+        });
+        let err = serde_json::from_value::<LoungeTask>(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "unexpected: {err}"
+        );
+        // Çıktıda yalnızca kanonik adlar.
+        let task = LoungeTask::new("a", "p", "out");
+        let out = serde_json::to_value(&task).unwrap();
+        assert!(out.get("root_id").is_some());
+        assert!(out.get("root_task_id").is_none());
+        assert!(out.get("parent_id").is_none());
+    }
+
+    #[test]
     fn agent_session_roundtrip() {
         let session = AgentSession::new("proj", "cursor", "gui", "/tmp/ws", "mcp_meta");
         let json = serde_json::to_value(&session).unwrap();

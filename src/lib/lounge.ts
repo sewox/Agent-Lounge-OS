@@ -1646,6 +1646,7 @@ export type ApprovalKind =
   | "quota_abort"
   | "security_critical"
   | "security_risky"
+  | "source_unverified"
   | "destructive";
 
 export type ApprovalRequest = {
@@ -1710,6 +1711,10 @@ export function formatApprovalClearReason(reason: string): string {
     default:
       return `Onay temizlendi (${reason})`;
   }
+}
+
+export function isSourceUnverifiedApproval(kind: ApprovalKind | string | undefined): boolean {
+  return kind === "source_unverified";
 }
 
 export function isSecurityApproval(kind: ApprovalKind | string | undefined): boolean {

@@ -13,6 +13,7 @@ import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 import {
   isSecurityApproval,
   isQuotaApproval,
+  isSourceUnverifiedApproval,
   approvalRemainingSecs,
   SECURITY_OVERLAY_PROMPT,
   QUOTA_ALERT_PROMPT,
@@ -625,7 +626,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
               <span className="font-semibold tracking-label text-error-dim uppercase">
-                {ta("routingApproval")}
+                {isSourceUnverifiedApproval(approval.kind)
+                  ? ta("sourceUnverified")
+                  : ta("routingApproval")}
                 {countdownLabel} ·{" "}
               </span>
               <span className="font-mono">

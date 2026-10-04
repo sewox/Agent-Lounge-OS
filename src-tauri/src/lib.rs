@@ -282,6 +282,8 @@ pub fn run_with_start_route(start_route: &'static str) {
                         log::error!("worker_registry durdu: {err}");
                     }
                 });
+                // A2A zombi tarama — EXECUTING/DISPATCHED sessizliği → NEEDS_HUMAN.
+                dispatcher.spawn_silence_watchdog();
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
                 }

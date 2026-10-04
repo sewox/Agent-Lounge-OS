@@ -5,6 +5,7 @@
   "continueLocal": "Yerelde devam et",
   "switchLocal": "Yerel modele geç",
   "routingApproval": "Yönlendirme onayı",
+  "sourceUnverified": "Doğrulanmamış kaynak · ONAY_BEKLİYOR",
   "securityPending": "Güvenlik · {{level}} · ONAY_BEKLİYOR",
   "quotaBlocked": "Kota uyarısı · KOTA_BLOKE",
   "noPending": "Bekleyen onay yok",

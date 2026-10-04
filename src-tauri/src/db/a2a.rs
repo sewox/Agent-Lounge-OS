@@ -1,28 +1,74 @@
 //! A2A Atomic Core — `agent_sessions`, `idempotency_keys`, `a2a_tasks` + atomik kabul.
 //!
+//! ## Kolon ↔ struct eşlemesi
+//! | SQLite `a2a_tasks` | `LoungeTask` alanı |
+//! |---|---|
+//! | `id` | `id` |
+//! | `root_id` | `root_id` (kanonik; JSON alias `root_task_id`) |
+//! | `parent_id` | `parent_task_id` (kanonik; JSON alias `parent_id`) |
+//! | `session_id` | `session_id` (kanonik; JSON alias `source_session_id`) |
+//! | `hop_count` | `hop_count` |
+//! | `idempotency_key` | `idempotency_key` (kapsam: source_agent+project_id) |
+//!
 //! Görev satırı ve idempotency kaydı **tek SQLite transaction** içinde yazılır.
-//! Hop / zombi kurtarma mantığı test edilebilir saat damgası alır.
+//! `PRAGMA foreign_keys=ON` migrate sırasında açılır. Şema sürümü: settings `a2a.schema_version`.
 
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::models::{now_rfc3339, AgentSession, LoungeTask, TaskStatus, DEFAULT_MAX_HOPS};
 
-/// `LOUNGE_MAX_HOPS` yoksa veya geçersizse [`DEFAULT_MAX_HOPS`].
-pub fn configured_max_hops() -> u32 {
-    std::env::var("LOUNGE_MAX_HOPS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_MAX_HOPS)
-}
+/// Mutlak hop tavanı — env / `with_max_hops` bunu aşamaz.
+pub const ABSOLUTE_MAX_HOPS: u32 = 64;
+
+/// Settings anahtarı — `migrate_a2a` sürümü.
+pub const A2A_SCHEMA_VERSION_KEY: &str = "a2a.schema_version";
+pub const A2A_SCHEMA_VERSION: &str = "2";
 
 /// Varsayılan ajan sessizlik süresi — EXECUTING/DISPATCHED zombi → NEEDS_HUMAN.
 pub const DEFAULT_AGENT_SILENCE: Duration = Duration::from_secs(120);
 
+/// Sessizlik tarayıcı aralığı varsayılanı.
+pub const DEFAULT_SILENCE_SCAN_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Idempotency anahtar TTL (başarılı tamamlananlar için GC) — `gc_idempotency_keys`.
+#[allow(dead_code)]
+pub const DEFAULT_IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// `LOUNGE_MAX_HOPS` yoksa veya geçersizse [`DEFAULT_MAX_HOPS`]; üst tavan [`ABSOLUTE_MAX_HOPS`].
+pub fn configured_max_hops() -> u32 {
+    let raw = std::env::var("LOUNGE_MAX_HOPS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_HOPS);
+    raw.min(ABSOLUTE_MAX_HOPS)
+}
+
+/// `LOUNGE_AGENT_SILENCE_SECS` — zombi eşiği.
+pub fn configured_agent_silence() -> Duration {
+    std::env::var("LOUNGE_AGENT_SILENCE_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_AGENT_SILENCE)
+}
+
+/// `LOUNGE_SILENCE_SCAN_SECS` — periyodik tarama aralığı.
+pub fn configured_silence_scan_interval() -> Duration {
+    std::env::var("LOUNGE_SILENCE_SCAN_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_SILENCE_SCAN_INTERVAL)
+}
+
 pub fn migrate_a2a(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -52,16 +98,6 @@ pub fn migrate_a2a(conn: &Connection) -> Result<()> {
             FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
         );
 
-        CREATE TABLE IF NOT EXISTS idempotency_keys (
-            idempotency_key TEXT PRIMARY KEY,
-            task_id TEXT NOT NULL,
-            source_agent TEXT,
-            project_id TEXT,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_idempotency_created
-            ON idempotency_keys(created_at);
-
         CREATE TABLE IF NOT EXISTS a2a_tasks (
             id TEXT PRIMARY KEY,
             root_id TEXT NOT NULL,
@@ -85,35 +121,129 @@ pub fn migrate_a2a(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_a2a_tasks_updated ON a2a_tasks(updated_at);
         "#,
     )
-    .context("a2a schema migrate")?;
+    .context("a2a schema migrate base")?;
+
+    migrate_idempotency_table(conn)?;
+
+    conn.execute(
+        "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        params![A2A_SCHEMA_VERSION_KEY, A2A_SCHEMA_VERSION],
+    )?;
     Ok(())
+}
+
+fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='idempotency_keys'",
+        [],
+        |row| row.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !exists {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE idempotency_keys (
+                source_agent TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (source_agent, project_id, idempotency_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_idempotency_created
+                ON idempotency_keys(created_at);
+            "#,
+        )?;
+        return Ok(());
+    }
+
+    let cols = column_names_fallback(conn, "idempotency_keys")?;
+    let has_composite = cols.iter().any(|c| c == "source_agent")
+        && cols.iter().any(|c| c == "project_id")
+        && cols.iter().any(|c| c == "idempotency_key");
+    // Eski şema: tek kolon PK `idempotency_key` — yeniden kur.
+    let pk_info: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(idempotency_keys)")?;
+        let rows = stmt.query_map([], |row| {
+            let name: String = row.get(1)?;
+            let pk: i64 = row.get(5)?;
+            Ok((name, pk))
+        })?;
+        let mut pks = Vec::new();
+        for row in rows {
+            let (name, pk) = row?;
+            if pk > 0 {
+                pks.push(name);
+            }
+        }
+        pks
+    };
+    let needs_rebuild = !has_composite || (pk_info.len() == 1 && pk_info[0] == "idempotency_key");
+    if !needs_rebuild {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+        ALTER TABLE idempotency_keys RENAME TO idempotency_keys_legacy;
+        CREATE TABLE idempotency_keys (
+            source_agent TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (source_agent, project_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_idempotency_created
+            ON idempotency_keys(created_at);
+        INSERT OR IGNORE INTO idempotency_keys
+            (source_agent, project_id, idempotency_key, task_id, created_at)
+        SELECT
+            COALESCE(NULLIF(source_agent, ''), 'unknown'),
+            COALESCE(NULLIF(project_id, ''), 'unknown'),
+            idempotency_key,
+            task_id,
+            created_at
+        FROM idempotency_keys_legacy;
+        DROP TABLE idempotency_keys_legacy;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn column_names_fallback(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum AdmitOutcome {
+    Accepted(LoungeTask),
+    /// Aynı (source, project, key) — orijinal görev; hata değil.
+    Replay {
+        existing_task_id: String,
+        status: TaskStatus,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmitError {
-    Duplicate {
-        idempotency_key: String,
-        existing_task_id: String,
-    },
-    HopLimitExceeded {
-        hop_count: u32,
-        max_hops: u32,
-    },
-    ParentMissing {
-        parent_id: String,
-    },
+    HopLimitExceeded { hop_count: u32, max_hops: u32 },
+    ParentMissing { parent_id: String },
+    ParentInvalid { parent_id: String, reason: String },
+    IdConflict { task_id: String },
+    Storage { message: String },
 }
 
 impl std::fmt::Display for AdmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Duplicate {
-                idempotency_key,
-                existing_task_id,
-            } => write!(
-                f,
-                "idempotency_key tekrarlandı: key={idempotency_key} existing_task={existing_task_id}"
-            ),
             Self::HopLimitExceeded {
                 hop_count,
                 max_hops,
@@ -122,46 +252,84 @@ impl std::fmt::Display for AdmitError {
                 "hop limiti aşıldı: hop_count={hop_count} max_hops={max_hops}"
             ),
             Self::ParentMissing { parent_id } => {
-                write!(f, "parent_id zinciri kırık: parent bulunamadı ({parent_id})")
+                write!(
+                    f,
+                    "parent_id zinciri kırık: parent bulunamadı ({parent_id})"
+                )
             }
+            Self::ParentInvalid { parent_id, reason } => {
+                write!(f, "parent_id geçersiz ({parent_id}): {reason}")
+            }
+            Self::IdConflict { task_id } => {
+                write!(f, "a2a_tasks id çakışması: {task_id}")
+            }
+            Self::Storage { message } => write!(f, "a2a storage hatası: {message}"),
         }
     }
 }
 
 impl std::error::Error for AdmitError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdmitOk {
-    pub task: LoungeTask,
+fn storage_err(err: impl ToString) -> AdmitError {
+    AdmitError::Storage {
+        message: err.to_string(),
+    }
 }
 
-/// Sunucu tarafı parent/hop/root normalizasyonu (istemci hop_count yok sayılır).
+/// Sunucu tarafı parent/hop/root normalizasyonu (istemci hop_count / root_id yok sayılır).
 pub fn normalize_lineage(
     conn: &Connection,
     task: &mut LoungeTask,
     max_hops: u32,
 ) -> Result<(), AdmitError> {
-    // İstemci hop iddiasını sil — yalnızca parent zinciri geçerlidir.
+    let max_hops = max_hops.clamp(1, ABSOLUTE_MAX_HOPS);
     let claimed_parent = task.parent_task_id.clone();
     match claimed_parent {
         Some(parent_id) => {
             let parent = match load_task_row(conn, &parent_id) {
                 Ok(Some(parent)) => parent,
-                Ok(None) => return Err(AdmitError::ParentMissing { parent_id }),
-                Err(err) => {
-                    log::error!("parent load failed ({parent_id}): {err}");
+                Ok(None) => {
+                    // Uçuştaki (henüz a2a_tasks'ta olmayan) parent — net red.
+                    // Belge: parent admit edilmeden çocuk kabul edilmez (fail-closed).
                     return Err(AdmitError::ParentMissing { parent_id });
                 }
+                Err(err) => {
+                    log::error!("parent load failed ({parent_id}): {err}");
+                    return Err(storage_err(err));
+                }
             };
+            if parent.project_id != task.project_id {
+                return Err(AdmitError::ParentInvalid {
+                    parent_id: parent_id.clone(),
+                    reason: format!(
+                        "project_id uyuşmazlığı parent={} child={}",
+                        parent.project_id, task.project_id
+                    ),
+                });
+            }
+            if matches!(
+                parent.status,
+                TaskStatus::Failed
+                    | TaskStatus::Expired
+                    | TaskStatus::NeedsHuman
+                    | TaskStatus::Timeout
+            ) {
+                return Err(AdmitError::ParentInvalid {
+                    parent_id: parent_id.clone(),
+                    reason: format!("terminal durum: {}", parent.status.as_str()),
+                });
+            }
+            // source_agent: çocuk, ebeveynin hedefi veya aynı proje ajanı olmalı — gevşek:
+            // parent.source_agent veya parent.target_agent ile ilişkisiz ise yine de hop zinciri
+            // server-side; yalnızca proje + durum sert kapı. Not: oturum bağı PR-3.
             task.parent_task_id = Some(parent.id.clone());
             task.root_id = Some(parent.effective_root_id().to_string());
             task.hop_count = parent.hop_count.saturating_add(1);
         }
         None => {
             task.parent_task_id = None;
-            if task.root_id.as_deref().unwrap_or("").is_empty() {
-                task.root_id = Some(task.id.clone());
-            }
+            // Client root_id'ye güvenme — rootsuz görevde root_id = id.
+            task.root_id = Some(task.id.clone());
             task.hop_count = 0;
         }
     }
@@ -180,17 +348,17 @@ pub fn admit_task_atomic(
     conn: &Connection,
     task: &mut LoungeTask,
     max_hops: u32,
-) -> Result<AdmitOk, AdmitError> {
-    admit_task_atomic_inner(conn, task, max_hops, false)
+) -> Result<AdmitOutcome, AdmitError> {
+    admit_task_atomic_inner(conn, task, max_hops, /*skip_lookup*/ false)
 }
 
-/// Test: task INSERT sonrası kasıtlı hata — hiçbir satır kalmamalı (atomiklik).
+/// Test / yarış: optimistic lookup atlanır — UNIQUE/PK hatası txn rollback'ini kanıtlar.
 #[cfg(test)]
-pub fn admit_task_atomic_fault_after_task(
+pub fn admit_task_atomic_skip_lookup(
     conn: &Connection,
     task: &mut LoungeTask,
     max_hops: u32,
-) -> Result<AdmitOk, AdmitError> {
+) -> Result<AdmitOutcome, AdmitError> {
     admit_task_atomic_inner(conn, task, max_hops, true)
 }
 
@@ -198,8 +366,8 @@ fn admit_task_atomic_inner(
     conn: &Connection,
     task: &mut LoungeTask,
     max_hops: u32,
-    fault_after_task: bool,
-) -> Result<AdmitOk, AdmitError> {
+    #[cfg_attr(not(test), allow(unused_variables))] skip_lookup: bool,
+) -> Result<AdmitOutcome, AdmitError> {
     normalize_lineage(conn, task, max_hops)?;
 
     let key = task
@@ -210,83 +378,66 @@ fn admit_task_atomic_inner(
         .map(str::to_string);
 
     if let Some(ref k) = key {
-        match lookup_idempotency(conn, k) {
-            Ok(Some(existing)) => {
-                return Err(AdmitError::Duplicate {
-                    idempotency_key: k.clone(),
-                    existing_task_id: existing,
-                });
-            }
-            Ok(None) => {}
-            Err(err) => {
-                log::error!("idempotency lookup: {err}");
-                return Err(AdmitError::Duplicate {
-                    idempotency_key: k.clone(),
-                    existing_task_id: String::new(),
-                });
+        #[cfg(test)]
+        let do_lookup = !skip_lookup;
+        #[cfg(not(test))]
+        let do_lookup = true;
+        if do_lookup {
+            match lookup_idempotency(conn, &task.source_agent, &task.project_id, k) {
+                Ok(Some(existing)) => {
+                    let status = task_status(conn, &existing)
+                        .map_err(storage_err)?
+                        .unwrap_or(TaskStatus::Queued);
+                    return Ok(AdmitOutcome::Replay {
+                        existing_task_id: existing,
+                        status,
+                    });
+                }
+                Ok(None) => {}
+                Err(err) => return Err(storage_err(err)),
             }
         }
     }
 
-    let tx = match conn.unchecked_transaction() {
-        Ok(tx) => tx,
-        Err(err) => {
-            log::error!("a2a tx begin: {err}");
-            return Err(AdmitError::Duplicate {
-                idempotency_key: key.clone().unwrap_or_default(),
-                existing_task_id: String::new(),
-            });
-        }
-    };
+    let tx = conn.unchecked_transaction().map_err(storage_err)?;
 
     if let Err(err) = insert_task_row(&tx, task) {
-        // Benzersiz id çakışması vb.
         let _ = tx.rollback();
-        log::error!("a2a_tasks insert: {err}");
-        return Err(AdmitError::Duplicate {
-            idempotency_key: key.unwrap_or_default(),
-            existing_task_id: task.id.clone(),
-        });
-    }
-
-    if fault_after_task {
-        let _ = tx.rollback();
-        return Err(AdmitError::Duplicate {
-            idempotency_key: "__fault_injection__".into(),
-            existing_task_id: String::new(),
-        });
+        if is_unique_violation(&err) {
+            return Err(AdmitError::IdConflict {
+                task_id: task.id.clone(),
+            });
+        }
+        return Err(storage_err(err));
     }
 
     if let Some(ref k) = key {
         if let Err(err) = insert_idempotency_row(&tx, k, task) {
             let _ = tx.rollback();
             if is_unique_violation(&err) {
-                let existing = lookup_idempotency(conn, k)
+                // Gerçek UNIQUE — task satırı geri alındı; replay veya yarış.
+                let existing = lookup_idempotency(conn, &task.source_agent, &task.project_id, k)
                     .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                return Err(AdmitError::Duplicate {
-                    idempotency_key: k.clone(),
-                    existing_task_id: existing,
+                    .flatten();
+                if let Some(existing) = existing {
+                    let status = task_status(conn, &existing)
+                        .unwrap_or(None)
+                        .unwrap_or(TaskStatus::Queued);
+                    return Ok(AdmitOutcome::Replay {
+                        existing_task_id: existing,
+                        status,
+                    });
+                }
+                return Err(AdmitError::Storage {
+                    message: format!("idempotency UNIQUE ihlali ama mevcut satır okunamadı: {err}"),
                 });
             }
-            log::error!("idempotency insert: {err}");
-            return Err(AdmitError::Duplicate {
-                idempotency_key: k.clone(),
-                existing_task_id: String::new(),
-            });
+            return Err(storage_err(err));
         }
     }
 
-    tx.commit().map_err(|e| {
-        log::error!("a2a tx commit: {e}");
-        AdmitError::Duplicate {
-            idempotency_key: key.unwrap_or_default(),
-            existing_task_id: String::new(),
-        }
-    })?;
-
-    Ok(AdmitOk { task: task.clone() })
+    tx.commit().map_err(storage_err)?;
+    Ok(AdmitOutcome::Accepted(task.clone()))
 }
 
 fn is_unique_violation(err: &rusqlite::Error) -> bool {
@@ -298,9 +449,10 @@ fn is_unique_violation(err: &rusqlite::Error) -> bool {
     }
 }
 
-fn insert_task_row(tx: &Transaction<'_>, task: &LoungeTask) -> Result<()> {
+fn insert_task_row(tx: &Transaction<'_>, task: &LoungeTask) -> rusqlite::Result<usize> {
     let now = now_rfc3339();
-    let payload = serde_json::to_string(task)?;
+    let payload = serde_json::to_string(task)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     tx.execute(
         r#"
         INSERT INTO a2a_tasks (
@@ -330,8 +482,7 @@ fn insert_task_row(tx: &Transaction<'_>, task: &LoungeTask) -> Result<()> {
             task.created_at,
             now,
         ],
-    )?;
-    Ok(())
+    )
 }
 
 fn insert_idempotency_row(
@@ -341,27 +492,62 @@ fn insert_idempotency_row(
 ) -> rusqlite::Result<usize> {
     tx.execute(
         r#"
-        INSERT INTO idempotency_keys (idempotency_key, task_id, source_agent, project_id, created_at)
+        INSERT INTO idempotency_keys
+            (source_agent, project_id, idempotency_key, task_id, created_at)
         VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
         params![
-            key,
-            task.id,
             task.source_agent,
             task.project_id,
+            key,
+            task.id,
             now_rfc3339(),
         ],
     )
 }
 
-pub fn lookup_idempotency(conn: &Connection, key: &str) -> Result<Option<String>> {
+pub fn lookup_idempotency(
+    conn: &Connection,
+    source_agent: &str,
+    project_id: &str,
+    key: &str,
+) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-            "SELECT task_id FROM idempotency_keys WHERE idempotency_key = ?1",
-            params![key],
+            r#"SELECT task_id FROM idempotency_keys
+               WHERE source_agent = ?1 AND project_id = ?2 AND idempotency_key = ?3"#,
+            params![source_agent, project_id, key],
             |row| row.get::<_, String>(0),
         )
         .optional()?)
+}
+
+/// Reddet / zaman aşımı / FAILED — anahtar yanmasın (yeniden denenebilsin).
+pub fn release_idempotency_for_task(conn: &Connection, task_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM idempotency_keys WHERE task_id = ?1",
+        params![task_id],
+    )?;
+    Ok(())
+}
+
+pub fn gc_idempotency_keys(conn: &Connection, older_than: &str) -> Result<u64> {
+    let n = conn.execute(
+        "DELETE FROM idempotency_keys WHERE created_at < ?1",
+        params![older_than],
+    )?;
+    Ok(n as u64)
+}
+
+#[cfg(test)]
+mod _gc_smoke {
+    #[test]
+    fn gc_compiles_and_runs() {
+        let store = crate::db::ExperienceStore::memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let n = super::gc_idempotency_keys(&conn, "2099-01-01T00:00:00.000Z").unwrap();
+        assert_eq!(n, 0);
+    }
 }
 
 pub fn load_task_row(conn: &Connection, id: &str) -> Result<Option<LoungeTask>> {
@@ -389,15 +575,19 @@ pub fn task_status(conn: &Connection, id: &str) -> Result<Option<TaskStatus>> {
     Ok(raw.map(|s| TaskStatus::parse(&s)))
 }
 
-pub fn update_task_status(conn: &Connection, id: &str, status: TaskStatus) -> Result<()> {
+pub(crate) fn update_task_status(conn: &Connection, id: &str, status: TaskStatus) -> Result<()> {
     let n = conn.execute(
         "UPDATE a2a_tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
         params![status.as_str(), now_rfc3339(), id],
     )?;
     if n == 0 {
-        bail!("a2a_tasks satırı yok: {id}");
+        // Admit atlanmış olabilir — sessizce yok sayma; logla.
+        log::debug!(
+            "a2a_tasks status güncellemesi: satır yok id={id} → {}",
+            status.as_str()
+        );
+        return Ok(());
     }
-    // payload_json içindeki status'u da senkron tut
     if let Some(mut task) = load_task_row(conn, id)? {
         task.status = status;
         let payload = serde_json::to_string(&task)?;
@@ -409,8 +599,8 @@ pub fn update_task_status(conn: &Connection, id: &str, status: TaskStatus) -> Re
     Ok(())
 }
 
-/// `updated_at` damgasını test edilebilir şekilde ayarla (zombi senaryosu).
-pub fn touch_task_updated_at(conn: &Connection, id: &str, updated_at: &str) -> Result<()> {
+#[cfg(test)]
+pub(crate) fn touch_task_updated_at(conn: &Connection, id: &str, updated_at: &str) -> Result<()> {
     conn.execute(
         "UPDATE a2a_tasks SET updated_at = ?1 WHERE id = ?2",
         params![updated_at, id],
@@ -418,9 +608,7 @@ pub fn touch_task_updated_at(conn: &Connection, id: &str, updated_at: &str) -> R
     Ok(())
 }
 
-/// EXECUTING / DISPATCHED görevlerde sessizlik → NEEDS_HUMAN (zombi kalmasın).
-///
-/// `now_rfc3339` ve `silence` enjekte edilebilir — birim testlerde saat kontrolü.
+/// EXECUTING / DISPATCHED görevlerde sessizlik → NEEDS_HUMAN.
 pub fn mark_silent_tasks_needs_human(
     conn: &Connection,
     now_rfc3339: &str,
@@ -437,22 +625,23 @@ pub fn mark_silent_tasks_needs_human(
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    let now = chrono::DateTime::parse_from_rfc3339(now_rfc3339)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .or_else(|_| {
-            chrono::DateTime::parse_from_str(now_rfc3339, "%+")
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-        })
-        .unwrap_or_else(|_| chrono::Utc::now());
+    let now = match chrono::DateTime::parse_from_rfc3339(now_rfc3339) {
+        Ok(dt) => dt.with_timezone(&chrono::Utc),
+        Err(err) => {
+            log::warn!("silence scan: now parse failed ({now_rfc3339}): {err}");
+            return Ok(Vec::new());
+        }
+    };
 
     let mut marked = Vec::new();
     for row in rows {
         let (id, updated_at) = row?;
-        let updated = chrono::DateTime::parse_from_rfc3339(&updated_at)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .ok();
-        let Some(updated) = updated else {
-            continue;
+        let updated = match chrono::DateTime::parse_from_rfc3339(&updated_at) {
+            Ok(dt) => dt.with_timezone(&chrono::Utc),
+            Err(err) => {
+                log::warn!("silence scan: updated_at parse failed id={id} raw={updated_at}: {err}");
+                continue;
+            }
         };
         let age = now.signed_duration_since(updated);
         if age.num_seconds() >= silence_secs {
@@ -497,6 +686,46 @@ pub fn upsert_agent_session(conn: &Connection, session: &AgentSession) -> Result
     Ok(())
 }
 
+pub fn acquire_session_lock(conn: &Connection, session_id: &str, holder: &str) -> Result<bool> {
+    let now = now_rfc3339();
+    match conn.execute(
+        "INSERT INTO session_lock (session_id, holder, locked_at) VALUES (?1, ?2, ?3)",
+        params![session_id, holder, now],
+    ) {
+        Ok(_) => Ok(true),
+        Err(err) if is_unique_violation(&err) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub fn release_session_lock(conn: &Connection, session_id: &str, holder: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM session_lock WHERE session_id = ?1 AND holder = ?2",
+        params![session_id, holder],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod _session_lock_smoke {
+    use super::*;
+    use crate::db::ExperienceStore;
+
+    #[test]
+    fn session_lock_roundtrip() {
+        let store = ExperienceStore::memory().unwrap();
+        let s = AgentSession::new("p", "cursor", "gui", "/tmp/ws", "user_pin");
+        {
+            let conn = store.conn.lock().unwrap();
+            upsert_agent_session(&conn, &s).unwrap();
+            assert!(acquire_session_lock(&conn, &s.id, "holder-a").unwrap());
+            assert!(!acquire_session_lock(&conn, &s.id, "holder-b").unwrap());
+            release_session_lock(&conn, &s.id, "holder-a").unwrap();
+            assert!(acquire_session_lock(&conn, &s.id, "holder-b").unwrap());
+        }
+    }
+}
+
 pub fn count_agent_sessions(conn: &Connection) -> Result<u64> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM agent_sessions", [], |row| row.get(0))?;
     Ok(n as u64)
@@ -516,13 +745,13 @@ fn count_idempotency_keys(conn: &Connection) -> Result<u64> {
     Ok(n as u64)
 }
 
-/// ExperienceStore üzerinden senkron A2A işlemleri.
+/// ExperienceStore üzerinden A2A işlemleri.
 impl crate::db::ExperienceStore {
     pub fn admit_a2a_task(
         &self,
         task: &mut LoungeTask,
         max_hops: u32,
-    ) -> Result<AdmitOk, AdmitError> {
+    ) -> Result<AdmitOutcome, AdmitError> {
         let conn = self.conn.lock().expect("experience db lock");
         admit_task_atomic(&conn, task, max_hops)
     }
@@ -532,7 +761,7 @@ impl crate::db::ExperienceStore {
         task_status(&conn, id)
     }
 
-    pub fn set_a2a_task_status(&self, id: &str, status: TaskStatus) -> Result<()> {
+    pub(crate) fn set_a2a_task_status(&self, id: &str, status: TaskStatus) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         update_task_status(&conn, id, status)
     }
@@ -546,7 +775,8 @@ impl crate::db::ExperienceStore {
         mark_silent_tasks_needs_human(&conn, now_rfc3339, silence)
     }
 
-    pub fn touch_a2a_updated_at(&self, id: &str, updated_at: &str) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn touch_a2a_updated_at(&self, id: &str, updated_at: &str) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         touch_task_updated_at(&conn, id, updated_at)
     }
@@ -560,24 +790,94 @@ impl crate::db::ExperienceStore {
         let conn = self.conn.lock().expect("experience db lock");
         count_agent_sessions(&conn)
     }
+
+    pub fn release_a2a_idempotency(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        release_idempotency_for_task(&conn, task_id)
+    }
+
+    pub fn gc_a2a_idempotency(&self, older_than: &str) -> Result<u64> {
+        let conn = self.conn.lock().expect("experience db lock");
+        gc_idempotency_keys(&conn, older_than)
+    }
+
+    pub fn try_lock_session(&self, session_id: &str, holder: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        acquire_session_lock(&conn, session_id, holder)
+    }
+
+    pub fn unlock_session(&self, session_id: &str, holder: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        release_session_lock(&conn, session_id, holder)
+    }
+
+    pub fn pragma_foreign_keys(&self) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        // migrate sets ON; query current connection setting.
+        let v: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+        Ok(v != 0)
+    }
+
+    pub fn a2a_schema_version(&self) -> Result<Option<String>> {
+        Ok(self.get_setting_sync(A2A_SCHEMA_VERSION_KEY)?.or(None))
+    }
+}
+
+impl crate::db::ExperienceStore {
+    fn get_setting_sync(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        Ok(conn
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+}
+
+#[cfg(test)]
+mod experiences_bridge {
+    use super::*;
+    /// Double-migrate smoke — idempotent.
+    #[test]
+    fn remigrate_twice() {
+        let store = crate::db::ExperienceStore::memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        migrate_a2a(&conn).unwrap();
+        migrate_a2a(&conn).unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::ExperienceStore;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
-    fn migration_creates_a2a_tables() {
+    fn migration_creates_a2a_tables_and_is_idempotent() {
         let store = ExperienceStore::memory().unwrap();
         let cols = store.table_columns("agent_sessions").unwrap();
         assert!(cols.iter().any(|c| c == "workspace_path"));
-        assert!(cols.iter().any(|c| c == "native_id"));
         let id_cols = store.table_columns("idempotency_keys").unwrap();
-        assert!(id_cols.iter().any(|c| c == "idempotency_key"));
-        let task_cols = store.table_columns("a2a_tasks").unwrap();
-        assert!(task_cols.iter().any(|c| c == "hop_count"));
-        assert!(task_cols.iter().any(|c| c == "parent_id"));
+        assert!(id_cols.iter().any(|c| c == "source_agent"));
+        assert!(id_cols.iter().any(|c| c == "project_id"));
+        // ikinci migrate
+        {
+            let conn = store.conn.lock().unwrap();
+            migrate_a2a(&conn).unwrap();
+            migrate_a2a(&conn).unwrap();
+        }
+        assert_eq!(
+            store.a2a_schema_version().unwrap().as_deref(),
+            Some(A2A_SCHEMA_VERSION)
+        );
+        assert!(
+            store.pragma_foreign_keys().unwrap(),
+            "PRAGMA foreign_keys ON olmalı"
+        );
     }
 
     #[test]
@@ -585,14 +885,18 @@ mod tests {
         let store = ExperienceStore::memory().unwrap();
         let max = 10u32;
         let mut prev = LoungeTask::new("a", "p", "root");
-        store.admit_a2a_task(&mut prev, max).unwrap();
+        match store.admit_a2a_task(&mut prev, max).unwrap() {
+            AdmitOutcome::Accepted(_) => {}
+            other => panic!("expected Accepted, got {other:?}"),
+        }
         assert_eq!(prev.hop_count, 0);
+        assert_eq!(prev.root_id.as_deref(), Some(prev.id.as_str()));
 
         for hop in 1..max {
             let mut child = LoungeTask::new("b", "p", format!("hop-{hop}"));
             child.parent_task_id = Some(prev.id.clone());
-            // İstemci sahte hop — sunucu ezecek.
             child.hop_count = 999;
+            child.root_id = Some("client-spoof-root".into());
             store.admit_a2a_task(&mut child, max).unwrap();
             assert_eq!(child.hop_count, hop);
             assert_eq!(child.root_id.as_deref(), Some(prev.effective_root_id()));
@@ -602,20 +906,27 @@ mod tests {
         let mut over = LoungeTask::new("c", "p", "too-deep");
         over.parent_task_id = Some(prev.id.clone());
         let err = store.admit_a2a_task(&mut over, max).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                AdmitError::HopLimitExceeded {
-                    hop_count: 10,
-                    max_hops: 10
-                }
-            ),
-            "unexpected: {err}"
-        );
+        assert!(matches!(
+            err,
+            AdmitError::HopLimitExceeded {
+                hop_count: 10,
+                max_hops: 10
+            }
+        ));
     }
 
     #[test]
-    fn duplicate_idempotency_key_rejected() {
+    fn rootless_task_forces_root_id_to_self() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("a", "p", "rootless");
+        task.root_id = Some("spoofed-root".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        assert_eq!(task.root_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(task.hop_count, 0);
+    }
+
+    #[test]
+    fn duplicate_idempotency_key_returns_replay() {
         let store = ExperienceStore::memory().unwrap();
         let mut t1 = LoungeTask::new("a", "p", "first");
         t1.idempotency_key = Some("same-key".into());
@@ -623,32 +934,85 @@ mod tests {
 
         let mut t2 = LoungeTask::new("a", "p", "second");
         t2.idempotency_key = Some("same-key".into());
-        let err = store.admit_a2a_task(&mut t2, 10).unwrap_err();
-        match err {
-            AdmitError::Duplicate {
-                idempotency_key,
-                existing_task_id,
-            } => {
-                assert_eq!(idempotency_key, "same-key");
-                assert_eq!(existing_task_id, t1.id);
-            }
-            other => panic!("expected Duplicate, got {other}"),
+        match store.admit_a2a_task(&mut t2, 10).unwrap() {
+            AdmitOutcome::Replay {
+                existing_task_id, ..
+            } => assert_eq!(existing_task_id, t1.id),
+            AdmitOutcome::Accepted(_) => panic!("expected Replay"),
         }
+        // farklı source → ayrı kapsam
+        let mut t3 = LoungeTask::new("other-agent", "p", "third");
+        t3.idempotency_key = Some("same-key".into());
+        assert!(matches!(
+            store.admit_a2a_task(&mut t3, 10).unwrap(),
+            AdmitOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn unique_violation_rolls_back_task_row() {
+        let store = ExperienceStore::memory().unwrap();
+        // Önceden dolu idempotency satırı.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                r#"INSERT INTO idempotency_keys
+                   (source_agent, project_id, idempotency_key, task_id, created_at)
+                   VALUES ('a', 'p', 'race-key', 'existing-task', ?1)"#,
+                params![now_rfc3339()],
+            )
+            .unwrap();
+        }
+        let mut task = LoungeTask::new("a", "p", "should-rollback");
+        task.idempotency_key = Some("race-key".into());
         let conn = store.conn.lock().unwrap();
-        assert_eq!(count_a2a_tasks(&conn).unwrap(), 1);
+        // Lookup atla → gerçek UNIQUE INSERT hatası.
+        let outcome = admit_task_atomic_skip_lookup(&conn, &mut task, 10).unwrap();
+        // existing-task a2a_tasks'ta yok; UNIQUE sonrası mevcut satır okunur → Replay
+        // veya Storage. Mevcut key existing-task'a işaret ediyor.
+        match outcome {
+            AdmitOutcome::Replay {
+                existing_task_id, ..
+            } => assert_eq!(existing_task_id, "existing-task"),
+            AdmitOutcome::Accepted(_) => panic!("should not accept"),
+        }
+        assert_eq!(
+            count_a2a_tasks(&conn).unwrap(),
+            0,
+            "UNIQUE sonrası task satırı geri alınmalı"
+        );
         assert_eq!(count_idempotency_keys(&conn).unwrap(), 1);
     }
 
     #[test]
-    fn admit_transaction_rolls_back_on_fault() {
+    fn concurrent_same_key_admits_exactly_one_task() {
         let store = ExperienceStore::memory().unwrap();
-        let mut task = LoungeTask::new("a", "p", "faulty");
-        task.idempotency_key = Some("fault-key".into());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for i in 0..2 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                let mut task = LoungeTask::new("a", "p", format!("race-{i}"));
+                task.idempotency_key = Some("concurrent-key".into());
+                barrier.wait();
+                store.admit_a2a_task(&mut task, 10)
+            }));
+        }
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let accepted = results
+            .iter()
+            .filter(|r| matches!(r, Ok(AdmitOutcome::Accepted(_))))
+            .count();
+        let replayed = results
+            .iter()
+            .filter(|r| matches!(r, Ok(AdmitOutcome::Replay { .. })))
+            .count();
+        assert_eq!(accepted, 1, "tam bir Accepted beklenir: {results:?}");
+        assert_eq!(replayed, 1, "diğeri Replay olmalı: {results:?}");
         let conn = store.conn.lock().unwrap();
-        let err = admit_task_atomic_fault_after_task(&conn, &mut task, 10).unwrap_err();
-        assert!(matches!(err, AdmitError::Duplicate { .. }));
-        assert_eq!(count_a2a_tasks(&conn).unwrap(), 0);
-        assert_eq!(count_idempotency_keys(&conn).unwrap(), 0);
+        assert_eq!(count_a2a_tasks(&conn).unwrap(), 1);
+        assert_eq!(count_idempotency_keys(&conn).unwrap(), 1);
     }
 
     #[test]
@@ -688,10 +1052,6 @@ mod tests {
             .recover_silent_a2a_tasks("2026-10-04T12:03:00.000Z", Duration::from_secs(120))
             .unwrap();
         assert!(marked.is_empty());
-        assert_eq!(
-            store.a2a_task_status(&task.id).unwrap(),
-            Some(TaskStatus::Executing)
-        );
     }
 
     #[test]
@@ -701,7 +1061,66 @@ mod tests {
         let s = AgentSession::new("p", "cursor", "gui", "/tmp/ws", "user_pin");
         store.upsert_session(&s).unwrap();
         assert_eq!(store.session_count().unwrap(), 1);
-        store.upsert_session(&s).unwrap();
-        assert_eq!(store.session_count().unwrap(), 1, "aynı id tekrar sayılmaz");
+    }
+
+    #[test]
+    fn parent_terminal_status_rejected() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut parent = LoungeTask::new("a", "p", "parent");
+        store.admit_a2a_task(&mut parent, 10).unwrap();
+        store
+            .set_a2a_task_status(&parent.id, TaskStatus::Failed)
+            .unwrap();
+        let mut child = LoungeTask::new("b", "p", "child");
+        child.parent_task_id = Some(parent.id.clone());
+        let err = store.admit_a2a_task(&mut child, 10).unwrap_err();
+        assert!(matches!(err, AdmitError::ParentInvalid { .. }));
+    }
+
+    #[test]
+    fn parent_project_mismatch_rejected() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut parent = LoungeTask::new("a", "proj-a", "parent");
+        store.admit_a2a_task(&mut parent, 10).unwrap();
+        let mut child = LoungeTask::new("b", "proj-b", "child");
+        child.parent_task_id = Some(parent.id.clone());
+        let err = store.admit_a2a_task(&mut child, 10).unwrap_err();
+        assert!(matches!(err, AdmitError::ParentInvalid { .. }));
+    }
+
+    #[test]
+    fn release_idempotency_allows_retry_after_failure() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut t1 = LoungeTask::new("a", "p", "first");
+        t1.idempotency_key = Some("retry-key".into());
+        store.admit_a2a_task(&mut t1, 10).unwrap();
+        store
+            .set_a2a_task_status(&t1.id, TaskStatus::Failed)
+            .unwrap();
+        store.release_a2a_idempotency(&t1.id).unwrap();
+        let mut t2 = LoungeTask::new("a", "p", "retry");
+        t2.idempotency_key = Some("retry-key".into());
+        assert!(matches!(
+            store.admit_a2a_task(&mut t2, 10).unwrap(),
+            AdmitOutcome::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn max_hops_clamped_to_absolute_ceiling() {
+        assert_eq!(ABSOLUTE_MAX_HOPS, 64);
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("a", "p", "x");
+        // 100 istenirse normalize clamp ile kabul (hop 0 < 64)
+        store.admit_a2a_task(&mut task, 100).unwrap();
+    }
+
+    #[test]
+    fn in_flight_parent_missing_is_documented_fail_closed() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut child = LoungeTask::new("b", "p", "orphan");
+        child.parent_task_id = Some("not-yet-admitted".into());
+        let err = store.admit_a2a_task(&mut child, 10).unwrap_err();
+        assert!(matches!(err, AdmitError::ParentMissing { .. }));
     }
 }

@@ -5,6 +5,7 @@
   "continueLocal": "Continue locally",
   "switchLocal": "Switch to local model",
   "routingApproval": "Routing approval",
+  "sourceUnverified": "Unverified source · PENDING_APPROVAL",
   "securityPending": "Security · {{level}} · PENDING_APPROVAL",
   "quotaBlocked": "Quota Alert · QUOTA_BLOCKED",
   "noPending": "No pending approval",
