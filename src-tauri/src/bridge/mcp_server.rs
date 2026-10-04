@@ -9,7 +9,7 @@
 //! şemalarına göre doğrulanır (`additionalProperties: false`).
 
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -145,9 +145,10 @@ impl McpServer {
                 timeouts.set_global_override_secs(Some(secs));
             }
         }
-        let clock: Arc<dyn WaitClock> = Arc::new(SystemWaitClock);
+        let clock: Arc<dyn WaitClock> = Arc::new(SystemWaitClock::default());
         let orchestrator =
             Orchestrator::new(store.clone(), nats_url.clone(), timeouts.clone(), clock);
+        timeouts.attach_settings_store(store.clone());
         Self {
             store,
             nats_url,
@@ -171,12 +172,14 @@ impl McpServer {
     }
 
     pub fn with_orchestrator_clock(mut self, clock: Arc<dyn WaitClock>) -> Self {
+        let skip = self.orchestrator.skips_nats();
         self.orchestrator = Orchestrator::new(
             self.store.clone(),
             self.nats_url.clone(),
             self.timeouts.clone(),
             clock,
-        );
+        )
+        .with_skip_nats(skip);
         self
     }
 
@@ -206,8 +209,9 @@ impl McpServer {
     }
 
     /// İstek başına istemci kimliği (HTTP oturum / shim).
+    /// `&self` — uzun çağrılar sunucu kilidi olmadan paralel çalışabilir (Clone + paylaşılan Arc alanları).
     pub async fn handle_line_for(
-        &mut self,
+        &self,
         line: &str,
         client: &mut ClientCtx,
     ) -> Result<Option<String>> {
@@ -245,7 +249,7 @@ impl McpServer {
     }
 
     async fn handle_notification(
-        &mut self,
+        &self,
         method: &str,
         params: &Value,
         client: &mut ClientCtx,
@@ -282,7 +286,7 @@ impl McpServer {
     }
 
     async fn dispatch(
-        &mut self,
+        &self,
         method: &str,
         params: &Value,
         client: &mut ClientCtx,
@@ -299,7 +303,7 @@ impl McpServer {
         }
     }
 
-    async fn initialize(&mut self, params: &Value, client: &mut ClientCtx) -> Result<Value> {
+    async fn initialize(&self, params: &Value, client: &mut ClientCtx) -> Result<Value> {
         let info = params.get("clientInfo").cloned().unwrap_or(json!({}));
         let name = info
             .get("name")
@@ -600,20 +604,19 @@ impl McpServer {
         let call_args = self.build_call_args(&normalized, /*wait*/ false).await?;
 
         if !self.orchestrator_skips_nats() && !probe_tcp_host_port(&self.nats_url) {
-            // Geriye dönük: eski dispatch NATS kapalıyken de task_id dönerdi.
-            let placeholder_id = Uuid::new_v4().to_string();
+            // P2(e): sahte UUID yok — açık durum; wait_task yetkisiz tuzağına düşmez.
             return Ok(json!({
                 "published": false,
                 "error": format!(
                     "NATS erişilemiyor ({}) — Lounge Kernel / NATS ayakta olmalı",
                     self.nats_url
                 ),
-                "task_id": placeholder_id,
+                "status": "nats_unavailable",
                 "subject": TASK_REQUESTED,
                 "target_agent": call_args.target_agent,
                 "project_id": call_args.project_id,
                 "summary": call_args.task,
-                "note": "Görev Kernel dispatcher üzerinden işlenir; PENDING_APPROVAL / kota kapıları atlanmaz."
+                "note": "Görev kabul edilmedi (NATS kapalı). task_id yok — lounge_wait_task çağırma."
             }));
         }
 
@@ -699,14 +702,16 @@ impl McpServer {
             .to_string();
         let status = arg_str(args, "status").unwrap_or("completed");
         let output = args.get("output").cloned().unwrap_or(json!(null));
-        self.orchestrator.yield_result(
-            &client.session_id,
-            &task_id,
-            status,
-            &output,
-            args.get("artifacts"),
-            args.get("metrics"),
-        )
+        self.orchestrator
+            .yield_result(
+                &client.session_id,
+                &task_id,
+                status,
+                &output,
+                args.get("artifacts"),
+                args.get("metrics"),
+            )
+            .await
     }
 
     async fn build_call_args(&self, normalized: &Value, wait: bool) -> Result<CallAgentArgs> {
@@ -735,10 +740,16 @@ impl McpServer {
 
     async fn register_inflight(&self, request_key: &str) -> watch::Receiver<Option<CancelKind>> {
         let (tx, rx) = watch::channel(None);
-        self.in_flight
-            .lock()
-            .await
-            .insert(request_key.to_string(), tx);
+        let mut map = self.in_flight.lock().await;
+        // P1-1: uçuş map üst sınırı — en eski girdileri düşür.
+        while map.len() >= super::session_id::MAX_IN_FLIGHT {
+            if let Some(evict) = map.keys().next().cloned() {
+                map.remove(&evict);
+            } else {
+                break;
+            }
+        }
+        map.insert(request_key.to_string(), tx);
         rx
     }
 
@@ -1138,92 +1149,168 @@ pub async fn run_stdio(store: ExperienceStore, nats_url: impl Into<String>) -> R
 }
 
 pub async fn run_stdio_embedded(store: ExperienceStore, nats_url: impl Into<String>) -> Result<()> {
-    let mut server = McpServer::new(store, nats_url);
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let locked = stdin.lock();
-    for line in locked.lines() {
-        let line = line.context("stdin okunamadı")?;
-        if let Some(response) = server.handle_line(&line).await? {
-            writeln!(stdout, "{response}").context("stdout yazılamadı")?;
-            stdout.flush().ok();
+    let server = Arc::new(McpServer::new(store, nats_url));
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    // stdout yazıcı — yanıt sırası serbest (MCP eşzamanlı isteklere izin verir).
+    let writer = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut stdout = tokio::io::stdout();
+        while let Some(response) = out_rx.recv().await {
+            let line = format!("{response}\n");
+            if stdout.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            let _ = stdout.flush().await;
         }
+    });
+
+    // stdin okuyucu — istek işlenirken de cancel satırları gelir.
+    let reader = tokio::task::spawn_blocking(move || -> Result<()> {
+        let stdin = std::io::stdin();
+        let locked = stdin.lock();
+        for line in locked.lines() {
+            let line = line.context("stdin okunamadı")?;
+            if line_tx.blocking_send(line).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+
+    while let Some(line) = line_rx.recv().await {
+        let server = Arc::clone(&server);
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let mut client = server.client.clone();
+            match server.handle_line_for(&line, &mut client).await {
+                Ok(Some(response)) => {
+                    let _ = out_tx.send(response).await;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("[lounge-mcp] handle_line: {err}");
+                }
+            }
+        });
     }
+    drop(out_tx);
+    let _ = writer.await;
+    reader.await.context("stdin join")??;
     Ok(())
 }
 
 /// Claude Desktop / Cursor stdio → Kernel `POST /mcp` köprüsü.
 /// Her süreç kendi `Mcp-Session-Id` değerini taşır; initialize'daki clientInfo
 /// sonraki isteklere `X-Lounge-Client-Name` ile de eklenir (kimlik karışması yok).
+///
+/// Okuma ile HTTP POST eşzamanlı: uzun tools/call sürerken `cancelled` okunur.
 pub async fn run_stdio_http_proxy() -> Result<()> {
     let base = default_mcp_http_url();
-    // Antigravity eşiği 150 sn + marj; proxy istemci hard-timeout'undan önce dönmeli.
+    // Antigravity eşiği 150 sn; proxy istemci hard-timeout (180) öncesi dönmeli.
+    // Varsayılan 165 (<180); 210 eski değer çelişki yaratıyordu.
     let proxy_timeout_secs = std::env::var("LOUNGE_MCP_PROXY_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(210);
+        .map(|n| n.min(180))
+        .unwrap_or(165);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(proxy_timeout_secs))
         .build()
         .context("HTTP client")?;
     let session_id = Uuid::new_v4().to_string();
-    let mut client_name: Option<String> = None;
-    let mut client_version: Option<String> = None;
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let locked = stdin.lock();
-    for line in locked.lines() {
-        let line = line.context("stdin okunamadı")?;
+    let client_meta = Arc::new(tokio::sync::Mutex::new((
+        Option::<String>::None,
+        Option::<String>::None,
+    )));
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    let writer = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut stdout = tokio::io::stdout();
+        while let Some(line) = out_rx.recv().await {
+            let one = format!("{}\n", line.replace('\n', " ").replace('\r', ""));
+            if stdout.write_all(one.as_bytes()).await.is_err() {
+                break;
+            }
+            let _ = stdout.flush().await;
+        }
+    });
+
+    let reader = tokio::task::spawn_blocking(move || -> Result<()> {
+        let stdin = std::io::stdin();
+        let locked = stdin.lock();
+        for line in locked.lines() {
+            let line = line.context("stdin okunamadı")?;
+            if line_tx.blocking_send(line).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+
+    while let Some(line) = line_rx.recv().await {
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
         }
-        // initialize gövdesinden clientInfo yakala (oturum başı).
         if let Ok(val) = serde_json::from_str::<Value>(&line) {
             if val.get("method").and_then(|m| m.as_str()) == Some("initialize") {
                 if let Some(info) = val.pointer("/params/clientInfo") {
+                    let mut meta = client_meta.lock().await;
                     if let Some(name) = info.get("name").and_then(|v| v.as_str()) {
-                        client_name = Some(name.to_string());
+                        meta.0 = Some(name.to_string());
                     }
                     if let Some(ver) = info.get("version").and_then(|v| v.as_str()) {
-                        client_version = Some(ver.to_string());
+                        meta.1 = Some(ver.to_string());
                     }
                 }
             }
         }
-        let url = format!("{base}/mcp");
-        let mut req = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("mcp-session-id", &session_id);
-        if let Some(ref name) = client_name {
-            req = req.header("x-lounge-client-name", name);
-        }
-        if let Some(ref ver) = client_version {
-            req = req.header("x-lounge-client-version", ver);
-        }
-        let response = req
-            .body(line.clone())
-            .send()
-            .await
-            .with_context(|| format!("MCP HTTP POST {url}"))?;
-        let status = response.status();
-        if status == reqwest::StatusCode::NO_CONTENT {
-            continue;
-        }
-        let text = response.text().await.context("MCP HTTP body")?;
-        if text.trim().is_empty() {
-            continue;
-        }
-        // Tek satır JSON-RPC (stdio framing).
-        let one_line = text.replace('\n', " ").replace('\r', "");
-        writeln!(stdout, "{one_line}").context("stdout")?;
-        stdout.flush().ok();
-        if !status.is_success() {
-            eprintln!("[lounge-mcp] HTTP {status}");
-        }
+        let client = client.clone();
+        let base = base.clone();
+        let session_id = session_id.clone();
+        let client_meta = Arc::clone(&client_meta);
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let meta = client_meta.lock().await.clone();
+            let url = format!("{base}/mcp");
+            let mut req = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("mcp-session-id", &session_id);
+            if let Some(ref name) = meta.0 {
+                req = req.header("x-lounge-client-name", name);
+            }
+            if let Some(ref ver) = meta.1 {
+                req = req.header("x-lounge-client-version", ver);
+            }
+            match req.body(line).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status == reqwest::StatusCode::NO_CONTENT {
+                        return;
+                    }
+                    match response.text().await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            let _ = out_tx.send(text).await;
+                        }
+                        _ => {}
+                    }
+                    if !status.is_success() {
+                        eprintln!("[lounge-mcp] HTTP {status}");
+                    }
+                }
+                Err(err) => eprintln!("[lounge-mcp] MCP HTTP POST: {err}"),
+            }
+        });
     }
+    drop(out_tx);
+    let _ = writer.await;
+    reader.await.context("stdin join")??;
     Ok(())
 }
 
