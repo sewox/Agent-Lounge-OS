@@ -28,7 +28,7 @@ use crate::kernel::worker_registry::{route_subject_for, WorkerRegistry};
 use crate::models::{
     decide_route, default_ollama_model, is_kernel, AnalysisDecision, ApprovalKind, ApprovalRequest,
     ExperienceContext, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
-    QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, TaskStatus, ALERT_QUOTA,
+    QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, TaskStatus, ALERT_QUOTA, CONTROL_STOP,
     EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
 };
 use crate::services::{
@@ -304,6 +304,76 @@ impl Dispatcher {
         });
     }
 
+    /// `lounge.control.stop` → görev CANCELLED (MCP context canceled yayınını tüketir).
+    pub fn spawn_control_stop_listener(self: &Dispatcher) {
+        let this = self.clone();
+        let url = self.nats_url.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) = this.listen_control_stop_once(&url).await {
+                    log::warn!("control.stop dinleyici: {err}");
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+    }
+
+    async fn listen_control_stop_once(&self, url: &str) -> Result<()> {
+        let url_owned = url.to_string();
+        let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
+            .await
+            .context("control.stop NATS connect join")?
+            .context("control.stop NATS bağlantısı kurulamadı")?;
+
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+        let sub_nc = nc.clone();
+        let subject = CONTROL_STOP.to_string();
+        tokio::task::spawn_blocking(move || {
+            let sub = sub_nc.subscribe(&subject)?;
+            for msg in sub.messages() {
+                if tx.blocking_send(msg.data.to_vec()).is_err() {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        });
+
+        log::info!("dispatcher control.stop dinliyor: {url} ({CONTROL_STOP})");
+        while let Some(data) = rx.recv().await {
+            if let Err(err) = self.apply_control_stop(&data) {
+                log::warn!("control.stop uygulama: {err}");
+            }
+        }
+        Ok(())
+    }
+
+    /// CONTROL_STOP payload → görev iptal (oturum eşleşirse).
+    pub fn apply_control_stop(&self, data: &[u8]) -> Result<()> {
+        let value: serde_json::Value =
+            serde_json::from_slice(data).context("control.stop payload json")?;
+        let task_id = value
+            .get("task_id")
+            .or_else(|| value.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("control.stop: task_id yok"))?
+            .to_string();
+        let session_id = value
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if session_id.is_empty() {
+            // Oturumsuz stop — yalnız status Cancelled (fail-open değil: session yoksa
+            // cancel_a2a_task yetkisiz der; doğrudan status yaz).
+            self.persist_status(&task_id, TaskStatus::Cancelled);
+            let _ = self.store.release_a2a_idempotency(&task_id);
+            return Ok(());
+        }
+        self.store
+            .cancel_a2a_task(&task_id, session_id)
+            .with_context(|| format!("control.stop cancel {task_id}"))?;
+        Ok(())
+    }
+
     async fn listen_lifecycle_once(&self, url: &str) -> Result<()> {
         let url_owned = url.to_string();
         let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
@@ -412,13 +482,8 @@ impl Dispatcher {
             }
         }
 
-        if failed {
-            self.fail_and_release_idempotency(&task_id);
-        } else {
-            self.persist_status(&task_id, TaskStatus::Completed);
-        }
-        // P1-3: eski NATS completed yolu result_json yazmıyordu → wait_task result null.
-        if let Some(result_val) = value
+        // Sonuç + durum atomik (P1-A): önce Completed sonra ayrı result_json → wake yarışı.
+        let result_raw = value
             .get("result")
             .cloned()
             .or_else(|| value.get("output").cloned())
@@ -428,17 +493,33 @@ impl Dispatcher {
                     .and_then(|v| v.as_str())
                     .and_then(|s| serde_json::from_str(s).ok())
             })
-        {
-            let raw = if result_val.is_string() {
-                result_val.as_str().unwrap_or("").to_string()
-            } else {
-                result_val.to_string()
-            };
-            if !raw.is_empty() {
-                if let Err(err) = self.store.store_a2a_bus_result(&task_id, &raw) {
-                    log::warn!("lifecycle result_json yazılamadı {task_id}: {err}");
+            .map(|result_val| {
+                if result_val.is_string() {
+                    result_val.as_str().unwrap_or("").to_string()
+                } else {
+                    result_val.to_string()
                 }
-            }
+            })
+            .filter(|s| !s.is_empty());
+
+        if failed {
+            self.store
+                .complete_a2a_with_result(
+                    &task_id,
+                    TaskStatus::Failed,
+                    result_raw.as_deref(),
+                    /*release_idempotency*/ true,
+                )
+                .map_err(|e| anyhow::anyhow!("bus terminal failed yazılamadı: {e}"))?;
+        } else {
+            self.store
+                .complete_a2a_with_result(
+                    &task_id,
+                    TaskStatus::Completed,
+                    result_raw.as_deref(),
+                    /*release_idempotency*/ false,
+                )
+                .map_err(|e| anyhow::anyhow!("bus terminal completed yazılamadı: {e}"))?;
         }
         Ok(())
     }
@@ -2916,13 +2997,123 @@ mod tests {
             .unwrap();
         dispatcher
             .apply_bus_terminal(
-                serde_json::json!({ "id": task.id }).to_string().as_bytes(),
+                serde_json::json!({
+                    "id": task.id,
+                    "result": {"late": true}
+                })
+                .to_string()
+                .as_bytes(),
                 false,
             )
             .unwrap();
         assert_eq!(
             dispatcher.store().a2a_task_status(&task.id).unwrap(),
             Some(TaskStatus::Completed)
+        );
+        assert_eq!(
+            dispatcher
+                .store()
+                .a2a_task_result(&task.id)
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"late":true}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn bus_terminal_writes_result_with_status_atomically() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "atom".into(),
+            adr_summary: "atom".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let task = LoungeTask::new("a", "p", "with-result");
+        dispatcher.handle_task(task.clone()).await.unwrap();
+        dispatcher
+            .store()
+            .set_a2a_task_status(&task.id, TaskStatus::Dispatched)
+            .unwrap();
+        dispatcher
+            .apply_bus_terminal(
+                serde_json::json!({
+                    "id": task.id,
+                    "result": {"v": 1}
+                })
+                .to_string()
+                .as_bytes(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
+        let result = dispatcher.store().a2a_task_result(&task.id).unwrap();
+        assert!(
+            result.as_deref().is_some_and(|s| s.contains("\"v\":1")),
+            "result_json must be present with Completed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn id_conflict_recovery_forces_unverified() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut existing = LoungeTask::new("mcp:cursor", "p", "pre-admit");
+        existing.session_id = Some("sess-1".into());
+        existing.source_verified = true;
+        store.admit_a2a_task(&mut existing, 10).unwrap();
+
+        let mut inbound = existing.clone();
+        stamp_external_nats_ingress(&mut inbound);
+        assert!(!inbound.source_verified);
+
+        // Aynı id → IdConflict
+        let err = store.admit_a2a_task(&mut inbound, 10).unwrap_err();
+        assert!(matches!(err, AdmitError::IdConflict { .. }));
+
+        // Dispatcher recovery: existing yükle + NATS stamp false (verified yükseltme yok).
+        let loaded = store.load_a2a_task(&existing.id).unwrap().unwrap();
+        assert_eq!(loaded.session_id.as_deref(), Some("sess-1"));
+        let mut recovered = loaded;
+        recovered.source_verified = false;
+        assert!(
+            !recovered.source_verified,
+            "IdConflict sonrası NATS yolu verified kalmamalı"
+        );
+    }
+
+    #[test]
+    fn apply_control_stop_cancels_task() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "stop".into(),
+            adr_summary: "stop".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let mut task = LoungeTask::new("mcp:cursor", "p", "stop-me");
+        task.session_id = Some("sess-stop".into());
+        dispatcher.store().admit_a2a_task(&mut task, 10).unwrap();
+        dispatcher
+            .apply_control_stop(
+                serde_json::json!({
+                    "task_id": task.id,
+                    "session_id": "sess-stop",
+                    "reason": "context canceled"
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Cancelled)
         );
     }
 

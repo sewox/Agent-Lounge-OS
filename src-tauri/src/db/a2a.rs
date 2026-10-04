@@ -1180,6 +1180,45 @@ impl crate::db::ExperienceStore {
         Ok(())
     }
 
+    /// Sonuç + durum tek transaction (P1-A: NATS wake yarışında result null olmasın).
+    pub fn complete_a2a_with_result(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        result_json: Option<&str>,
+        release_idempotency: bool,
+    ) -> Result<()> {
+        if !matches!(
+            status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            anyhow::bail!("complete_a2a_with_result: terminal status gerekli");
+        }
+        let conn = self.conn.lock().expect("experience db lock");
+        let tx = conn.unchecked_transaction()?;
+        let now = now_rfc3339();
+        if let Some(raw) = result_json.filter(|s| !s.is_empty()) {
+            tx.execute(
+                "UPDATE a2a_tasks SET result_json = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
+                params![raw, status.as_str(), now, task_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE a2a_tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now, task_id],
+            )?;
+        }
+        if let Ok(Some(mut task)) = load_task_row(&tx, task_id) {
+            task.status = status.clone();
+            let _ = rewrite_payload(&tx, &task);
+        }
+        if release_idempotency {
+            let _ = release_idempotency_for_task(&tx, task_id);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn session_can_read_a2a_task(&self, task_id: &str, session_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("experience db lock");
         session_can_read_task(&conn, task_id, session_id)
