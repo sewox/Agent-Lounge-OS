@@ -73,6 +73,8 @@ const eslintConfig = defineConfig([
     "test-results/**",
     "scripts/qa/**",
     "src-tauri/target/**",
+    // Standalone Node harness (own package; not Next/app code)
+    "tools/mcp-probe/**",
   ]),
 ]);
 

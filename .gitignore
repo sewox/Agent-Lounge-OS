@@ -75,3 +75,8 @@ data/laya/
 # Local experience store
 experiences/*.sqlite
 experiences/*.sqlite-journal
+
+# MCP probe harness logs / matrix outputs (keep .gitkeep)
+tools/mcp-probe/logs/**
+!tools/mcp-probe/logs/.gitkeep
+tools/mcp-probe/logs/matrix/
