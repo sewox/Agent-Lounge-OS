@@ -500,12 +500,15 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return qaDestructiveQueue.slice();
         case "confirm_destructive": {
           const id = String(args?.id ?? "");
-          const hash = args?.commandHash != null ? String(args.commandHash) : "";
+          const hash = args?.commandHash != null ? String(args.commandHash).trim() : "";
+          if (!hash) {
+            throw new Error("command_hash required");
+          }
           const idx = qaDestructiveQueue.findIndex((row) => row.id === id);
           if (idx < 0) {
             throw new Error("unknown destructive confirmation id");
           }
-          if (hash && qaDestructiveQueue[idx]!.command_hash !== hash) {
+          if (qaDestructiveQueue[idx]!.command_hash !== hash) {
             throw new Error("destructive confirmation hash mismatch");
           }
           qaDestructiveQueue.splice(idx, 1);
@@ -514,12 +517,15 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "reject_destructive": {
           const id = String(args?.id ?? "");
-          const hash = args?.commandHash != null ? String(args.commandHash) : "";
+          const hash = args?.commandHash != null ? String(args.commandHash).trim() : "";
+          if (!hash) {
+            throw new Error("command_hash required");
+          }
           const idx = qaDestructiveQueue.findIndex((row) => row.id === id);
           if (idx < 0) {
             throw new Error("unknown destructive confirmation id");
           }
-          if (hash && qaDestructiveQueue[idx]!.command_hash !== hash) {
+          if (qaDestructiveQueue[idx]!.command_hash !== hash) {
             throw new Error("destructive confirmation hash mismatch");
           }
           qaDestructiveQueue.splice(idx, 1);

@@ -17,7 +17,7 @@ pub use decision_engine::{
 };
 pub use destructive_confirm::{
     assert_destructive_hash, confirm_destructive, list_pending_destructive, reject_destructive,
-    DestructivePendingEvent,
+    require_destructive_command_hash, validate_destructive_ipc_hash, DestructivePendingEvent,
 };
 pub use dispatcher::{default_model_lock, Dispatcher};
 pub use guarded_command::GuardedCommand;

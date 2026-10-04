@@ -332,6 +332,62 @@ test.describe("AP / CP / misc", () => {
     expect((rejectCall!.args as { id?: string }).id).toBe(DESTRUCTIVE_FIFO[0]!.id);
   });
 
+  test("AP-07c · confirm/reject without or with wrong commandHash fail", async ({ page }) => {
+    await openRoute(page, "/dashboard", "full");
+    await seedDestructiveQueue(page, [DESTRUCTIVE_FIFO[0]!]);
+    await expect(page.locator('[data-qa="destructive-dialog"]')).toBeVisible({ timeout: 5_000 });
+    const id = DESTRUCTIVE_FIFO[0]!.id;
+
+    const missing = await page.evaluate(async (taskId) => {
+      const internals = window.__TAURI_INTERNALS__ as {
+        invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      try {
+        await internals.invoke("confirm_destructive", { id: taskId, commandHash: null });
+        return "unexpected-ok";
+      } catch (err) {
+        return String(err);
+      }
+    }, id);
+    expect(missing, "missing hash must fail").toMatch(/command_hash required/i);
+
+    const blank = await page.evaluate(async (taskId) => {
+      const internals = window.__TAURI_INTERNALS__ as {
+        invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      try {
+        await internals.invoke("reject_destructive", { id: taskId, commandHash: "   " });
+        return "unexpected-ok";
+      } catch (err) {
+        return String(err);
+      }
+    }, id);
+    expect(blank, "blank hash must fail").toMatch(/command_hash required/i);
+
+    const wrong = await page.evaluate(async (taskId) => {
+      const internals = window.__TAURI_INTERNALS__ as {
+        invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+      };
+      try {
+        await internals.invoke("confirm_destructive", {
+          id: taskId,
+          commandHash: "definitely-wrong-hash",
+        });
+        return "unexpected-ok";
+      } catch (err) {
+        return String(err);
+      }
+    }, id);
+    expect(wrong, "wrong hash must fail").toMatch(/hash mismatch/i);
+
+    // Queue must still be present after failed invokes.
+    await expect(page.locator('[data-qa="destructive-dialog"]')).toBeVisible();
+    await expect(page.locator('[data-qa="destructive-dialog"]')).toHaveAttribute(
+      "data-task-id",
+      id,
+    );
+  });
+
   test("AP-08 · Pending approval plays alert sound (HTML Audio; wav/mp3/ogg)", async ({
     page,
   }) => {

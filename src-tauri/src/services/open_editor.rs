@@ -150,7 +150,144 @@ fn build_cursor_argv(os: OsFamily, path: &str, line: Option<i64>) -> (String, Ve
     }
 }
 
-/// Validate custom editor template — no shell metacharacters.
+/// Denied program stems (case-insensitive; `.exe`/`.com` stripped before match).
+/// Python family (`python`, `python3.12`, …) handled separately.
+const CUSTOM_EDITOR_DENIED_STEMS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ksh",
+    "csh",
+    "tcsh",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "node",
+    "nodejs",
+    "perl",
+    "ruby",
+    "php",
+    "osascript",
+    "wscript",
+    "cscript",
+    "mshta",
+    "curl",
+    "wget",
+    "busybox",
+    "env",
+    "wsl",
+];
+
+fn home_dir_for_editor() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+fn expand_home_prefix(program: &str) -> String {
+    let trimmed = program.trim();
+    if trimmed == "~" {
+        return home_dir_for_editor()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|| trimmed.to_string());
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        if let Some(home) = home_dir_for_editor() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Basename using both `/` and `\` (cross-platform string logic).
+fn custom_editor_program_basename(program: &str) -> String {
+    let trimmed = program.trim();
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
+    base.to_ascii_lowercase()
+}
+
+/// Windows allows trailing `.` / spaces on executable names (`cmd.exe.`).
+fn strip_trailing_windows_junk(name: &str) -> &str {
+    name.trim_end_matches([' ', '.'])
+}
+
+fn editor_program_stem(basename_lower: &str) -> &str {
+    let cleaned = strip_trailing_windows_junk(basename_lower);
+    for ext in [".exe", ".com"] {
+        if let Some(stem) = cleaned.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    cleaned
+}
+
+fn is_denied_script_extension(basename_lower: &str) -> bool {
+    let cleaned = strip_trailing_windows_junk(basename_lower);
+    cleaned.ends_with(".bat") || cleaned.ends_with(".cmd") || cleaned.ends_with(".ps1")
+}
+
+fn is_python_family_stem(stem: &str) -> bool {
+    if stem == "python" || stem == "py" {
+        return true;
+    }
+    if let Some(rest) = stem.strip_prefix("python") {
+        // python3, python3.12, python310 — not "pythonium"
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.');
+    }
+    false
+}
+
+fn basename_is_denied_editor(basename_lower: &str) -> bool {
+    if is_denied_script_extension(basename_lower) {
+        return true;
+    }
+    let stem = editor_program_stem(basename_lower);
+    if stem.is_empty() {
+        return false;
+    }
+    is_python_family_stem(stem) || CUSTOM_EDITOR_DENIED_STEMS.contains(&stem)
+}
+
+/// Candidates: raw path, `~` expanded, and canonicalize/symlink target when present.
+fn editor_denylist_path_candidates(program: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let trimmed = program.trim().to_string();
+    if !trimmed.is_empty() {
+        out.push(trimmed.clone());
+    }
+    let expanded = expand_home_prefix(&trimmed);
+    if expanded != trimmed {
+        out.push(expanded.clone());
+    }
+    for candidate in [trimmed.as_str(), expanded.as_str()] {
+        let path = std::path::Path::new(candidate);
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            let s = canon.to_string_lossy().into_owned();
+            if !out.iter().any(|x| x == &s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// True when program (or its resolved symlink target) is a denied shell/interpreter.
+pub fn custom_editor_program_is_denied(program: &str) -> bool {
+    for candidate in editor_denylist_path_candidates(program) {
+        let base = custom_editor_program_basename(&candidate);
+        if basename_is_denied_editor(&base) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Validate custom editor template — no shell metacharacters; deny interpreters.
 pub fn validate_custom_editor(program: &str, args_template: &str) -> Result<()> {
     let prog = program.trim();
     if prog.is_empty() {
@@ -164,6 +301,10 @@ pub fn validate_custom_editor(program: &str, args_template: &str) -> Result<()> 
         || prog.contains('\n')
     {
         bail!("editor program must not contain shell metacharacters");
+    }
+    if custom_editor_program_is_denied(prog) {
+        let base = custom_editor_program_basename(prog);
+        bail!("editor program is not allowed (shell/interpreter denylist): {base}");
     }
     let args = args_template.trim();
     if args.is_empty() {
@@ -404,6 +545,85 @@ mod tests {
         assert!(validate_custom_editor("sh", "-c {path}").is_err());
         assert!(validate_custom_editor("code", "-g {path}").is_ok());
         assert!(validate_custom_editor("code", "-g").is_err());
+    }
+
+    #[test]
+    fn validate_custom_editor_denies_interpreters_by_basename() {
+        for prog in [
+            "python3",
+            "python3.12",
+            "PYTHON3.12",
+            "/usr/bin/python3",
+            "node",
+            r"C:\Windows\System32\cmd.exe",
+            "PowerShell",
+            "curl",
+            "env",
+            "wsl",
+            "wsl.exe",
+            "bash.exe",
+            "sh.exe",
+            "zsh.exe",
+            "evil.bat",
+            "run.cmd",
+            "hack.ps1",
+            "cmd.exe.",
+            "cmd.exe ",
+        ] {
+            let err = validate_custom_editor(prog, "{path}").expect_err(prog);
+            assert!(
+                err.to_string().contains("denylist") || err.to_string().contains("shell"),
+                "{prog}: {err}"
+            );
+        }
+        assert!(validate_custom_editor("code", "-g {path}").is_ok());
+        assert!(validate_custom_editor("/usr/local/bin/nvim", "{path}").is_ok());
+        assert!(validate_custom_editor("subl", "{path}").is_ok());
+        // Not a python* version family.
+        assert!(validate_custom_editor("pythonium", "{path}").is_ok());
+    }
+
+    #[test]
+    fn editor_denylist_string_logic_is_case_and_suffix_insensitive() {
+        assert!(custom_editor_program_is_denied("BaSh.EXE"));
+        assert!(custom_editor_program_is_denied("python3.11"));
+        assert!(custom_editor_program_is_denied("Py.exe"));
+        assert!(custom_editor_program_is_denied("code.cmd")); // .cmd script ext → denied
+        assert!(custom_editor_program_is_denied("helper.cmd"));
+        assert!(!custom_editor_program_is_denied("nvim"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn editor_denylist_windows_paths() {
+        assert!(custom_editor_program_is_denied(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        ));
+        assert!(custom_editor_program_is_denied(
+            r"C:\Windows\System32\cmd.exe."
+        ));
+        assert!(custom_editor_program_is_denied(r".\wsl.exe"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_denylist_follows_symlink_to_shell() {
+        let dir = std::env::temp_dir().join(format!("lounge-editor-deny-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("innocent-editor");
+        let target = if std::path::Path::new("/bin/sh").exists() {
+            "/bin/sh"
+        } else {
+            "/usr/bin/sh"
+        };
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(target, &link).expect("symlink");
+        let err = validate_custom_editor(link.to_str().unwrap(), "{path}").expect_err("symlink");
+        assert!(
+            err.to_string().contains("denylist"),
+            "symlink to sh must deny: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

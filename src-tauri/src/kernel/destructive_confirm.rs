@@ -197,7 +197,16 @@ pub fn list_pending_destructive() -> Vec<DestructivePendingEvent> {
         .collect()
 }
 
-/// Optional UI/QA check: pending id must carry the expected command hash.
+/// Require a non-empty `command_hash` for destructive IPC (confirm/reject).
+/// Pure argument check — no registry access.
+pub fn require_destructive_command_hash(command_hash: Option<&str>) -> Result<&str> {
+    match command_hash.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(hash) => Ok(hash),
+        None => bail!("command_hash required"),
+    }
+}
+
+/// UI/QA check: pending id must carry the expected command hash.
 pub fn assert_destructive_hash(id: &str, command_hash: &str) -> Result<()> {
     let reg = registry().lock().expect("registry");
     let Some(token) = reg.pending.get(id) else {
@@ -207,6 +216,12 @@ pub fn assert_destructive_hash(id: &str, command_hash: &str) -> Result<()> {
         bail!("destructive confirmation hash mismatch");
     }
     Ok(())
+}
+
+/// IPC gate: required hash + match pending token (used by Tauri commands).
+pub fn validate_destructive_ipc_hash(id: &str, command_hash: Option<&str>) -> Result<()> {
+    let hash = require_destructive_command_hash(command_hash)?;
+    assert_destructive_hash(id, hash)
 }
 
 /// User confirmed the destructive approval — token becomes single-use runnable.
@@ -377,6 +392,54 @@ mod tests {
         assert!(err.to_string().contains("hash mismatch"));
         let missing = assert_destructive_hash("no-such-id", "x").unwrap_err();
         assert!(missing.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn require_destructive_command_hash_rejects_missing_and_blank() {
+        assert!(require_destructive_command_hash(None)
+            .unwrap_err()
+            .to_string()
+            .contains("command_hash required"));
+        assert!(require_destructive_command_hash(Some(""))
+            .unwrap_err()
+            .to_string()
+            .contains("command_hash required"));
+        assert!(require_destructive_command_hash(Some("   "))
+            .unwrap_err()
+            .to_string()
+            .contains("command_hash required"));
+        assert_eq!(
+            require_destructive_command_hash(Some("abc")).unwrap(),
+            "abc"
+        );
+        assert_eq!(
+            require_destructive_command_hash(Some("  abc  ")).unwrap(),
+            "abc"
+        );
+    }
+
+    #[test]
+    fn validate_destructive_ipc_hash_missing_wrong_and_ok() {
+        let _guard = test_lock();
+        reset_for_tests();
+        let args = vec!["-rf".into(), "/tmp/ipc-hash".into()];
+        let event = register_pending("rm", &args, DestructiveClass::PosixRm, ActionSource::User);
+
+        let missing = validate_destructive_ipc_hash(&event.id, None).unwrap_err();
+        assert!(
+            missing.to_string().contains("command_hash required"),
+            "{missing}"
+        );
+        let blank = validate_destructive_ipc_hash(&event.id, Some("  ")).unwrap_err();
+        assert!(
+            blank.to_string().contains("command_hash required"),
+            "{blank}"
+        );
+        let wrong = validate_destructive_ipc_hash(&event.id, Some("deadbeef")).unwrap_err();
+        assert!(wrong.to_string().contains("hash mismatch"), "{wrong}");
+        validate_destructive_ipc_hash(&event.id, Some(&event.command_hash)).unwrap();
+        validate_destructive_ipc_hash(&event.id, Some(&format!("  {}  ", event.command_hash)))
+            .unwrap();
     }
 
     #[test]
