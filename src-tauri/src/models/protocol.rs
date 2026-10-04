@@ -19,6 +19,8 @@ pub const AGENT_STATUS: &str = "lounge.agent.status";
 pub const WORKERS_REGISTER: &str = "lounge.workers.register";
 pub const WORKERS_UNREGISTER: &str = "lounge.workers.unregister";
 pub const WORKERS_HEARTBEAT: &str = "lounge.workers.heartbeat";
+/// Kullanıcı Stop (MCP `context canceled`) → görev iptali sinyali.
+pub const CONTROL_STOP: &str = "lounge.control.stop";
 /// Cross-Project Memory fısıltısı — kanonik NATS konusu (`subjects.json` `context.whisper`).
 /// Ajan enjeksiyonu ayrıca `AGENT_PROMPT` üzerinden de yayınlanır.
 pub const CONTEXT_WHISPER: &str = "lounge.context.whisper";
@@ -76,6 +78,8 @@ pub enum TaskStatus {
     Expired,
     Timeout,
     WaitTimeoutReached,
+    /// Kullanıcı Stop (`notifications/cancelled` reason: context canceled).
+    Cancelled,
 }
 
 impl TaskStatus {
@@ -92,6 +96,7 @@ impl TaskStatus {
             Self::Expired => "EXPIRED",
             Self::Timeout => "TIMEOUT",
             Self::WaitTimeoutReached => "WAIT_TIMEOUT_REACHED",
+            Self::Cancelled => "CANCELLED",
         }
     }
 
@@ -107,8 +112,21 @@ impl TaskStatus {
             "EXPIRED" => Self::Expired,
             "TIMEOUT" => Self::Timeout,
             "WAIT_TIMEOUT_REACHED" => Self::WaitTimeoutReached,
+            "CANCELLED" | "CANCELED" => Self::Cancelled,
             _ => Self::Queued,
         }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed
+                | Self::Failed
+                | Self::Expired
+                | Self::Timeout
+                | Self::Cancelled
+                | Self::NeedsHuman
+        )
     }
 }
 

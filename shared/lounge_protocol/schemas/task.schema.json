@@ -124,7 +124,8 @@
         "RECOVERY_PENDING",
         "EXPIRED",
         "TIMEOUT",
-        "WAIT_TIMEOUT_REACHED"
+        "WAIT_TIMEOUT_REACHED",
+        "CANCELLED"
       ],
       "default": "QUEUED"
     }

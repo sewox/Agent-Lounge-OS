@@ -47,5 +47,8 @@
     "connected": "lounge.bus.connected",
     "heartbeat": "lounge.bus.heartbeat",
     "probe": "lounge.bus.probe"
+  },
+  "control": {
+    "stop": "lounge.control.stop"
   }
 }
