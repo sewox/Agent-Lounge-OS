@@ -1435,7 +1435,12 @@ mod tests {
 
         // Bağsız oturum yield edemez (eski test bunu meşru sayıyordu — yanlış).
         let unbound = store
-            .yield_a2a_result(&t.id, "worker-sess", TaskStatus::Completed, r#"{"ok":true}"#)
+            .yield_a2a_result(
+                &t.id,
+                "worker-sess",
+                TaskStatus::Completed,
+                r#"{"ok":true}"#,
+            )
             .unwrap_err();
         assert!(
             unbound.to_string().contains("yetkisiz"),
@@ -1463,7 +1468,8 @@ mod tests {
             .yield_a2a_result(&t.id, "worker-sess", TaskStatus::Failed, "{}")
             .unwrap_err();
         assert!(
-            terminal.to_string().contains("terminal") || terminal.to_string().contains("reddedildi"),
+            terminal.to_string().contains("terminal")
+                || terminal.to_string().contains("reddedildi"),
             "expected terminal reject, got {terminal}"
         );
         // İzinsiz oturum.

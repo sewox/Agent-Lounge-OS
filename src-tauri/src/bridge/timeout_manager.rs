@@ -95,7 +95,10 @@ impl TimeoutManager {
     /// 180 sn üstü kırpılır ve uyarılır.
     pub fn set_global_override_secs(&self, secs: Option<u64>) {
         let mut guard = self.global_override.write().expect("timeout override lock");
-        *guard = secs.filter(|&s| s > 0).map(cap_override_secs).map(Duration::from_secs);
+        *guard = secs
+            .filter(|&s| s > 0)
+            .map(cap_override_secs)
+            .map(Duration::from_secs);
     }
 
     /// Tek istemci eşiğini güncelle (ölçüm sonrası tablo güncellemesi).
@@ -113,7 +116,12 @@ impl TimeoutManager {
             return over;
         }
         // Settings canlı yenile.
-        if let Some(store) = self.settings_store.read().expect("settings store lock").as_ref() {
+        if let Some(store) = self
+            .settings_store
+            .read()
+            .expect("settings store lock")
+            .as_ref()
+        {
             if let Ok(conn) = store.conn.lock() {
                 if let Ok(raw) = conn.query_row(
                     "SELECT value_json FROM settings WHERE key = ?1",
@@ -181,9 +189,7 @@ fn cap_override(d: Duration) -> Duration {
 
 fn cap_override_secs(secs: u64) -> u64 {
     if secs > MAX_TIMEOUT_OVERRIDE_SECS {
-        log::warn!(
-            "timeout override {secs}s > {MAX_TIMEOUT_OVERRIDE_SECS}s — kırpıldı"
-        );
+        log::warn!("timeout override {secs}s > {MAX_TIMEOUT_OVERRIDE_SECS}s — kırpıldı");
         MAX_TIMEOUT_OVERRIDE_SECS
     } else {
         secs

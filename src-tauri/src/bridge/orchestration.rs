@@ -120,10 +120,9 @@ impl Orchestrator {
     ) -> Self {
         let nats_url = nats_url.into();
         let terminal_hub = NatsTerminalHub::new(nats_url.clone());
-        let control_publisher: Arc<dyn ControlStopPublisher> =
-            Arc::new(NatsControlStopPublisher {
-                nats_url: nats_url.clone(),
-            });
+        let control_publisher: Arc<dyn ControlStopPublisher> = Arc::new(NatsControlStopPublisher {
+            nats_url: nats_url.clone(),
+        });
         Self {
             store,
             nats_url,

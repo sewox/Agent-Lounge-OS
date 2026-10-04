@@ -103,10 +103,7 @@ mod tests {
 
     #[test]
     fn extracts_id_fields() {
-        assert_eq!(
-            extract_task_id(br#"{"id":"a1"}"#).as_deref(),
-            Some("a1")
-        );
+        assert_eq!(extract_task_id(br#"{"id":"a1"}"#).as_deref(), Some("a1"));
         assert_eq!(
             extract_task_id(br#"{"task_id":"b2"}"#).as_deref(),
             Some("b2")

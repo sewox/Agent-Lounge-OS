@@ -31,9 +31,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::mcp_server::{default_mcp_http_bind, ClientCtx, McpServer};
-use super::session_id::{
-    is_valid_session_id, normalize_or_mint_session_id, MAX_MCP_SESSIONS,
-};
+use super::session_id::{is_valid_session_id, normalize_or_mint_session_id, MAX_MCP_SESSIONS};
 use crate::db::ExperienceStore;
 use crate::kernel::WorkerRegistry;
 
@@ -290,13 +288,11 @@ mod tests {
         store.upsert_session(&sess).unwrap();
 
         // call_agent sürerken health yanıt vermeli (kilit tutulmuyor).
-        let health = http
-            .get(format!("{base}/health"))
-            .send()
-            .await
-            .unwrap();
+        let health = http.get(format!("{base}/health")).send().await.unwrap();
         assert!(health.status().is_success());
-        assert!(health.json::<Value>().await.unwrap()["ok"].as_bool().unwrap());
+        assert!(health.json::<Value>().await.unwrap()["ok"]
+            .as_bool()
+            .unwrap());
 
         // Eşzamanlı yield
         let yield_res = http
@@ -338,9 +334,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(
-            cancel_res.status() == StatusCode::NO_CONTENT || cancel_res.status().is_success()
-        );
+        assert!(cancel_res.status() == StatusCode::NO_CONTENT || cancel_res.status().is_success());
 
         clock.advance(Duration::from_millis(100));
         let call_res = call_fut.await.unwrap();
