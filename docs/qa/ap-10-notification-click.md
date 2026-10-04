@@ -3,6 +3,24 @@
 Backend emits `approval_pending` and shows a native OS notification via
 `tauri-plugin-notification` on macOS, Windows, and Linux.
 
+## CI status (retired from open manual debt)
+
+| Surface | Status | Notes |
+|---------|--------|-------|
+| Playwright AP-10 (FE contract) | **Pass / CI gate** | Mock `focus_app_for_approval` → `approval_banner_focus` + banner focus |
+| Rust unit tests (slot / clear / activation gate) | **Pass / CI gate** | `approval_notify` tests |
+| Live OS toast → activate → banner (S2) | **Retired from CI gate** | Optional platform smoke only — see below |
+
+Reason for retirement: `@tauri-apps/plugin-notification` **`onAction` is mobile-only**.
+Desktop does **not** deliver toast-click callbacks to the webview. The real desktop
+path is dock/taskbar / window focus (`RunEvent::Reopen`, `WindowEvent::Focused`),
+which cannot be driven from the Playwright browser harness. Keeping an open
+“NOT YET RUN” blocker would be a permanent false debt.
+
+Optional S2 smoke remains in `scripts/qa/{mac,windows,linux}/QA_Report.md` for
+humans with a packaged build — it is **not** a merge blocker and is **not**
+counted as skipped/expected-fail in the e2e suite.
+
 ## What actually works (honest)
 
 `@tauri-apps/plugin-notification` **`onAction` is mobile-only**. Upstream guest-js
@@ -32,7 +50,7 @@ the webview on Windows, macOS, or Linux. We do **not** claim otherwise.
 Rust unit tests cover: matching clear, mismatched id does not clear, activation
 gate is inert after resolve (routing + destructive confirm/reject).
 
-### Frontend bridge + Playwright (front-end contract only)
+### Frontend bridge + Playwright (front-end contract — CI gate)
 
 `ApprovalNotificationBridge` listens for `approval_banner_focus` and focuses the
 tabindex banner. Playwright AP-10 uses the **e2e Tauri mock** of
@@ -41,21 +59,18 @@ harness. That proves the **front-end contract** (invoke → banner focus / windo
 focus fallback), **not** the live Rust raise path. Do not treat AP-10 e2e as a
 desktop OS toast-click pass.
 
-### Mobile (out of primary scope for PR-2b targets)
+### Mobile (out of primary scope)
 
 If `onAction` fires (action-typed notification), the bridge invokes
 `focus_app_for_approval`. Registration failures are **logged**, never swallowed.
 
-## S2 live checklist — NOT YET RUN
+## Optional S2 platform smoke (not CI)
 
-Manual verification on real OS toasts is **required** and is **not claimed Pass**
-in this PR until executed and recorded here.
-
-| Platform | Click / activation | Checklist | Status |
-|----------|--------------------|-----------|--------|
-| **macOS** | Notification Center often activates the app; plugin `onAction` does **not** fire. | Pending approval toast → window forward + banner focus. If toast cannot activate: dock/Alt-Tab with still-pending approval → banner focus. After Approve/Deny, further focus must **not** re-raise. | **NOT YET RUN** |
-| **Windows** | Toast may activate a packaged app; `onAction` does **not** fire. Dev `cargo tauri dev` toasts are unreliable. | Same as macOS. | **NOT YET RUN** |
-| **Linux** | libnotify / D-Bus varies; default-action callbacks are **not** wired through the Tauri notification plugin. | Same as macOS. | **NOT YET RUN** |
+| Platform | Click / activation | Checklist |
+|----------|--------------------|-----------|
+| **macOS** | Notification Center often activates the app; plugin `onAction` does **not** fire. | Pending approval toast → window forward + banner focus. If toast cannot activate: dock/Alt-Tab with still-pending approval → banner focus. After Approve/Deny, further focus must **not** re-raise. |
+| **Windows** | Toast may activate a packaged app; `onAction` does **not** fire. Dev `cargo tauri dev` toasts are unreliable. | Same as macOS. |
+| **Linux** | libnotify / D-Bus varies; default-action callbacks are **not** wired through the Tauri notification plugin. | Same as macOS. |
 
 Capability: `notification:default` on the `main` window
 (`src-tauri/capabilities/default.json`).

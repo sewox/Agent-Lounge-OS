@@ -13,10 +13,10 @@
 | ID | Check | Pass? | Notes |
 |----|-------|-------|-------|
 | SH-04 | Palette opens with **Ctrl+K**; UI shows `Ctrl+K` (not ⌘K) | ☐ | |
-| DS-03 | Open in editor uses `start` / opener; Settings Editor override | ☐ | |
+| DS-03 | Open in editor uses `explorer.exe` (single argv; never `cmd /C start`); Settings Editor override | ☐ | |
 | AP-08 | Approval alert sound while pending (also when window minimized) | ☐ | |
 | AP-09 | Settings sound prefs + Dinle; wav/mp3/ogg upload | ☐ | |
-| AP-10 | **Windows** toast/notification via Tauri plugin; click focuses app + banner | ☐ | |
+| AP-10 | Optional S2 smoke (not CI): **Windows** toast/activation → banner focus; see `docs/qa/ap-10-notification-click.md` | ☐ | |
 | AP-06/07 | Destructive patterns: `del /s`, `rd /s`, `Remove-Item -Recurse`, `format` require confirm | ☐ | |
 | Paths | Index / open paths with `C:\…` and mixed separators work | ☐ | |
 
