@@ -11,7 +11,20 @@
 //! | `idempotency_key` | `idempotency_key` (kapsam: source_agent+project_id) |
 //!
 //! Görev satırı ve idempotency kaydı **tek SQLite transaction** içinde yazılır.
-//! `PRAGMA foreign_keys=ON` migrate sırasında açılır. Şema sürümü: settings `a2a.schema_version`.
+//!
+//! ## `PRAGMA foreign_keys=ON`
+//! SQLite’da foreign key zorlaması **bağlantı (connection) düzeyinde**dir; process-global
+//! değildir. `migrate_a2a` bu bağlantıda `PRAGMA foreign_keys=ON` çalıştırır; aynı
+//! `ExperienceStore` / paylaşılan `Connection` üzerindeki sonraki işlemler FK’yi görür.
+//! Yeni bir `Connection::open` ile açılan bağlantıda varsayılan **OFF** kalır — migrate
+//! veya açık `PRAGMA` gerekir. `session_lock.session_id → agent_sessions(id)` FK’si
+//! yalnızca bu pragma açıkken geçerlidir.
+//!
+//! ## `session_lock` / `acquire_session_lock`
+//! **PR-3 hazırlığı** — üretim dispatcher/workflow yoluna bağlı değil; şema + API + birim
+//! testi mevcut. Oturum sahipliği / kilit PR-3’te MCP oturum kimliğiyle bağlanacak.
+//!
+//! Şema sürümü: settings `a2a.schema_version`.
 
 use std::time::Duration;
 
@@ -33,8 +46,7 @@ pub const DEFAULT_AGENT_SILENCE: Duration = Duration::from_secs(120);
 /// Sessizlik tarayıcı aralığı varsayılanı.
 pub const DEFAULT_SILENCE_SCAN_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Idempotency anahtar TTL (başarılı tamamlananlar için GC) — `gc_idempotency_keys`.
-#[allow(dead_code)]
+/// Idempotency anahtar TTL (GC) — silence watchdog periyodunda `gc_idempotency_keys`.
 pub const DEFAULT_IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 3600);
 
 /// `LOUNGE_MAX_HOPS` yoksa veya geçersizse [`DEFAULT_MAX_HOPS`]; üst tavan [`ABSOLUTE_MAX_HOPS`].
@@ -183,7 +195,11 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute_batch(
+    // RENAME→CREATE→INSERT→DROP tek transaction — yarı yolda çökmede tutarlı kalır.
+    let tx = conn
+        .unchecked_transaction()
+        .context("idempotency rebuild txn")?;
+    tx.execute_batch(
         r#"
         ALTER TABLE idempotency_keys RENAME TO idempotency_keys_legacy;
         CREATE TABLE idempotency_keys (
@@ -196,18 +212,47 @@ fn migrate_idempotency_table(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_idempotency_created
             ON idempotency_keys(created_at);
-        INSERT OR IGNORE INTO idempotency_keys
-            (source_agent, project_id, idempotency_key, task_id, created_at)
-        SELECT
-            COALESCE(NULLIF(source_agent, ''), 'unknown'),
-            COALESCE(NULLIF(project_id, ''), 'unknown'),
-            idempotency_key,
-            task_id,
-            created_at
-        FROM idempotency_keys_legacy;
-        DROP TABLE idempotency_keys_legacy;
         "#,
-    )?;
+    )
+    .context("idempotency rebuild create")?;
+
+    let legacy_cols = column_names_fallback(&tx, "idempotency_keys_legacy")?;
+    let legacy_has_scope = legacy_cols.iter().any(|c| c == "source_agent")
+        && legacy_cols.iter().any(|c| c == "project_id");
+    if legacy_has_scope {
+        tx.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO idempotency_keys
+                (source_agent, project_id, idempotency_key, task_id, created_at)
+            SELECT
+                COALESCE(NULLIF(source_agent, ''), 'unknown'),
+                COALESCE(NULLIF(project_id, ''), 'unknown'),
+                idempotency_key,
+                task_id,
+                created_at
+            FROM idempotency_keys_legacy;
+            "#,
+        )
+        .context("idempotency rebuild copy scoped")?;
+    } else {
+        // Tek kolon PK (yalnız idempotency_key[+task_id+created_at]) — kapsam bilinmiyor.
+        tx.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO idempotency_keys
+                (source_agent, project_id, idempotency_key, task_id, created_at)
+            SELECT
+                'unknown',
+                'unknown',
+                idempotency_key,
+                task_id,
+                created_at
+            FROM idempotency_keys_legacy;
+            "#,
+        )
+        .context("idempotency rebuild copy legacy")?;
+    }
+    tx.execute_batch("DROP TABLE idempotency_keys_legacy;")?;
+    tx.commit().context("idempotency rebuild commit")?;
     Ok(())
 }
 
@@ -608,7 +653,23 @@ pub(crate) fn touch_task_updated_at(conn: &Connection, id: &str, updated_at: &st
     Ok(())
 }
 
-/// EXECUTING / DISPATCHED görevlerde sessizlik → NEEDS_HUMAN.
+/// Worker heartbeat — hedef ajana DISPATCHED görevlerin `updated_at` yenilemesi.
+pub fn touch_dispatched_for_target(conn: &Connection, target_agent: &str) -> Result<u64> {
+    let target = target_agent.trim().to_ascii_lowercase();
+    let n = conn.execute(
+        r#"
+        UPDATE a2a_tasks
+        SET updated_at = ?1
+        WHERE status = 'DISPATCHED'
+          AND lower(COALESCE(target_agent, '')) = ?2
+        "#,
+        params![now_rfc3339(), target],
+    )?;
+    Ok(n as u64)
+}
+
+/// EXECUTING / DISPATCHED / RECOVERY_PENDING / QUEUED sessizliği → NEEDS_HUMAN.
+/// `PENDING_APPROVAL` bilinçli olarak dışarıda (kullanıcı onayı bekleniyor).
 pub fn mark_silent_tasks_needs_human(
     conn: &Connection,
     now_rfc3339: &str,
@@ -618,7 +679,7 @@ pub fn mark_silent_tasks_needs_human(
     let mut stmt = conn.prepare(
         r#"
         SELECT id, updated_at FROM a2a_tasks
-        WHERE status IN ('EXECUTING', 'DISPATCHED', 'RECOVERY_PENDING')
+        WHERE status IN ('EXECUTING', 'DISPATCHED', 'RECOVERY_PENDING', 'QUEUED')
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -652,6 +713,7 @@ pub fn mark_silent_tasks_needs_human(
     Ok(marked)
 }
 
+/// PR-3 hazırlığı — üretim yoluna bağlı değil (bkz. modül dokümantasyonu).
 pub fn upsert_agent_session(conn: &Connection, session: &AgentSession) -> Result<()> {
     conn.execute(
         r#"
@@ -686,6 +748,7 @@ pub fn upsert_agent_session(conn: &Connection, session: &AgentSession) -> Result
     Ok(())
 }
 
+/// PR-3 hazırlığı — üretim yoluna bağlı değil.
 pub fn acquire_session_lock(conn: &Connection, session_id: &str, holder: &str) -> Result<bool> {
     let now = now_rfc3339();
     match conn.execute(
@@ -698,6 +761,7 @@ pub fn acquire_session_lock(conn: &Connection, session_id: &str, holder: &str) -
     }
 }
 
+/// PR-3 hazırlığı — üretim yoluna bağlı değil.
 pub fn release_session_lock(conn: &Connection, session_id: &str, holder: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM session_lock WHERE session_id = ?1 AND holder = ?2",
@@ -781,6 +845,12 @@ impl crate::db::ExperienceStore {
         touch_task_updated_at(&conn, id, updated_at)
     }
 
+    /// Worker heartbeat → DISPATCHED görevlerin `updated_at` yenilemesi.
+    pub fn touch_dispatched_for_agent(&self, target_agent: &str) -> Result<u64> {
+        let conn = self.conn.lock().expect("experience db lock");
+        touch_dispatched_for_target(&conn, target_agent)
+    }
+
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         upsert_agent_session(&conn, session)
@@ -801,11 +871,13 @@ impl crate::db::ExperienceStore {
         gc_idempotency_keys(&conn, older_than)
     }
 
+    /// PR-3 hazırlığı — üretim dispatcher'ına bağlı değil.
     pub fn try_lock_session(&self, session_id: &str, holder: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("experience db lock");
         acquire_session_lock(&conn, session_id, holder)
     }
 
+    /// PR-3 hazırlığı — üretim dispatcher'ına bağlı değil.
     pub fn unlock_session(&self, session_id: &str, holder: &str) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         release_session_lock(&conn, session_id, holder)
@@ -1122,5 +1194,117 @@ mod tests {
         child.parent_task_id = Some("not-yet-admitted".into());
         let err = store.admit_a2a_task(&mut child, 10).unwrap_err();
         assert!(matches!(err, AdmitError::ParentMissing { .. }));
+    }
+
+    #[test]
+    fn legacy_single_pk_idempotency_migrates_preserving_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            );
+            CREATE TABLE idempotency_keys (
+                idempotency_key TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO idempotency_keys (idempotency_key, task_id, created_at) VALUES (?1, ?2, ?3)",
+            params![
+                "legacy-key-1",
+                "task-legacy-1",
+                "2026-01-01T00:00:00.000Z"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO idempotency_keys (idempotency_key, task_id, created_at) VALUES (?1, ?2, ?3)",
+            params![
+                "legacy-key-2",
+                "task-legacy-2",
+                "2026-01-02T00:00:00.000Z"
+            ],
+        )
+        .unwrap();
+
+        migrate_a2a(&conn).unwrap();
+
+        let cols = column_names_fallback(&conn, "idempotency_keys").unwrap();
+        assert!(cols.iter().any(|c| c == "source_agent"));
+        assert!(cols.iter().any(|c| c == "project_id"));
+        assert_eq!(count_idempotency_keys(&conn).unwrap(), 2);
+
+        let task_id: String = conn
+            .query_row(
+                r#"SELECT task_id FROM idempotency_keys
+                   WHERE source_agent = 'unknown' AND project_id = 'unknown'
+                     AND idempotency_key = 'legacy-key-1'"#,
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_id, "task-legacy-1");
+
+        // İkinci migrate no-op + veri korunur
+        migrate_a2a(&conn).unwrap();
+        assert_eq!(count_idempotency_keys(&conn).unwrap(), 2);
+    }
+
+    #[test]
+    fn silent_queued_becomes_needs_human_but_pending_approval_does_not() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut queued = LoungeTask::new("a", "p", "stuck-queued");
+        store.admit_a2a_task(&mut queued, 10).unwrap();
+        // admit sonrası QUEUED
+        store
+            .touch_a2a_updated_at(&queued.id, "2026-10-04T12:00:00.000Z")
+            .unwrap();
+
+        let mut pending = LoungeTask::new("a", "p", "awaiting-user");
+        store.admit_a2a_task(&mut pending, 10).unwrap();
+        store
+            .set_a2a_task_status(&pending.id, TaskStatus::PendingApproval)
+            .unwrap();
+        store
+            .touch_a2a_updated_at(&pending.id, "2026-10-04T12:00:00.000Z")
+            .unwrap();
+
+        let marked = store
+            .recover_silent_a2a_tasks("2026-10-04T12:03:00.000Z", Duration::from_secs(120))
+            .unwrap();
+        assert_eq!(marked, vec![queued.id.clone()]);
+        assert_eq!(
+            store.a2a_task_status(&queued.id).unwrap(),
+            Some(TaskStatus::NeedsHuman)
+        );
+        assert_eq!(
+            store.a2a_task_status(&pending.id).unwrap(),
+            Some(TaskStatus::PendingApproval)
+        );
+    }
+
+    #[test]
+    fn touch_dispatched_for_target_refreshes_updated_at() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("a", "p", "delegated");
+        task.target_agent = Some("grok-tester".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store
+            .set_a2a_task_status(&task.id, TaskStatus::Dispatched)
+            .unwrap();
+        store
+            .touch_a2a_updated_at(&task.id, "2026-10-04T10:00:00.000Z")
+            .unwrap();
+        let n = store.touch_dispatched_for_agent("grok-tester").unwrap();
+        assert_eq!(n, 1);
+        let marked = store
+            .recover_silent_a2a_tasks("2026-10-04T10:01:00.000Z", Duration::from_secs(120))
+            .unwrap();
+        assert!(marked.is_empty(), "heartbeat sonrası sessiz sayılmamalı");
     }
 }

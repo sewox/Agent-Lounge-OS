@@ -14,6 +14,7 @@ pub use a2a::{
     admit_task_atomic, configured_agent_silence, configured_max_hops,
     configured_silence_scan_interval, mark_silent_tasks_needs_human, migrate_a2a, AdmitError,
     AdmitOutcome, A2A_SCHEMA_VERSION, ABSOLUTE_MAX_HOPS, DEFAULT_AGENT_SILENCE,
+    DEFAULT_IDEMPOTENCY_TTL,
 };
 pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experience_governance::{

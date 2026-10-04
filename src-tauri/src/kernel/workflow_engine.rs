@@ -27,6 +27,8 @@ pub struct WorkflowEngine {
     fleet_has_grok: Option<bool>,
     /// Testlerde yerel Test Worker override; `None` → env / config.
     fleet_has_local_test: Option<bool>,
+    /// Kernel içi trusted giriş — NATS spoof’una kapalı (Dispatcher `handle_trusted_task`).
+    trusted_ingress: Option<mpsc::Sender<LoungeTask>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,7 @@ impl WorkflowEngine {
             nats_url: nats_url.into(),
             fleet_has_grok: None,
             fleet_has_local_test: None,
+            trusted_ingress: None,
         }
     }
 
@@ -55,6 +58,12 @@ impl WorkflowEngine {
     /// Birim testleri için yerel Test Worker (`lounge-kernel`) varlık durumunu sabitler.
     pub fn with_local_test_in_fleet(mut self, present: bool) -> Self {
         self.fleet_has_local_test = Some(present);
+        self
+    }
+
+    /// Dispatcher trusted mpsc — follow-up NATS’a çıkmadan içeriden işlenir.
+    pub fn with_trusted_ingress(mut self, tx: mpsc::Sender<LoungeTask>) -> Self {
+        self.trusted_ingress = Some(tx);
         self
     }
 
@@ -108,12 +117,24 @@ impl WorkflowEngine {
         let Some(dispatch) = self.plan_test_followup(&completed) else {
             return Ok(());
         };
-        publish_task(nc, dispatch.subject, &dispatch.task).await?;
+        let followup_id = dispatch.task.id.clone();
+        let chain = dispatch.chain_label.clone();
+        if let Some(tx) = &self.trusted_ingress {
+            // Trusted iç yol — NATS TASK_REQUESTED spoof kapısı yok.
+            tx.send(dispatch.task)
+                .await
+                .context("workflow trusted ingress send")?;
+        } else {
+            log::warn!(
+                "workflow_engine trusted_ingress yok; follow-up NATS’a düşer (unverified damga)"
+            );
+            publish_task(nc, dispatch.subject, &dispatch.task).await?;
+        }
         log::info!(
             "workflow_engine Test tetiklendi: {} → {} ({})",
             completed.id,
-            dispatch.task.id,
-            dispatch.chain_label
+            followup_id,
+            chain
         );
         Ok(())
     }
@@ -147,7 +168,8 @@ impl WorkflowEngine {
         task.root_id = Some(completed.effective_root_id().to_string());
         task.hop_count = completed.hop_count.saturating_add(1);
         task.session_id = completed.session_id.clone();
-        // Kernel içi workflow zinciri — NATS geçidinde trusted kalır.
+        // Trusted damga yalnızca Dispatcher iç kanalında (`handle_trusted_task`) geçerlidir.
+        // NATS’a düşerse `stamp_external_nats_ingress` bunu false yapar.
         task.source_verified = true;
         task.repo_path = completed.repo_path.clone();
         task.ast_refs = completed.ast_refs.clone();
