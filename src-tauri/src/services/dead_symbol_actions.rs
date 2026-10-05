@@ -96,7 +96,7 @@ where
     let subject_err = subject.clone();
     #[allow(deprecated)]
     tokio::task::spawn_blocking(move || {
-        let nc = nats::connect(&url).map_err(|err| err.to_string())?;
+        let nc = crate::services::nats_connect(&url).map_err(|err| err.to_string())?;
         nc.publish(&subject, bytes).map_err(|err| err.to_string())
     })
     .await

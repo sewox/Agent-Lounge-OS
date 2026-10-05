@@ -371,6 +371,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_connected_tools,
             list_agent_sessions,
             list_a2a_background_tasks,
+            get_remote_access,
+            register_remote_tunnel,
+            remove_remote_tunnel,
+            rotate_remote_token,
             agent_efficiency_report,
             get_graph_ui_status,
             open_graph_ui,
@@ -1245,7 +1249,7 @@ async fn trigger_grok_test(
     let bytes = serde_json::to_vec(&task).map_err(|err| err.to_string())?;
     let subject_err = subject.clone();
     tokio::task::spawn_blocking(move || {
-        let nc = nats::connect(&url).map_err(|err| err.to_string())?;
+        let nc = crate::services::nats_connect(&url).map_err(|err| err.to_string())?;
         nc.publish(&subject, bytes).map_err(|err| err.to_string())
     })
     .await
@@ -1462,6 +1466,34 @@ async fn list_a2a_background_tasks(
     state
         .list_background_a2a_tasks(50)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_remote_access(tunnel_url: Option<String>) -> services::RemoteAccessInfo {
+    let bind = bridge::mcp_server::default_mcp_http_bind();
+    services::remote_access_info(&bind, tunnel_url.as_deref())
+}
+
+#[tauri::command]
+fn register_remote_tunnel(tunnel_url: String) -> Result<services::RemoteAccessInfo, String> {
+    let host = services::add_allowed_origin(&tunnel_url).map_err(|e| e.to_string())?;
+    log::info!("remote allow-list += {host}");
+    let bind = bridge::mcp_server::default_mcp_http_bind();
+    Ok(services::remote_access_info(&bind, Some(tunnel_url.trim())))
+}
+
+#[tauri::command]
+fn remove_remote_tunnel(host: String) -> services::RemoteAccessInfo {
+    let _ = services::remove_allowed_origin(&host);
+    let bind = bridge::mcp_server::default_mcp_http_bind();
+    services::remote_access_info(&bind, None)
+}
+
+#[tauri::command]
+fn rotate_remote_token() -> services::RemoteAccessInfo {
+    let _ = services::rotate_lounge_token();
+    let bind = bridge::mcp_server::default_mcp_http_bind();
+    services::remote_access_info(&bind, None)
 }
 
 #[tauri::command]

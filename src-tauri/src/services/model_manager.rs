@@ -401,7 +401,7 @@ fn publish_infra_status(nats_url: &str, status: &LayaEngineStatus) {
     let url = nats_url.to_string();
     let _ = std::thread::Builder::new()
         .name("lounge-infra-status".into())
-        .spawn(move || match nats::connect(&url) {
+        .spawn(move || match crate::services::nats_connect(&url) {
             Ok(nc) => {
                 if let Err(err) = nc.publish(&subject, bytes) {
                     log::debug!("{INFRA_STATUS} publish: {err}");

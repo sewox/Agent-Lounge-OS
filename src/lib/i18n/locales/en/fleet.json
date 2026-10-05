@@ -47,5 +47,13 @@
   "orchestrated": "Orchestrated",
   "noSessions": "No agent sessions",
   "noBackgroundTasks": "No background tasks",
-  "backgroundTasksCount": "{{count}} background"
+  "backgroundTasksCount": "{{count}} background",
+  "remoteAccessTitle": "Connect Grok Bot",
+  "remoteAccessBlurb": "Paste your tunnel URL. Lounge adds the host to the allow-list and issues copy-ready MCP JSON (URL + X-Lounge-Token). Run your own cloudflared/ngrok — nothing is bundled.",
+  "remoteAccessTunnelLabel": "Tunnel URL",
+  "remoteAccessAllowHost": "Allow host",
+  "remoteAccessCopyJson": "Copy MCP JSON",
+  "remoteAccessCopied": "Copied",
+  "remoteAccessTokenLabel": "Token",
+  "remoteAccessAllowed": "Allowed hosts"
 }

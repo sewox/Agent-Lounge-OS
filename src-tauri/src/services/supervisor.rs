@@ -569,6 +569,7 @@ mod tests {
                 http_port: 0,
                 binary: stub.display().to_string(),
                 args: vec![],
+                credentials: None,
             }),
             MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
         );
@@ -613,6 +614,7 @@ mod tests {
             http_port: 0,
             binary: "__missing_nats__".into(),
             args: vec![],
+            credentials: None,
         })
     }
 
@@ -623,6 +625,7 @@ mod tests {
             http_port: 0,
             binary: "__missing_nats__".into(),
             args: vec![],
+            credentials: None,
         })
     }
 

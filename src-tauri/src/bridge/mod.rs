@@ -8,7 +8,7 @@ pub mod session_id;
 pub mod timeout_manager;
 pub mod wait_clock;
 
-pub use mcp_server::{run_stdio, ClientCtx, McpServer};
+pub use mcp_server::{default_mcp_http_bind, run_stdio, ClientCtx, McpServer};
 pub use nats_terminal::NatsTerminalHub;
 pub use orchestration::{CallAgentArgs, CancelKind, Orchestrator, ProgressSink, WaitOpts};
 pub use session_id::{is_valid_session_id, normalize_or_mint_session_id};

@@ -712,6 +712,20 @@ test.describe("AP / CP / misc", () => {
     await expect(page.getByRole("columnheader", { name: /Heartbeat/i })).toBeVisible();
   });
 
+  test("FL-03 · Connect Grok Bot card renders copy-ready MCP JSON", async ({ page }) => {
+    await openRoute(page, "/fleet", "full");
+    const card = page.locator('[data-qa="remote-access-card"]');
+    await expect(card).toBeVisible();
+    await expect(card.getByText(/Connect Grok Bot|Grok Bot bağla/i)).toBeVisible();
+    const json = page.locator('[data-qa="remote-access-mcp-json"]');
+    await expect(json).toBeVisible();
+    const body = await json.innerText();
+    expect(body).toMatch(/X-Lounge-Token/);
+    expect(body).toMatch(/mcpServers|agent-lounge-os/);
+    expect(body).toMatch(/https?:\/\/|your-tunnel|mcp/);
+    await expect(page.locator('[data-qa="remote-access-copy"]')).toBeVisible();
+  });
+
   test("FL-02 · Orchestrated label and background task status transitions", async ({
     page,
   }) => {

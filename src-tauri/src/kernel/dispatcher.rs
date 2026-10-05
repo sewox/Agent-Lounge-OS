@@ -48,10 +48,11 @@ pub const ROUTING_APPROVAL_CLEARED_EVENT: &str = "lounge://routing-approval-clea
 pub const TASK_NEEDS_HUMAN_EVENT: &str = "lounge://task-needs-human";
 
 /// NATS giriş damgası — güven kararı payload/`source_agent`'tan türetilmez.
-/// Her dış NATS mesajı sabit `source_verified=false`.
+/// `source_verified=true` yalnızca oturum NATS kimlik doğrulaması aktifken
+/// (yayıncı geçerli creds ile bağlanmış demektir). Aksi halde unverified/legacy.
 /// Geçersiz `session_id` yok sayılır (P2-h).
 pub fn stamp_external_nats_ingress(task: &mut LoungeTask) {
-    task.source_verified = false;
+    task.source_verified = crate::services::lounge_auth::nats_ingress_source_verified();
     if let Some(ref sid) = task.session_id {
         if !crate::bridge::session_id::is_valid_session_id(sid) {
             task.session_id = None;
@@ -78,7 +79,7 @@ fn publish_orphan_control_stop(nats_url: &str, task_id: &str, session_id: &str) 
     });
     let bytes = serde_json::to_vec(&payload)?;
     #[allow(deprecated)]
-    let nc = nats::connect(nats_url).map_err(|e| anyhow::anyhow!("NATS connect: {e}"))?;
+    let nc = crate::services::nats_connect(nats_url)?;
     nc.publish(CONTROL_STOP, bytes)
         .map_err(|e| anyhow::anyhow!("NATS publish: {e}"))?;
     nc.flush().map_err(|e| anyhow::anyhow!("NATS flush: {e}"))?;
@@ -415,7 +416,7 @@ impl Dispatcher {
 
     async fn listen_task_ack_once(&self, url: &str) -> Result<()> {
         let url_owned = url.to_string();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url_owned))
             .await
             .context("task.acked NATS connect join")?
             .context("task.acked NATS bağlantısı kurulamadı")?;
@@ -475,7 +476,7 @@ impl Dispatcher {
 
     async fn listen_control_stop_once(&self, url: &str) -> Result<()> {
         let url_owned = url.to_string();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url_owned))
             .await
             .context("control.stop NATS connect join")?
             .context("control.stop NATS bağlantısı kurulamadı")?;
@@ -530,7 +531,7 @@ impl Dispatcher {
 
     async fn listen_lifecycle_once(&self, url: &str) -> Result<()> {
         let url_owned = url.to_string();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url_owned))
             .await
             .context("lifecycle NATS connect join")?
             .context("lifecycle NATS bağlantısı kurulamadı")?;
@@ -687,7 +688,7 @@ impl Dispatcher {
             }
         }
         let url = self.nats_url.clone();
-        match tokio::task::spawn_blocking(move || nats::connect(&url)).await {
+        match tokio::task::spawn_blocking(move || crate::services::nats_connect(&url)).await {
             Ok(Ok(nc)) => {
                 let mut guard = self.nats_conn.lock().expect("nats_conn lock");
                 *guard = Some(nc.clone());
@@ -827,7 +828,7 @@ impl Dispatcher {
 
     async fn listen_once(&self) -> Result<()> {
         let url = self.nats_url.clone();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url))
             .await
             .context("NATS connect join")?
             .context("NATS bağlantısı kurulamadı")?;
@@ -1281,11 +1282,13 @@ impl Dispatcher {
                     {
                         let preserved_session = existing.session_id.clone();
                         *task = existing;
-                        // NATS stamp again — DB'deki verified=true MCP satırı trust yükseltmez.
-                        task.source_verified = false;
+                        // NATS stamp again — payload/DB cannot spoof trust; auth-active → verified.
+                        stamp_external_nats_ingress(task);
                         // Geçersiz NATS session_id yok sayılır (P2-h).
                         if let Some(ref sid) = preserved_session {
-                            if !crate::bridge::session_id::is_valid_session_id(sid) {
+                            if crate::bridge::session_id::is_valid_session_id(sid) {
+                                task.session_id = preserved_session;
+                            } else {
                                 task.session_id = None;
                             }
                         }
@@ -1641,9 +1644,11 @@ impl Dispatcher {
         let subject = subject.to_string();
         let bytes = serde_json::to_vec(payload).context("NATS payload serialize")?;
         let subject_for_err = subject.clone();
-        tokio::task::spawn_blocking(move || {
-            let nc = nats::connect(&url)?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let nc = crate::services::nats_connect(&url)?;
             nc.publish(&subject, bytes)
+                .map_err(|e| anyhow::anyhow!("NATS publish: {e}"))?;
+            Ok(())
         })
         .await
         .context("NATS publish join")?
@@ -2605,6 +2610,11 @@ mod tests {
 
     #[test]
     fn spoofed_source_agent_cannot_bypass_nats_ingress_stamp() {
+        crate::services::lounge_auth::deactivate_nats_auth();
+        assert!(
+            !crate::services::lounge_auth::nats_auth_active(),
+            "unit stamp tests expect inactive NATS auth"
+        );
         for spoof in [
             "workflow_engine",
             "Workflow_Engine",
@@ -2631,6 +2641,30 @@ mod tests {
                 "parse_nats_task spoof source_agent={spoof:?} için false olmalı"
             );
         }
+    }
+
+    #[test]
+    fn authenticated_nats_ingress_sets_source_verified_true() {
+        let creds = crate::services::lounge_auth::NatsCredentials {
+            user: "test_u".into(),
+            password: "test_p".into(),
+        };
+        crate::services::lounge_auth::activate_nats_auth(creds);
+        let raw = serde_json::json!({
+            "id": "auth-verified-id",
+            "type": "task",
+            "source_agent": "external-bot",
+            "project_id": "p",
+            "summary": "authed",
+            "source_verified": false,
+            "created_at": "2026-10-04T12:00:00.000Z",
+        });
+        let task = parse_nats_task(raw.to_string().as_bytes()).unwrap();
+        assert!(
+            task.source_verified,
+            "auth-active NATS ingress must stamp source_verified=true"
+        );
+        crate::services::lounge_auth::deactivate_nats_auth();
     }
 
     #[tokio::test]
