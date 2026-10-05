@@ -17,9 +17,9 @@ Status: **implemented in PR-3b** (üzerine `main` @ MCP Bridge v2 / #83). Kaynak
 | `task_token` | yaratılışta düz token bir kez; DB SHA-256; wait = aynı oturum VEYA token |
 | Proxy timeout | varsayılan **320 sn** (≥ claude-code 300); hata → JSON-RPC error istemciye |
 
-## PR-4'e taşınan (burada yok)
+## PR-4'e taşınan
 
-`lounge_list_my_tasks`, `pending_results` piggyback, `notifications/message`.
+`lounge_list_my_tasks`, `pending_results` piggyback, Resource `lounge://help/a2a-guide` → **PR-4'te**. `notifications/message` hâlâ ertelenmiş.
 
 ## İzleme (bu turda zorunlu değil)
 

@@ -93,4 +93,6 @@ export const EMPTY_FIXTURE: FixtureDataset = {
   graphUiPort: 7433,
   graphUiStatus: { enabled: false, running: false, url: null, detail: null },
   workers: [],
+  agentSessions: [],
+  backgroundTasks: [],
 };

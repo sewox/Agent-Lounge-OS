@@ -21,6 +21,8 @@ pub const AGENT_HEARTBEAT: &str = "lounge.agent.heartbeat";
 pub const AGENT_STATUS: &str = "lounge.agent.status";
 /// Per-bot görev kutusu öneki — tam konu: `lounge.tasks.<bot_id>`.
 pub const TASKS_INBOX_PREFIX: &str = "lounge.tasks.";
+/// Worker inbox ACK — dispatcher enqueue sonrası worker onayı.
+pub const TASK_ACKED: &str = "lounge.task.acked";
 
 /// `lounge.tasks.<bot_id>` — yalnızca `[a-z0-9_-]` kabul eder.
 pub fn worker_tasks_subject(bot_id: &str) -> Option<String> {

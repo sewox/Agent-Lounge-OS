@@ -6,6 +6,7 @@ pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.1:8b";
 
 pub const TASK_REQUESTED: &str = "lounge.task.requested";
 pub const TASK_ASSIGNED: &str = "lounge.task.assigned";
+pub const TASK_ACKED: &str = "lounge.task.acked";
 pub const TASK_COMPLETED: &str = "lounge.task.completed";
 pub const TASK_FAILED: &str = "lounge.task.failed";
 pub const TASK_RESUME: &str = "lounge.task.resume";
@@ -160,6 +161,11 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    /// Kernel tarafından başlatılan / claim edilen oturumlar Dashboard'da "Orchestrated".
+    pub fn is_orchestrated(&self) -> bool {
+        self.owner.eq_ignore_ascii_case("lounge")
+    }
+
     pub fn new(
         project_id: impl Into<String>,
         agent_id: impl Into<String>,
@@ -882,6 +888,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert_eq!(json["task"]["requested"], TASK_REQUESTED);
         assert_eq!(json["task"]["assigned"], TASK_ASSIGNED);
+        assert_eq!(json["task"]["acked"], TASK_ACKED);
         assert_eq!(json["task"]["completed"], TASK_COMPLETED);
         assert_eq!(json["task"]["failed"], TASK_FAILED);
         assert_eq!(json["task"]["resume"], TASK_RESUME);

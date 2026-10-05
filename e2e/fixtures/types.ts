@@ -199,4 +199,23 @@ export type FixtureDataset = {
   graphUiPort: number;
   graphUiStatus: { enabled: boolean; running: boolean; url: string | null; detail: string | null };
   workers: { id: string; name: string; kind: string; is_active: boolean; enabled: boolean; model?: string }[];
+  agentSessions: {
+    id: string;
+    agent_id: string;
+    app_kind: string;
+    workspace_path: string;
+    state: string;
+    owner: string;
+    created_by: string;
+    last_seen: string;
+    orchestrated: boolean;
+  }[];
+  backgroundTasks: {
+    id: string;
+    status: string;
+    summary: string;
+    source_agent?: string;
+    target_agent?: string | null;
+    updated_at?: string;
+  }[];
 };

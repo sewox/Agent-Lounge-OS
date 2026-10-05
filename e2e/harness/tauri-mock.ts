@@ -755,6 +755,10 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "list_connected_tools":
           return f.connectedTools;
+        case "list_agent_sessions":
+          return f.agentSessions ?? [];
+        case "list_a2a_background_tasks":
+          return f.backgroundTasks ?? [];
         case "list_recommended_models":
           return {
             device: {

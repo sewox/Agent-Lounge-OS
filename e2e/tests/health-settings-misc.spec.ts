@@ -711,5 +711,37 @@ test.describe("AP / CP / misc", () => {
     ).toBeVisible();
     await expect(page.getByRole("columnheader", { name: /Heartbeat/i })).toBeVisible();
   });
+
+  test("FL-02 · Orchestrated label and background task status transitions", async ({
+    page,
+  }) => {
+    await openRoute(page, "/fleet", "full");
+    await expect(page.locator('[data-qa="fleet-orchestration"]')).toBeVisible();
+    await expect(page.locator('[data-qa="orchestrated-label"]').first()).toBeVisible();
+    await expect(page.locator('[data-qa="orchestrated-label"]').first()).toHaveText(
+      /Orchestrated/i,
+    );
+    const orchestratedRow = page.locator('[data-qa="fleet-session-row"][data-orchestrated="true"]');
+    await expect(orchestratedRow.first()).toBeVisible();
+    await expect(page.locator('[data-qa="fleet-background-task"]').first()).toBeVisible();
+    await expect(
+      page.locator('[data-qa="fleet-background-task"][data-task-status="WAIT_TIMEOUT_REACHED"]'),
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-qa="fleet-background-task"][data-task-status="DISPATCHED"]'),
+    ).toBeVisible();
+  });
+
+  test("DB-ORCH · Dashboard shows Orchestrated sessions and background tasks", async ({
+    page,
+  }) => {
+    await openRoute(page, "/dashboard", "full");
+    await expect(page.locator('[data-qa="dash-orchestration"]')).toBeVisible();
+    await expect(page.locator('[data-qa="orchestrated-label"]').first()).toBeVisible();
+    await expect(page.locator('[data-qa="dash-background-task"]').first()).toBeVisible();
+    await expect(
+      page.locator('[data-qa="dash-background-task"][data-task-status="WAIT_TIMEOUT_REACHED"]'),
+    ).toBeVisible();
+  });
 });
 

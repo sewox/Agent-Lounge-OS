@@ -289,6 +289,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 dispatcher.spawn_trusted_ingress(trusted_rx);
                 dispatcher.spawn_lifecycle_listener();
                 dispatcher.spawn_control_stop_listener();
+                dispatcher.spawn_task_ack_listener();
                 dispatcher.spawn_silence_watchdog();
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");
@@ -368,6 +369,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             save_connected_tools,
             save_selected_tools,
             list_connected_tools,
+            list_agent_sessions,
+            list_a2a_background_tasks,
             agent_efficiency_report,
             get_graph_ui_status,
             open_graph_ui,
@@ -1426,6 +1429,38 @@ async fn list_connected_tools(
     state
         .list_connected_tools()
         .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_agent_sessions(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = state.list_sessions(64).map_err(|err| err.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "agent_id": s.agent_id,
+                "app_kind": s.app_kind,
+                "workspace_path": s.workspace_path,
+                "state": s.state,
+                "owner": s.owner,
+                "created_by": s.created_by,
+                "last_seen": s.last_seen,
+                "orchestrated": s.is_orchestrated(),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn list_a2a_background_tasks(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<Vec<serde_json::Value>, String> {
+    state
+        .list_background_a2a_tasks(50)
         .map_err(|err| err.to_string())
 }
 
