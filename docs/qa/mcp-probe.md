@@ -209,6 +209,20 @@ Aynı `command` + `args` kalıbı Claude Code (`.mcp.json`), VS Code (`.vscode/m
 
 İstemci `notifications/cancelled` gönderdiğinde probe iptali **yalnızca loglar** ve in-flight `slow_echo`’yu durdurur; iptal edilen istek için **JSON-RPC `-32800` yanıtı göndermez** (MCP spec: server SHOULD NOT respond to a cancelled request).
 
+## Ölçüm sonuçları (2026-10-04/05) — Lounge `ClientProfile`
+
+Gerçek GUI/CLI ölçümleri (mcp-probe; ürün koduna dokunulmadı). Lounge PR-3b bu tabloyu `bridge/timeout_manager.rs` içinde kullanır.
+
+| clientInfo.name | sürüm / not | hard timeout | progress uzatır mı? | Stop → cancel? | Lounge threshold | kaynak |
+|---|---|---:|---|---|---:|---|
+| `antigravity-client` | Antigravity IDE, protocol 2025-11-25 | **180 sn** | hayır (18 bildirim yine 180) | evet (`context canceled`) | 150 | measured |
+| `cursor-vscode` | Cursor 1.0.0, protocol 2025-11-25 | **120 sn** (−32001) | **evet** (300 sn / 30 bildirim OK) | hayır | 100 (progressToken → ≤280) | measured |
+| `claude-ai` | Claude Desktop Chat 0.1.0 | **240 sn** | token göndermez | hayır | 210 | measured |
+| `claude-code` | CLI 2.1.289 | ≥300 sn (üst sınır görülmedi) | token var; duvar-saat uzatmaz | SIGINT=süreç kapanır, cancel yok | 300 | assumed (hard bilinmiyor) |
+| Grok Bot | — | ölçülemedi | — | — | **45** (bilinmeyen/bulut) | assumed |
+
+Bilinmeyen/bulut eşiği 45 sn (Gemini Grok için 60 demişti; tutarlılık için 45 — bkz. `docs/mcp.md`).
+
 ## CI
 
 `ci.yml` içinde `MCP probe` işi (ubuntu / windows / macos matrisi) zorunlu aggregate `ci` job’ına `needs` ile bağlıdır (bilinçli: probe regresyonu ana CI’yı kırmızıya çeker).

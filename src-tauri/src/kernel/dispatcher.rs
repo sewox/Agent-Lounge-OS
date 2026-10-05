@@ -11,7 +11,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::db::{
-    configured_agent_silence, configured_max_hops, configured_silence_scan_interval,
+    configured_agent_silence, configured_incomplete_orphan_ttl, configured_max_hops,
+    configured_must_deliver_ttl, configured_result_orphan_ttl, configured_silence_scan_interval,
     lexical_embedding, AdmitError, AdmitOutcome, ExperienceStore, FastRetrieveQuery,
     ABSOLUTE_MAX_HOPS, DEFAULT_IDEMPOTENCY_TTL,
 };
@@ -63,6 +64,24 @@ pub fn parse_nats_task(data: &[u8]) -> Result<LoungeTask> {
         serde_json::from_slice(data).context("İş Emri shared task şemasına uymuyor")?;
     stamp_external_nats_ingress(&mut task);
     Ok(task)
+}
+
+/// Incomplete orphan TTL — best-effort control.stop (worker hard-kill yok).
+fn publish_orphan_control_stop(nats_url: &str, task_id: &str, session_id: &str) -> Result<()> {
+    let payload = serde_json::json!({
+        "task_id": task_id,
+        "session_id": session_id,
+        "reason": "incomplete orphan TTL",
+        "at": crate::models::now_rfc3339(),
+        "id": uuid::Uuid::new_v4().to_string(),
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    #[allow(deprecated)]
+    let nc = nats::connect(nats_url).map_err(|e| anyhow::anyhow!("NATS connect: {e}"))?;
+    nc.publish(CONTROL_STOP, bytes)
+        .map_err(|e| anyhow::anyhow!("NATS publish: {e}"))?;
+    nc.flush().map_err(|e| anyhow::anyhow!("NATS flush: {e}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -253,16 +272,65 @@ impl Dispatcher {
         }
     }
 
-    /// Kernel açılışında: periyodik zombi tarama + idempotency GC.
+    /// Kernel açılışında: periyodik zombi tarama + orphan TTL + idempotency GC.
     pub fn spawn_silence_watchdog(self: &Dispatcher) {
         let this = self.clone();
         let interval = self.silence_scan_interval;
+        let result_ttl = configured_result_orphan_ttl();
+        let incomplete_ttl = configured_incomplete_orphan_ttl();
+        let must_deliver_ttl = configured_must_deliver_ttl();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
                 let now = crate::models::now_rfc3339();
                 if let Err(err) = this.recover_silent_tasks(&now) {
                     log::warn!("silence watchdog: {err}");
+                }
+                match this
+                    .store
+                    .abandon_stale_must_deliver(&now, must_deliver_ttl)
+                {
+                    Ok(abandoned) if !abandoned.is_empty() => {
+                        log::info!(
+                            "must_deliver abandoned FAILED ({}): {:?}",
+                            abandoned.len(),
+                            abandoned
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => log::warn!("must_deliver abandon: {err}"),
+                }
+                match this
+                    .store
+                    .expire_a2a_orphans(&now, result_ttl, incomplete_ttl)
+                {
+                    Ok((result_expired, incomplete_expired)) => {
+                        if !result_expired.is_empty() {
+                            log::info!(
+                                "result orphan EXPIRED ({}): {:?}",
+                                result_expired.len(),
+                                result_expired
+                            );
+                        }
+                        for (task_id, session_id) in incomplete_expired {
+                            log::info!(
+                                "incomplete orphan EXPIRED+stop task={task_id} session={session_id:?}"
+                            );
+                            // control.stop yalnız DB CANCELLED yazar (kabul edilen risk);
+                            // burada zaten EXPIRED — NATS stop yine de yayınlanır ki
+                            // dispatcher/worker iptal bayrağını görsün.
+                            if let Some(sid) = session_id {
+                                let url = this.nats_url.clone();
+                                let tid = task_id.clone();
+                                let sid = sid.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    publish_orphan_control_stop(&url, &tid, &sid)
+                                })
+                                .await;
+                            }
+                        }
+                    }
+                    Err(err) => log::warn!("orphan TTL: {err}"),
                 }
                 let cutoff = (chrono::Utc::now()
                     - chrono::Duration::from_std(DEFAULT_IDEMPOTENCY_TTL)

@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use sha2::{Digest, Sha256};
 
 use crate::models::{now_rfc3339, AgentSession, LoungeTask, TaskStatus, DEFAULT_MAX_HOPS};
 
@@ -50,7 +51,8 @@ pub const ABSOLUTE_MAX_HOPS: u32 = 64;
 /// Settings anahtarı — `migrate_a2a` sürümü.
 pub const A2A_SCHEMA_VERSION_KEY: &str = "a2a.schema_version";
 /// v3: session-scoped idempotency + result_json + claimed_by.
-pub const A2A_SCHEMA_VERSION: &str = "3";
+/// v4: orphan TTL — last_wait_at / backgrounded_at / result_ready_at.
+pub const A2A_SCHEMA_VERSION: &str = "4";
 
 /// Varsayılan ajan sessizlik süresi — EXECUTING/DISPATCHED zombi → NEEDS_HUMAN.
 pub const DEFAULT_AGENT_SILENCE: Duration = Duration::from_secs(120);
@@ -58,8 +60,34 @@ pub const DEFAULT_AGENT_SILENCE: Duration = Duration::from_secs(120);
 /// Sessizlik tarayıcı aralığı varsayılanı.
 pub const DEFAULT_SILENCE_SCAN_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Backgrounded sonuç hazır ama hiç sorgulanmadı → EXPIRED (çalışanı öldürmez).
+pub const DEFAULT_RESULT_ORPHAN_TTL: Duration = Duration::from_secs(30 * 60);
+/// Sahipsiz tamamlanmamış görev → EXPIRED + control.stop.
+pub const DEFAULT_INCOMPLETE_ORPHAN_TTL: Duration = Duration::from_secs(30 * 60);
+/// must_deliver mutlak üst sınır — alınmayan sonuç → FAILED(abandoned).
+pub const DEFAULT_MUST_DELIVER_TTL: Duration = Duration::from_secs(24 * 3600);
+/// must_deliver kota: oturum başına eşzamanlı.
+pub const MUST_DELIVER_MAX_PER_SESSION: u64 = 5;
+/// must_deliver kota: kaynak ajan başına açık toplam.
+pub const MUST_DELIVER_MAX_PER_AGENT: u64 = 10;
+
+/// Settings / env: sonuç orphan TTL (sn).
+#[allow(dead_code)]
+pub const SETTING_RESULT_ORPHAN_TTL_SECS: &str = "mcp.result_orphan_ttl_secs";
+pub const ENV_RESULT_ORPHAN_TTL_SECS: &str = "LOUNGE_RESULT_ORPHAN_TTL_SECS";
+/// Settings / env: incomplete orphan TTL (sn).
+#[allow(dead_code)]
+pub const SETTING_INCOMPLETE_ORPHAN_TTL_SECS: &str = "mcp.incomplete_orphan_ttl_secs";
+pub const ENV_INCOMPLETE_ORPHAN_TTL_SECS: &str = "LOUNGE_INCOMPLETE_ORPHAN_TTL_SECS";
+pub const ENV_MUST_DELIVER_TTL_SECS: &str = "LOUNGE_MUST_DELIVER_TTL_SECS";
+
 /// Idempotency anahtar TTL (GC) — silence watchdog periyodunda `gc_idempotency_keys`.
 pub const DEFAULT_IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// poll_after_secs başlangıç / çarpan / tavan (long_running / backgrounded).
+pub const POLL_AFTER_SECS_START: u64 = 15;
+pub const POLL_AFTER_SECS_MAX: u64 = 60;
+pub const POLL_AFTER_GROWTH: f64 = 1.5;
 
 /// `LOUNGE_MAX_HOPS` yoksa veya geçersizse [`DEFAULT_MAX_HOPS`]; üst tavan [`ABSOLUTE_MAX_HOPS`].
 pub fn configured_max_hops() -> u32 {
@@ -89,6 +117,143 @@ pub fn configured_silence_scan_interval() -> Duration {
         .filter(|&n| n > 0)
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_SILENCE_SCAN_INTERVAL)
+}
+
+/// Backgrounded + sonuç hazır, hiç `lounge_wait_task` yok → EXPIRED.
+pub fn configured_result_orphan_ttl() -> Duration {
+    std::env::var(ENV_RESULT_ORPHAN_TTL_SECS)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_RESULT_ORPHAN_TTL)
+}
+
+/// Sahipsiz tamamlanmamış → EXPIRED + control.stop.
+pub fn configured_incomplete_orphan_ttl() -> Duration {
+    std::env::var(ENV_INCOMPLETE_ORPHAN_TTL_SECS)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_INCOMPLETE_ORPHAN_TTL)
+}
+
+/// must_deliver alınmayan sonuç → FAILED(abandoned) üst sınırı.
+pub fn configured_must_deliver_ttl() -> Duration {
+    std::env::var(ENV_MUST_DELIVER_TTL_SECS)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_MUST_DELIVER_TTL)
+}
+
+/// Boş wait sonrası bir sonraki poll_after_secs (15 → ×1.5 → … ≤60).
+pub fn next_poll_after_secs(empty_wait_count: u32) -> u64 {
+    if empty_wait_count == 0 {
+        return POLL_AFTER_SECS_START;
+    }
+    let mut v = POLL_AFTER_SECS_START as f64;
+    for _ in 0..empty_wait_count {
+        v *= POLL_AFTER_GROWTH;
+    }
+    v.floor().min(POLL_AFTER_SECS_MAX as f64) as u64
+}
+
+/// 32 bayt rastgele → hex token (yalnız bir kez istemciye; DB'de hash).
+pub fn generate_task_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom_fill(&mut bytes);
+    hex_encode(&bytes)
+}
+
+pub fn hash_task_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex_encode(&hasher.finalize())
+}
+
+/// Sabit zamanlı hash karşılaştırması (token loglanmaz).
+pub fn task_token_matches(stored_hash: &str, presented: &str) -> bool {
+    let presented_hash = hash_task_token(presented);
+    ct_eq_hex(stored_hash.as_bytes(), presented_hash.as_bytes())
+}
+
+fn ct_eq_hex(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+fn getrandom_fill(buf: &mut [u8]) {
+    // uuid crate zaten getrandom kullanır; Uuid baytlarından doldur.
+    let mut i = 0;
+    while i < buf.len() {
+        let u = uuid::Uuid::new_v4();
+        let b = u.as_bytes();
+        let n = (buf.len() - i).min(b.len());
+        buf[i..i + n].copy_from_slice(&b[..n]);
+        i += n;
+    }
+}
+
+/// must_deliver kota kontrolü — aşımda Err (çağıran JSON-RPC -32029 üretir).
+pub fn check_must_deliver_quota(
+    conn: &Connection,
+    session_id: &str,
+    source_agent: &str,
+) -> Result<()> {
+    let session_open: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM a2a_tasks
+        WHERE must_deliver = 1
+          AND session_id = ?1
+          AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED', 'TIMEOUT')
+        "#,
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    if session_open as u64 >= MUST_DELIVER_MAX_PER_SESSION {
+        anyhow::bail!(
+            "MCP_RPC:-32029:must_deliver kota (oturum): {}/{} açık — yeni must_deliver reddedildi",
+            session_open,
+            MUST_DELIVER_MAX_PER_SESSION
+        );
+    }
+    let agent_open: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM a2a_tasks
+        WHERE must_deliver = 1
+          AND source_agent = ?1
+          AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED', 'TIMEOUT')
+        "#,
+        params![source_agent],
+        |row| row.get(0),
+    )?;
+    if agent_open as u64 >= MUST_DELIVER_MAX_PER_AGENT {
+        anyhow::bail!(
+            "MCP_RPC:-32029:must_deliver kota (ajan): {}/{} açık — yeni must_deliver reddedildi",
+            agent_open,
+            MUST_DELIVER_MAX_PER_AGENT
+        );
+    }
+    Ok(())
 }
 
 pub fn migrate_a2a(conn: &Connection) -> Result<()> {
@@ -178,6 +343,36 @@ fn migrate_a2a_task_columns(conn: &Connection) -> Result<()> {
     }
     if !cols.iter().any(|c| c == "claimed_by") {
         conn.execute("ALTER TABLE a2a_tasks ADD COLUMN claimed_by TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "last_wait_at") {
+        conn.execute("ALTER TABLE a2a_tasks ADD COLUMN last_wait_at TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "backgrounded_at") {
+        conn.execute("ALTER TABLE a2a_tasks ADD COLUMN backgrounded_at TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "result_ready_at") {
+        conn.execute("ALTER TABLE a2a_tasks ADD COLUMN result_ready_at TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "task_token_hash") {
+        conn.execute("ALTER TABLE a2a_tasks ADD COLUMN task_token_hash TEXT", [])?;
+    }
+    if !cols.iter().any(|c| c == "must_deliver") {
+        conn.execute(
+            "ALTER TABLE a2a_tasks ADD COLUMN must_deliver INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "long_running") {
+        conn.execute(
+            "ALTER TABLE a2a_tasks ADD COLUMN long_running INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "empty_wait_count") {
+        conn.execute(
+            "ALTER TABLE a2a_tasks ADD COLUMN empty_wait_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -529,16 +724,20 @@ fn insert_task_row(tx: &Transaction<'_>, task: &LoungeTask) -> rusqlite::Result<
     let now = now_rfc3339();
     let payload = serde_json::to_string(task)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let must_deliver = if task.must_deliver { 1 } else { 0 };
+    let long_running = if task.long_running { 1 } else { 0 };
     tx.execute(
         r#"
         INSERT INTO a2a_tasks (
             id, root_id, parent_id, project_id, source_agent, target_agent,
             status, hop_count, idempotency_key, session_id, source_verified,
-            summary, payload_json, created_at, updated_at
+            summary, payload_json, created_at, updated_at,
+            must_deliver, long_running, task_token_hash
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
             ?7, ?8, ?9, ?10, ?11,
-            ?12, ?13, ?14, ?15
+            ?12, ?13, ?14, ?15,
+            ?16, ?17, ?18
         )
         "#,
         params![
@@ -557,6 +756,9 @@ fn insert_task_row(tx: &Transaction<'_>, task: &LoungeTask) -> rusqlite::Result<
             payload,
             task.created_at,
             now,
+            must_deliver,
+            long_running,
+            task.task_token_hash,
         ],
     )
 }
@@ -752,7 +954,8 @@ pub fn yield_task_result(
     let n = conn.execute(
         r#"
         UPDATE a2a_tasks
-        SET result_json = ?1, status = ?2, updated_at = ?3, claimed_by = ?4
+        SET result_json = ?1, status = ?2, updated_at = ?3, claimed_by = ?4,
+            result_ready_at = COALESCE(result_ready_at, ?3)
         WHERE id = ?5
           AND status IN ('QUEUED', 'DISPATCHED', 'EXECUTING', 'WAIT_TIMEOUT_REACHED')
         "#,
@@ -781,14 +984,38 @@ fn rewrite_payload(conn: &Connection, task: &LoungeTask) -> Result<()> {
     Ok(())
 }
 
-/// Kaynak oturum wait/okuma yetkisi.
+/// Kaynak oturum wait/okuma yetkisi — aynı oturum VEYA geçerli task_token.
 pub fn session_can_read_task(conn: &Connection, task_id: &str, session_id: &str) -> Result<bool> {
+    session_or_token_can_read(conn, task_id, session_id, None)
+}
+
+pub fn session_or_token_can_read(
+    conn: &Connection,
+    task_id: &str,
+    session_id: &str,
+    task_token: Option<&str>,
+) -> Result<bool> {
     let owner = load_task_session_id(conn, task_id)?;
-    Ok(match owner {
-        Some(ref sid) => sid == session_id,
-        // Oturumsuz (legacy NATS) görevler — okuma açık değil (fail-closed PR-3).
-        None => false,
-    })
+    if let Some(ref sid) = owner {
+        if sid == session_id {
+            return Ok(true);
+        }
+    }
+    // Yeniden bağlanma: düz token sunulursa hash sabit-zamanlı doğrulanır.
+    if let Some(presented) = task_token.map(str::trim).filter(|s| !s.is_empty()) {
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT task_token_hash FROM a2a_tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(hash) = stored.filter(|h| !h.is_empty()) {
+            return Ok(task_token_matches(&hash, presented));
+        }
+    }
+    // Oturumsuz (legacy NATS) görevler — okuma açık değil (fail-closed PR-3).
+    Ok(false)
 }
 
 /// Kullanıcı iptali.
@@ -951,6 +1178,225 @@ pub fn mark_silent_tasks_needs_human(
         }
     }
     Ok(marked)
+}
+
+/// `lounge_wait_task` çağrıldığında dokunulan zaman damgası.
+pub fn touch_last_wait(conn: &Connection, task_id: &str) -> Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE a2a_tasks SET last_wait_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, task_id],
+    )?;
+    Ok(())
+}
+
+/// MCP oturumu koptu — agent_sessions.state = disconnected.
+pub fn mark_session_disconnected(conn: &Connection, session_id: &str) -> Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        UPDATE agent_sessions
+        SET state = 'disconnected', last_seen = ?1
+        WHERE id = ?2
+        "#,
+        params![now, session_id],
+    )?;
+    Ok(())
+}
+
+fn parse_rfc3339_age_secs(now: &str, then: &str) -> Option<i64> {
+    let now_dt = chrono::DateTime::parse_from_rfc3339(now)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let then_dt = chrono::DateTime::parse_from_rfc3339(then)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(now_dt.signed_duration_since(then_dt).num_seconds())
+}
+
+/// Sonuç orphan: backgrounded → tamamlandı, N dk hiç wait yok → EXPIRED.
+/// Çalışan (sonuçsuz) görevleri öldürmez.
+pub fn expire_result_orphans(
+    conn: &Connection,
+    now_rfc3339: &str,
+    ttl: Duration,
+) -> Result<Vec<String>> {
+    let ttl_secs = ttl.as_secs() as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, result_ready_at, last_wait_at, backgrounded_at, status
+        FROM a2a_tasks
+        WHERE backgrounded_at IS NOT NULL
+          AND result_ready_at IS NOT NULL
+          AND result_json IS NOT NULL
+          AND status IN ('COMPLETED', 'FAILED')
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut expired = Vec::new();
+    for row in rows {
+        let (id, ready_at, last_wait, _bg, _st) = row?;
+        let Some(ready) = ready_at else { continue };
+        // Wait sonucu hazır olduktan sonra geldiyse orphan değil.
+        if let Some(ref lw) = last_wait {
+            if let (Some(ready_age), Some(wait_age)) = (
+                parse_rfc3339_age_secs(now_rfc3339, &ready),
+                parse_rfc3339_age_secs(now_rfc3339, lw),
+            ) {
+                // last_wait daha yeni (küçük age) → sorgulandı.
+                if wait_age <= ready_age {
+                    continue;
+                }
+            }
+        }
+        let Some(age) = parse_rfc3339_age_secs(now_rfc3339, &ready) else {
+            continue;
+        };
+        if age >= ttl_secs {
+            update_task_status(conn, &id, TaskStatus::Expired)?;
+            expired.push(id);
+        }
+    }
+    Ok(expired)
+}
+
+/// Incomplete orphan: çağıran oturum yok/disconnected + N dk sorgu yok → EXPIRED.
+/// Dönüş: control.stop uygulanacak task_id listesi (henüz terminal olmayanlar).
+pub fn expire_incomplete_orphans(
+    conn: &Connection,
+    now_rfc3339: &str,
+    ttl: Duration,
+) -> Result<Vec<(String, Option<String>)>> {
+    let ttl_secs = ttl.as_secs() as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT t.id, t.session_id, t.updated_at, t.last_wait_at, t.created_at,
+               s.state AS session_state
+        FROM a2a_tasks t
+        LEFT JOIN agent_sessions s ON s.id = t.session_id
+        WHERE t.status IN (
+            'QUEUED', 'DISPATCHED', 'EXECUTING', 'WAIT_TIMEOUT_REACHED',
+            'RECOVERY_PENDING', 'PENDING_APPROVAL'
+        )
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, session_id, updated_at, last_wait, created_at, session_state) = row?;
+        let session_gone = match (session_id.as_deref(), session_state.as_deref()) {
+            (None, _) => true,
+            (Some(_), None) => true, // session satırı yok
+            (Some(_), Some(st)) => {
+                let lower = st.to_ascii_lowercase();
+                lower == "disconnected" || lower == "stale"
+            }
+        };
+        if !session_gone {
+            continue;
+        }
+        let anchor = last_wait.as_deref().unwrap_or(updated_at.as_str());
+        let anchor = if anchor.is_empty() {
+            created_at.as_str()
+        } else {
+            anchor
+        };
+        let Some(age) = parse_rfc3339_age_secs(now_rfc3339, anchor) else {
+            continue;
+        };
+        if age >= ttl_secs {
+            update_task_status(conn, &id, TaskStatus::Expired)?;
+            out.push((id, session_id));
+        }
+    }
+    Ok(out)
+}
+
+/// must_deliver: hazır sonuç veya açık görev TTL aşımı → FAILED + reason abandoned.
+pub fn abandon_must_deliver_orphans(
+    conn: &Connection,
+    now_rfc3339: &str,
+    ttl: Duration,
+) -> Result<Vec<String>> {
+    let ttl_secs = ttl.as_secs() as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, COALESCE(result_ready_at, created_at), status
+        FROM a2a_tasks
+        WHERE must_deliver = 1
+          AND status NOT IN ('FAILED', 'CANCELLED', 'EXPIRED', 'TIMEOUT')
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut abandoned = Vec::new();
+    for row in rows {
+        let (id, anchor, status) = row?;
+        // COMPLETED ama hiç alınmamış (last_wait yok veya result_ready'den eski) → abandon.
+        // Açık görevler de TTL ile abandon.
+        let Some(age) = parse_rfc3339_age_secs(now_rfc3339, &anchor) else {
+            continue;
+        };
+        if age < ttl_secs {
+            continue;
+        }
+        if status == "COMPLETED" {
+            let last_wait: Option<String> = conn
+                .query_row(
+                    "SELECT last_wait_at FROM a2a_tasks WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+            if let Some(ref lw) = last_wait {
+                if let Some(wait_age) = parse_rfc3339_age_secs(now_rfc3339, lw) {
+                    if wait_age <= age {
+                        continue; // alındı
+                    }
+                }
+            }
+        }
+        let envelope = serde_json::json!({
+            "reason": "abandoned",
+            "message": "must_deliver TTL aşıldı — sonuç alınmadı",
+            "abandoned_at": now_rfc3339,
+        });
+        let raw = serde_json::to_string(&envelope)?;
+        conn.execute(
+            r#"
+            UPDATE a2a_tasks
+            SET status = 'FAILED', result_json = COALESCE(result_json, ?1),
+                updated_at = ?2, result_ready_at = COALESCE(result_ready_at, ?2)
+            WHERE id = ?3
+            "#,
+            params![raw, now_rfc3339, id],
+        )?;
+        abandoned.push(id);
+    }
+    Ok(abandoned)
 }
 
 /// Hub / DB agent_sessions üst sınırı (MCP in-memory ile aynı).
@@ -1214,7 +1660,12 @@ impl crate::db::ExperienceStore {
         let conn = self.conn.lock().expect("experience db lock");
         let now = now_rfc3339();
         let n = conn.execute(
-            "UPDATE a2a_tasks SET result_json = ?1, updated_at = ?2 WHERE id = ?3",
+            r#"
+            UPDATE a2a_tasks
+            SET result_json = ?1, updated_at = ?2,
+                result_ready_at = COALESCE(result_ready_at, ?2)
+            WHERE id = ?3
+            "#,
             params![result_json, now, task_id],
         )?;
         if n == 0 {
@@ -1242,7 +1693,12 @@ impl crate::db::ExperienceStore {
         let now = now_rfc3339();
         if let Some(raw) = result_json.filter(|s| !s.is_empty()) {
             tx.execute(
-                "UPDATE a2a_tasks SET result_json = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
+                r#"
+                UPDATE a2a_tasks
+                SET result_json = ?1, status = ?2, updated_at = ?3,
+                    result_ready_at = COALESCE(result_ready_at, ?3)
+                WHERE id = ?4
+                "#,
                 params![raw, status.as_str(), now, task_id],
             )?;
         } else {
@@ -1267,18 +1723,141 @@ impl crate::db::ExperienceStore {
         session_can_read_task(&conn, task_id, session_id)
     }
 
+    pub fn session_or_token_can_read_a2a_task(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        task_token: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        session_or_token_can_read(&conn, task_id, session_id, task_token)
+    }
+
     pub fn cancel_a2a_task(&self, task_id: &str, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().expect("experience db lock");
         cancel_task(&conn, task_id, session_id)
     }
 
-    pub fn mark_a2a_wait_timeout(&self, task_id: &str) -> Result<()> {
+    /// Atomik backgrounded geçişi. `true` = bu çağrı kazandı; `false` = terminal/zaten backgrounded
+    /// (eşik anında tamamlanan görevde çift yanıt yok).
+    pub fn try_mark_a2a_wait_timeout(&self, task_id: &str) -> Result<bool> {
         let conn = self.conn.lock().expect("experience db lock");
-        let current = task_status(&conn, task_id)?.unwrap_or(TaskStatus::Queued);
-        if current.is_terminal() || matches!(current, TaskStatus::WaitTimeoutReached) {
-            return Ok(());
+        let now = now_rfc3339();
+        let n = conn.execute(
+            r#"
+            UPDATE a2a_tasks
+            SET status = ?1, updated_at = ?2, backgrounded_at = COALESCE(backgrounded_at, ?2)
+            WHERE id = ?3
+              AND status IN ('QUEUED', 'DISPATCHED', 'EXECUTING', 'RECOVERY_PENDING', 'PENDING_APPROVAL')
+            "#,
+            params![TaskStatus::WaitTimeoutReached.as_str(), now, task_id],
+        )?;
+        if n > 0 {
+            if let Some(mut task) = load_task_row(&conn, task_id)? {
+                task.status = TaskStatus::WaitTimeoutReached;
+                let _ = rewrite_payload(&conn, &task);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        update_task_status(&conn, task_id, TaskStatus::WaitTimeoutReached)
+    }
+
+    pub fn mark_a2a_wait_timeout(&self, task_id: &str) -> Result<()> {
+        let _ = self.try_mark_a2a_wait_timeout(task_id)?;
+        Ok(())
+    }
+
+    pub fn touch_a2a_last_wait(&self, task_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        touch_last_wait(&conn, task_id)
+    }
+
+    /// Boş wait sayacını artır; yeni poll_after_secs döner.
+    pub fn bump_a2a_empty_wait(&self, task_id: &str) -> Result<u64> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let now = now_rfc3339();
+        conn.execute(
+            r#"
+            UPDATE a2a_tasks
+            SET empty_wait_count = empty_wait_count + 1, last_wait_at = ?1, updated_at = ?1
+            WHERE id = ?2
+            "#,
+            params![now, task_id],
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT empty_wait_count FROM a2a_tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )?;
+        // count artık artırılmış; next_poll önceki boş dönüş sayısına göre (count-1).
+        Ok(next_poll_after_secs(count.saturating_sub(1).max(0) as u32))
+    }
+
+    pub fn a2a_flags(&self, task_id: &str) -> Result<(bool, bool)> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let row: (i64, i64) = conn.query_row(
+            "SELECT COALESCE(must_deliver,0), COALESCE(long_running,0) FROM a2a_tasks WHERE id = ?1",
+            params![task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((row.0 != 0, row.1 != 0))
+    }
+
+    pub fn set_a2a_task_token_hash(&self, task_id: &str, hash: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        conn.execute(
+            "UPDATE a2a_tasks SET task_token_hash = ?1 WHERE id = ?2",
+            params![hash, task_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn check_must_deliver_quota(&self, session_id: &str, source_agent: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        check_must_deliver_quota(&conn, session_id, source_agent)
+    }
+
+    pub fn peek_a2a_idempotency(
+        &self,
+        session_id: &str,
+        project_id: &str,
+        key: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let scope = format!("session:{session_id}");
+        lookup_idempotency(&conn, &scope, project_id, key)
+    }
+
+    /// must_deliver: result_ready veya oluşturulma + TTL → FAILED(abandoned).
+    pub fn abandon_stale_must_deliver(
+        &self,
+        now_rfc3339: &str,
+        ttl: Duration,
+    ) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        abandon_must_deliver_orphans(&conn, now_rfc3339, ttl)
+    }
+
+    pub fn mark_mcp_session_disconnected(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("experience db lock");
+        mark_session_disconnected(&conn, session_id)
+    }
+
+    /// PR-3b orphan TTL taraması.
+    /// `result_expired`: backgrounded+hazır, wait yok.
+    /// `incomplete_expired`: (id, session_id) — control.stop için.
+    #[allow(clippy::type_complexity)]
+    pub fn expire_a2a_orphans(
+        &self,
+        now_rfc3339: &str,
+        result_ttl: Duration,
+        incomplete_ttl: Duration,
+    ) -> Result<(Vec<String>, Vec<(String, Option<String>)>)> {
+        let conn = self.conn.lock().expect("experience db lock");
+        let result_expired = expire_result_orphans(&conn, now_rfc3339, result_ttl)?;
+        let incomplete_expired = expire_incomplete_orphans(&conn, now_rfc3339, incomplete_ttl)?;
+        Ok((result_expired, incomplete_expired))
     }
 
     pub fn pragma_foreign_keys(&self) -> Result<bool> {
@@ -1901,5 +2480,133 @@ mod tests {
             .recover_silent_a2a_tasks("2026-10-04T10:01:00.000Z", Duration::from_secs(120))
             .unwrap();
         assert!(marked.is_empty(), "heartbeat sonrası sessiz sayılmamalı");
+    }
+
+    #[test]
+    fn result_orphan_expires_after_ttl_without_wait() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "bg-done");
+        task.session_id = Some("sess-r".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+        // Worker sonucu yazdı (backgrounded sonrası).
+        store
+            .complete_a2a_with_result(
+                &task.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+        // result_ready_at şimdi; 11 dk sonra expire.
+        let (expired, incomplete) = store
+            .expire_a2a_orphans(
+                "2099-01-01T00:11:00.000Z", // far future relative — use fixed
+                Duration::from_secs(600),
+                Duration::from_secs(1800),
+            )
+            .unwrap();
+        // now is in the future vs result_ready_at (real now) — age huge → expired
+        assert!(
+            expired.contains(&task.id),
+            "result orphan expire: {expired:?}"
+        );
+        assert!(incomplete.is_empty());
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Expired)
+        );
+    }
+
+    #[test]
+    fn result_orphan_skipped_if_waited() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "bg-waited");
+        task.session_id = Some("sess-w".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+        store
+            .complete_a2a_with_result(
+                &task.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+        store.touch_a2a_last_wait(&task.id).unwrap();
+        let (expired, _) = store
+            .expire_a2a_orphans(
+                "2099-01-01T00:00:00.000Z",
+                Duration::from_secs(1),
+                Duration::from_secs(1800),
+            )
+            .unwrap();
+        assert!(
+            !expired.contains(&task.id),
+            "wait sonrası result orphan olmamalı"
+        );
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn incomplete_orphan_expires_when_session_disconnected() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut sess = AgentSession::new("p", "cursor", "mcp", "/tmp", "mcp_meta");
+        sess.id = "sess-gone".into();
+        store.upsert_session(&sess).unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "orph");
+        task.session_id = Some("sess-gone".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store
+            .set_a2a_task_status(&task.id, TaskStatus::WaitTimeoutReached)
+            .unwrap();
+        store.mark_mcp_session_disconnected("sess-gone").unwrap();
+        // updated_at = now; force old updated_at
+        store
+            .touch_a2a_updated_at(&task.id, "2026-10-04T12:00:00.000Z")
+            .unwrap();
+        let (_r, incomplete) = store
+            .expire_a2a_orphans(
+                "2026-10-04T12:35:00.000Z",
+                Duration::from_secs(600),
+                Duration::from_secs(30 * 60),
+            )
+            .unwrap();
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0].0, task.id);
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Expired)
+        );
+    }
+
+    #[test]
+    fn running_task_not_killed_by_result_orphan_ttl() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut sess = AgentSession::new("p", "cursor", "mcp", "/tmp", "mcp_meta");
+        sess.id = "sess-run".into();
+        sess.state = "active".into();
+        store.upsert_session(&sess).unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "still-run");
+        task.session_id = Some("sess-run".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+        // Sonuç yok — result orphan uygulanmaz; oturum active → incomplete yok.
+        let (expired, incomplete) = store
+            .expire_a2a_orphans(
+                "2099-01-01T00:00:00.000Z",
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert!(expired.is_empty());
+        assert!(incomplete.is_empty());
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::WaitTimeoutReached)
+        );
     }
 }

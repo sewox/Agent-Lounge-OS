@@ -5,15 +5,21 @@
 //! istemci sert zaman aşımından **önce** dönmek esas.
 //!
 //! Sonuç teslimi (deadline exceeded sonrası): bağlantı açık kalır; ajan
-//! `lounge_wait_task` ile aynı oturumda sonucu çeker (piggyback). Progress
-//! bildirimleri yalnız UI nabzı içindir; süreyi uzatmaz.
+//! `lounge_wait_task` ile aynı oturumda sonucu çeker (piggyback).
+//!
+//! Progress: yalnız `progress_extends` profillerinde (Cursor) ve istemci
+//! `progressToken` gönderdiyse 10 sn heartbeat ile Mod A ≤280 sn tutulur.
+//! Diğer istemcilerde progress süreyi uzatmaz.
 //!
 //! İptal: `notifications/cancelled` reason `context canceled` → görev iptal +
 //! `lounge.control.stop`. `deadline exceeded` → görev arka planda sürer.
+//! Oturum kopması (stdio EOF / HTTP DELETE): yalnız **in-flight** (senkron
+//! beklenen) çağrılar iptal; backgrounded görevler korunur.
 //!
 //! NATS: paylaşılan [`NatsTerminalHub`] (çağrı başına connect yok). Sender
 //! kapanınca select kolu devre dışı kalır (busy-loop yok).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,12 +30,55 @@ use uuid::Uuid;
 
 use super::nats_terminal::NatsTerminalHub;
 use super::session_id::is_valid_session_id;
-use super::timeout_manager::TimeoutManager;
+use super::timeout_manager::{profile_diag, TimeoutManager};
 use super::wait_clock::WaitClock;
-use crate::db::{configured_max_hops, AdmitOutcome, ExperienceStore};
+use crate::db::{
+    configured_max_hops, generate_task_token, hash_task_token, AdmitOutcome, ExperienceStore,
+};
 use crate::models::{
     now_rfc3339, LoungeTask, TaskStatus, CONTROL_STOP, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
 };
+
+/// Progress heartbeat — testte sayaç; üretimde MCP `notifications/progress`.
+pub trait ProgressSink: Send + Sync {
+    fn emit_progress(&self, progress_token: &Value, message: &str, elapsed_secs: u64);
+}
+
+/// Sessiz (HTTP yanıt gövdesine yazılamayan) sink.
+#[derive(Debug, Default)]
+pub struct NoopProgressSink;
+
+impl ProgressSink for NoopProgressSink {
+    fn emit_progress(&self, _progress_token: &Value, _message: &str, _elapsed_secs: u64) {}
+}
+
+/// Test / teşhis sayacı.
+#[derive(Debug, Default)]
+pub struct CountingProgressSink {
+    pub count: AtomicU64,
+}
+
+impl ProgressSink for CountingProgressSink {
+    fn emit_progress(&self, _progress_token: &Value, _message: &str, _elapsed_secs: u64) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Mod A bekleme seçenekleri.
+#[derive(Clone)]
+pub struct WaitOpts {
+    pub progress_token: Option<Value>,
+    pub progress_sink: Arc<dyn ProgressSink>,
+}
+
+impl Default for WaitOpts {
+    fn default() -> Self {
+        Self {
+            progress_token: None,
+            progress_sink: Arc::new(NoopProgressSink),
+        }
+    }
+}
 
 /// İstemci iptal nedeni ayrımı.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +114,10 @@ pub struct CallAgentArgs {
     pub parent_task_id: Option<String>,
     /// `true` → Mod A bekle; `false` → hemen task_id (dispatch uyumluluğu).
     pub wait: bool,
+    /// Uzun iş — backgrounded sonrası poll_after ipucu.
+    pub long_running: bool,
+    /// Sonuç mutlaka teslim (kota + 24s abandoned).
+    pub must_deliver: bool,
 }
 
 /// NATS / test yayın aracı — control.stop doğrulaması için enjekte edilir.
@@ -172,7 +225,25 @@ impl Orchestrator {
         session_id: &str,
         client_name: &str,
         args: CallAgentArgs,
+        cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
+    ) -> Result<Value> {
+        self.call_agent_with_opts(
+            session_id,
+            client_name,
+            args,
+            cancel_rx,
+            WaitOpts::default(),
+        )
+        .await
+    }
+
+    pub async fn call_agent_with_opts(
+        &self,
+        session_id: &str,
+        client_name: &str,
+        args: CallAgentArgs,
         mut cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
+        opts: WaitOpts,
     ) -> Result<Value> {
         if !is_valid_session_id(session_id) {
             return Err(anyhow!("geçersiz session_id"));
@@ -187,19 +258,47 @@ impl Orchestrator {
                 super::session_id::MAX_OPEN_TASKS_PER_SESSION
             ));
         }
-        let timeout_limit = self.timeouts.timeout_limit(client_name);
+        let has_progress = opts.progress_token.is_some();
+        let timeout_limit = self
+            .timeouts
+            .timeout_limit_with_progress(client_name, has_progress);
+        let diag = profile_diag(client_name, timeout_limit);
         let source = format!(
             "mcp:{}",
             super::mcp_server::normalize_client_host(client_name)
         );
 
-        let mut task = LoungeTask::new(source, args.project_id.clone(), args.task.clone());
+        if args.must_deliver {
+            // Idempotency replay kota yemez — yalnız yeni kabul öncesi kontrol.
+            let peek_replay = if let Some(ref key) = args.idempotency_key {
+                self.store
+                    .peek_a2a_idempotency(session_id, &args.project_id, key)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            } else {
+                false
+            };
+            if !peek_replay {
+                self.store
+                    .check_must_deliver_quota(session_id, &source)
+                    .map_err(|e| anyhow!(e.to_string()))?;
+            }
+        }
+
+        let plaintext_token = generate_task_token();
+        let token_hash = hash_task_token(&plaintext_token);
+
+        let mut task = LoungeTask::new(source.clone(), args.project_id.clone(), args.task.clone());
         task.target_agent = Some(args.target_agent.clone());
         task.session_id = Some(session_id.to_string());
         // P1-1: token/parent-PID doğrulaması gelene kadar MCP görevleri unverified.
         task.source_verified = false;
         task.idempotency_key = args.idempotency_key.clone();
         task.repo_path = args.repo_path.clone();
+        task.long_running = args.long_running;
+        task.must_deliver = args.must_deliver;
+        task.task_token_hash = Some(token_hash.clone());
         // parent_task_id istemci değeri yok sayılır — yalnız sunucu enjekte eder.
         let _ = args.parent_task_id;
         task.parent_task_id = None;
@@ -210,23 +309,26 @@ impl Orchestrator {
             .admit_a2a_task(&mut task, max_hops)
             .map_err(|e| anyhow!(e.to_string()))?;
 
-        let (task_id, replay_status) = match outcome {
-            AdmitOutcome::Accepted(t) => (t.id, None),
+        let (task_id, replay_status, issued_token) = match outcome {
+            AdmitOutcome::Accepted(t) => (t.id, None, Some(plaintext_token)),
             AdmitOutcome::Replay {
                 existing_task_id,
                 status,
             } => {
+                // İlk gelen kazanır — token yeniden üretilmez (must_deliver idempotency).
                 if status.is_terminal() {
                     let result = self.store.a2a_task_result(&existing_task_id)?;
-                    return Ok(json!({
+                    let mut body = json!({
                         "status": status.as_str().to_ascii_lowercase(),
                         "task_id": existing_task_id,
                         "replay": true,
                         "result": result.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
                         "timeout_limit_secs": timeout_limit.as_secs(),
-                    }));
+                    });
+                    merge_diag(&mut body, &diag);
+                    return Ok(body);
                 }
-                (existing_task_id, Some(status))
+                (existing_task_id, Some(status), None)
             }
         };
 
@@ -235,7 +337,7 @@ impl Orchestrator {
         }
 
         if !args.wait {
-            return Ok(json!({
+            let mut body = json!({
                 "published": true,
                 "task_id": task_id,
                 "subject": TASK_REQUESTED,
@@ -246,33 +348,68 @@ impl Orchestrator {
                 "session_id": session_id,
                 "source_verified": false,
                 "timeout_limit_secs": timeout_limit.as_secs(),
+                "long_running": args.long_running,
+                "must_deliver": args.must_deliver,
                 "replay_status": replay_status.map(|s| s.as_str()),
-                "note": "Görev NATS'a yazıldı. Sonuç için lounge_wait_task kullanın (Mod B). source_verified=false — onay kapısı uygulanabilir."
-            }));
+                "note": "Görev NATS'a yazıldı. Sonuç için lounge_wait_task kullanın (Mod B). source_verified=false — onay kapısı uygulanabilir. Yeniden bağlanmada task_token saklayın."
+            });
+            if let Some(tok) = issued_token {
+                body["task_token"] = json!(tok);
+            }
+            merge_diag(&mut body, &diag);
+            return Ok(body);
         }
 
-        self.wait_until_done_or_background(&task_id, session_id, timeout_limit, cancel_rx.as_mut())
-            .await
+        let mut out = self
+            .wait_until_done_or_background(
+                &task_id,
+                session_id,
+                client_name,
+                timeout_limit,
+                cancel_rx.as_mut(),
+                &opts,
+                args.long_running,
+            )
+            .await?;
+        if let Some(tok) = issued_token {
+            if out.get("status").and_then(|s| s.as_str()) == Some("backgrounded") {
+                out["task_token"] = json!(tok);
+            }
+        }
+        out["long_running"] = json!(args.long_running);
+        out["must_deliver"] = json!(args.must_deliver);
+        merge_diag(&mut out, &diag);
+        Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn wait_until_done_or_background(
         &self,
         task_id: &str,
         session_id: &str,
+        client_name: &str,
         timeout_limit: Duration,
         mut cancel_rx: Option<&mut watch::Receiver<Option<CancelKind>>>,
+        opts: &WaitOpts,
+        long_running: bool,
     ) -> Result<Value> {
         let poll = Duration::from_millis(50);
-        let deadline_ms = self
-            .clock
-            .now_ms()
-            .saturating_add(timeout_limit.as_millis() as u64);
+        let start_ms = self.clock.now_ms();
+        let deadline_ms = start_ms.saturating_add(timeout_limit.as_millis() as u64);
+        let profile = self.timeouts.profile_for(client_name);
+        let heartbeat = if opts.progress_token.is_some() && profile.progress_extends {
+            Duration::from_secs(profile.progress_heartbeat_secs.unwrap_or(10))
+        } else {
+            Duration::from_secs(u64::MAX / 4) // fiilen kapalı
+        };
+        let mut next_heartbeat_ms = start_ms.saturating_add(heartbeat.as_millis() as u64);
 
         let mut nats_rx = self.subscribe_terminal(task_id);
         // Sender kapandıysa kolu tamamen bırak (pending future → CPU yok).
         let mut nats_alive = !self.skip_nats;
 
         loop {
+            // Cancel önce — progress heartbeat cancelled işlemeyi geciktirmesin.
             let pending_cancel = cancel_rx.as_ref().and_then(|rx| *rx.borrow());
             if let Some(kind) = pending_cancel {
                 return self.handle_cancel(task_id, session_id, kind).await;
@@ -282,23 +419,61 @@ impl Orchestrator {
                 return Ok(payload);
             }
 
-            if self.clock.now_ms() >= deadline_ms {
-                let _ = self.store.mark_a2a_wait_timeout(task_id);
+            let now = self.clock.now_ms();
+            if now >= deadline_ms {
+                // Atomik: sonuç ile backgrounded arasında tek kazanan.
+                if let Some(payload) = self.try_read_result(task_id, session_id)? {
+                    return Ok(payload);
+                }
+                let won = self.store.try_mark_a2a_wait_timeout(task_id)?;
+                if !won {
+                    if let Some(payload) = self.try_read_result(task_id, session_id)? {
+                        return Ok(payload);
+                    }
+                }
+                let poll_after = crate::db::next_poll_after_secs(0);
                 return Ok(json!({
                     "status": "backgrounded",
                     "task_id": task_id,
+                    "poll_after_secs": poll_after,
+                    "next_action": format!(
+                        "Call lounge_wait_task(task_id) after ~{poll_after}s — do not tell the user the work finished until wait returns completed/failed."
+                    ),
                     "message": format!(
-                        "İşlem {}sn eşiğini aştı, arka planda devam ediyor. Sonucu lounge_wait_task ile alın; sonuç gelmeden kullanıcıya bitti demeyin.",
-                        timeout_limit.as_secs()
+                        "İşlem {}sn eşiğini aştı, arka planda devam ediyor. ~{}sn sonra lounge_wait_task ile kontrol edin; sonuç gelmeden kullanıcıya bitti demeyin.",
+                        timeout_limit.as_secs(),
+                        poll_after
                     ),
                     "timeout_limit_secs": timeout_limit.as_secs(),
-                    "hint": "Call lounge_wait_task(task_id) — do not tell the user the work finished until wait returns completed/failed."
+                    "long_running": long_running,
+                    "hint": "Call lounge_wait_task(task_id) on a schedule (poll_after_secs). Keep task_token if reconnecting in a new session."
                 }));
             }
 
-            let slice = poll.min(Duration::from_millis(
-                deadline_ms.saturating_sub(self.clock.now_ms()).max(1),
-            ));
+            while opts.progress_token.is_some()
+                && profile.progress_extends
+                && now >= next_heartbeat_ms
+            {
+                // Cancel yeniden kontrol — heartbeat aralığında Stop gelmiş olabilir.
+                let pending_cancel = cancel_rx.as_ref().and_then(|rx| *rx.borrow());
+                if let Some(kind) = pending_cancel {
+                    return self.handle_cancel(task_id, session_id, kind).await;
+                }
+                if let Some(ref token) = opts.progress_token {
+                    let elapsed = (now - start_ms) / 1000;
+                    opts.progress_sink.emit_progress(
+                        token,
+                        &format!("lounge waiting ({elapsed}s)"),
+                        elapsed,
+                    );
+                }
+                // Saat sıçramasında (test) kaçırılan dilimleri yakala.
+                next_heartbeat_ms = next_heartbeat_ms.saturating_add(heartbeat.as_millis() as u64);
+            }
+
+            let until_deadline = deadline_ms.saturating_sub(now).max(1);
+            let until_hb = next_heartbeat_ms.saturating_sub(now).max(1);
+            let slice = poll.min(Duration::from_millis(until_deadline.min(until_hb)));
             let nats_fut = poll_terminal_match(&mut nats_rx, task_id, nats_alive);
             if let Some(rx) = cancel_rx.as_mut() {
                 tokio::select! {
@@ -340,7 +515,19 @@ impl Orchestrator {
     }
 
     pub(crate) fn try_read_result(&self, task_id: &str, session_id: &str) -> Result<Option<Value>> {
-        if !self.store.session_can_read_a2a_task(task_id, session_id)? {
+        self.try_read_result_with_token(task_id, session_id, None)
+    }
+
+    pub(crate) fn try_read_result_with_token(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        task_token: Option<&str>,
+    ) -> Result<Option<Value>> {
+        if !self
+            .store
+            .session_or_token_can_read_a2a_task(task_id, session_id, task_token)?
+        {
             return Err(anyhow!("yetkisiz oturum: görev okunamaz"));
         }
         let status = match self.store.a2a_task_status(task_id)? {
@@ -431,13 +618,20 @@ impl Orchestrator {
                 Ok(body)
             }
             CancelKind::DeadlineExceeded => {
-                let _ = self.store.mark_a2a_wait_timeout(task_id);
+                let won = self.store.try_mark_a2a_wait_timeout(task_id)?;
+                if !won {
+                    if let Some(payload) = self.try_read_result(task_id, session_id)? {
+                        return Ok(payload);
+                    }
+                }
                 Ok(json!({
                     "status": "backgrounded",
                     "task_id": task_id,
                     "reason": "deadline exceeded",
+                    "poll_after_secs": crate::db::next_poll_after_secs(0),
+                    "next_action": "Call lounge_wait_task after poll_after_secs.",
                     "message": "İstemci zaman aşımı — görev arka planda sürüyor. lounge_wait_task ile sonucu alın.",
-                    "hint": "Connection stays open; call lounge_wait_task in this session."
+                    "hint": "Connection stays open; call lounge_wait_task in this session (or with task_token)."
                 }))
             }
             CancelKind::Other => Ok(json!({
@@ -455,17 +649,69 @@ impl Orchestrator {
         client_name: &str,
         task_id: &str,
         timeout_ms: Option<u64>,
-        mut cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
+        cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
     ) -> Result<Value> {
-        let timeout_limit = self.timeouts.timeout_limit(client_name);
+        self.wait_task_with_opts(
+            session_id,
+            client_name,
+            task_id,
+            timeout_ms,
+            cancel_rx,
+            WaitOpts::default(),
+            None,
+        )
+        .await
+    }
+
+    pub async fn wait_task_with_token(
+        &self,
+        session_id: &str,
+        client_name: &str,
+        task_id: &str,
+        timeout_ms: Option<u64>,
+        cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
+        task_token: Option<&str>,
+    ) -> Result<Value> {
+        self.wait_task_with_opts(
+            session_id,
+            client_name,
+            task_id,
+            timeout_ms,
+            cancel_rx,
+            WaitOpts::default(),
+            task_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn wait_task_with_opts(
+        &self,
+        session_id: &str,
+        client_name: &str,
+        task_id: &str,
+        timeout_ms: Option<u64>,
+        mut cancel_rx: Option<watch::Receiver<Option<CancelKind>>>,
+        opts: WaitOpts,
+        task_token: Option<&str>,
+    ) -> Result<Value> {
+        let has_progress = opts.progress_token.is_some();
+        let timeout_limit = self
+            .timeouts
+            .timeout_limit_with_progress(client_name, has_progress);
+        let diag = profile_diag(client_name, timeout_limit);
         let requested = timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(timeout_limit);
         let budget = requested.min(timeout_limit);
 
-        if !self.store.session_can_read_a2a_task(task_id, session_id)? {
+        if !self
+            .store
+            .session_or_token_can_read_a2a_task(task_id, session_id, task_token)?
+        {
             return Err(anyhow!("yetkisiz oturum: görev okunamaz"));
         }
+        let _ = self.store.touch_a2a_last_wait(task_id);
 
         let deadline_ms = self
             .clock
@@ -484,11 +730,16 @@ impl Orchestrator {
             };
             if let Some(kind) = cancel_kind {
                 if kind == CancelKind::UserStop {
-                    return self.handle_cancel(task_id, session_id, kind).await;
+                    let mut out = self.handle_cancel(task_id, session_id, kind).await?;
+                    merge_diag(&mut out, &diag);
+                    return Ok(out);
                 }
             }
 
-            if let Some(payload) = self.try_read_result(task_id, session_id)? {
+            if let Some(mut payload) =
+                self.try_read_result_with_token(task_id, session_id, task_token)?
+            {
+                merge_diag(&mut payload, &diag);
                 return Ok(payload);
             }
 
@@ -497,12 +748,28 @@ impl Orchestrator {
                     .store
                     .a2a_task_status(task_id)?
                     .unwrap_or(TaskStatus::WaitTimeoutReached);
+                let (must_deliver, long_running) =
+                    self.store.a2a_flags(task_id).unwrap_or((false, false));
+                let use_backoff = long_running
+                    || matches!(status, TaskStatus::WaitTimeoutReached)
+                    || must_deliver;
+                let poll_after = if use_backoff {
+                    self.store.bump_a2a_empty_wait(task_id).unwrap_or(15)
+                } else {
+                    1
+                };
                 let mut body = json!({
                     "status": "still_running",
                     "task_id": task_id,
                     "task_status": status.as_str(),
-                    "retry_after_ms": 1000,
+                    "retry_after_ms": poll_after.saturating_mul(1000),
+                    "poll_after_secs": poll_after,
+                    "next_action": format!(
+                        "Call lounge_wait_task again after ~{poll_after}s; do not report completion yet."
+                    ),
                     "timeout_limit_secs": timeout_limit.as_secs(),
+                    "long_running": long_running,
+                    "must_deliver": must_deliver,
                     "message": "Görev hâlâ çalışıyor — lounge_wait_task tekrar çağrılabilir."
                 });
                 if matches!(status, TaskStatus::NeedsHuman) {
@@ -511,6 +778,7 @@ impl Orchestrator {
                         "Kullanıcı onayı gerekli — tekrar bekleme; UI/karar sonrası yeniden dene."
                     );
                 }
+                merge_diag(&mut body, &diag);
                 return Ok(body);
             }
 
@@ -541,6 +809,24 @@ impl Orchestrator {
                 closed = nats_fut => { if closed { nats_alive = false; } }
             }
         }
+    }
+
+    /// Oturum kopması: yalnız henüz senkron beklenen (in-flight cancel kanalı)
+    /// görevleri UserStop ile iptal et. Backgrounded görevlere dokunma.
+    pub async fn cancel_in_flight_on_disconnect(
+        &self,
+        session_id: &str,
+        cancel_txs: Vec<watch::Sender<Option<CancelKind>>>,
+    ) -> usize {
+        let n = cancel_txs.len();
+        for tx in cancel_txs {
+            let _ = tx.send(Some(CancelKind::UserStop));
+        }
+        if n > 0 {
+            log::info!("session disconnect: {n} in-flight cancel sinyali session={session_id}");
+        }
+        let _ = self.store.mark_mcp_session_disconnected(session_id);
+        n
     }
 
     pub async fn yield_result(
@@ -674,6 +960,14 @@ async fn poll_terminal_match(
     }
 }
 
+fn merge_diag(body: &mut Value, diag: &Value) {
+    if let (Some(obj), Some(d)) = (body.as_object_mut(), diag.as_object()) {
+        for (k, v) in d {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 fn terminal_payload_matches_task(data: &[u8], task_id: &str) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(data) else {
@@ -743,6 +1037,8 @@ mod tests {
             repo_path: None,
             parent_task_id: None,
             wait: true,
+            long_running: false,
+            must_deliver: false,
         };
         let store = orch.store().clone();
         bind_worker(&store, "worker-sess", "worker");
@@ -792,6 +1088,8 @@ mod tests {
             repo_path: None,
             parent_task_id: None,
             wait: true,
+            long_running: false,
+            must_deliver: false,
         };
         bind_worker(orch.store(), "w", "worker");
         let (cancel_tx, cancel_rx) = watch::channel(None);
@@ -849,6 +1147,8 @@ mod tests {
             repo_path: None,
             parent_task_id: None,
             wait: true,
+            long_running: false,
+            must_deliver: false,
         };
         let (cancel_tx, cancel_rx) = watch::channel(None);
         let call = tokio::spawn({
@@ -880,6 +1180,8 @@ mod tests {
             repo_path: None,
             parent_task_id: None,
             wait: true,
+            long_running: false,
+            must_deliver: false,
         };
         let (cancel_tx, cancel_rx) = watch::channel(None);
         let call = tokio::spawn({
@@ -913,6 +1215,8 @@ mod tests {
             repo_path: None,
             parent_task_id: None,
             wait: true,
+            long_running: false,
+            must_deliver: false,
         };
         let (cancel_tx, cancel_rx) = watch::channel(None);
         let call = tokio::spawn({
@@ -1010,6 +1314,8 @@ mod tests {
             repo_path: None,
             parent_task_id: None,
             wait: false,
+            long_running: false,
+            must_deliver: false,
         };
         let out = orch
             .call_agent(&session, "cursor", args, None)
@@ -1047,5 +1353,380 @@ mod tests {
             "xyz"
         ));
         assert!(!terminal_payload_matches_task(br#"{"id":"abc"}"#, "other"));
+    }
+
+    #[tokio::test]
+    async fn cursor_progress_heartbeat_extends_wait() {
+        let store = ExperienceStore::memory().unwrap();
+        let clock = Arc::new(ManualWaitClock::new());
+        let timeouts = Arc::new(TimeoutManager::with_defaults());
+        // Override yok — Cursor progress ile 280 sn.
+        let sink = Arc::new(CountingProgressSink::default());
+        let orch = Orchestrator::new(
+            store,
+            "nats://127.0.0.1:9",
+            timeouts,
+            clock.clone() as Arc<dyn WaitClock>,
+        )
+        .with_skip_nats(true);
+        let session = Uuid::new_v4().to_string();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "long".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: false,
+            must_deliver: false,
+        };
+        let opts = WaitOpts {
+            progress_token: Some(json!(42)),
+            progress_sink: sink.clone() as Arc<dyn ProgressSink>,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent_with_opts(&session, "cursor-vscode", args, Some(cancel_rx), opts)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        // 100 sn eşiğini aş, 280'e kadar devam etmeli (henüz backgrounded değil).
+        clock.advance(Duration::from_secs(110));
+        tokio::task::yield_now().await;
+        assert!(!call.is_finished(), "progress ile 110sn'de hâlâ beklemeli");
+        assert!(
+            sink.count.load(Ordering::SeqCst) >= 10,
+            "≈10 sn heartbeat: {}",
+            sink.count.load(Ordering::SeqCst)
+        );
+        // 280 sn dolsun → backgrounded
+        clock.advance(Duration::from_secs(180));
+        let out = call.await.unwrap().unwrap();
+        assert_eq!(out["status"], "backgrounded");
+        assert_eq!(out["client_profile"], "cursor-vscode");
+        assert_eq!(out["timeout_limit_secs"], 280);
+        let _ = cancel_tx;
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_inflight_keeps_backgrounded() {
+        let (orch, clock, session) = orch_manual();
+        // 1) Backgrounded görev
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "bg".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: false,
+            must_deliver: false,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent(&session, "cursor", args, Some(cancel_rx))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        clock.advance(Duration::from_secs(3));
+        let bg = call.await.unwrap().unwrap();
+        assert_eq!(bg["status"], "backgrounded");
+        let bg_id = bg["task_id"].as_str().unwrap().to_string();
+        let _ = cancel_tx;
+
+        // 2) Hâlâ in-flight senkron bekleme
+        let args2 = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "inflight".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: false,
+            must_deliver: false,
+        };
+        let (tx2, rx2) = watch::channel(None);
+        let call2 = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move { orch.call_agent(&session, "cursor", args2, Some(rx2)).await }
+        });
+        tokio::task::yield_now().await;
+        clock.advance(Duration::from_millis(20));
+
+        // Disconnect: yalnız in-flight cancel
+        let n = orch
+            .cancel_in_flight_on_disconnect(&session, vec![tx2])
+            .await;
+        assert_eq!(n, 1);
+        clock.advance(Duration::from_millis(50));
+        let cancelled = call2.await.unwrap().unwrap();
+        assert_eq!(cancelled["status"], "cancelled");
+
+        // Backgrounded hâlâ WaitTimeoutReached (CANCELLED değil)
+        let st = orch.store().a2a_task_status(&bg_id).unwrap().unwrap();
+        assert_eq!(st, TaskStatus::WaitTimeoutReached);
+    }
+
+    #[tokio::test]
+    async fn responses_include_client_profile() {
+        let (orch, _clock, session) = orch_manual();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "x".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: false,
+            long_running: false,
+            must_deliver: false,
+        };
+        let out = orch
+            .call_agent(&session, "claude-ai", args, None)
+            .await
+            .unwrap();
+        assert_eq!(out["client_profile"], "claude-ai");
+        assert_eq!(out["timeout_limit_secs"], 2);
+        assert!(out.get("task_token").and_then(|v| v.as_str()).is_some());
+    }
+
+    #[tokio::test]
+    async fn threshold_race_single_winner_completed_not_backgrounded() {
+        // Eşik anında sonuç yazılırsa yalnız completed (çift yanıt yok).
+        let (orch, clock, session) = orch_manual();
+        bind_worker(orch.store(), "w", "worker");
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "race".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: false,
+            must_deliver: false,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent(&session, "cursor", args, Some(cancel_rx))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        // Deadline'a yaklaş: override 2s.
+        clock.advance(Duration::from_millis(1900));
+        tokio::task::yield_now().await;
+        let task_id = {
+            let conn = orch.store().conn.lock().unwrap();
+            conn.query_row("SELECT id FROM a2a_tasks LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+        };
+        orch.store()
+            .yield_a2a_result(&task_id, "w", TaskStatus::Completed, r#"{"race":true}"#)
+            .unwrap();
+        clock.advance(Duration::from_millis(200));
+        let out = call.await.unwrap().unwrap();
+        assert_eq!(out["status"], "completed", "tek kazanan completed: {out}");
+        assert_ne!(out["status"], "backgrounded");
+        let _ = cancel_tx;
+    }
+
+    #[tokio::test]
+    async fn must_deliver_idempotency_first_wins() {
+        let (orch, _clock, session) = orch_manual();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "md".into(),
+            project_id: "p".into(),
+            idempotency_key: Some("md-key-1".into()),
+            repo_path: None,
+            parent_task_id: None,
+            wait: false,
+            long_running: false,
+            must_deliver: true,
+        };
+        let first = orch
+            .call_agent(&session, "cursor", args.clone(), None)
+            .await
+            .unwrap();
+        let id1 = first["task_id"].as_str().unwrap().to_string();
+        let second = orch
+            .call_agent(&session, "cursor", args, None)
+            .await
+            .unwrap();
+        assert_eq!(second["task_id"], id1);
+        assert!(
+            second.get("task_token").is_none() || second["replay_status"].is_string(),
+            "ikinci çağrı yeni token üretmez / replay: {second}"
+        );
+        let conn = orch.store().conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM a2a_tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn must_deliver_quota_rejects_with_rpc_marker() {
+        let (orch, _clock, session) = orch_manual();
+        for i in 0..5 {
+            let args = CallAgentArgs {
+                target_agent: "worker".into(),
+                task: format!("md-{i}"),
+                project_id: "p".into(),
+                idempotency_key: Some(format!("q-{i}")),
+                repo_path: None,
+                parent_task_id: None,
+                wait: false,
+                long_running: false,
+                must_deliver: true,
+            };
+            orch.call_agent(&session, "cursor", args, None)
+                .await
+                .unwrap();
+        }
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "overflow".into(),
+            project_id: "p".into(),
+            idempotency_key: Some("q-overflow".into()),
+            repo_path: None,
+            parent_task_id: None,
+            wait: false,
+            long_running: false,
+            must_deliver: true,
+        };
+        let err = orch
+            .call_agent(&session, "cursor", args, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("MCP_RPC:-32029"),
+            "kota JSON-RPC marker: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cursor_heartbeat_does_not_delay_cancel() {
+        let store = ExperienceStore::memory().unwrap();
+        let clock = Arc::new(ManualWaitClock::new());
+        let timeouts = Arc::new(TimeoutManager::with_defaults());
+        let sink = Arc::new(CountingProgressSink::default());
+        let orch = Orchestrator::new(
+            store,
+            "nats://127.0.0.1:9",
+            timeouts,
+            clock.clone() as Arc<dyn WaitClock>,
+        )
+        .with_skip_nats(true);
+        let session = Uuid::new_v4().to_string();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "hb-cancel".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: false,
+            must_deliver: false,
+        };
+        let opts = WaitOpts {
+            progress_token: Some(json!(7)),
+            progress_sink: sink.clone() as Arc<dyn ProgressSink>,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent_with_opts(&session, "cursor-vscode", args, Some(cancel_rx), opts)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        clock.advance(Duration::from_secs(5));
+        tokio::task::yield_now().await;
+        let _ = cancel_tx.send(Some(CancelKind::UserStop));
+        // Heartbeat 10sn — cancel hemen işlenmeli (50ms poll).
+        clock.advance(Duration::from_millis(100));
+        let out = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .expect("cancel heartbeat tarafından gecikmemeli")
+            .unwrap()
+            .unwrap();
+        assert_eq!(out["status"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn task_token_allows_reconnect_wait() {
+        let (orch, clock, session) = orch_manual();
+        bind_worker(orch.store(), "w", "worker");
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "tok".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: true,
+            must_deliver: false,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent(&session, "cursor", args, Some(cancel_rx))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        clock.advance(Duration::from_secs(3));
+        let bg = call.await.unwrap().unwrap();
+        assert_eq!(bg["status"], "backgrounded");
+        assert!(bg["poll_after_secs"].as_u64().unwrap() >= 15);
+        let task_id = bg["task_id"].as_str().unwrap().to_string();
+        let token = bg["task_token"].as_str().unwrap().to_string();
+        orch.store()
+            .yield_a2a_result(&task_id, "w", TaskStatus::Completed, r#"{"ok":1}"#)
+            .unwrap();
+        let other = Uuid::new_v4().to_string();
+        let waited = orch
+            .wait_task_with_token(&other, "cursor", &task_id, Some(500), None, Some(&token))
+            .await
+            .unwrap();
+        assert_eq!(waited["status"], "completed");
+        let denied = orch
+            .wait_task_with_token(
+                &other,
+                "cursor",
+                &task_id,
+                Some(10),
+                None,
+                Some("bad-token-xxxxxxxxxxxx"),
+            )
+            .await;
+        assert!(denied.is_err());
+        let _ = cancel_tx;
     }
 }

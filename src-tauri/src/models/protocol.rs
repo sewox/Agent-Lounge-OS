@@ -248,6 +248,15 @@ pub struct LoungeTask {
     /// Görev yaşam döngüsü durumu.
     #[serde(default)]
     pub status: TaskStatus,
+    /// Uzun süren iş — backgrounded sonrası düzenli poll ipucu.
+    #[serde(default)]
+    pub long_running: bool,
+    /// Sonuç mutlaka teslim edilmeli (24s TTL + kota).
+    #[serde(default)]
+    pub must_deliver: bool,
+    /// `task_token` SHA-256 hex (düz token asla saklanmaz / loglanmaz).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_token_hash: Option<String>,
 }
 
 impl LoungeTask {
@@ -282,6 +291,9 @@ impl LoungeTask {
             // Yerel / programatik oluşturma güvenilir; NATS ham JSON varsayılanı false.
             source_verified: true,
             status: TaskStatus::Queued,
+            long_running: false,
+            must_deliver: false,
+            task_token_hash: None,
         }
     }
 

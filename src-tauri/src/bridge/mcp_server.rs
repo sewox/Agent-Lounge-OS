@@ -22,7 +22,9 @@ use serde_json::{json, Map, Value};
 use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
-use super::orchestration::{CallAgentArgs, CancelKind, Orchestrator};
+use super::orchestration::{
+    CallAgentArgs, CancelKind, NoopProgressSink, Orchestrator, ProgressSink, WaitOpts,
+};
 use super::timeout_manager::{
     parse_timeout_setting, TimeoutManager, ENV_MCP_TIMEOUT_SECS, SETTING_MCP_TIMEOUT_SECS,
 };
@@ -203,6 +205,54 @@ impl McpServer {
         self.client.label()
     }
 
+    /// Oturum kopması: in-flight cancel kanallarını UserStop ile bilgilendir.
+    /// Backgrounded görevler in_flight map'te yoktur → korunur.
+    pub async fn on_session_disconnect(&self, session_id: &str) -> usize {
+        let keys: Vec<String> = {
+            let map = self.in_flight.lock().await;
+            let prefix = format!("{session_id}:");
+            map.keys()
+                .filter(|k| k.starts_with(&prefix) || k.as_str() == session_id)
+                .cloned()
+                .collect()
+        };
+        let mut txs = Vec::new();
+        {
+            let mut map = self.in_flight.lock().await;
+            let mut order = self.in_flight_order.lock().await;
+            for key in &keys {
+                if let Some(tx) = map.remove(key) {
+                    txs.push(tx);
+                }
+                if let Some(pos) = order.iter().position(|k| k == key) {
+                    order.remove(pos);
+                }
+            }
+        }
+        self.orchestrator
+            .cancel_in_flight_on_disconnect(session_id, txs)
+            .await
+    }
+
+    /// Stdio EOF — gömülü tek oturumun tüm in-flight'ları.
+    pub async fn on_transport_eof(&self) -> usize {
+        let session = self.client.session_id.clone();
+        if session.is_empty() {
+            // Oturum id yoksa tüm in-flight'ları iptal et.
+            let txs: Vec<_> = {
+                let mut map = self.in_flight.lock().await;
+                let mut order = self.in_flight_order.lock().await;
+                order.clear();
+                map.drain().map(|(_, tx)| tx).collect()
+            };
+            return self
+                .orchestrator
+                .cancel_in_flight_on_disconnect("_stdio_eof", txs)
+                .await;
+        }
+        self.on_session_disconnect(&session).await
+    }
+
     /// Tek satırlık JSON-RPC (embedded stdio — tek istemci durumu).
     pub async fn handle_line(&mut self, line: &str) -> Result<Option<String>> {
         let mut client = self.client.clone();
@@ -247,7 +297,10 @@ impl McpServer {
             .await
         {
             Ok(result) => Ok(Some(ok_response(id, result))),
-            Err(err) => Ok(Some(error_response(id, -32000, &err.to_string(), None))),
+            Err(err) => {
+                let (code, message) = mcp_rpc_code_message(&err);
+                Ok(Some(error_response(id, code, &message, None)))
+            }
         }
     }
 
@@ -379,6 +432,10 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("tools/call: name gerekli"))?;
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
+        let progress_token = params
+            .pointer("/_meta/progressToken")
+            .cloned()
+            .or_else(|| params.get("progressToken").cloned());
 
         // Güvenlik sınırı: ayar / dosya yazma tool'ları yok ve reddedilir.
         if is_forbidden_tool(name) {
@@ -408,14 +465,24 @@ impl McpServer {
                     Err(err) => (json!({ "error": err.to_string() }), true),
                 }
             }
-            "lounge_call_agent" => match self.tool_call_agent(&args, client, request_key).await {
-                Ok(v) => (v, false),
-                Err(err) => (json!({ "error": err.to_string() }), true),
-            },
-            "lounge_wait_task" => match self.tool_wait_task(&args, client, request_key).await {
-                Ok(v) => (v, false),
-                Err(err) => (json!({ "error": err.to_string() }), true),
-            },
+            "lounge_call_agent" => {
+                match self
+                    .tool_call_agent(&args, client, request_key, progress_token.clone())
+                    .await
+                {
+                    Ok(v) => (v, false),
+                    Err(err) => (json!({ "error": err.to_string() }), true),
+                }
+            }
+            "lounge_wait_task" => {
+                match self
+                    .tool_wait_task(&args, client, request_key, progress_token.clone())
+                    .await
+                {
+                    Ok(v) => (v, false),
+                    Err(err) => (json!({ "error": err.to_string() }), true),
+                }
+            }
             "lounge_yield_result" => match self.tool_yield_result(&args, client).await {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
@@ -654,6 +721,7 @@ impl McpServer {
         args: &Value,
         client: &ClientCtx,
         request_key: &str,
+        progress_token: Option<Value>,
     ) -> Result<Value> {
         let normalized = normalize_dispatch_args(args);
         validate_schema(SchemaKind::McpCallAgent, &normalized).map_err(|e| anyhow!(e))?;
@@ -675,9 +743,27 @@ impl McpServer {
         }
 
         let cancel_rx = self.register_inflight(request_key).await;
+        let profile = self.timeouts.profile_for(&client.name);
+        let sink: Arc<dyn ProgressSink> = if progress_token.is_some() && profile.progress_extends {
+            Arc::new(LogProgressSink {
+                session_id: client.session_id.clone(),
+            })
+        } else {
+            Arc::new(NoopProgressSink)
+        };
+        let opts = WaitOpts {
+            progress_token,
+            progress_sink: sink,
+        };
         let result = self
             .orchestrator
-            .call_agent(&client.session_id, &client.name, call_args, Some(cancel_rx))
+            .call_agent_with_opts(
+                &client.session_id,
+                &client.name,
+                call_args,
+                Some(cancel_rx),
+                opts,
+            )
             .await;
         self.clear_inflight(request_key).await;
         result
@@ -688,21 +774,37 @@ impl McpServer {
         args: &Value,
         client: &ClientCtx,
         request_key: &str,
+        progress_token: Option<Value>,
     ) -> Result<Value> {
         validate_schema(SchemaKind::McpWaitTask, args).map_err(|e| anyhow!(e))?;
         let task_id = arg_str(args, "task_id")
             .ok_or_else(|| anyhow!("task_id gerekli"))?
             .to_string();
         let timeout_ms = args.get("timeout_ms").and_then(|v| v.as_u64());
+        let task_token = arg_str(args, "task_token").map(str::to_string);
         let cancel_rx = self.register_inflight(request_key).await;
+        let profile = self.timeouts.profile_for(&client.name);
+        let sink: Arc<dyn ProgressSink> = if progress_token.is_some() && profile.progress_extends {
+            Arc::new(LogProgressSink {
+                session_id: client.session_id.clone(),
+            })
+        } else {
+            Arc::new(NoopProgressSink)
+        };
+        let opts = WaitOpts {
+            progress_token,
+            progress_sink: sink,
+        };
         let result = self
             .orchestrator
-            .wait_task(
+            .wait_task_with_opts(
                 &client.session_id,
                 &client.name,
                 &task_id,
                 timeout_ms,
                 Some(cancel_rx),
+                opts,
+                task_token.as_deref(),
             )
             .await;
         self.clear_inflight(request_key).await;
@@ -749,6 +851,14 @@ impl McpServer {
                 .map(str::to_string),
             parent_task_id: None,
             wait,
+            long_running: normalized
+                .get("long_running")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            must_deliver: normalized
+                .get("must_deliver")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
     }
 
@@ -902,10 +1012,11 @@ impl McpServer {
             },
             "timeout_manager": self.timeouts.snapshot(),
             "timeout_limit_secs": self.timeouts.timeout_limit(&client.name).as_secs(),
+            "client_profile": self.timeouts.profile_for(&client.name).name,
             "connected_agents": connected,
             "workers": workers,
             "dispatch_requires_kernel": true,
-            "hint": "lounge_call_agent / lounge_dispatch_task için NATS + Kernel gerekir. Sonuç: lounge_wait_task (aynı oturum). Progress süreyi uzatmaz."
+            "hint": "lounge_call_agent / lounge_dispatch_task için NATS + Kernel gerekir. Sonuç: lounge_wait_task (aynı oturum). Cursor: progressToken ile Mod A ≤280sn."
         }))
     }
 
@@ -934,6 +1045,33 @@ fn is_forbidden_tool(name: &str) -> bool {
         || lower.contains("fs_write")
 }
 
+/// `MCP_RPC:<code>:<message>` — must_deliver kota vb.
+fn mcp_rpc_code_message(err: &anyhow::Error) -> (i32, String) {
+    let s = err.to_string();
+    if let Some(rest) = s.strip_prefix("MCP_RPC:") {
+        if let Some((code_s, msg)) = rest.split_once(':') {
+            if let Ok(code) = code_s.parse::<i32>() {
+                return (code, msg.to_string());
+            }
+        }
+    }
+    (-32000, s)
+}
+
+/// Cursor progress heartbeat — stderr log (+ ileride stdio notification çıkışı).
+struct LogProgressSink {
+    session_id: String,
+}
+
+impl ProgressSink for LogProgressSink {
+    fn emit_progress(&self, progress_token: &Value, message: &str, elapsed_secs: u64) {
+        eprintln!(
+            "[lounge-mcp] progress session={} token={} elapsed={}s msg={message}",
+            self.session_id, progress_token, elapsed_secs
+        );
+    }
+}
+
 fn tool_defs() -> Vec<Value> {
     vec![
         tool_def(
@@ -953,12 +1091,12 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "lounge_call_agent",
-            "Mod A→B: başka ajana görev ver; timeout_limit içinde sonuç veya backgrounded. parent_task_id yok sayılır.",
+            "Mod A→B: başka ajana görev ver; timeout_limit içinde sonuç veya backgrounded. Backgrounded/long_running ise poll_after_secs'e uyarak düzenli lounge_wait_task çağırın; sonuç gelmeden kullanıcıya bitti demeyin. task_token'ı saklayın (yeni oturumda wait için). must_deliver kota aşımında -32029. parent_task_id yok sayılır.",
             include_schema("mcp_call_agent.schema.json"),
         ),
         tool_def(
             "lounge_wait_task",
-            "Aynı oturumda görev sonucu long-poll. Eşik aşımında still_running; tekrar çağrılabilir. Progress süreyi uzatmaz.",
+            "Aynı oturum veya geçerli task_token ile sonuç long-poll. still_running ise next_action/poll_after_secs'e uyun (15→×1.5→≤60). Sonuç completed/failed olmadan kullanıcıya bitti demeyin.",
             include_schema("mcp_wait_task.schema.json"),
         ),
         tool_def(
@@ -1068,10 +1206,18 @@ fn parse_outcome(raw: &str) -> ExperienceOutcome {
     }
 }
 
-/// clientInfo.name → dashboard host id (`cursor`, `claude_desktop`, …).
+/// clientInfo.name → dashboard host id (`cursor`, `claude_ai`, `claude_code`, …).
 pub fn normalize_client_host(name: &str) -> String {
     let lower = name.trim().to_ascii_lowercase();
+    // Daha spesifik Claude eşleşmeleri önce (hepsi "claude" içerir).
+    if lower.contains("claude-code") || lower.contains("claude_code") || lower == "claude-code" {
+        return "claude_code".into();
+    }
+    if lower.contains("claude-ai") || lower.contains("claude_ai") || lower == "claude-ai" {
+        return "claude_ai".into();
+    }
     if lower.contains("claude") {
+        // Claude Desktop / legacy "Claude Desktop" → claude_desktop (profil: claude-ai).
         return "claude_desktop".into();
     }
     if lower.contains("cursor") {
@@ -1235,6 +1381,11 @@ pub async fn run_stdio_embedded(store: ExperienceStore, nats_url: impl Into<Stri
             }
         });
     }
+    // stdin EOF — in-flight senkron beklemeleri iptal; backgrounded korunur.
+    let n = server.on_transport_eof().await;
+    if n > 0 {
+        eprintln!("[lounge-mcp] stdio EOF: {n} in-flight iptal");
+    }
     drop(out_tx);
     let _ = writer.await;
     reader.await.context("stdin join")??;
@@ -1248,14 +1399,13 @@ pub async fn run_stdio_embedded(store: ExperienceStore, nats_url: impl Into<Stri
 /// Okuma ile HTTP POST eşzamanlı: uzun tools/call sürerken `cancelled` okunur.
 pub async fn run_stdio_http_proxy() -> Result<()> {
     let base = default_mcp_http_url();
-    // Antigravity eşiği 150 sn; proxy istemci hard-timeout (180) öncesi dönmeli.
-    // Varsayılan 165 (<180); 210 eski değer çelişki yaratıyordu.
+    // Cursor progress uzatması ≤280 sn; proxy istemci hard-timeout öncesi dönmeli.
     let proxy_timeout_secs = std::env::var("LOUNGE_MCP_PROXY_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
-        .map(|n| n.min(180))
-        .unwrap_or(165);
+        .map(|n| n.min(300))
+        .unwrap_or(290);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(proxy_timeout_secs))
         .build()
@@ -1315,8 +1465,23 @@ pub async fn run_stdio_http_proxy() -> Result<()> {
         let session_id = session_id.clone();
         let client_meta = Arc::clone(&client_meta);
         let out_tx = out_tx.clone();
+        // Cursor: progressToken varken proxy 10 sn heartbeat yazar (HTTP POST blokluyken).
+        let progress_token = serde_json::from_str::<Value>(&line).ok().and_then(|v| {
+            if v.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
+                v.pointer("/params/_meta/progressToken").cloned()
+            } else {
+                None
+            }
+        });
+        let request_id = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|v| v.get("id").cloned());
         tokio::spawn(async move {
             let meta = client_meta.lock().await.clone();
+            let client_name = meta.0.clone().unwrap_or_default();
+            let profile = super::timeout_manager::resolve_client_profile(&client_name);
+            let emit_progress = progress_token.is_some() && profile.progress_extends;
+
             let url = format!("{base}/mcp");
             let mut req = client
                 .post(&url)
@@ -1328,7 +1493,39 @@ pub async fn run_stdio_http_proxy() -> Result<()> {
             if let Some(ref ver) = meta.1 {
                 req = req.header("x-lounge-client-version", ver);
             }
-            match req.body(line).send().await {
+
+            let send_fut = req.body(line).send();
+            let result = if emit_progress {
+                let token = progress_token.clone().unwrap();
+                let out_hb = out_tx.clone();
+                let hb_secs = profile.progress_heartbeat_secs.unwrap_or(10);
+                tokio::pin!(send_fut);
+                let mut ticks: u64 = 0;
+                loop {
+                    tokio::select! {
+                        resp = &mut send_fut => break resp,
+                        _ = tokio::time::sleep(Duration::from_secs(hb_secs)) => {
+                            ticks += 1;
+                            let elapsed = ticks * hb_secs;
+                            let note = json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/progress",
+                                "params": {
+                                    "progressToken": token,
+                                    "progress": elapsed,
+                                    "total": profile.progress_extended_secs.unwrap_or(280),
+                                    "message": format!("lounge waiting ({elapsed}s)")
+                                }
+                            });
+                            let _ = out_hb.send(note.to_string()).await;
+                        }
+                    }
+                }
+            } else {
+                send_fut.await
+            };
+
+            match result {
                 Ok(response) => {
                     let status = response.status();
                     if status == reqwest::StatusCode::NO_CONTENT {
@@ -1338,7 +1535,9 @@ pub async fn run_stdio_http_proxy() -> Result<()> {
                         Ok(text) if !text.trim().is_empty() => {
                             let _ = out_tx.send(text).await;
                         }
-                        _ => {}
+                        _ => {
+                            let _ = request_id;
+                        }
                     }
                     if !status.is_success() {
                         eprintln!("[lounge-mcp] HTTP {status}");
@@ -1347,6 +1546,15 @@ pub async fn run_stdio_http_proxy() -> Result<()> {
                 Err(err) => eprintln!("[lounge-mcp] MCP HTTP POST: {err}"),
             }
         });
+    }
+    // stdin EOF → Kernel'e oturum kapat.
+    {
+        let url = format!("{base}/mcp");
+        let _ = client
+            .delete(&url)
+            .header("mcp-session-id", &session_id)
+            .send()
+            .await;
     }
     drop(out_tx);
     let _ = writer.await;
@@ -1394,6 +1602,9 @@ mod tests {
         assert_eq!(normalize_client_host("Cursor"), "cursor");
         assert_eq!(normalize_client_host("claude-desktop"), "claude_desktop");
         assert_eq!(normalize_client_host("Claude Desktop"), "claude_desktop");
+        assert_eq!(normalize_client_host("claude-ai"), "claude_ai");
+        assert_eq!(normalize_client_host("claude-code"), "claude_code");
+        assert_eq!(normalize_client_host("antigravity-client"), "antigravity");
     }
 
     #[tokio::test]
@@ -1567,7 +1778,7 @@ mod tests {
         let _ = serve.await;
 
         let connected = store.list_connected_tools().await.unwrap();
-        assert!(connected.iter().any(|c| c.id == "app:claude_desktop"));
+        assert!(connected.iter().any(|c| c.id == "app:claude_ai"));
     }
 
     #[tokio::test]
