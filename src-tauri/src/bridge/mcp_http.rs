@@ -551,6 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_allowlisted_host_rejected() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         crate::services::lounge_auth::clear_allowed_origins();
         let store = ExperienceStore::memory().unwrap();
         let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
@@ -566,6 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_host_with_valid_token_accepted() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         crate::services::lounge_auth::clear_allowed_origins();
         crate::services::lounge_auth::add_allowed_origin("https://tunnel.example.com").unwrap();
         let token = crate::services::lounge_auth::lounge_token();
@@ -585,6 +587,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_host_with_invalid_token_rejected() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         crate::services::lounge_auth::clear_allowed_origins();
         crate::services::lounge_auth::add_allowed_origin("tunnel.example.com").unwrap();
         let store = ExperienceStore::memory().unwrap();
@@ -605,6 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_bind_host_requires_token() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         crate::services::lounge_auth::clear_allowed_origins();
         let store = ExperienceStore::memory().unwrap();
         let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
@@ -620,6 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn spoofed_loopback_host_with_evil_origin_rejected() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         crate::services::lounge_auth::clear_allowed_origins();
         let store = ExperienceStore::memory().unwrap();
         let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);

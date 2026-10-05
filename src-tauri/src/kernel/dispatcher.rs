@@ -2610,6 +2610,7 @@ mod tests {
 
     #[test]
     fn spoofed_source_agent_cannot_bypass_nats_ingress_stamp() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         crate::services::lounge_auth::deactivate_nats_auth();
         assert!(
             !crate::services::lounge_auth::nats_auth_active(),
@@ -2645,6 +2646,7 @@ mod tests {
 
     #[test]
     fn authenticated_nats_ingress_sets_source_verified_true() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         let creds = crate::services::lounge_auth::NatsCredentials {
             user: "test_u".into(),
             password: "test_p".into(),

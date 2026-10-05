@@ -78,6 +78,8 @@ pub fn auth_required() -> bool {
 }
 
 pub fn nats_auth_active() -> bool {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     state().lock().map(|s| s.nats_auth_active).unwrap_or(false)
 }
 
@@ -213,6 +215,8 @@ pub fn ensure_session_credentials(nats_url: &str) -> Result<Option<NatsCredentia
     if !auth_required() {
         return Ok(None);
     }
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     let mut guard = state().lock().expect("lounge_auth poison");
     if let Some(existing) = guard.creds.clone() {
         let path = default_creds_path();
@@ -227,12 +231,16 @@ pub fn ensure_session_credentials(nats_url: &str) -> Result<Option<NatsCredentia
 }
 
 pub fn activate_nats_auth(creds: NatsCredentials) {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     let mut guard = state().lock().expect("lounge_auth poison");
     guard.creds = Some(creds);
     guard.nats_auth_active = true;
 }
 
 pub fn deactivate_nats_auth() {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     if let Ok(mut guard) = state().lock() {
         guard.nats_auth_active = false;
     }
@@ -248,6 +256,8 @@ pub fn current_credentials() -> Option<NatsCredentials> {
 
 /// Authenticated NATS connect when session auth is active; otherwise plain.
 pub fn connect(url: &str) -> Result<nats::Connection> {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     if nats_auth_active() {
         let creds = current_credentials().ok_or_else(|| {
             anyhow::anyhow!(
@@ -268,6 +278,8 @@ pub fn nats_ingress_source_verified() -> bool {
 }
 
 pub fn lounge_token() -> String {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     state()
         .lock()
         .map(|s| s.lounge_token.clone())
@@ -275,6 +287,8 @@ pub fn lounge_token() -> String {
 }
 
 pub fn rotate_lounge_token() -> String {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     let token = format!("lounge_{}", uuid::Uuid::new_v4().simple());
     let path = token_path();
     let _ = std::fs::create_dir_all(lounge_nats_dir());
@@ -289,6 +303,8 @@ pub fn rotate_lounge_token() -> String {
 }
 
 pub fn allowed_hosts() -> Vec<String> {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     state()
         .lock()
         .map(|s| {
@@ -301,6 +317,8 @@ pub fn allowed_hosts() -> Vec<String> {
 
 /// Parse a tunnel URL (or bare host) and add its hostname to the allow-list.
 pub fn add_allowed_origin(url_or_host: &str) -> Result<String> {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     let host = parse_host(url_or_host).context("invalid tunnel URL / host")?;
     let mut guard = state().lock().expect("lounge_auth poison");
     guard.allowed_hosts.insert(host.clone());
@@ -316,6 +334,8 @@ pub fn remove_allowed_origin(host: &str) -> bool {
 }
 
 pub fn clear_allowed_origins() {
+    #[cfg(test)]
+    let _sync = auth_state_sync();
     if let Ok(mut s) = state().lock() {
         s.allowed_hosts.clear();
     }
@@ -552,12 +572,89 @@ pub fn remote_access_info(mcp_bind: &str, tunnel_url: Option<&str>) -> RemoteAcc
     }
 }
 
+/// Serialize parallel tests that share process-wide lounge auth state.
+#[cfg(test)]
+static TEST_AUTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    static AUTH_LOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+struct AuthStateSync {
+    _mutex: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[cfg(test)]
+fn auth_state_sync() -> AuthStateSync {
+    let depth = AUTH_LOCK_DEPTH.with(|c| c.get());
+    if depth > 0 {
+        AUTH_LOCK_DEPTH.with(|c| c.set(depth + 1));
+        return AuthStateSync { _mutex: None };
+    }
+    let guard = TEST_AUTH_LOCK
+        .lock()
+        .expect("lounge_auth test lock poisoned");
+    AUTH_LOCK_DEPTH.with(|c| c.set(1));
+    AuthStateSync {
+        _mutex: Some(guard),
+    }
+}
+
+#[cfg(test)]
+impl Drop for AuthStateSync {
+    fn drop(&mut self) {
+        AUTH_LOCK_DEPTH.with(|c| {
+            let d = c.get();
+            debug_assert!(d > 0, "auth lock depth underflow");
+            if d <= 1 {
+                c.set(0);
+            } else {
+                c.set(d - 1);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub struct TestAuthGuard {
+    _sync: AuthStateSync,
+}
+
+#[cfg(test)]
+impl TestAuthGuard {
+    pub fn new() -> Self {
+        let sync = auth_state_sync();
+        reset_test_state();
+        Self { _sync: sync }
+    }
+}
+
+#[cfg(test)]
+impl Default for TestAuthGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Clear in-memory auth flags without touching on-disk secrets (for test isolation).
+#[cfg(test)]
+pub fn reset_test_state() {
+    if let Ok(mut guard) = state().lock() {
+        guard.nats_auth_active = false;
+        guard.creds = None;
+        guard.allowed_hosts.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn auth_required_defaults_true() {
+        let _guard = TestAuthGuard::new();
         // Do not assert against ambient env in parallel tests blindly —
         // only check parser helper via temporary unset is hard; exercise falsey.
         let prev = std::env::var_os(LOUNGE_AUTH_REQUIRED_ENV);
@@ -579,6 +676,7 @@ mod tests {
 
     #[test]
     fn parse_host_from_tunnel_url() {
+        let _guard = TestAuthGuard::new();
         assert_eq!(
             parse_host("https://abc.trycloudflare.com/mcp").unwrap(),
             "abc.trycloudflare.com"
@@ -589,6 +687,7 @@ mod tests {
 
     #[test]
     fn loopback_hosts_recognized() {
+        let _guard = TestAuthGuard::new();
         assert!(is_loopback_host("127.0.0.1"));
         assert!(is_loopback_host("localhost"));
         assert!(is_loopback_host("::1"));
@@ -601,6 +700,7 @@ mod tests {
 
     #[test]
     fn remote_auth_loopback_ok_without_token() {
+        let _guard = TestAuthGuard::new();
         clear_allowed_origins();
         assert!(authorize_mcp_headers(Some("127.0.0.1:18791"), None, None).is_ok());
         assert!(
@@ -611,6 +711,7 @@ mod tests {
 
     #[test]
     fn remote_auth_missing_host_and_origin_denied() {
+        let _guard = TestAuthGuard::new();
         clear_allowed_origins();
         let err = authorize_mcp_headers(None, None, None).unwrap_err();
         assert_eq!(err, RemoteAuthFailure::MissingHost);
@@ -620,6 +721,7 @@ mod tests {
 
     #[test]
     fn remote_auth_zero_bind_requires_token_and_allowlist() {
+        let _guard = TestAuthGuard::new();
         clear_allowed_origins();
         let token = lounge_token();
         let err = authorize_mcp_headers(Some("0.0.0.0:18791"), None, None).unwrap_err();
@@ -633,6 +735,7 @@ mod tests {
 
     #[test]
     fn remote_auth_spoofed_loopback_host_with_evil_origin_denied() {
+        let _guard = TestAuthGuard::new();
         clear_allowed_origins();
         let err =
             authorize_mcp_headers(Some("127.0.0.1:18791"), Some("https://evil.example"), None)
@@ -650,6 +753,7 @@ mod tests {
 
     #[test]
     fn remote_auth_requires_token_and_allowlist() {
+        let _guard = TestAuthGuard::new();
         clear_allowed_origins();
         let token = lounge_token();
         let err = authorize_mcp_headers(Some("abc.trycloudflare.com"), None, None).unwrap_err();
@@ -670,6 +774,7 @@ mod tests {
 
     #[test]
     fn creds_file_roundtrip() {
+        let _guard = TestAuthGuard::new();
         let dir = std::env::temp_dir().join(format!("lounge-creds-{}", uuid::Uuid::new_v4()));
         let path = dir.join("session.creds.json");
         let creds = NatsCredentials {
@@ -685,6 +790,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn secret_files_are_mode_600() {
+        let _guard = TestAuthGuard::new();
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("lounge-secret-mode-{}", uuid::Uuid::new_v4()));
         let creds_path = dir.join("session.creds.json");
@@ -708,6 +814,7 @@ mod tests {
 
     #[test]
     fn mcp_json_contains_token_and_url() {
+        let _guard = TestAuthGuard::new();
         let info = remote_access_info("127.0.0.1:18791", Some("https://abc.trycloudflare.com"));
         assert!(info.mcp_json.contains("X-Lounge-Token"));
         assert!(info.mcp_json.contains(&info.lounge_token));

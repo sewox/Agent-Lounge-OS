@@ -735,11 +735,25 @@ mod tests {
 
     #[tokio::test]
     async fn nats_service_starts_with_auth_and_activates_verified_bus() {
-        let prev = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
+        let temp =
+            std::env::temp_dir().join(format!("lounge-nats-auth-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let creds_path = temp.join("session.creds.json");
+        let prev_auth = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        let prev_creds_file =
+            std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV);
+        let prev_user = std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_USER_ENV);
+        let prev_pass = std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV);
         unsafe {
             std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "true");
+            std::env::set_var(
+                super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV,
+                &creds_path,
+            );
+            std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_USER_ENV);
+            std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV);
         }
-        crate::services::lounge_auth::deactivate_nats_auth();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -768,18 +782,42 @@ mod tests {
             nats::connect(&url).is_err(),
             "plain connect must fail against auth-required server"
         );
+        let creds = service
+            .credentials()
+            .expect("service must have credentials");
+        assert!(
+            nats::Options::with_user_pass(&creds.user, &creds.password)
+                .connect(&url)
+                .is_ok(),
+            "authenticated connect must succeed with service credentials"
+        );
         assert!(nats_connect(&url).is_ok());
 
         service.kill_child().await;
         crate::services::lounge_auth::deactivate_nats_auth();
         unsafe {
-            match prev {
+            match prev_auth {
                 Some(v) => {
                     std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
                 }
                 None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
             }
+            match prev_creds_file {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV),
+            }
+            match prev_user {
+                Some(v) => std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_USER_ENV, v),
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_USER_ENV),
+            }
+            match prev_pass {
+                Some(v) => std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV, v),
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV),
+            }
         }
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     fn spawn_ephemeral_nats() -> Result<(String, std::process::Child)> {
