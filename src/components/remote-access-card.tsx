@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { isTauri } from "@/hooks/use-is-tauri";
+import { isTauri } from "@/lib/lounge";
 import {
   buildMcpJson,
   demoRemoteAccess,

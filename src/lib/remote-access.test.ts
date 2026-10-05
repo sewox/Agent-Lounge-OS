@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildMcpJson, demoRemoteAccess } from "./remote-access";
+import { buildMcpJson, demoRemoteAccess } from "./remote-access.ts";
 
 describe("remote-access MCP JSON", () => {
   it("includes URL and X-Lounge-Token fields", () => {

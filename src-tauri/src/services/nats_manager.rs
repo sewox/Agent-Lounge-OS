@@ -212,42 +212,47 @@ impl NatsService {
         let client_ok = self.is_healthy().await;
         let monitor_ok = self.monitor_ready().await;
         if client_ok && monitor_ok {
-            if self.auth_connect_ok() {
-                self.mark_auth_active();
-                return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
-            }
-            if auth_required() {
-                log::warn!(
-                    "NATS :{} açık ama oturum kimlik bilgileriyle bağlanılamadı — yeniden başlatılıyor",
-                    self.config.port
-                );
-                let _ = kill_nats_on_port(self.config.port);
-                self.kill_child().await;
-                let host = self.config.host.clone();
-                let port = self.config.port;
-                let _ = wait_until(
-                    Duration::from_secs(2),
-                    Duration::from_millis(80),
-                    move || {
-                        let host = host.clone();
-                        async move { !tcp_ready(&host, port, HEALTH_TIMEOUT).await }
-                    },
-                )
-                .await;
-                force_respawn = true;
-            } else {
-                deactivate_nats_auth();
-                return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+            match &self.config.credentials {
+                None => {
+                    // Auth bypass / legacy: reuse open TCP without NATS handshake probe
+                    // (a bare listener is not a NATS server — connect would hang).
+                    deactivate_nats_auth();
+                    return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+                }
+                Some(_) if self.auth_connect_ok() => {
+                    self.mark_auth_active();
+                    return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+                }
+                Some(_) => {
+                    log::warn!(
+                        "NATS :{} açık ama oturum kimlik bilgileriyle bağlanılamadı — yeniden başlatılıyor",
+                        self.config.port
+                    );
+                    let _ = kill_nats_on_port(self.config.port);
+                    self.kill_child().await;
+                    let host = self.config.host.clone();
+                    let port = self.config.port;
+                    let _ = wait_until(
+                        Duration::from_secs(2),
+                        Duration::from_millis(80),
+                        move || {
+                            let host = host.clone();
+                            async move { !tcp_ready(&host, port, HEALTH_TIMEOUT).await }
+                        },
+                    )
+                    .await;
+                    force_respawn = true;
+                }
             }
         }
 
         if client_ok && !monitor_ok && !force_respawn {
             let killed = kill_nats_on_port(self.config.port);
             if killed == 0 {
-                if self.auth_connect_ok() {
-                    self.mark_auth_active();
-                } else if !auth_required() {
+                if self.config.credentials.is_none() {
                     deactivate_nats_auth();
+                } else if self.auth_connect_ok() {
+                    self.mark_auth_active();
                 }
                 return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
             }
@@ -299,11 +304,23 @@ impl NatsService {
 
     fn auth_connect_ok(&self) -> bool {
         let url = self.endpoint();
-        match &self.config.credentials {
-            Some(creds) => nats::Options::with_user_pass(&creds.user, &creds.password)
-                .connect(&url)
-                .is_ok(),
-            None => nats::connect(&url).is_ok(),
+        let Some(creds) = &self.config.credentials else {
+            return false;
+        };
+        // Fail fast — do not hang on a non-NATS TCP listener.
+        let user = creds.user.clone();
+        let pass = creds.password.clone();
+        let url = url.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("nats-auth-probe".into())
+            .spawn(move || {
+                let result = nats::Options::with_user_pass(&user, &pass).connect(&url);
+                let _ = tx.send(result.is_ok());
+            });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(ok) => ok,
+            Err(_) => false,
         }
     }
 

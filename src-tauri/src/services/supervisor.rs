@@ -605,6 +605,15 @@ mod tests {
     }
 
     async fn nats_stub_listening() -> NatsService {
+        // Fake TCP is not a NATS server — bypass auth so ensure() reuses the open port
+        // without a handshake probe (auth-required path would try --user/--pass restart).
+        unsafe {
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
+                "false",
+            );
+        }
+        crate::services::lounge_auth::deactivate_nats_auth();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         std::mem::forget(listener);
