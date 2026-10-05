@@ -1819,6 +1819,25 @@ function translateFleetToken(t: (key: string) => string, token: string): string 
   return key ? t(key) : token;
 }
 
+type FleetSessionRow = {
+  id: string;
+  agent_id: string;
+  state: string;
+  owner: string;
+  created_by: string;
+  orchestrated: boolean;
+  last_seen: string;
+};
+
+type FleetBackgroundTask = {
+  id: string;
+  status: string;
+  summary: string;
+  source_agent?: string;
+  target_agent?: string | null;
+  updated_at?: string;
+};
+
 export function FleetPanel() {
   const { t } = useTranslation("fleet");
   const { report, model, decisionGate, layaEngine } = useLounge();
@@ -1836,6 +1855,8 @@ export function FleetPanel() {
         ? decisionGate.device || t("decisionGate")
         : t("decisionGateOff");
   const [natsWorkers, setNatsWorkers] = useState<FleetWorkerRow[]>([]);
+  const [sessions, setSessions] = useState<FleetSessionRow[]>([]);
+  const [backgroundTasks, setBackgroundTasks] = useState<FleetBackgroundTask[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>("lounge-kernel");
 
   useEffect(() => {
@@ -1844,17 +1865,23 @@ export function FleetPanel() {
     const load = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const rows = await invoke<
-          {
-            id: string;
-            name: string;
-            kind: string;
-            is_active: boolean;
-            enabled: boolean;
-            payload: { available?: boolean; detail?: string };
-            endpoint?: string | null;
-          }[]
-        >("list_connected_tools");
+        const [rows, sessionRows, taskRows] = await Promise.all([
+          invoke<
+            {
+              id: string;
+              name: string;
+              kind: string;
+              is_active: boolean;
+              enabled: boolean;
+              payload: { available?: boolean; detail?: string };
+              endpoint?: string | null;
+            }[]
+          >("list_connected_tools"),
+          invoke<FleetSessionRow[]>("list_agent_sessions").catch(() => [] as FleetSessionRow[]),
+          invoke<FleetBackgroundTask[]>("list_a2a_background_tasks").catch(
+            () => [] as FleetBackgroundTask[],
+          ),
+        ]);
         if (cancelled) return;
         setNatsWorkers(
           rows
@@ -1878,8 +1905,14 @@ export function FleetPanel() {
               };
             }),
         );
+        setSessions(sessionRows);
+        setBackgroundTasks(taskRows);
       } catch {
-        if (!cancelled) setNatsWorkers([]);
+        if (!cancelled) {
+          setNatsWorkers([]);
+          setSessions([]);
+          setBackgroundTasks([]);
+        }
       }
     };
     void load();
@@ -2060,6 +2093,77 @@ export function FleetPanel() {
             <p className="font-mono">lounge.workers.heartbeat</p>
           </div>
         </aside>
+      </div>
+      <div
+        data-qa="fleet-orchestration"
+        className="shrink-0 border-t border-outline-variant bg-surface-container-low/60 px-3 py-2"
+      >
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-body text-meta font-semibold tracking-label text-on-surface uppercase">
+            {t("orchestrationTitle")}
+          </h3>
+          <span className="font-mono text-meta text-outline">
+            {t("backgroundTasksCount", { count: backgroundTasks.length })}
+          </span>
+        </div>
+        <div className="grid gap-2 lg:grid-cols-2">
+          <ul
+            data-qa="fleet-sessions"
+            className="max-h-36 space-y-1 overflow-auto rounded border border-outline-variant/50 bg-surface-container p-2 font-mono text-meta"
+          >
+            {sessions.length === 0 ? (
+              <li className="text-outline">{t("noSessions")}</li>
+            ) : (
+              sessions.map((session) => (
+                <li
+                  key={session.id}
+                  data-qa="fleet-session-row"
+                  data-orchestrated={session.orchestrated ? "true" : "false"}
+                  className="flex min-w-0 flex-wrap items-center gap-1.5 text-on-surface-variant"
+                >
+                  <span className="truncate font-medium text-on-surface" title={session.id}>
+                    {session.agent_id || session.id}
+                  </span>
+                  <span className="text-outline">{session.state}</span>
+                  {session.orchestrated ? (
+                    <span
+                      data-qa="orchestrated-label"
+                      className="rounded border border-secondary/50 bg-secondary-container/30 px-1.5 py-0.5 font-body text-meta font-semibold tracking-label text-secondary uppercase"
+                    >
+                      {t("orchestrated")}
+                    </span>
+                  ) : null}
+                </li>
+              ))
+            )}
+          </ul>
+          <ul
+            data-qa="fleet-background-tasks"
+            className="max-h-36 space-y-1 overflow-auto rounded border border-outline-variant/50 bg-surface-container p-2 font-mono text-meta"
+          >
+            {backgroundTasks.length === 0 ? (
+              <li className="text-outline">{t("noBackgroundTasks")}</li>
+            ) : (
+              backgroundTasks.map((task) => (
+                <li
+                  key={task.id}
+                  data-qa="fleet-background-task"
+                  data-task-status={task.status}
+                  className="flex min-w-0 flex-col gap-0.5 text-on-surface-variant"
+                >
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <span className="rounded border border-outline-variant px-1 py-0.5 font-body uppercase text-on-surface">
+                      {task.status}
+                    </span>
+                    <span className="truncate" title={task.id}>
+                      {task.summary || task.id}
+                    </span>
+                  </span>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
       </div>
       <div className="flex shrink-0 items-center justify-between gap-2 border-t border-outline-variant bg-surface-container-low px-3 py-2 font-body text-meta text-outline">
         <span className="font-body">{t("workersRegistered", { count: workers.length })}</span>

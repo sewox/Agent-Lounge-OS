@@ -27,10 +27,11 @@ use crate::kernel::policy_manager::{
 };
 use crate::kernel::worker_registry::{route_subject_for, WorkerRegistry};
 use crate::models::{
-    decide_route, default_ollama_model, is_kernel, AnalysisDecision, ApprovalKind, ApprovalRequest,
-    ExperienceContext, ExperienceOutcome, ExperienceRecord, LoungeExperience, LoungeTask,
-    QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, TaskStatus, ALERT_QUOTA, CONTROL_STOP,
-    EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ASSIGNED, TASK_COMPLETED, TASK_FAILED, TASK_REQUESTED,
+    decide_route, default_ollama_model, is_kernel, AgentSession, AnalysisDecision, ApprovalKind,
+    ApprovalRequest, ExperienceContext, ExperienceOutcome, ExperienceRecord, LoungeExperience,
+    LoungeTask, QuotaVerdict, RouteIntent, RoutingVote, TaskAssignment, TaskStatus, ALERT_QUOTA,
+    CONTROL_STOP, EXPERIENCE_REPORTED, KERNEL_AGENT, TASK_ACKED, TASK_ASSIGNED, TASK_COMPLETED,
+    TASK_FAILED, TASK_REQUESTED,
 };
 use crate::services::{
     chat_json, embed_model, embed_text, evaluate_assignment, is_quota_approval,
@@ -272,6 +273,18 @@ impl Dispatcher {
         }
     }
 
+    /// Kernel'in worker inbox'a yönlendirdiği oturum — Dashboard "Orchestrated".
+    fn ensure_orchestrated_worker_session(&self, bot_id: &str) {
+        let mut sess = AgentSession::new("agent-lounge-os", bot_id, "worker", "", "launcher");
+        sess.id = format!("orchestrated:{bot_id}");
+        sess.owner = "lounge".into();
+        sess.state = "busy".into();
+        sess.last_seen = crate::models::now_rfc3339();
+        if let Err(err) = self.store.upsert_session(&sess) {
+            log::warn!("orchestrated session yazılamadı ({bot_id}): {err}");
+        }
+    }
+
     /// Kernel açılışında: periyodik zombi tarama + orphan TTL + idempotency GC.
     pub fn spawn_silence_watchdog(self: &Dispatcher) {
         let this = self.clone();
@@ -384,6 +397,80 @@ impl Dispatcher {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         });
+    }
+
+    /// `lounge.task.acked` — worker pull-inbox onayı → DISPATCHED→EXECUTING.
+    pub fn spawn_task_ack_listener(self: &Dispatcher) {
+        let this = self.clone();
+        let url = self.nats_url.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) = this.listen_task_ack_once(&url).await {
+                    log::warn!("task.acked dinleyici: {err}");
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+    }
+
+    async fn listen_task_ack_once(&self, url: &str) -> Result<()> {
+        let url_owned = url.to_string();
+        let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
+            .await
+            .context("task.acked NATS connect join")?
+            .context("task.acked NATS bağlantısı kurulamadı")?;
+
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(64);
+        let sub_nc = nc.clone();
+        let subject = TASK_ACKED.to_string();
+        tokio::task::spawn_blocking(move || {
+            let sub = sub_nc.subscribe(&subject)?;
+            for msg in sub.messages() {
+                if tx.blocking_send(msg.data.to_vec()).is_err() {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        });
+
+        log::info!("dispatcher task.acked dinliyor: {url} ({TASK_ACKED})");
+        while let Some(data) = rx.recv().await {
+            if let Err(err) = self.apply_task_acked(&data) {
+                log::warn!("task.acked uygulama: {err}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Worker inbox ACK — `lounge.tasks.<bot>` mesajı alındı.
+    pub fn apply_task_acked(&self, data: &[u8]) -> Result<bool> {
+        let value: serde_json::Value =
+            serde_json::from_slice(data).context("task.acked payload json")?;
+        let task_id = value
+            .get("task_id")
+            .or_else(|| value.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("task.acked: task_id yok"))?
+            .to_string();
+        let bot_id = value
+            .get("bot_id")
+            .or_else(|| value.get("target_agent"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if bot_id.is_empty() {
+            anyhow::bail!("task.acked: bot_id gerekli");
+        }
+        let marked = self
+            .store
+            .mark_a2a_task_acked(&task_id, &bot_id)
+            .with_context(|| format!("task.acked mark {task_id}"))?;
+        if marked {
+            log::info!("task.acked: {task_id} ← {bot_id} (DISPATCHED→EXECUTING)");
+        } else {
+            log::debug!("task.acked ignored (status/target): {task_id} bot={bot_id}");
+        }
+        Ok(marked)
     }
 
     async fn listen_control_stop_once(&self, url: &str) -> Result<()> {
@@ -1036,6 +1123,7 @@ impl Dispatcher {
             publish_json(nc, TASK_ASSIGNED, &assignment).await?;
             if let Some(subject) = worker_inbox.clone() {
                 self.persist_status(&task.id, TaskStatus::Dispatched);
+                self.ensure_orchestrated_worker_session(&target);
                 publish_json(nc, &subject, &assignment).await?;
                 return Ok(TaskExecution::Delegated {
                     bot_id: target,
@@ -1044,6 +1132,7 @@ impl Dispatcher {
             }
         } else if let Some(subject) = worker_inbox {
             self.persist_status(&task.id, TaskStatus::Dispatched);
+            self.ensure_orchestrated_worker_session(&target);
             // Test / senkron yol: NATS yokken de yerel çalıştırmayı atla.
             return Ok(TaskExecution::Delegated {
                 bot_id: target,
@@ -1661,7 +1750,9 @@ mod tests {
     use super::*;
     use crate::db::ExperienceStore;
     use crate::kernel::decision_engine::{Scored, SecurityLevel};
-    use crate::models::{ApprovalKind, ExperienceRecord, TaskKind, TASK_ASSIGNED, TASK_REQUESTED};
+    use crate::models::{
+        ApprovalKind, ExperienceRecord, TaskKind, TASK_ACKED, TASK_ASSIGNED, TASK_REQUESTED,
+    };
     use crate::services::parse_llm_json;
 
     fn dispatcher(decision: AnalysisDecision) -> Dispatcher {
@@ -3289,5 +3380,43 @@ mod tests {
         );
         dispatcher.resolve_vote(id, RoutingVote::Deny).unwrap();
         let _ = handle.await;
+    }
+
+    #[test]
+    fn apply_task_acked_moves_dispatched_to_executing() {
+        let dispatcher = dispatcher(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "ack".into(),
+            adr_summary: "ack".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        let mut task = LoungeTask::new("mcp:cursor", "p", "inbox");
+        task.target_agent = Some("grok-tester".into());
+        task.session_id = Some("sess-ack".into());
+        dispatcher.store().admit_a2a_task(&mut task, 10).unwrap();
+        dispatcher
+            .store()
+            .set_a2a_task_status(&task.id, TaskStatus::Dispatched)
+            .unwrap();
+        let marked = dispatcher
+            .apply_task_acked(
+                serde_json::json!({
+                    "task_id": task.id,
+                    "bot_id": "grok-tester",
+                    "acked_at": "2026-10-05T12:00:00.000Z"
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        assert!(marked);
+        assert_eq!(
+            dispatcher.store().a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Executing)
+        );
+        assert_eq!(TASK_ACKED, "lounge.task.acked");
     }
 }

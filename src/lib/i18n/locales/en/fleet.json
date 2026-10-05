@@ -42,5 +42,10 @@
   "natsListening": "lounge.> listening",
   "cbmMissing": "cbm cli missing",
   "decisionGate": "DecisionGate",
-  "decisionGateOff": "DecisionGate off"
+  "decisionGateOff": "DecisionGate off",
+  "orchestrationTitle": "Sessions & background tasks",
+  "orchestrated": "Orchestrated",
+  "noSessions": "No agent sessions",
+  "noBackgroundTasks": "No background tasks",
+  "backgroundTasksCount": "{{count}} background"
 }

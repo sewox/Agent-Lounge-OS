@@ -42,5 +42,10 @@
   "natsListening": "lounge.> dinleniyor",
   "cbmMissing": "cbm cli yok",
   "decisionGate": "DecisionGate",
-  "decisionGateOff": "DecisionGate kapalı"
+  "decisionGateOff": "DecisionGate kapalı",
+  "orchestrationTitle": "Oturumlar ve arka plan görevleri",
+  "orchestrated": "Orchestrated",
+  "noSessions": "Ajan oturumu yok",
+  "noBackgroundTasks": "Arka plan görevi yok",
+  "backgroundTasksCount": "{{count}} arka plan"
 }

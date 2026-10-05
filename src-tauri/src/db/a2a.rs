@@ -1404,7 +1404,10 @@ pub fn upsert_agent_session(conn: &Connection, session: &AgentSession) -> Result
         ON CONFLICT(id) DO UPDATE SET
             native_id = excluded.native_id,
             native_ref = excluded.native_ref,
+            workspace_path = excluded.workspace_path,
             state = excluded.state,
+            owner = excluded.owner,
+            created_by = excluded.created_by,
             last_seen = excluded.last_seen,
             replaced_by = excluded.replaced_by,
             is_primary = excluded.is_primary
@@ -1534,6 +1537,308 @@ pub fn count_open_tasks_for_session(conn: &Connection, session_id: &str) -> Resu
     Ok(n as u64)
 }
 
+/// Terminal durumlar (bitmiş görevler).
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED" | "TIMEOUT"
+    )
+}
+
+/// Kısa özet — piggyback / list_my_tasks.
+fn short_summary(raw: &str, max: usize) -> String {
+    let trimmed = raw.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    trimmed
+        .chars()
+        .take(max.saturating_sub(1))
+        .collect::<String>()
+        + "…"
+}
+
+/// Oturum sahipliği: `source_session_id` eşleşmesi; isteğe bağlı workspace_path kapsamı.
+/// Workspace paylaşımı yok — yalnız çağıran oturumun kendi görevleri.
+pub fn list_tasks_for_session(
+    conn: &Connection,
+    session_id: &str,
+    workspace_path: Option<&str>,
+    include_finished: bool,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>> {
+    if let Some(ws) = workspace_path.map(str::trim).filter(|s| !s.is_empty()) {
+        let sess_ws: Option<String> = conn
+            .query_row(
+                "SELECT workspace_path FROM agent_sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match sess_ws {
+            Some(ref stored) if !stored.is_empty() && stored != ws => {
+                // Oturum başka workspace'e bağlı — boş liste (sahiplik reddi).
+                return Ok(Vec::new());
+            }
+            Some(ref stored) if stored.is_empty() => {
+                // MCP oturumunda workspace boşsa argümanı kabul et (kapsam ipucu).
+            }
+            None => {
+                // Oturum kaydı yok — yalnız session_id ile devam (initialize öncesi).
+            }
+            _ => {}
+        }
+    }
+
+    let limit = limit.clamp(1, 100) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, status, summary, target_agent, project_id, created_at, updated_at,
+               backgrounded_at, result_ready_at, last_wait_at, long_running, must_deliver,
+               empty_wait_count
+        FROM a2a_tasks
+        WHERE session_id = ?1
+        ORDER BY updated_at DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![session_id, limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, i64>(10)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, i64>(12)?,
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            id,
+            status,
+            summary,
+            target,
+            project_id,
+            created_at,
+            updated_at,
+            backgrounded_at,
+            result_ready_at,
+            last_wait_at,
+            long_running,
+            must_deliver,
+            empty_wait_count,
+        ) = row?;
+        if !include_finished && is_terminal_status(&status) {
+            continue;
+        }
+        let ready_unread = result_ready_at
+            .as_ref()
+            .is_some_and(|ready| last_wait_at.as_ref().map(|lw| lw < ready).unwrap_or(true));
+        let poll_after = if !is_terminal_status(&status) || ready_unread {
+            Some(next_poll_after_secs(empty_wait_count.max(0) as u32))
+        } else {
+            None
+        };
+        out.push(serde_json::json!({
+            "id": id,
+            "status": status,
+            "summary": short_summary(&summary, 160),
+            "target_agent": target,
+            "project_id": project_id,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "backgrounded_at": backgrounded_at,
+            "result_ready": result_ready_at.is_some(),
+            "result_unread": ready_unread,
+            "long_running": long_running != 0,
+            "must_deliver": must_deliver != 0,
+            "poll_after_secs": poll_after,
+            "next_action": if ready_unread || !is_terminal_status(&status) {
+                NEXT_ACTION_WAIT_TASK
+            } else {
+                "none"
+            },
+        }));
+    }
+    Ok(out)
+}
+
+/// Piggyback: oturuma ait bekleyen / hazır (henüz wait ile teslim edilmemiş) sonuç özetleri.
+pub fn list_pending_results_for_session(
+    conn: &Connection,
+    session_id: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let limit = limit.clamp(1, 20) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, status, summary, result_ready_at, last_wait_at, empty_wait_count, backgrounded_at
+        FROM a2a_tasks
+        WHERE session_id = ?1
+          AND (
+            (
+              result_ready_at IS NOT NULL
+              AND result_json IS NOT NULL
+              AND status IN ('COMPLETED', 'FAILED')
+              AND (last_wait_at IS NULL OR last_wait_at < result_ready_at)
+            )
+            OR status IN (
+              'QUEUED', 'PENDING_APPROVAL', 'DISPATCHED', 'EXECUTING',
+              'WAIT_TIMEOUT_REACHED', 'RECOVERY_PENDING', 'NEEDS_HUMAN'
+            )
+          )
+        ORDER BY
+          CASE WHEN result_ready_at IS NOT NULL AND (last_wait_at IS NULL OR last_wait_at < result_ready_at)
+               THEN 0 ELSE 1 END,
+          updated_at DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![session_id, limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, status, summary, result_ready_at, last_wait_at, empty_wait_count, backgrounded_at) =
+            row?;
+        let ready = result_ready_at
+            .as_ref()
+            .is_some_and(|ready| last_wait_at.as_ref().map(|lw| lw < ready).unwrap_or(true));
+        let piggy_status = if ready {
+            if status.eq_ignore_ascii_case("FAILED") {
+                "failed"
+            } else {
+                "ready"
+            }
+        } else if backgrounded_at.is_some() || status == "WAIT_TIMEOUT_REACHED" {
+            "backgrounded"
+        } else if status == "NEEDS_HUMAN" {
+            "needs_human"
+        } else {
+            "pending"
+        };
+        out.push(serde_json::json!({
+            "id": id,
+            "status": piggy_status,
+            "task_status": status,
+            "summary": short_summary(&summary, 120),
+            "poll_after_secs": next_poll_after_secs(empty_wait_count.max(0) as u32),
+            "next_action": NEXT_ACTION_WAIT_TASK,
+        }));
+    }
+    Ok(out)
+}
+
+/// Dashboard / Fleet — agent_sessions listesi.
+pub fn list_agent_sessions(conn: &Connection, limit: usize) -> Result<Vec<AgentSession>> {
+    let limit = limit.clamp(1, 256) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, project_id, agent_id, app_kind, native_id, native_ref,
+               workspace_path, is_primary, state, owner, created_by, last_seen, replaced_by
+        FROM agent_sessions
+        ORDER BY last_seen DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(AgentSession {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            agent_id: row.get(2)?,
+            app_kind: row.get(3)?,
+            native_id: row.get(4)?,
+            native_ref: row.get(5)?,
+            workspace_path: row.get(6)?,
+            is_primary: row.get::<_, i64>(7)? != 0,
+            state: row.get(8)?,
+            owner: row.get(9)?,
+            created_by: row.get(10)?,
+            last_seen: row.get(11)?,
+            replaced_by: row.get(12)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Dashboard — arka plan / aktif A2A görev özeti (status geçişleri).
+pub fn list_background_tasks_overview(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let limit = limit.clamp(1, 100) as i64;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, status, summary, source_agent, target_agent, session_id,
+               backgrounded_at, updated_at, created_at
+        FROM a2a_tasks
+        WHERE status IN (
+            'QUEUED', 'PENDING_APPROVAL', 'DISPATCHED', 'EXECUTING',
+            'WAIT_TIMEOUT_REACHED', 'RECOVERY_PENDING', 'NEEDS_HUMAN'
+          )
+          OR backgrounded_at IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, String>(0)?,
+            "status": row.get::<_, String>(1)?,
+            "summary": short_summary(&row.get::<_, String>(2)?, 100),
+            "source_agent": row.get::<_, String>(3)?,
+            "target_agent": row.get::<_, Option<String>>(4)?,
+            "session_id": row.get::<_, Option<String>>(5)?,
+            "backgrounded_at": row.get::<_, Option<String>>(6)?,
+            "updated_at": row.get::<_, String>(7)?,
+            "created_at": row.get::<_, String>(8)?,
+        }))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Worker inbox ACK — DISPATCHED → EXECUTING (temel pull-inbox onayı).
+pub fn mark_task_acked(conn: &Connection, task_id: &str, bot_id: &str) -> Result<bool> {
+    let now = now_rfc3339();
+    let n = conn.execute(
+        r#"
+        UPDATE a2a_tasks
+        SET status = 'EXECUTING', updated_at = ?1
+        WHERE id = ?2
+          AND status = 'DISPATCHED'
+          AND (target_agent IS NULL OR lower(target_agent) = lower(?3))
+        "#,
+        params![now, task_id, bot_id],
+    )?;
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 fn count_idempotency_keys(conn: &Connection) -> Result<u64> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM idempotency_keys", [], |row| {
@@ -1603,6 +1908,41 @@ impl crate::db::ExperienceStore {
     pub fn count_open_a2a_tasks_for_session(&self, session_id: &str) -> Result<u64> {
         let conn = self.conn.lock().expect("experience db lock");
         count_open_tasks_for_session(&conn, session_id)
+    }
+
+    pub fn list_my_a2a_tasks(
+        &self,
+        session_id: &str,
+        workspace_path: Option<&str>,
+        include_finished: bool,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        list_tasks_for_session(&conn, session_id, workspace_path, include_finished, limit)
+    }
+
+    pub fn list_pending_results_for_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        list_pending_results_for_session(&conn, session_id, limit)
+    }
+
+    pub fn list_sessions(&self, limit: usize) -> Result<Vec<AgentSession>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        list_agent_sessions(&conn, limit)
+    }
+
+    pub fn list_background_a2a_tasks(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        list_background_tasks_overview(&conn, limit)
+    }
+
+    pub fn mark_a2a_task_acked(&self, task_id: &str, bot_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("experience db lock");
+        mark_task_acked(&conn, task_id, bot_id)
     }
 
     pub fn release_a2a_idempotency(&self, task_id: &str) -> Result<()> {
@@ -2721,6 +3061,46 @@ mod tests {
             store.a2a_task_status(&task.id).unwrap(),
             Some(TaskStatus::Completed)
         );
+    }
+
+    #[test]
+    fn list_pending_results_filters_by_session() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut a = LoungeTask::new("mcp:a", "p", "mine");
+        a.session_id = Some("s-a".into());
+        store.admit_a2a_task(&mut a, 10).unwrap();
+        store.mark_a2a_wait_timeout(&a.id).unwrap();
+        store
+            .complete_a2a_with_result(&a.id, TaskStatus::Completed, Some(r#"{"ok":1}"#), false)
+            .unwrap();
+        let mut b = LoungeTask::new("mcp:b", "p", "theirs");
+        b.session_id = Some("s-b".into());
+        store.admit_a2a_task(&mut b, 10).unwrap();
+        store.mark_a2a_wait_timeout(&b.id).unwrap();
+        store
+            .complete_a2a_with_result(&b.id, TaskStatus::Completed, Some(r#"{"ok":2}"#), false)
+            .unwrap();
+        let mine = store.list_pending_results_for_session("s-a", 10).unwrap();
+        assert!(mine.iter().any(|r| r["id"] == a.id));
+        assert!(!mine.iter().any(|r| r["id"] == b.id));
+        assert!(mine[0]["poll_after_secs"].as_u64().unwrap() >= 15);
+    }
+
+    #[test]
+    fn mark_task_acked_dispatched_to_executing() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "ack-me");
+        task.target_agent = Some("grok-tester".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store
+            .set_a2a_task_status(&task.id, TaskStatus::Dispatched)
+            .unwrap();
+        assert!(store.mark_a2a_task_acked(&task.id, "grok-tester").unwrap());
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Executing)
+        );
+        assert!(!store.mark_a2a_task_acked(&task.id, "grok-tester").unwrap());
     }
 
     #[test]

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_list_my_tasks.schema.json",
+  "title": "McpListMyTasksArgs",
+  "description": "lounge_list_my_tasks — current Mcp-Session-Id (source_session_id) ownership; optional workspace_path scope.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "include_finished": {
+      "type": "boolean",
+      "default": true,
+      "description": "false ise yalnız aktif (non-terminal) görevler."
+    },
+    "workspace_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "İsteğe bağlı workspace kapsamı; oturum workspace_path ile eşleşmeli."
+    },
+    "workspace_root": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "workspace_path alias."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 50
+    }
+  }
+}

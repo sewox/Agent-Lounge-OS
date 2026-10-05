@@ -34,6 +34,7 @@ WORKERS_HEARTBEAT = "lounge.workers.heartbeat"
 AGENT_STATUS = "lounge.agent.status"
 TASK_COMPLETED = "lounge.task.completed"
 TASK_FAILED = "lounge.task.failed"
+TASK_ACKED = "lounge.task.acked"
 EXPERIENCE_REPORTED = "lounge.experience.reported"
 TASKS_INBOX_PREFIX = "lounge.tasks."
 
@@ -194,6 +195,18 @@ class BotWorker(ABC):
             except asyncio.TimeoutError:
                 continue
 
+    async def publish_task_ack(self, task_id: str) -> None:
+        """Pull-inbox ACK — Kernel DISPATCHED→EXECUTING geçişini tetikler."""
+        await self.publish(
+            TASK_ACKED,
+            {
+                "task_id": task_id,
+                "bot_id": self.bot_id,
+                "subject": self._tasks_subject,
+                "acked_at": now_rfc3339(),
+            },
+        )
+
     async def _handle_message(self, msg: Any) -> None:
         raw: Any = None
         try:
@@ -201,7 +214,10 @@ class BotWorker(ABC):
             wrapped = validate_task_payload(raw)
             task = wrapped["task"]
             context = wrapped.get("context") or {}
-            await self.publish_progress(task.get("id", ""), "started")
+            task_id = str(task.get("id") or "")
+            if task_id:
+                await self.publish_task_ack(task_id)
+            await self.publish_progress(task_id, "started")
             result = await self.handle_task(task, context)
             if not isinstance(result, dict) or result.get("type") != "task":
                 raise ValueError("handle_task LoungeTask dict döndürmeli")

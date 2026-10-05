@@ -2,6 +2,7 @@
   "task": {
     "requested": "lounge.task.requested",
     "assigned": "lounge.task.assigned",
+    "acked": "lounge.task.acked",
     "completed": "lounge.task.completed",
     "failed": "lounge.task.failed",
     "resume": "lounge.task.resume"

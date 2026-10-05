@@ -92,6 +92,7 @@ Claude yalnızca stdio başlatır; `lounge-mcp` Kernel HTTP’ye köprü kurar.
 | `lounge_record_decision` | aynı | ADR alias |
 | `lounge_call_agent` | `mcp_call_agent.schema.json` | Mod A→B; `timeout_limit` içinde sonuç veya `backgrounded` |
 | `lounge_wait_task` | `mcp_wait_task.schema.json` | Aynı oturum long-poll; eşik aşımında `still_running` |
+| `lounge_list_my_tasks` | `mcp_list_my_tasks.schema.json` | `source_session_id` (+ isteğe bağlı workspace) sahipliğindeki görevler |
 | `lounge_yield_result` | `mcp_yield_result.schema.json` | `target_agent` = normalize(`clientInfo.name`) ile `agent_sessions` bağlı oturum (initialize kaydı); terminal ezilemez |
 | `lounge_dispatch_task` | `mcp_dispatch_task.schema.json` | Fire-and-forget (yeni A2A altyapısı); sonuç → `lounge_wait_task` |
 | `lounge_ask_agent` | aynı | Dispatch alias |
@@ -147,7 +148,7 @@ Stdio HTTP proxy timeout varsayılan **320 sn** (`LOUNGE_MCP_PROXY_TIMEOUT_SECS`
 
 Yeniden bağlanma: `task_token` (düz, bir kez) + DB hash; `lounge_wait_task` aynı oturum **veya** geçerli token. Workspace paylaşımı yok.
 
-PR-4: `lounge_list_my_tasks`, `pending_results` piggyback, `notifications/message`.
+PR-4 (uygulandı): `lounge_list_my_tasks`, `_meta.pending_results` piggyback (Mcp-Session-Id), Resource `lounge://help/a2a-guide`, NATS `lounge.task.acked` pull-inbox. `notifications/message` hâlâ ertelenmiş (PR-5+).
 
 ### `notifications/cancelled`
 

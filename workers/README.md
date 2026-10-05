@@ -36,6 +36,7 @@ Kayıt olunca bot `lounge.workers.register` yayımlar, lobiye `lounge.agent.stat
 | `lounge.workers.heartbeat` | bot → kernel | aynı şema (`action=heartbeat`) |
 | `lounge.workers.unregister` | bot → kernel | aynı şema (`action=unregister`) |
 | `lounge.tasks.<bot_id>` | kernel → bot | `TaskAssignment` (`task` + isteğe bağlı `context`) |
+| `lounge.task.acked` | bot → kernel | pull-inbox ACK (`task_id`, `bot_id`) → DISPATCHED→EXECUTING |
 | `lounge.task.completed` / `.failed` | bot → bus | `LoungeTask` |
 | `lounge.agent.status` | bot → bus | durum / Merhaba / ilerleme |
 

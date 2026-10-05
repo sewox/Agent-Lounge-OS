@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bot_template import (  # noqa: E402
+    TASK_ACKED,
     TASK_COMPLETED,
     WORKERS_REGISTER,
     WORKERS_UNREGISTER,
@@ -183,6 +184,10 @@ async def test_handle_message_completes_task():
     msg = MagicMock()
     msg.data = json.dumps(body).encode()
     await bot._handle_message(msg)
+    acked = [p for s, p in published if s == TASK_ACKED]
+    assert acked, "worker must ACK inbox pull before handle"
+    assert acked[0]["task_id"] == "11111111-1111-4111-8111-111111111111"
+    assert acked[0]["bot_id"] == "echo-bot"
     completed = [p for s, p in published if s == TASK_COMPLETED]
     assert completed
     assert completed[0]["summary"] == "echo: hello"

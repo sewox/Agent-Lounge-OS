@@ -1319,6 +1319,45 @@ mod tests {
         assert_eq!(st, TaskStatus::WaitTimeoutReached);
     }
 
+    /// Antigravity: notifications/cancelled (context deadline exceeded) → backgrounded kalır.
+    #[tokio::test]
+    async fn antigravity_deadline_cancel_keeps_task_backgrounded() {
+        let (orch, clock, session) = orch_manual();
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "antigravity-long".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: false,
+            must_deliver: false,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(None);
+        let call = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            async move {
+                orch.call_agent(&session, "antigravity-client", args, Some(cancel_rx))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let kind = CancelKind::from_reason("context deadline exceeded");
+        assert_eq!(kind, CancelKind::DeadlineExceeded);
+        let _ = cancel_tx.send(Some(kind));
+        clock.advance(Duration::from_millis(50));
+        let out = call.await.unwrap().unwrap();
+        assert_eq!(out["status"], "backgrounded");
+        assert!(out["poll_after_secs"].as_u64().unwrap() >= 15);
+        let task_id = out["task_id"].as_str().unwrap();
+        let st = orch.store().a2a_task_status(task_id).unwrap().unwrap();
+        assert_eq!(st, TaskStatus::WaitTimeoutReached);
+        // İptal edilmemiş — CANCELLED olmamalı.
+        assert_ne!(st, TaskStatus::Cancelled);
+    }
+
     #[tokio::test]
     async fn unauthorized_session_cannot_wait() {
         let (orch, _clock, session) = orch_manual();

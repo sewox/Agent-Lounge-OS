@@ -55,6 +55,8 @@ pub struct ClientCtx {
     pub initialized: bool,
     /// MCP oturum kimliği (`Mcp-Session-Id` / stdio süreç kimliği).
     pub session_id: String,
+    /// İsteğe bağlı workspace (initialize / list_my_tasks sahiplik kapsamı).
+    pub workspace_path: String,
 }
 
 impl Default for ClientCtx {
@@ -64,6 +66,7 @@ impl Default for ClientCtx {
             version: "0".into(),
             initialized: false,
             session_id: Uuid::new_v4().to_string(),
+            workspace_path: String::new(),
         }
     }
 }
@@ -75,8 +78,61 @@ impl ClientCtx {
             "version": self.version,
             "initialized": self.initialized,
             "session_id": self.session_id,
+            "workspace_path": self.workspace_path,
         })
     }
+}
+
+/// MCP Resource — A2A işletim kılavuzu (timeout / polling / piggyback).
+pub const A2A_GUIDE_URI: &str = "lounge://help/a2a-guide";
+const A2A_GUIDE_MIME: &str = "text/markdown";
+
+fn a2a_guide_markdown() -> &'static str {
+    r#"# Agent Lounge OS — A2A Guide
+
+Bu kaynak, ajanların Lounge üzerinden başka ajanlara iş vermesini ve sonuç almasını açıklar.
+Masaüstü istemciler: **Grok Bot**, **Cursor**, **Antigravity**, **Claude Desktop**.
+
+## Temel akış
+
+1. `lounge_call_agent` ile görev verin (veya `lounge_dispatch_task` fire-and-forget).
+2. Eşik içinde sonuç gelmezse yanıt `status: backgrounded` + `task_id` (+ `task_token`) döner.
+3. `poll_after_secs` ve `next_action` değerlerine uyun; hemen sonsuz `lounge_wait_task` döngüsüne girmeyin.
+4. Sonuç hazır olduğunda:
+   - `lounge_wait_task(task_id)` ile tam sonucu alın, **veya**
+   - Herhangi bir tool yanıtındaki `_meta.pending_results` piggyback özetini görün (Claude Desktop için kritik — progress token yok).
+5. Süreci `lounge_list_my_tasks` ile izleyin (aynı `Mcp-Session-Id` / `source_session_id`).
+
+## İstemci bekleme eşikleri (ClientProfile)
+
+| İstemci | Mod A eşiği | Not |
+|---|---:|---|
+| Antigravity | ~150s | `notifications/cancelled` (deadline) → görev **backgrounded kalır** |
+| Cursor | ~100s (progress ile ≤280s) | progressToken heartbeat |
+| Claude Desktop (`claude-ai`) | ~210s | Progress yok → **piggyback zorunlu yol** |
+| Grok Bot / bilinmeyen | ~45s | Bulut / unknown profil |
+
+`long_running=true`: eşiği beklemeden hemen `backgrounded` + `task_id`.
+`must_deliver=true`: kopmada iptal yok; orphan EXPIRED yok; kota aşımında `-32029`.
+
+## Polling kuralları
+
+- `poll_after_secs`: 15 → ×1.5 → en fazla 60.
+- `still_running` / `backgrounded` iken `next_action` = `lounge_wait_task`.
+- Sonuç `completed`/`failed` olmadan kullanıcıya "bitti" demeyin.
+- Piggyback yalnız özet verir; tam gövde için `lounge_wait_task` çağırın (teslim `last_wait_at`).
+
+## Sahiplik
+
+- Görevler `source_session_id` (= `Mcp-Session-Id`) ile bağlanır.
+- Workspace paylaşımı yok; `lounge_list_my_tasks` yalnız bu oturumun görevlerini listeler.
+- `task_token` yeniden bağlanmada wait yetkisi verir (düz token bir kez; DB hash).
+
+## Kaynaklar
+
+- Bu kılavuz: `lounge://help/a2a-guide` (`resources/read`)
+- Durum: `lounge_status`
+"#
 }
 
 /// Uçuştaki tools/call — `notifications/cancelled` ile eşleşir.
@@ -351,9 +407,12 @@ impl McpServer {
         match method {
             "initialize" => self.initialize(params, client).await,
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tool_defs() })),
+            "tools/list" => Ok(json!({
+                "tools": tool_defs(client, &self.timeouts)
+            })),
             "tools/call" => self.tools_call(params, client, request_key).await,
-            "resources/list" => Ok(json!({ "resources": [] })),
+            "resources/list" => Ok(json!({ "resources": resource_defs() })),
+            "resources/read" => self.resources_read(params),
             "prompts/list" => Ok(json!({ "prompts": [] })),
             other => Err(anyhow!("method bulunamadı: {other}")),
         }
@@ -368,6 +427,16 @@ impl McpServer {
         let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("0");
         client.name = name.to_string();
         client.version = version.to_string();
+        if let Some(ws) = params
+            .pointer("/clientInfo/workspace_path")
+            .or_else(|| params.pointer("/clientInfo/workspaceRoot"))
+            .or_else(|| params.get("workspace_path"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            client.workspace_path = ws.to_string();
+        }
 
         let requested = params
             .get("protocolVersion")
@@ -384,17 +453,26 @@ impl McpServer {
             eprintln!("[lounge-mcp] client kaydı (initialize): {err}");
         }
 
+        let profile = self.timeouts.profile_for(&client.name);
         Ok(json!({
             "protocolVersion": protocol_version,
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "resources": {}
             },
             "serverInfo": {
                 "name": SERVER_NAME,
                 "version": SERVER_VERSION,
                 "title": "Agent Lounge OS"
             },
-            "instructions": "Agent Lounge OS yerel orkestrasyon katmanı. Tecrübe ara/kaydet; görevleri NATS üzerinden Kernel'e ilet (güvenlik/kota kapıları uygulanır)."
+            "instructions": format!(
+                "Agent Lounge OS yerel orkestrasyon. Önce resources/read ile {A2A_GUIDE_URI} okuyun \
+        (timeout/polling/piggyback). Bu istemci Mod A eşiği ~{}s (profil {}). \
+        lounge_call_agent → backgrounded olursa poll_after_secs'e uyun; sonraki tool yanıtlarında \
+        _meta.pending_results piggyback gelebilir; lounge_list_my_tasks ile süreci izleyin.",
+                profile.threshold_secs,
+                profile.name
+            )
         }))
     }
 
@@ -411,14 +489,39 @@ impl McpServer {
         // P1-B: MCP oturumunu agent_sessions'a bağla — yield target_agent eşleşmesi.
         // agent_id = normalize(clientInfo.name); session id = Mcp-Session-Id.
         // Not: gerçek yetki token'a bağlı değil; session id istemci seçimli (kabul edilen risk).
-        let mut sess = crate::models::AgentSession::new("mcp", &host, "mcp", "", "mcp_meta");
+        // İnbound MCP istemci oturumu user-owned (Orchestrated değil); Kernel claim → lounge.
+        let mut sess = crate::models::AgentSession::new(
+            "mcp",
+            &host,
+            "mcp",
+            &client.workspace_path,
+            "mcp_meta",
+        );
         sess.id = client.session_id.clone();
+        sess.owner = "user".into();
         sess.state = "active".into();
         sess.last_seen = crate::models::now_rfc3339();
         if let Err(err) = self.store.upsert_session(&sess) {
             eprintln!("[lounge-mcp] agent_session bağlama: {err}");
         }
         Ok(())
+    }
+
+    fn resources_read(&self, params: &Value) -> Result<Value> {
+        let uri = params
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("resources/read: uri gerekli"))?;
+        if uri != A2A_GUIDE_URI {
+            return Err(anyhow!("resource bulunamadı: {uri}"));
+        }
+        Ok(json!({
+            "contents": [{
+                "uri": A2A_GUIDE_URI,
+                "mimeType": A2A_GUIDE_MIME,
+                "text": a2a_guide_markdown(),
+            }]
+        }))
     }
 
     async fn tools_call(
@@ -491,12 +594,87 @@ impl McpServer {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
             },
+            "lounge_list_my_tasks" => match self.tool_list_my_tasks(&args, client).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
             other => (
                 json!({ "error": format!("bilinmeyen tool: {other}") }),
                 true,
             ),
         };
-        Ok(tool_result(payload, is_error))
+        Ok(self.tool_result_with_piggyback(client, payload, is_error))
+    }
+
+    /// Tüm tools/call yanıtlarına `_meta.pending_results` ekler (Mcp-Session-Id filtreli).
+    fn tool_result_with_piggyback(
+        &self,
+        client: &ClientCtx,
+        payload: Value,
+        is_error: bool,
+    ) -> Value {
+        let mut result = tool_result(payload, is_error);
+        if client.session_id.trim().is_empty() {
+            return result;
+        }
+        let pending = self
+            .store
+            .list_pending_results_for_session(&client.session_id, 8)
+            .unwrap_or_default();
+        if pending.is_empty() {
+            return result;
+        }
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert(
+                "_meta".into(),
+                json!({
+                    "pending_results": pending,
+                    "hint": "Hazır sonuçlar için lounge_wait_task(task_id) çağırın; poll_after_secs'e uyun."
+                }),
+            );
+        }
+        result
+    }
+
+    async fn tool_list_my_tasks(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
+        let args = if args.is_null() {
+            json!({})
+        } else {
+            args.clone()
+        };
+        validate_schema(SchemaKind::McpListMyTasks, &args).map_err(|e| anyhow!(e))?;
+        let include_finished = args
+            .get("include_finished")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .clamp(1, 100) as usize;
+        let workspace = arg_str(&args, "workspace_path")
+            .or_else(|| arg_str(&args, "workspace_root"))
+            .map(str::to_string)
+            .or_else(|| {
+                if client.workspace_path.trim().is_empty() {
+                    None
+                } else {
+                    Some(client.workspace_path.clone())
+                }
+            });
+        let tasks = self.store.list_my_a2a_tasks(
+            &client.session_id,
+            workspace.as_deref(),
+            include_finished,
+            limit,
+        )?;
+        Ok(json!({
+            "source_session_id": client.session_id,
+            "workspace_path": workspace,
+            "count": tasks.len(),
+            "tasks": tasks,
+            "hint": "Aynı Mcp-Session-Id sahipliği. Sonuç için lounge_wait_task; özet için sonraki tool yanıtlarında _meta.pending_results."
+        }))
     }
 
     async fn tool_search(&self, args: &Value) -> Result<Value> {
@@ -1072,7 +1250,29 @@ impl ProgressSink for LogProgressSink {
     }
 }
 
-fn tool_defs() -> Vec<Value> {
+fn resource_defs() -> Vec<Value> {
+    vec![json!({
+        "uri": A2A_GUIDE_URI,
+        "name": "a2a-guide",
+        "title": "Agent Lounge A2A Guide",
+        "description": "Timeout, polling, backgrounded, task_token, piggyback pending_results — Grok Bot / Cursor / Antigravity / Claude Desktop.",
+        "mimeType": A2A_GUIDE_MIME,
+    })]
+}
+
+fn tool_defs(client: &ClientCtx, timeouts: &TimeoutManager) -> Vec<Value> {
+    let profile = timeouts.profile_for(&client.name);
+    let threshold = profile.threshold_secs;
+    let call_desc = format!(
+        "Mod A→B: başka ajana görev ver. Bu istemci ({profile}) için Mod A bekleme eşiği ~{threshold}s \
+(Antigravity ~150s, Grok/unknown ~45s, Cursor ~100s/progress≤280s, Claude Desktop ~210s — ClientProfile). \
+Eşik dolunca backgrounded+task_id; long_running=true ise eşiği beklemeden hemen backgrounded. \
+poll_after_secs ve next_action'a uyun (15→×1.5→≤60); sonsuz lounge_wait_task döngüsü kurmayın. \
+Sonuç gelmeden kullanıcıya bitti demeyin. task_token'ı saklayın. must_deliver: kopmada iptal yok. \
+Kota aşımında -32029. Ayrıntı: resources/read {A2A_GUIDE_URI}.",
+        profile = profile.name,
+        threshold = threshold,
+    );
     vec![
         tool_def(
             "lounge_search_experience",
@@ -1091,12 +1291,12 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "lounge_call_agent",
-            "Mod A→B: başka ajana görev ver; timeout_limit içinde sonuç veya backgrounded. long_running=true ise eşiği beklemeden hemen backgrounded+task_id. Backgrounded/still_running yanıtında poll_after_secs ve next_action'a uyarak düzenli lounge_wait_task çağırın; sonuç gelmeden kullanıcıya bitti demeyin. task_token'ı saklayın. must_deliver: kopmada iptal yok, orphan EXPIRED yok. Kota aşımında -32029. parent_task_id yok sayılır.",
+            &call_desc,
             include_schema("mcp_call_agent.schema.json"),
         ),
         tool_def(
             "lounge_wait_task",
-            "Aynı oturum veya geçerli task_token ile sonuç long-poll. still_running ise next_action/poll_after_secs'e uyun (15→×1.5→≤60). Arka plan görevlerini düzenli kontrol edin. Sonuç completed/failed olmadan kullanıcıya bitti demeyin.",
+            "Aynı oturum veya geçerli task_token ile sonuç long-poll. still_running ise next_action/poll_after_secs'e uyun (15→×1.5→≤60). Arka plan görevlerini düzenli kontrol edin. Sonuç completed/failed olmadan kullanıcıya bitti demeyin. Claude Desktop: progress yok — piggyback `_meta.pending_results` veya bu tool.",
             include_schema("mcp_wait_task.schema.json"),
         ),
         tool_def(
@@ -1115,8 +1315,13 @@ fn tool_defs() -> Vec<Value> {
             include_schema("mcp_dispatch_task.schema.json"),
         ),
         tool_def(
+            "lounge_list_my_tasks",
+            "Bu Mcp-Session-Id (source_session_id) + isteğe bağlı workspace_path sahipliğindeki aktif/bitmiş görevleri listeler. Süreç takibi; tam sonuç için lounge_wait_task.",
+            include_schema("mcp_list_my_tasks.schema.json"),
+        ),
+        tool_def(
             "lounge_status",
-            "Bağlı ajanlar + NATS/LMR/MCP HTTP sağlık + timeout_limit. Ayar değiştirmez.",
+            "Bağlı ajanlar + NATS/LMR/MCP HTTP sağlık + timeout_limit. Ayar değiştirmez. Yanıtta `_meta.pending_results` piggyback olabilir.",
             include_schema("mcp_status.schema.json"),
         ),
     ]
@@ -1148,6 +1353,9 @@ fn include_schema(file: &str) -> Value {
         }
         "mcp_status.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_status.schema.json")
+        }
+        "mcp_list_my_tasks.schema.json" => {
+            include_str!("../../../shared/lounge_protocol/schemas/mcp_list_my_tasks.schema.json")
         }
         other => panic!("bilinmeyen schema: {other}"),
     };
@@ -1935,12 +2143,14 @@ mod tests {
             version: "1".into(),
             initialized: true,
             session_id: "sess-cursor".into(),
+            workspace_path: String::new(),
         };
         let mut claude = ClientCtx {
             name: "Claude Desktop".into(),
             version: "2".into(),
             initialized: true,
             session_id: "sess-claude".into(),
+            workspace_path: String::new(),
         };
 
         let status_cursor = server
@@ -2022,5 +2232,239 @@ mod tests {
             Some(v) => std::env::set_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS", v),
             None => std::env::remove_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS"),
         }
+    }
+
+    #[tokio::test]
+    async fn resources_expose_a2a_guide() {
+        let store = ExperienceStore::memory().expect("db");
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9");
+        let init = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claude-ai","version":"1"}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let init_v: Value = serde_json::from_str(&init).unwrap();
+        assert!(init_v["result"]["capabilities"]["resources"].is_object());
+        assert!(init_v["result"]["instructions"]
+            .as_str()
+            .unwrap_or("")
+            .contains(A2A_GUIDE_URI));
+
+        let list = server
+            .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"resources/list"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        let list_v: Value = serde_json::from_str(&list).unwrap();
+        let uris: Vec<&str> = list_v["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["uri"].as_str())
+            .collect();
+        assert!(uris.contains(&A2A_GUIDE_URI));
+
+        let read = server
+            .handle_line(&format!(
+                r#"{{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{{"uri":"{A2A_GUIDE_URI}"}}}}"#
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let read_v: Value = serde_json::from_str(&read).unwrap();
+        let text = read_v["result"]["contents"][0]["text"].as_str().unwrap();
+        assert!(text.contains("poll_after_secs"));
+        assert!(text.contains("pending_results"));
+        assert!(text.contains("Claude Desktop"));
+    }
+
+    #[tokio::test]
+    async fn tools_list_injects_client_aware_threshold() {
+        let store = ExperienceStore::memory().expect("db");
+        let server = McpServer::new(store, "nats://127.0.0.1:9");
+        let mut antigravity = ClientCtx {
+            name: "antigravity-client".into(),
+            version: "1".into(),
+            initialized: true,
+            session_id: "sess-ag".into(),
+            workspace_path: String::new(),
+        };
+        let mut grok = ClientCtx {
+            name: "Grok Bot".into(),
+            version: "1".into(),
+            initialized: true,
+            session_id: "sess-grok".into(),
+            workspace_path: String::new(),
+        };
+        let ag = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                &mut antigravity,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let grok_resp = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                &mut grok,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let ag_v: Value = serde_json::from_str(&ag).unwrap();
+        let grok_v: Value = serde_json::from_str(&grok_resp).unwrap();
+        let find_call = |v: &Value| {
+            v["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == "lounge_call_agent")
+                .unwrap()["description"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let ag_desc = find_call(&ag_v);
+        let grok_desc = find_call(&grok_v);
+        assert!(ag_desc.contains("150"), "{ag_desc}");
+        assert!(grok_desc.contains("45"), "{grok_desc}");
+        assert!(ag_v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "lounge_list_my_tasks"));
+    }
+
+    #[tokio::test]
+    async fn piggyback_pending_results_filters_by_mcp_session_id() {
+        use crate::models::{LoungeTask, TaskStatus};
+        let store = ExperienceStore::memory().expect("db");
+        let server = McpServer::new(store.clone(), "nats://127.0.0.1:9").with_skip_nats(true);
+
+        let mut mine = ClientCtx {
+            name: "claude-ai".into(),
+            version: "1".into(),
+            initialized: true,
+            session_id: "sess-mine".into(),
+            workspace_path: String::new(),
+        };
+        let mut other = ClientCtx {
+            name: "claude-ai".into(),
+            version: "1".into(),
+            initialized: true,
+            session_id: "sess-other".into(),
+            workspace_path: String::new(),
+        };
+
+        let mut task_mine = LoungeTask::new("mcp:claude_ai", "p", "mine-ready");
+        task_mine.session_id = Some("sess-mine".into());
+        store.admit_a2a_task(&mut task_mine, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task_mine.id).unwrap();
+        store
+            .complete_a2a_with_result(
+                &task_mine.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true,"msg":"done"}"#),
+                false,
+            )
+            .unwrap();
+
+        let mut task_other = LoungeTask::new("mcp:claude_ai", "p", "other-ready");
+        task_other.session_id = Some("sess-other".into());
+        store.admit_a2a_task(&mut task_other, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task_other.id).unwrap();
+        store
+            .complete_a2a_with_result(
+                &task_other.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+
+        let status = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"lounge_status","arguments":{}}}"#,
+                &mut mine,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let status_v: Value = serde_json::from_str(&status).unwrap();
+        let pending = status_v["result"]["_meta"]["pending_results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            pending
+                .iter()
+                .any(|p| p["id"] == task_mine.id && p["status"] == "ready"),
+            "own ready result must piggyback: {status_v}"
+        );
+        assert!(
+            !pending.iter().any(|p| p["id"] == task_other.id),
+            "other session must not leak: {status_v}"
+        );
+
+        let other_status = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"lounge_status","arguments":{}}}"#,
+                &mut other,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let other_v: Value = serde_json::from_str(&other_status).unwrap();
+        let other_pending = other_v["result"]["_meta"]["pending_results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(other_pending.iter().any(|p| p["id"] == task_other.id));
+        assert!(!other_pending.iter().any(|p| p["id"] == task_mine.id));
+    }
+
+    #[tokio::test]
+    async fn list_my_tasks_session_ownership_and_poll_hints() {
+        use crate::models::LoungeTask;
+        let store = ExperienceStore::memory().expect("db");
+        let server = McpServer::new(store.clone(), "nats://127.0.0.1:9").with_skip_nats(true);
+        let mut client = ClientCtx {
+            name: "claude-ai".into(),
+            version: "1".into(),
+            initialized: true,
+            session_id: "sess-list".into(),
+            workspace_path: "/tmp/ws".into(),
+        };
+        let mut task = LoungeTask::new("mcp:claude_ai", "p", "bg-work");
+        task.session_id = Some("sess-list".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+
+        let mut foreign = LoungeTask::new("mcp:claude_ai", "p", "foreign");
+        foreign.session_id = Some("sess-foreign".into());
+        store.admit_a2a_task(&mut foreign, 10).unwrap();
+
+        let resp = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lounge_list_my_tasks","arguments":{}}}"#,
+                &mut client,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&resp).unwrap();
+        let tasks = v["result"]["structuredContent"]["tasks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["id"], task.id);
+        assert!(tasks[0]["poll_after_secs"].as_u64().unwrap() >= 15);
+        assert_eq!(
+            tasks[0]["next_action"].as_str().unwrap(),
+            crate::db::NEXT_ACTION_WAIT_TASK
+        );
     }
 }

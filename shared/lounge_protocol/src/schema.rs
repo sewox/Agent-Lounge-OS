@@ -31,6 +31,7 @@ schema!(mcp_status_validator, "mcp_status.schema.json");
 schema!(mcp_call_agent_validator, "mcp_call_agent.schema.json");
 schema!(mcp_wait_task_validator, "mcp_wait_task.schema.json");
 schema!(mcp_yield_result_validator, "mcp_yield_result.schema.json");
+schema!(mcp_list_my_tasks_validator, "mcp_list_my_tasks.schema.json");
 
 #[derive(Debug, Clone, Copy)]
 pub enum SchemaKind {
@@ -44,6 +45,7 @@ pub enum SchemaKind {
     McpCallAgent,
     McpWaitTask,
     McpYieldResult,
+    McpListMyTasks,
 }
 
 /// `instance` verilen şemaya uymuyorsa insan-okur hata metni döner.
@@ -59,6 +61,7 @@ pub fn validate(kind: SchemaKind, instance: &Value) -> Result<(), String> {
         SchemaKind::McpCallAgent => mcp_call_agent_validator(),
         SchemaKind::McpWaitTask => mcp_wait_task_validator(),
         SchemaKind::McpYieldResult => mcp_yield_result_validator(),
+        SchemaKind::McpListMyTasks => mcp_list_my_tasks_validator(),
     };
     let Ok(()) = validator.validate(instance) else {
         let errors: Vec<String> = validator
