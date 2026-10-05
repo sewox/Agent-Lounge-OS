@@ -318,10 +318,7 @@ impl NatsService {
                 let result = nats::Options::with_user_pass(&user, &pass).connect(&url);
                 let _ = tx.send(result.is_ok());
             });
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(ok) => ok,
-            Err(_) => false,
-        }
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
     }
 
     fn mark_auth_active(&self) {
