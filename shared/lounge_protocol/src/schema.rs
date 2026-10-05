@@ -28,6 +28,9 @@ schema!(mcp_search_validator, "mcp_search_experience.schema.json");
 schema!(mcp_record_validator, "mcp_record_experience.schema.json");
 schema!(mcp_dispatch_validator, "mcp_dispatch_task.schema.json");
 schema!(mcp_status_validator, "mcp_status.schema.json");
+schema!(mcp_call_agent_validator, "mcp_call_agent.schema.json");
+schema!(mcp_wait_task_validator, "mcp_wait_task.schema.json");
+schema!(mcp_yield_result_validator, "mcp_yield_result.schema.json");
 
 #[derive(Debug, Clone, Copy)]
 pub enum SchemaKind {
@@ -38,6 +41,9 @@ pub enum SchemaKind {
     McpRecord,
     McpDispatch,
     McpStatus,
+    McpCallAgent,
+    McpWaitTask,
+    McpYieldResult,
 }
 
 /// `instance` verilen şemaya uymuyorsa insan-okur hata metni döner.
@@ -50,6 +56,9 @@ pub fn validate(kind: SchemaKind, instance: &Value) -> Result<(), String> {
         SchemaKind::McpRecord => mcp_record_validator(),
         SchemaKind::McpDispatch => mcp_dispatch_validator(),
         SchemaKind::McpStatus => mcp_status_validator(),
+        SchemaKind::McpCallAgent => mcp_call_agent_validator(),
+        SchemaKind::McpWaitTask => mcp_wait_task_validator(),
+        SchemaKind::McpYieldResult => mcp_yield_result_validator(),
     };
     let Ok(()) = validator.validate(instance) else {
         let errors: Vec<String> = validator

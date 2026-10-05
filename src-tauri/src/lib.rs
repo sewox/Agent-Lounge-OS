@@ -288,6 +288,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 // A2A zombi tarama + idempotency GC; trusted workflow girişi; worker lifecycle.
                 dispatcher.spawn_trusted_ingress(trusted_rx);
                 dispatcher.spawn_lifecycle_listener();
+                dispatcher.spawn_control_stop_listener();
                 dispatcher.spawn_silence_watchdog();
                 if let Err(err) = dispatcher.listen().await {
                     log::error!("dispatcher durdu: {err}");

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_call_agent.schema.json",
+  "title": "McpCallAgentArgs",
+  "description": "lounge_call_agent — Mod A delegate_and_wait. parent_task_id istemci değeri yok sayılır.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target_agent", "task"],
+  "properties": {
+    "target_agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "task": { "type": "string", "minLength": 1, "maxLength": 32000 },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 32000 },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "project": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "project_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "active_file": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "workspace_root": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "repo_path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "parent_task_id": {
+      "type": ["string", "null"],
+      "description": "İstemci değeri yok sayılır (sunucu enjekte eder)."
+    },
+    "wait": {
+      "type": "boolean",
+      "default": true,
+      "description": "false ise hemen task_id (Mod B fire-and-forget)."
+    }
+  }
+}

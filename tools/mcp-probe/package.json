@@ -13,6 +13,7 @@
     "start:http": "node bin/mcp-probe.mjs --transport http --port 19891",
     "test": "node --test test/logger.test.mjs test/protocol.test.mjs test/stdio.integration.test.mjs test/http.integration.test.mjs test/matrix.test.mjs",
     "run-matrix": "node scripts/run-matrix.mjs",
+    "run-antigravity-cliff": "node scripts/run-antigravity-cliff.mjs",
     "report": "node scripts/report.mjs"
   },
   "engines": {
