@@ -99,19 +99,55 @@ Claude yalnızca stdio başlatır; `lounge-mcp` Kernel HTTP’ye köprü kurar.
 
 Serbest biçim / `additionalProperties` → net MCP `isError` yanıtı.
 
-## Timeout manager (PR-3)
+## Timeout manager (PR-3 / PR-3b)
 
-Oturum başına tek eşik: `timeout_limit` (`bridge/timeout_manager.rs`).
+Oturum başına tek eşik: `timeout_limit` (`bridge/timeout_manager.rs` → [`ClientProfile`]).
 
-| İstemci (`clientInfo.name` → normalize) | Varsayılan |
-|---|---|
-| Antigravity | **150 sn** (180 sn sert limit − 30 sn marj) |
-| Cursor / Claude Desktop / Claude Code / Grok | **45 sn** (geçici; ölçüm bekleniyor) |
-| Bilinmeyen | **30 sn** (güvenli düşük) |
+Ölçüm matrisi (2026-10-04/05, mcp-probe; `clientInfo.name`):
 
-Override: Settings `mcp.timeout_secs` veya env `LOUNGE_MCP_TIMEOUT_SECS` (global). Tablo `TimeoutManager::set_client_timeout` ile güncellenir.
+| Profil | hard_limit | threshold | progress_extends | sends_cancel | kaynak |
+|---|---:|---:|:---:|:---:|---|
+| `antigravity-client` | 180 | 150 | hayır | evet | measured |
+| `cursor-vscode` | 120 | 100 | evet → ≤280 sn (10 sn heartbeat) | hayır (Stop) | measured |
+| `claude-ai` (Desktop) | 240 | 210 | hayır (token yok) | hayır (Stop) | measured |
+| `claude-code` | — (bilinmiyor; 3600 yazılmaz) | 300 | hayır | hayır (SIGINT=EOF) | assumed |
+| `unknown` / Grok Bot / bulut | — | **45** | hayır | — | assumed |
 
-**Progress bildirimleri süreyi uzatmaz** — yalnız UI nabzı.
+Not: Gemini Grok için 60 sn demişti; tutarlılık için bilinmeyen=45. Cursor progress ile 300 sn ölçüldü; Lounge 280 sn (20 sn marj).
+
+Override: Settings `mcp.timeout_secs` veya env `LOUNGE_MCP_TIMEOUT_SECS`. Üst sınır **profil başına** `hard_limit − 20` (bilinmeyen: 170). Kullanıcı override’ı profil tavanını aşamaz (uyarı log).
+
+Yanıtlarda teşhis: `client_profile`, `timeout_limit_secs`, `profile_source`.
+
+### Bağlantı kopması (cancel göndermeyen istemciler)
+
+stdio EOF / HTTP `DELETE /mcp` / oturum kapanışı → in-flight çağrılara `SessionDisconnect`:
+- **Mod A senkron** (`lounge_call_agent` wait): varsayılan → `CANCELLED` + `lounge.control.stop`; **`must_deliver=true`** → arka plan
+- **`lounge_wait_task` long-poll**: yalnız bekleme biter (`still_running`); görev **iptal edilmez** (backgrounded korunur)
+
+**Backgrounded** görevler in-flight map'te yoktur → kopmada dokunulmaz. İstemci `lounge_wait_task` ile dönebilir.
+
+`WAIT_TIMEOUT_REACHED` sessizlik taramasından **muaf** (eşik > 120 sn profilde yanlış NEEDS_HUMAN yok).
+
+Terminal sonuç okununca `last_wait_at` yenilenir (teslim) → orphan EXPIRED / must_deliver abandoned uygulanmaz.
+
+Stdio HTTP proxy timeout varsayılan **320 sn** (`LOUNGE_MCP_PROXY_TIMEOUT_SECS`); hata/timeout → istemciye JSON-RPC error.
+
+### Orphan TTL (yedek temizlik)
+
+| Tür | Varsayılan | Davranış |
+|---|---|---|
+| Sonuç orphan | **30 dk** (`LOUNGE_RESULT_ORPHAN_TTL_SECS`) | Backgrounded → sonuç hazır, hiç `lounge_wait_task` yok → `EXPIRED` (çalışanı öldürmez). **must_deliver atlanır** |
+| Incomplete orphan | **30 dk** (`LOUNGE_INCOMPLETE_ORPHAN_TTL_SECS`) | Çağıran oturum yok/disconnected + sorgu yok → `EXPIRED` + `control.stop`. **must_deliver atlanır** |
+| must_deliver | **24 sa** (`LOUNGE_MUST_DELIVER_TTL_SECS`) | Alınmayan → `FAILED` reason `abandoned`. Kota: oturum 5 / ajan 10 açık; aşımda JSON-RPC **-32029** (sessiz düşürme yok) |
+
+`long_running=true`: eşik beklenmeden hemen `backgrounded` + `task_id`.
+
+`poll_after_secs`: long_running/backgrounded için 15 sn başlar, her boş wait’te ×1.5, en fazla 60. Yanıtta `next_action`: `lounge_wait_task(task_id) ile tekrar kontrol et`.
+
+Yeniden bağlanma: `task_token` (düz, bir kez) + DB hash; `lounge_wait_task` aynı oturum **veya** geçerli token. Workspace paylaşımı yok.
+
+PR-4: `lounge_list_my_tasks`, `pending_results` piggyback, `notifications/message`.
 
 ### `notifications/cancelled`
 

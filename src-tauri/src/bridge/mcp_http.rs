@@ -93,7 +93,7 @@ pub async fn serve(
         session_order: Arc::new(Mutex::new(VecDeque::new())),
     };
     let app = Router::new()
-        .route("/mcp", post(mcp_post))
+        .route("/mcp", post(mcp_post).delete(mcp_delete))
         .route("/mcp/health", get(health))
         .route("/mcp/sse", get(sse_ready))
         .route("/health", get(health))
@@ -111,7 +111,7 @@ pub fn router_from_server(server: McpServer) -> Router {
         session_order: Arc::new(Mutex::new(VecDeque::new())),
     };
     Router::new()
-        .route("/mcp", post(mcp_post))
+        .route("/mcp", post(mcp_post).delete(mcp_delete))
         .route("/mcp/health", get(health))
         .route("/mcp/sse", get(sse_ready))
         .route("/health", get(health))
@@ -206,6 +206,44 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
         )
             .into_response(),
     }
+}
+
+async fn mcp_delete(State(hub): State<Hub>, headers: HeaderMap) -> impl IntoResponse {
+    let raw_session = headers
+        .get(HDR_SESSION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(session_id) = raw_session.map(str::to_string) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
+    {
+        let mut sessions = hub.sessions.lock().await;
+        let mut order = hub.session_order.lock().await;
+        sessions.remove(&session_id);
+        if let Some(pos) = order.iter().position(|s| s == &session_id) {
+            order.remove(pos);
+        }
+    }
+
+    let cancelled = {
+        let server = {
+            let guard = hub.server.lock().await;
+            guard.clone()
+        };
+        server.on_session_disconnect(&session_id).await
+    };
+
+    log::info!("MCP DELETE session={session_id} in_flight_cancelled={cancelled}");
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            HeaderName::from_static(HDR_SESSION),
+            HeaderValue::from_str(&session_id).unwrap_or_else(|_| HeaderValue::from_static("")),
+        )],
+    )
+        .into_response()
 }
 
 fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {

@@ -1,9 +1,11 @@
-//! İstemci bazlı MCP araç zaman aşımı eşiği (`timeout_limit`).
+//! İstemci bazlı MCP araç zaman aşımı — [`ClientProfile`] tablosu.
 //!
-//! Ölçüm (Antigravity IDE, 2026-10-04): sert istemci limiti **180 sn**; progress
-//! süreyi uzatmıyor. Antigravity varsayılanı 150 sn (30 sn marj). Cursor / Claude
-//! Desktop / diğerleri için geçici 45 sn; bilinmeyen istemci için güvenli düşük
-//! varsayılan. Tablo kolay güncellenir; global override env veya settings.
+//! Ölçümler (2026-10-04/05, mcp-probe): antigravity-client 180 sn (progress
+//! uzatmaz, cancel gönderir); cursor-vscode 120 sn (−32001), progress ile 300 sn;
+//! claude-ai 240 sn (progress/cancel yok); claude-code ≥300 sn (sert sınır
+//! bilinmiyor); Grok Bot ölçülemedi → bilinmeyen/bulut eşiği 45 sn.
+//!
+//! Global override üst sınırı profil başına `hard_limit − 20` (bilinmeyen: 170).
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -11,38 +13,188 @@ use std::time::Duration;
 
 use super::mcp_server::normalize_client_host;
 
-/// Bilinmeyen / ölçülmemiş istemci — güvenli düşük varsayılan.
-pub const DEFAULT_UNKNOWN_TIMEOUT: Duration = Duration::from_secs(30);
-/// Cursor / Claude Desktop / Claude Code / Grok — geçici varsayılan (ölçüm bekleniyor).
-pub const DEFAULT_GUI_TIMEOUT: Duration = Duration::from_secs(45);
-/// Antigravity: 180 sn sert limit − 30 sn marj.
-pub const DEFAULT_ANTIGRAVITY_TIMEOUT: Duration = Duration::from_secs(150);
-/// Global override üst sınırı — Antigravity eşiğinin biraz üstü, istemci hard 180'den düşük.
-pub const MAX_TIMEOUT_OVERRIDE_SECS: u64 = 170;
+/// Bilinmeyen / bulut (Grok Bot dahil) — Gemini 60 önermişti; tutarlılık için 45.
+pub const DEFAULT_UNKNOWN_THRESHOLD_SECS: u64 = 45;
+/// Bilinmeyen profil için override tavanı (sabit; hard_limit yok).
+pub const UNKNOWN_OVERRIDE_CAP_SECS: u64 = 170;
+/// Cursor progress heartbeat aralığı.
+pub const CURSOR_PROGRESS_HEARTBEAT_SECS: u64 = 10;
+/// Cursor progress ile Mod A üst bekleme (300 ölçüldü − 20 sn marj).
+pub const CURSOR_PROGRESS_EXTENDED_SECS: u64 = 280;
 
-/// Settings anahtarı — saniye cinsinden global override (tüm istemciler).
+/// Settings anahtarı — saniye cinsinden global override (tüm istemciler, profil tavanıyla kırpılır).
 pub const SETTING_MCP_TIMEOUT_SECS: &str = "mcp.timeout_secs";
 /// Ortam değişkeni — settings’i de ezer (en yüksek öncelik).
 pub const ENV_MCP_TIMEOUT_SECS: &str = "LOUNGE_MCP_TIMEOUT_SECS";
 
+/// Profil kaynak etiketi — ölçülmüş vs varsayılan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileSource {
+    Measured,
+    Assumed,
+}
+
+impl ProfileSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Assumed => "assumed",
+        }
+    }
+}
+
+/// İstemci yetenek + eşik profili (`clientInfo.name` eşleşmesi).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientProfile {
+    /// Teşhis adı (`antigravity-client`, `cursor-vscode`, …).
+    pub name: &'static str,
+    /// Sert istemci limiti (sn). `None` = ölçülmedi / bilinmiyor — 3600 yazma.
+    pub hard_limit_secs: Option<u64>,
+    /// Lounge Mod A eşiği (sn).
+    pub threshold_secs: u64,
+    /// Progress heartbeat istemci zaman aşımını uzatır mı?
+    pub progress_extends: bool,
+    /// `notifications/cancelled` (Stop) gönderir mi?
+    pub sends_cancel: bool,
+    pub source: ProfileSource,
+    /// `progress_extends` iken progressToken varsa Mod A üst süre.
+    pub progress_extended_secs: Option<u64>,
+    /// Heartbeat aralığı (sn).
+    pub progress_heartbeat_secs: Option<u64>,
+}
+
+impl ClientProfile {
+    /// Kullanıcı/global override tavanı.
+    pub fn override_cap_secs(&self) -> u64 {
+        match self.hard_limit_secs {
+            Some(hard) => hard.saturating_sub(20),
+            None if self.name == "unknown" => UNKNOWN_OVERRIDE_CAP_SECS,
+            // claude-code: sert sınır bilinmiyor — eşik üstüne çıkma.
+            None => self.threshold_secs,
+        }
+    }
+
+    /// Effective Mod A bekleme: progressToken + progress_extends → extended.
+    pub fn effective_threshold_secs(&self, has_progress_token: bool) -> u64 {
+        if has_progress_token && self.progress_extends {
+            self.progress_extended_secs
+                .unwrap_or(self.threshold_secs)
+                .max(self.threshold_secs)
+        } else {
+            self.threshold_secs
+        }
+    }
+}
+
+/// Ölçülmüş / varsayılan profiller (tek kaynak tablo).
+pub fn builtin_profiles() -> &'static [ClientProfile] {
+    &BUILTIN_PROFILES
+}
+
+const BUILTIN_PROFILES: [ClientProfile; 5] = [
+    ClientProfile {
+        name: "antigravity-client",
+        hard_limit_secs: Some(180),
+        threshold_secs: 150,
+        progress_extends: false,
+        sends_cancel: true,
+        source: ProfileSource::Measured,
+        progress_extended_secs: None,
+        progress_heartbeat_secs: None,
+    },
+    ClientProfile {
+        name: "cursor-vscode",
+        hard_limit_secs: Some(120),
+        threshold_secs: 100,
+        progress_extends: true,
+        sends_cancel: false,
+        source: ProfileSource::Measured,
+        progress_extended_secs: Some(CURSOR_PROGRESS_EXTENDED_SECS),
+        progress_heartbeat_secs: Some(CURSOR_PROGRESS_HEARTBEAT_SECS),
+    },
+    ClientProfile {
+        name: "claude-ai",
+        hard_limit_secs: Some(240),
+        threshold_secs: 210,
+        progress_extends: false,
+        sends_cancel: false,
+        source: ProfileSource::Measured,
+        progress_extended_secs: None,
+        progress_heartbeat_secs: None,
+    },
+    ClientProfile {
+        name: "claude-code",
+        hard_limit_secs: None, // ölçülmedi — 3600 yazma
+        threshold_secs: 300,
+        progress_extends: false,
+        sends_cancel: false,
+        source: ProfileSource::Assumed,
+        progress_extended_secs: None,
+        progress_heartbeat_secs: None,
+    },
+    ClientProfile {
+        name: "unknown",
+        hard_limit_secs: None,
+        threshold_secs: DEFAULT_UNKNOWN_THRESHOLD_SECS,
+        progress_extends: false,
+        sends_cancel: false,
+        source: ProfileSource::Assumed,
+        progress_extended_secs: None,
+        progress_heartbeat_secs: None,
+    },
+];
+
+/// `clientInfo.name` → profil (normalize + ham ad eşleşmesi).
+pub fn resolve_client_profile(client_name: &str) -> ClientProfile {
+    let raw = client_name.trim().to_ascii_lowercase();
+    let key = normalize_client_host(client_name);
+
+    if raw.contains("antigravity") || key == "antigravity" || key == "antigravity_client" {
+        return BUILTIN_PROFILES[0].clone();
+    }
+    if raw.contains("cursor") || key == "cursor" || key == "cursor_vscode" {
+        return BUILTIN_PROFILES[1].clone();
+    }
+    // claude-code önce (içinde "claude" var).
+    if raw.contains("claude-code")
+        || raw.contains("claude_code")
+        || key == "claude_code"
+        || key == "claude-code"
+    {
+        return BUILTIN_PROFILES[3].clone();
+    }
+    // Claude Desktop ölçümü: clientInfo.name = claude-ai.
+    if raw.contains("claude-ai")
+        || raw.contains("claude_ai")
+        || key == "claude_ai"
+        || key == "claude_desktop"
+        || raw.contains("claude desktop")
+        || raw.contains("claude-desktop")
+    {
+        return BUILTIN_PROFILES[2].clone();
+    }
+    // Grok Bot / windsurf / vscode / zed / bilinmeyen → unknown (45 sn).
+    BUILTIN_PROFILES[4].clone()
+}
+
 /// Oturum başına eşik yöneticisi. Tek kaynak: [`TimeoutManager::timeout_limit`].
 pub struct TimeoutManager {
-    /// `normalize_client_host` anahtarı → süre.
-    table: RwLock<HashMap<String, Duration>>,
-    /// Global override (env / settings); `None` → tabloya bak.
-    global_override: RwLock<Option<Duration>>,
-    unknown_default: Duration,
-    /// Settings canlı okuma için store (opsiyonel).
+    /// Opsiyonel tablo ezmesi (test / ölçüm sonrası); yoksa [`resolve_client_profile`].
+    overrides: RwLock<HashMap<String, Duration>>,
+    /// Global override saniyesi (env / settings); profil tavanıyla uygulanır.
+    global_override_secs: RwLock<Option<u64>>,
     settings_store: RwLock<Option<crate::db::ExperienceStore>>,
 }
 
 impl std::fmt::Debug for TimeoutManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimeoutManager")
-            .field("unknown_default", &self.unknown_default)
             .field(
-                "global_override",
-                &*self.global_override.read().expect("timeout override lock"),
+                "global_override_secs",
+                &*self
+                    .global_override_secs
+                    .read()
+                    .expect("timeout override lock"),
             )
             .field(
                 "has_settings_store",
@@ -64,67 +216,73 @@ impl Default for TimeoutManager {
 
 impl TimeoutManager {
     pub fn with_defaults() -> Self {
-        let mut table = HashMap::new();
-        table.insert("antigravity".into(), DEFAULT_ANTIGRAVITY_TIMEOUT);
-        // Antigravity clientInfo.name ölçümde `antigravity-client`.
-        table.insert("antigravity_client".into(), DEFAULT_ANTIGRAVITY_TIMEOUT);
-        table.insert("cursor".into(), DEFAULT_GUI_TIMEOUT);
-        table.insert("claude_desktop".into(), DEFAULT_GUI_TIMEOUT);
-        table.insert("claude_code".into(), DEFAULT_GUI_TIMEOUT);
-        table.insert("grok_bot".into(), DEFAULT_GUI_TIMEOUT);
-        // Geçici: henüz ölçülmemiş GUI’ler aynı kovada.
-        table.insert("windsurf".into(), DEFAULT_GUI_TIMEOUT);
-        table.insert("vscode".into(), DEFAULT_GUI_TIMEOUT);
-        table.insert("zed".into(), DEFAULT_GUI_TIMEOUT);
-
-        let global = parse_secs_env(ENV_MCP_TIMEOUT_SECS).map(cap_override);
+        let global = parse_secs_env_raw(ENV_MCP_TIMEOUT_SECS);
         Self {
-            table: RwLock::new(table),
-            global_override: RwLock::new(global),
-            unknown_default: DEFAULT_UNKNOWN_TIMEOUT,
+            overrides: RwLock::new(HashMap::new()),
+            global_override_secs: RwLock::new(global),
             settings_store: RwLock::new(None),
         }
     }
 
-    /// Settings canlı okuma — `timeout_limit` her çağrıda settings’i yeniler.
     pub fn attach_settings_store(&self, store: crate::db::ExperienceStore) {
         *self.settings_store.write().expect("settings store lock") = Some(store);
     }
 
     /// Settings / env global override (saniye). `None` veya 0 → override kaldır.
-    /// 180 sn üstü kırpılır ve uyarılır.
+    /// Profil tavanı uygulama anında uygulanır ([`timeout_limit`]).
     pub fn set_global_override_secs(&self, secs: Option<u64>) {
-        let mut guard = self.global_override.write().expect("timeout override lock");
-        *guard = secs
-            .filter(|&s| s > 0)
-            .map(cap_override_secs)
-            .map(Duration::from_secs);
+        let mut guard = self
+            .global_override_secs
+            .write()
+            .expect("timeout override lock");
+        *guard = secs.filter(|&s| s > 0);
     }
 
-    /// Tek istemci eşiğini güncelle (ölçüm sonrası tablo güncellemesi).
+    /// Tek istemci eşiğini test/ölçüm için ez.
     pub fn set_client_timeout(&self, client_name: &str, limit: Duration) {
         let key = normalize_client_host(client_name);
-        let mut table = self.table.write().expect("timeout table lock");
+        let mut table = self.overrides.write().expect("timeout table lock");
         table.insert(key, limit);
     }
 
-    /// Bu oturumun kullanacağı tek eşik değişkeni.
-    /// Env > settings (try_lock canlı cache) > tablo. Override ≤170 sn.
-    pub fn timeout_limit(&self, client_name: &str) -> Duration {
-        if let Some(over) = parse_secs_env(ENV_MCP_TIMEOUT_SECS).map(cap_override) {
-            return over;
-        }
-        // Async bağlamda std Mutex bloğunu önle — try_lock; başarısızsa cache'e düş.
-        self.try_refresh_settings_cache();
-        if let Some(over) = *self.global_override.read().expect("timeout override lock") {
-            return over;
-        }
-        let key = normalize_client_host(client_name);
-        let table = self.table.read().expect("timeout table lock");
-        table.get(&key).copied().unwrap_or(self.unknown_default)
+    pub fn profile_for(&self, client_name: &str) -> ClientProfile {
+        resolve_client_profile(client_name)
     }
 
-    /// Settings'i try_lock ile oku; kilit meşgulse önceki global_override kalır.
+    /// Bu oturumun kullanacağı eşik. Env > settings > tablo/profil.
+    /// Override profil `hard_limit−20` (veya unknown 170) ile kırpılır; uyarı loglanır.
+    pub fn timeout_limit(&self, client_name: &str) -> Duration {
+        self.timeout_limit_with_progress(client_name, false)
+    }
+
+    /// Progress token varken Cursor vb. uzatılmış eşik.
+    pub fn timeout_limit_with_progress(
+        &self,
+        client_name: &str,
+        has_progress_token: bool,
+    ) -> Duration {
+        let profile = resolve_client_profile(client_name);
+        let base = profile.effective_threshold_secs(has_progress_token);
+
+        if let Some(raw) = parse_secs_env_raw(ENV_MCP_TIMEOUT_SECS) {
+            return Duration::from_secs(cap_override_for_profile(raw, &profile));
+        }
+        self.try_refresh_settings_cache();
+        if let Some(raw) = *self
+            .global_override_secs
+            .read()
+            .expect("timeout override lock")
+        {
+            return Duration::from_secs(cap_override_for_profile(raw, &profile));
+        }
+        let key = normalize_client_host(client_name);
+        let table = self.overrides.read().expect("timeout table lock");
+        if let Some(over) = table.get(&key).copied() {
+            return over;
+        }
+        Duration::from_secs(base)
+    }
+
     fn try_refresh_settings_cache(&self) {
         let Ok(store_guard) = self.settings_store.try_read() else {
             return;
@@ -143,60 +301,64 @@ impl TimeoutManager {
             return;
         };
         if let Some(secs) = parse_timeout_setting(&raw) {
-            let capped = cap_override_secs(secs);
-            if capped != secs {
-                log::warn!(
-                    "mcp.timeout_secs={secs} > {MAX_TIMEOUT_OVERRIDE_SECS}; {MAX_TIMEOUT_OVERRIDE_SECS}sn’ye kırpıldı"
-                );
-            }
-            *self.global_override.write().expect("timeout override lock") =
-                Some(Duration::from_secs(capped));
+            *self
+                .global_override_secs
+                .write()
+                .expect("timeout override lock") = Some(secs);
         }
     }
 
     pub fn unknown_default(&self) -> Duration {
-        self.unknown_default
+        Duration::from_secs(DEFAULT_UNKNOWN_THRESHOLD_SECS)
     }
 
     /// Tanı / status çıktısı.
     pub fn snapshot(&self) -> serde_json::Value {
-        let table = self.table.read().expect("timeout table lock");
-        let override_secs = self
-            .global_override
+        let override_secs = *self
+            .global_override_secs
             .read()
-            .expect("timeout override lock")
-            .map(|d| d.as_secs());
+            .expect("timeout override lock");
         let mut clients = serde_json::Map::new();
-        for (k, v) in table.iter() {
-            clients.insert(k.clone(), serde_json::json!(v.as_secs()));
+        for p in builtin_profiles() {
+            clients.insert(
+                p.name.to_string(),
+                serde_json::json!({
+                    "threshold_secs": p.threshold_secs,
+                    "hard_limit_secs": p.hard_limit_secs,
+                    "progress_extends": p.progress_extends,
+                    "sends_cancel": p.sends_cancel,
+                    "source": p.source.as_str(),
+                    "override_cap_secs": p.override_cap_secs(),
+                    "progress_extended_secs": p.progress_extended_secs,
+                }),
+            );
         }
         serde_json::json!({
-            "timeout_limit_source": if override_secs.is_some() { "global_override" } else { "client_table" },
+            "timeout_limit_source": if override_secs.is_some() { "global_override" } else { "client_profile" },
             "global_override_secs": override_secs,
-            "unknown_default_secs": self.unknown_default.as_secs(),
-            "clients_secs": clients,
-            "note": "Progress notifications do not extend the limit; return before client hard timeout."
+            "unknown_default_secs": DEFAULT_UNKNOWN_THRESHOLD_SECS,
+            "unknown_override_cap_secs": UNKNOWN_OVERRIDE_CAP_SECS,
+            "profiles": clients,
+            "note": "Cursor: progressToken varken 10sn heartbeat ile Mod A ≤280sn. Diğerlerinde progress süreyi uzatmaz. Bilinmeyen/Grok=45 (Gemini 60 demişti; tutarlılık)."
         })
     }
 }
 
-fn parse_secs_env(key: &str) -> Option<Duration> {
+fn parse_secs_env_raw(key: &str) -> Option<u64> {
     std::env::var(key)
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|&n| n > 0)
-        .map(cap_override_secs)
-        .map(Duration::from_secs)
 }
 
-fn cap_override(d: Duration) -> Duration {
-    Duration::from_secs(cap_override_secs(d.as_secs()))
-}
-
-fn cap_override_secs(secs: u64) -> u64 {
-    if secs > MAX_TIMEOUT_OVERRIDE_SECS {
-        log::warn!("timeout override {secs}s > {MAX_TIMEOUT_OVERRIDE_SECS}s — kırpıldı");
-        MAX_TIMEOUT_OVERRIDE_SECS
+fn cap_override_for_profile(secs: u64, profile: &ClientProfile) -> u64 {
+    let cap = profile.override_cap_secs();
+    if secs > cap {
+        log::warn!(
+            "timeout override {secs}s > profil {} tavanı {cap}s (hard_limit−20 veya unknown 170) — kırpıldı",
+            profile.name
+        );
+        cap
     } else {
         secs
     }
@@ -208,55 +370,120 @@ pub fn parse_timeout_setting(raw: &str) -> Option<u64> {
     trimmed.parse::<u64>().ok().filter(|&n| n > 0)
 }
 
+/// Yanıt teşhis alanları.
+pub fn profile_diag(client_name: &str, timeout_limit: Duration) -> serde_json::Value {
+    let p = resolve_client_profile(client_name);
+    serde_json::json!({
+        "client_profile": p.name,
+        "timeout_limit_secs": timeout_limit.as_secs(),
+        "profile_source": p.source.as_str(),
+        "progress_extends": p.progress_extends,
+        "sends_cancel": p.sends_cancel,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn antigravity_gets_150s() {
+    fn antigravity_threshold_150_hard_180() {
         let tm = TimeoutManager::with_defaults();
+        let p = tm.profile_for("antigravity-client");
+        assert_eq!(p.name, "antigravity-client");
+        assert_eq!(p.threshold_secs, 150);
+        assert_eq!(p.hard_limit_secs, Some(180));
+        assert!(!p.progress_extends);
+        assert!(p.sends_cancel);
+        assert_eq!(p.source, ProfileSource::Measured);
         assert_eq!(
             tm.timeout_limit("antigravity-client"),
-            DEFAULT_ANTIGRAVITY_TIMEOUT
+            Duration::from_secs(150)
         );
-        assert_eq!(tm.timeout_limit("Antigravity"), DEFAULT_ANTIGRAVITY_TIMEOUT);
+        assert_eq!(tm.timeout_limit("Antigravity"), Duration::from_secs(150));
     }
 
     #[test]
-    fn cursor_and_claude_get_45s() {
+    fn cursor_threshold_100_progress_extends_280() {
         let tm = TimeoutManager::with_defaults();
-        assert_eq!(tm.timeout_limit("Cursor"), DEFAULT_GUI_TIMEOUT);
-        assert_eq!(tm.timeout_limit("Claude Desktop"), DEFAULT_GUI_TIMEOUT);
+        let p = tm.profile_for("cursor-vscode");
+        assert_eq!(p.name, "cursor-vscode");
+        assert_eq!(p.threshold_secs, 100);
+        assert_eq!(p.hard_limit_secs, Some(120));
+        assert!(p.progress_extends);
+        assert!(!p.sends_cancel);
+        assert_eq!(p.progress_extended_secs, Some(280));
+        assert_eq!(tm.timeout_limit("Cursor"), Duration::from_secs(100));
+        assert_eq!(
+            tm.timeout_limit_with_progress("cursor-vscode", true),
+            Duration::from_secs(280)
+        );
+        assert_eq!(
+            tm.timeout_limit_with_progress("cursor-vscode", false),
+            Duration::from_secs(100)
+        );
     }
 
     #[test]
-    fn unknown_gets_safe_low_default() {
+    fn claude_ai_threshold_210() {
+        let tm = TimeoutManager::with_defaults();
+        assert_eq!(tm.timeout_limit("claude-ai"), Duration::from_secs(210));
+        assert_eq!(tm.timeout_limit("Claude Desktop"), Duration::from_secs(210));
+        let p = tm.profile_for("claude-ai");
+        assert_eq!(p.hard_limit_secs, Some(240));
+        assert!(!p.sends_cancel);
+        assert_eq!(p.source, ProfileSource::Measured);
+    }
+
+    #[test]
+    fn claude_code_threshold_300_assumed_no_fake_hard() {
+        let tm = TimeoutManager::with_defaults();
+        let p = tm.profile_for("claude-code");
+        assert_eq!(p.name, "claude-code");
+        assert_eq!(p.threshold_secs, 300);
+        assert_eq!(p.hard_limit_secs, None);
+        assert_eq!(p.source, ProfileSource::Assumed);
+        assert_eq!(tm.timeout_limit("claude-code"), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn unknown_and_grok_get_45() {
         let tm = TimeoutManager::with_defaults();
         assert_eq!(
             tm.timeout_limit("totally-unknown-ide"),
-            DEFAULT_UNKNOWN_TIMEOUT
+            Duration::from_secs(45)
+        );
+        assert_eq!(tm.timeout_limit("Grok Bot"), Duration::from_secs(45));
+        assert_eq!(tm.profile_for("grok-bot").name, "unknown");
+    }
+
+    #[test]
+    fn override_capped_per_profile_hard_minus_20() {
+        let tm = TimeoutManager::with_defaults();
+        tm.set_global_override_secs(Some(300));
+        // antigravity: 180-20=160
+        assert_eq!(tm.timeout_limit("antigravity"), Duration::from_secs(160));
+        // cursor: 120-20=100
+        assert_eq!(tm.timeout_limit("cursor"), Duration::from_secs(100));
+        // claude-ai: 240-20=220
+        assert_eq!(tm.timeout_limit("claude-ai"), Duration::from_secs(220));
+        // claude-code: hard yok → threshold 300
+        assert_eq!(tm.timeout_limit("claude-code"), Duration::from_secs(300));
+        // unknown: 170
+        assert_eq!(
+            tm.timeout_limit("mystery-client"),
+            Duration::from_secs(UNKNOWN_OVERRIDE_CAP_SECS)
         );
     }
 
     #[test]
-    fn global_override_wins() {
+    fn override_under_cap_wins() {
         let tm = TimeoutManager::with_defaults();
         tm.set_global_override_secs(Some(12));
         assert_eq!(tm.timeout_limit("antigravity"), Duration::from_secs(12));
         assert_eq!(tm.timeout_limit("Cursor"), Duration::from_secs(12));
         tm.set_global_override_secs(None);
-        assert_eq!(tm.timeout_limit("antigravity"), DEFAULT_ANTIGRAVITY_TIMEOUT);
-    }
-
-    #[test]
-    fn override_capped_at_170() {
-        let tm = TimeoutManager::with_defaults();
-        tm.set_global_override_secs(Some(300));
-        assert_eq!(
-            tm.timeout_limit("antigravity"),
-            Duration::from_secs(MAX_TIMEOUT_OVERRIDE_SECS)
-        );
-        assert_eq!(MAX_TIMEOUT_OVERRIDE_SECS, 170);
+        assert_eq!(tm.timeout_limit("antigravity"), Duration::from_secs(150));
     }
 
     #[test]
@@ -272,5 +499,12 @@ mod tests {
         assert_eq!(parse_timeout_setting("\"90\""), Some(90));
         assert_eq!(parse_timeout_setting("0"), None);
         assert_eq!(parse_timeout_setting("abc"), None);
+    }
+
+    #[test]
+    fn profile_diag_includes_name_and_threshold() {
+        let d = profile_diag("cursor-vscode", Duration::from_secs(100));
+        assert_eq!(d["client_profile"], "cursor-vscode");
+        assert_eq!(d["timeout_limit_secs"], 100);
     }
 }
