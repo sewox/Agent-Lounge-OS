@@ -245,7 +245,7 @@ pub fn install_destructive_approval_emitter<R: Runtime>(app: AppHandle<R>, nats_
             .spawn(move || {
                 // Sync nats client is deprecated upstream; keep until async bus refactor.
                 #[allow(deprecated)]
-                let connect = nats::connect(&url);
+                let connect = crate::services::nats_connect(&url);
                 if let Ok(nc) = connect {
                     let _ = nc.publish(APPROVAL_PENDING_NATS, body);
                 }

@@ -92,7 +92,7 @@ impl WorkflowEngine {
 
     async fn listen_once(&self) -> Result<()> {
         let url = self.nats_url.clone();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url))
             .await
             .context("workflow_engine NATS connect join")?
             .context("workflow_engine NATS bağlantısı kurulamadı")?;

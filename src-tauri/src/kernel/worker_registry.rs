@@ -302,7 +302,7 @@ impl WorkerRegistry {
 
     async fn listen_once(&self, url: &str) -> Result<()> {
         let url_owned = url.to_string();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url_owned))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url_owned))
             .await
             .context("NATS connect join")?
             .context("NATS bağlantısı kurulamadı")?;

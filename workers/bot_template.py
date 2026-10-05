@@ -9,6 +9,10 @@ Bağlantı:
 
 Güvenlik: Bu worker PENDING_APPROVAL / kota kapısını baypas etmez; yalnızca
 Kernel'in onayladıktan sonra lounge.tasks.<bot> konusuna yazdığı işleri alır.
+
+PR-5: NATS kimlik bilgileri Kernel tarafından üretilir:
+  LOUNGE_NATS_CREDS_FILE (JSON: user/password) veya LOUNGE_NATS_USER/PASS.
+  LOUNGE_AUTH_REQUIRED varsayılan true; false ile geçiş bypass.
 """
 
 from __future__ import annotations
@@ -54,6 +58,48 @@ def worker_tasks_subject(bot_id: str) -> str:
     if not BOT_ID_RE.match(cleaned):
         raise ValueError(f"geçersiz bot_id: {bot_id!r}")
     return f"{TASKS_INBOX_PREFIX}{cleaned}"
+
+
+def auth_required() -> bool:
+    raw = os.environ.get("LOUNGE_AUTH_REQUIRED", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def load_nats_credentials() -> Optional[dict[str, str]]:
+    """Kernel'in yazdığı user/pass — env veya creds dosyası."""
+    user = (os.environ.get("LOUNGE_NATS_USER") or "").strip()
+    password = (os.environ.get("LOUNGE_NATS_PASS") or "").strip()
+    if user and password:
+        return {"user": user, "password": password}
+
+    creds_path = (os.environ.get("LOUNGE_NATS_CREDS_FILE") or "").strip()
+    if not creds_path:
+        return None
+    path = Path(creds_path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        raise RuntimeError(f"NATS creds okunamadı ({path}): {err}") from err
+    user = str(data.get("user") or "").strip()
+    password = str(data.get("password") or "").strip()
+    if not user or not password:
+        raise RuntimeError(f"NATS creds eksik user/password: {path}")
+    return {"user": user, "password": password}
+
+
+def resolve_nats_connect_kwargs() -> dict[str, Any]:
+    """nats.connect için user/password kwargs; auth zorunluysa creds şart."""
+    creds = load_nats_credentials()
+    if creds:
+        return creds
+    if auth_required():
+        raise RuntimeError(
+            "NATS authentication required (LOUNGE_AUTH_REQUIRED) but no credentials found. "
+            "Set LOUNGE_NATS_USER/LOUNGE_NATS_PASS or LOUNGE_NATS_CREDS_FILE from the Kernel session."
+        )
+    return {}
 
 
 def _load_schema(name: str) -> dict[str, Any]:
@@ -236,14 +282,18 @@ class BotWorker(ABC):
                 except Exception:  # noqa: BLE001
                     LOG.exception("failed yayınlanamadı")
 
-    async def _connect(self) -> Any:
+    async def _connect(self, connect_kwargs: dict[str, Any]) -> Any:
         import nats
 
         backoff = 1.0
         while not self._stop.is_set():
             try:
-                nc = await nats.connect(self.nats_url)
-                LOG.info("NATS bağlandı: %s", self.nats_url)
+                nc = await nats.connect(self.nats_url, **connect_kwargs)
+                LOG.info(
+                    "NATS bağlandı: %s (auth=%s)",
+                    self.nats_url,
+                    "yes" if connect_kwargs else "no",
+                )
                 return nc
             except Exception as err:  # noqa: BLE001
                 LOG.warning("NATS bağlantı hatası (%s), %.1fs sonra…", err, backoff)
@@ -262,9 +312,12 @@ class BotWorker(ABC):
             except NotImplementedError:  # Windows
                 signal.signal(sig, lambda *_: self._stop.set())
 
+        # Fail closed before retry loop when Kernel creds are missing.
+        connect_kwargs = resolve_nats_connect_kwargs()
+
         while not self._stop.is_set():
             try:
-                self._nc = await self._connect()
+                self._nc = await self._connect(connect_kwargs)
                 await self._register()
                 await self._nc.subscribe(self._tasks_subject, cb=self._on_msg)
                 hb = asyncio.create_task(self._heartbeat_loop(), name="heartbeat")

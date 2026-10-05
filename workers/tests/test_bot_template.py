@@ -207,3 +207,48 @@ async def test_schema_reject_does_not_complete():
     msg.data = json.dumps({"not": "a task"}).encode()
     await bot._handle_message(msg)
     assert not any(s == TASK_COMPLETED for s, _ in published)
+
+
+def test_auth_required_defaults_true(monkeypatch):
+    monkeypatch.delenv("LOUNGE_AUTH_REQUIRED", raising=False)
+    from bot_template import auth_required
+
+    assert auth_required() is True
+    monkeypatch.setenv("LOUNGE_AUTH_REQUIRED", "false")
+    assert auth_required() is False
+
+
+def test_resolve_nats_connect_kwargs_requires_creds(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOUNGE_AUTH_REQUIRED", "true")
+    monkeypatch.delenv("LOUNGE_NATS_USER", raising=False)
+    monkeypatch.delenv("LOUNGE_NATS_PASS", raising=False)
+    monkeypatch.delenv("LOUNGE_NATS_CREDS_FILE", raising=False)
+    from bot_template import resolve_nats_connect_kwargs
+
+    with pytest.raises(RuntimeError, match="credentials"):
+        resolve_nats_connect_kwargs()
+
+
+def test_resolve_nats_connect_kwargs_reads_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOUNGE_AUTH_REQUIRED", "true")
+    creds = tmp_path / "session.creds.json"
+    creds.write_text(
+        json.dumps({"user": "lounge_u", "password": "lounge_p", "url": "nats://127.0.0.1:4222"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOUNGE_NATS_CREDS_FILE", str(creds))
+    monkeypatch.delenv("LOUNGE_NATS_USER", raising=False)
+    monkeypatch.delenv("LOUNGE_NATS_PASS", raising=False)
+    from bot_template import resolve_nats_connect_kwargs
+
+    assert resolve_nats_connect_kwargs() == {"user": "lounge_u", "password": "lounge_p"}
+
+
+def test_resolve_nats_connect_kwargs_bypass_without_creds(monkeypatch):
+    monkeypatch.setenv("LOUNGE_AUTH_REQUIRED", "false")
+    monkeypatch.delenv("LOUNGE_NATS_USER", raising=False)
+    monkeypatch.delenv("LOUNGE_NATS_PASS", raising=False)
+    monkeypatch.delenv("LOUNGE_NATS_CREDS_FILE", raising=False)
+    from bot_template import resolve_nats_connect_kwargs
+
+    assert resolve_nats_connect_kwargs() == {}

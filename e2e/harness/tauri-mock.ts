@@ -759,6 +759,88 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.agentSessions ?? [];
         case "list_a2a_background_tasks":
           return f.backgroundTasks ?? [];
+        case "get_remote_access": {
+          const tunnel =
+            typeof args?.tunnelUrl === "string" && args.tunnelUrl.trim()
+              ? args.tunnelUrl.trim().replace(/\/+$/, "")
+              : "https://your-tunnel.example";
+          const token = "lounge_qa_token";
+          const mcpUrl = `${tunnel}/mcp`;
+          return {
+            auth_required: true,
+            nats_auth_active: true,
+            lounge_token: token,
+            mcp_bind: "127.0.0.1:18791",
+            mcp_url: mcpUrl,
+            allowed_hosts: ["your-tunnel.example"],
+            tunnel_url: tunnel,
+            mcp_json: JSON.stringify(
+              {
+                mcpServers: {
+                  "agent-lounge-os": {
+                    url: mcpUrl,
+                    headers: { "X-Lounge-Token": token },
+                  },
+                },
+              },
+              null,
+              2,
+            ),
+            nats_creds_file: "/tmp/session.creds.json",
+          };
+        }
+        case "register_remote_tunnel": {
+          const tunnel = String(args?.tunnelUrl ?? "https://tunnel.example").replace(/\/+$/, "");
+          const host = tunnel.replace(/^https?:\/\//, "").split("/")[0] || "tunnel.example";
+          const token = "lounge_qa_token";
+          const mcpUrl = `${tunnel}/mcp`;
+          return {
+            auth_required: true,
+            nats_auth_active: true,
+            lounge_token: token,
+            mcp_bind: "127.0.0.1:18791",
+            mcp_url: mcpUrl,
+            allowed_hosts: [host],
+            tunnel_url: tunnel,
+            mcp_json: JSON.stringify(
+              {
+                mcpServers: {
+                  "agent-lounge-os": {
+                    url: mcpUrl,
+                    headers: { "X-Lounge-Token": token },
+                  },
+                },
+              },
+              null,
+              2,
+            ),
+            nats_creds_file: "/tmp/session.creds.json",
+          };
+        }
+        case "remove_remote_tunnel":
+        case "rotate_remote_token":
+          return {
+            auth_required: true,
+            nats_auth_active: true,
+            lounge_token: "lounge_qa_token_rotated",
+            mcp_bind: "127.0.0.1:18791",
+            mcp_url: "http://127.0.0.1:18791/mcp",
+            allowed_hosts: [],
+            tunnel_url: null,
+            mcp_json: JSON.stringify(
+              {
+                mcpServers: {
+                  "agent-lounge-os": {
+                    url: "http://127.0.0.1:18791/mcp",
+                    headers: { "X-Lounge-Token": "lounge_qa_token_rotated" },
+                  },
+                },
+              },
+              null,
+              2,
+            ),
+            nats_creds_file: "/tmp/session.creds.json",
+          };
         case "list_recommended_models":
           return {
             device: {

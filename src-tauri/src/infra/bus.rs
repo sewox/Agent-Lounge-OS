@@ -54,9 +54,11 @@ impl BusManager {
         let url = self.nats_url.clone();
         let subject = msg.subject.clone();
         let bytes = serde_json::to_vec(msg).context("LoungeMessage serialize")?;
-        tokio::task::spawn_blocking(move || {
-            let nc = nats::connect(&url)?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let nc = crate::services::nats_connect(&url)?;
             nc.publish(&subject, bytes)
+                .map_err(|e| anyhow::anyhow!("NATS publish: {e}"))?;
+            Ok(())
         })
         .await
         .context("bus publish join")?
@@ -66,7 +68,7 @@ impl BusManager {
 
     async fn serve(&self) -> Result<()> {
         let url = self.nats_url.clone();
-        let nc = tokio::task::spawn_blocking(move || nats::connect(&url))
+        let nc = tokio::task::spawn_blocking(move || crate::services::nats_connect(&url))
             .await
             .context("NATS bus connect join")?
             .context("NATS bus bağlanamadı")?;

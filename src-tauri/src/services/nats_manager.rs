@@ -8,6 +8,10 @@ use lounge_protocol::{LoungeMessage, UI_EVENT, WILDCARD};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::{Child, Command};
 
+use super::lounge_auth::{
+    activate_nats_auth, auth_required, connect as nats_connect, current_credentials,
+    deactivate_nats_auth, ensure_session_credentials, NatsCredentials,
+};
 use super::probe::{
     endpoint, find_executable, lounge_nats_dir, tcp_ready, wait_until, DEFAULT_NATS_HOST,
     DEFAULT_NATS_HTTP_PORT, DEFAULT_NATS_PORT,
@@ -66,7 +70,7 @@ pub(crate) fn listen_once(app: &AppHandle, url: &str) -> Result<()> {
 }
 
 pub(crate) fn connect_and_subscribe(url: &str) -> Result<(nats::Connection, nats::Subscription)> {
-    let nc = nats::connect(url).with_context(|| format!("NATS bağlanamadı: {url}"))?;
+    let nc = nats_connect(url).with_context(|| format!("NATS bağlanamadı: {url}"))?;
     let sub = nc
         .subscribe(EVENT_PUMP_SUBJECT)
         .with_context(|| format!("subscribe {EVENT_PUMP_SUBJECT} başarısız"))?;
@@ -92,6 +96,8 @@ pub struct NatsConfig {
     pub http_port: u16,
     pub binary: String,
     pub args: Vec<String>,
+    /// When set, nats-server is started with `--user` / `--pass`.
+    pub credentials: Option<NatsCredentials>,
 }
 
 impl Default for NatsConfig {
@@ -102,6 +108,7 @@ impl Default for NatsConfig {
             http_port: DEFAULT_NATS_HTTP_PORT,
             binary: "nats-server".to_string(),
             args: Vec::new(),
+            credentials: None,
         }
     }
 }
@@ -123,6 +130,10 @@ impl NatsService {
             child: None,
             started_by_us: false,
         }
+    }
+
+    pub fn credentials(&self) -> Option<&NatsCredentials> {
+        self.config.credentials.as_ref()
     }
 
     pub fn endpoint(&self) -> String {
@@ -195,16 +206,54 @@ impl NatsService {
 
     async fn ensure_inner(&mut self) -> Result<ServiceHealth> {
         self.reap_exited_child();
+        self.prepare_auth_credentials()?;
 
+        let mut force_respawn = false;
         let client_ok = self.is_healthy().await;
         let monitor_ok = self.monitor_ready().await;
         if client_ok && monitor_ok {
-            return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+            match &self.config.credentials {
+                None => {
+                    // Auth bypass / legacy: reuse open TCP without NATS handshake probe
+                    // (a bare listener is not a NATS server — connect would hang).
+                    deactivate_nats_auth();
+                    return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+                }
+                Some(_) if self.auth_connect_ok() => {
+                    self.mark_auth_active();
+                    return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+                }
+                Some(_) => {
+                    log::warn!(
+                        "NATS :{} açık ama oturum kimlik bilgileriyle bağlanılamadı — yeniden başlatılıyor",
+                        self.config.port
+                    );
+                    let _ = kill_nats_on_port(self.config.port);
+                    self.kill_child().await;
+                    let host = self.config.host.clone();
+                    let port = self.config.port;
+                    let _ = wait_until(
+                        Duration::from_secs(2),
+                        Duration::from_millis(80),
+                        move || {
+                            let host = host.clone();
+                            async move { !tcp_ready(&host, port, HEALTH_TIMEOUT).await }
+                        },
+                    )
+                    .await;
+                    force_respawn = true;
+                }
+            }
         }
 
-        if client_ok && !monitor_ok {
+        if client_ok && !monitor_ok && !force_respawn {
             let killed = kill_nats_on_port(self.config.port);
             if killed == 0 {
+                if self.config.credentials.is_none() {
+                    deactivate_nats_auth();
+                } else if self.auth_connect_ok() {
+                    self.mark_auth_active();
+                }
                 return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
             }
             log::error!(
@@ -240,6 +289,46 @@ impl NatsService {
         }
     }
 
+    fn prepare_auth_credentials(&mut self) -> Result<()> {
+        if !auth_required() {
+            self.config.credentials = None;
+            deactivate_nats_auth();
+            return Ok(());
+        }
+        let creds = ensure_session_credentials(&self.endpoint())?
+            .or_else(current_credentials)
+            .context("LOUNGE_AUTH_REQUIRED but failed to mint NATS credentials")?;
+        self.config.credentials = Some(creds);
+        Ok(())
+    }
+
+    fn auth_connect_ok(&self) -> bool {
+        let url = self.endpoint();
+        let Some(creds) = &self.config.credentials else {
+            return false;
+        };
+        // Fail fast — do not hang on a non-NATS TCP listener.
+        let user = creds.user.clone();
+        let pass = creds.password.clone();
+        let url = url.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("nats-auth-probe".into())
+            .spawn(move || {
+                let result = nats::Options::with_user_pass(&user, &pass).connect(&url);
+                let _ = tx.send(result.is_ok());
+            });
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+    }
+
+    fn mark_auth_active(&self) {
+        if let Some(creds) = self.config.credentials.clone() {
+            activate_nats_auth(creds);
+        } else {
+            deactivate_nats_auth();
+        }
+    }
+
     async fn spawn_and_wait(&mut self, with_monitor: bool) -> Result<ServiceHealth> {
         let binary = resolve_nats_binary(&self.config.binary).ok_or_else(|| {
             anyhow::anyhow!(
@@ -265,10 +354,11 @@ impl NatsService {
         self.child = Some(child);
         self.started_by_us = true;
         log::info!(
-            "NATS spawn edildi: {} → {} (monitor={})",
+            "NATS spawn edildi: {} → {} (monitor={} auth={})",
             binary.display(),
             self.endpoint(),
-            with_monitor
+            with_monitor,
+            self.config.credentials.is_some()
         );
 
         let host = self.config.host.clone();
@@ -286,6 +376,13 @@ impl NatsService {
                 endpoint = self.endpoint()
             );
         }
+
+        // Confirm auth handshake before marking the bus verified.
+        if self.config.credentials.is_some() && !self.auth_connect_ok() {
+            self.kill_child().await;
+            anyhow::bail!("NATS ayağa kalktı ama kimlik doğrulamalı bağlantı başarısız");
+        }
+        self.mark_auth_active();
 
         Ok(self.snapshot(true, Some("kernel tarafından başlatıldı".into()), None))
     }
@@ -346,6 +443,12 @@ pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<S
     if with_monitor && config.http_port > 0 {
         args.push("-m".to_string());
         args.push(config.http_port.to_string());
+    }
+    if let Some(creds) = &config.credentials {
+        args.push("--user".to_string());
+        args.push(creds.user.clone());
+        args.push("--pass".to_string());
+        args.push(creds.password.clone());
     }
     args.extend(config.args.iter().cloned());
     args
@@ -464,6 +567,10 @@ mod tests {
 
     #[tokio::test]
     async fn skips_spawn_when_port_already_open() {
+        let prev = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        unsafe {
+            std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "false");
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut service = NatsService::with_config(NatsConfig {
@@ -472,12 +579,21 @@ mod tests {
             http_port: 0,
             binary: "__missing_nats__".into(),
             args: vec!["-p".into(), port.to_string()],
+            credentials: None,
         });
 
         let health = service.ensure().await;
         assert!(health.running);
         assert!(!health.started_by_us);
         assert!(health.error.is_none());
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
+            }
+        }
     }
 
     #[tokio::test]
@@ -571,7 +687,152 @@ mod tests {
         result.expect("event pump wildcard subscribe");
     }
 
+    #[test]
+    fn spawn_args_include_http_monitor() {
+        let config = NatsConfig::default();
+        let args = nats_server_args(&config, true);
+        assert!(args.windows(2).any(|pair| pair == ["-m", "8222"]));
+        assert!(args.windows(2).any(|pair| pair == ["-p", "4222"]));
+        let without = nats_server_args(&config, false);
+        assert!(!without.iter().any(|arg| arg == "-m"));
+    }
+
+    #[test]
+    fn spawn_args_include_user_pass_when_credentials_set() {
+        let config = NatsConfig {
+            credentials: Some(NatsCredentials {
+                user: "lounge_u".into(),
+                password: "secret".into(),
+            }),
+            ..NatsConfig::default()
+        };
+        let args = nats_server_args(&config, false);
+        assert!(args.windows(2).any(|pair| pair == ["--user", "lounge_u"]));
+        assert!(args.windows(2).any(|pair| pair == ["--pass", "secret"]));
+    }
+
+    #[test]
+    fn nats_auth_rejects_unauthenticated_when_required() {
+        let creds = NatsCredentials {
+            user: format!("u_{}", uuid::Uuid::new_v4().simple()),
+            password: format!("p_{}", uuid::Uuid::new_v4().simple()),
+        };
+        let (url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
+            panic!(
+                "nats-server required for nats_auth_rejects_unauthenticated_when_required: {err}"
+            );
+        });
+        let unauth = nats::connect(&url);
+        assert!(
+            unauth.is_err(),
+            "unauthenticated connect must be rejected when nats-server requires user/pass"
+        );
+        let auth = nats::Options::with_user_pass(&creds.user, &creds.password).connect(&url);
+        assert!(auth.is_ok(), "authenticated connect must succeed: {auth:?}");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn nats_service_starts_with_auth_and_activates_verified_bus() {
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
+        let temp =
+            std::env::temp_dir().join(format!("lounge-nats-auth-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let creds_path = temp.join("session.creds.json");
+        let prev_auth = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        let prev_creds_file =
+            std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV);
+        let prev_user = std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_USER_ENV);
+        let prev_pass = std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV);
+        unsafe {
+            std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "true");
+            std::env::set_var(
+                super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV,
+                &creds_path,
+            );
+            std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_USER_ENV);
+            std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV);
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let mut service = NatsService::with_config(NatsConfig {
+            host: "127.0.0.1".into(),
+            port,
+            http_port: 0,
+            binary: "nats-server".into(),
+            args: Vec::new(),
+            credentials: None,
+        });
+        let health = service.ensure().await;
+        assert!(
+            health.running,
+            "expected nats auth start: {:?}",
+            health.error
+        );
+        assert!(service.credentials().is_some());
+        assert!(crate::services::lounge_auth::nats_auth_active());
+        assert!(crate::services::lounge_auth::nats_ingress_source_verified());
+
+        let url = service.endpoint();
+        assert!(
+            nats::connect(&url).is_err(),
+            "plain connect must fail against auth-required server"
+        );
+        let creds = service
+            .credentials()
+            .expect("service must have credentials");
+        assert!(
+            nats::Options::with_user_pass(&creds.user, &creds.password)
+                .connect(&url)
+                .is_ok(),
+            "authenticated connect must succeed with service credentials"
+        );
+        assert!(nats_connect(&url).is_ok());
+
+        service.kill_child().await;
+        crate::services::lounge_auth::deactivate_nats_auth();
+        unsafe {
+            match prev_auth {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
+            }
+            match prev_creds_file {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV),
+            }
+            match prev_user {
+                Some(v) => std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_USER_ENV, v),
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_USER_ENV),
+            }
+            match prev_pass {
+                Some(v) => std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV, v),
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV),
+            }
+        }
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
     fn spawn_ephemeral_nats() -> Result<(String, std::process::Child)> {
+        spawn_ephemeral_nats_with_auth_opt(None)
+    }
+
+    fn spawn_ephemeral_nats_with_auth(
+        creds: &NatsCredentials,
+    ) -> Result<(String, std::process::Child)> {
+        spawn_ephemeral_nats_with_auth_opt(Some(creds))
+    }
+
+    fn spawn_ephemeral_nats_with_auth_opt(
+        creds: Option<&NatsCredentials>,
+    ) -> Result<(String, std::process::Child)> {
         let binary = find_executable("nats-server").ok_or_else(|| {
             anyhow::anyhow!("nats-server not on PATH (install locally or rely on CI install step)")
         })?;
@@ -582,8 +843,20 @@ mod tests {
             .context("ephemeral listener local_addr")?
             .port();
         drop(listener);
+        let mut args = vec![
+            "-a".to_string(),
+            "127.0.0.1".to_string(),
+            "-p".to_string(),
+            port.to_string(),
+        ];
+        if let Some(c) = creds {
+            args.push("--user".into());
+            args.push(c.user.clone());
+            args.push("--pass".into());
+            args.push(c.password.clone());
+        }
         let mut command = GuardedCommand::new(binary)
-            .args(["-a", "127.0.0.1", "-p", &port.to_string()])
+            .args(&args)
             .internal_daemon()
             .into_std_command()
             .context("nats-server GuardedCommand")?;
@@ -595,7 +868,13 @@ mod tests {
             .context("spawn nats-server")?;
         let url = format!("nats://127.0.0.1:{port}");
         for _ in 0..80 {
-            if nats::connect(&url).is_ok() {
+            let ok = match creds {
+                Some(c) => nats::Options::with_user_pass(&c.user, &c.password)
+                    .connect(&url)
+                    .is_ok(),
+                None => nats::connect(&url).is_ok(),
+            };
+            if ok {
                 return Ok((url, child));
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -606,16 +885,6 @@ mod tests {
         Err(anyhow::anyhow!(
             "nats-server spawned but did not accept connections at {url} within ~4s"
         ))
-    }
-
-    #[test]
-    fn spawn_args_include_http_monitor() {
-        let config = NatsConfig::default();
-        let args = nats_server_args(&config, true);
-        assert!(args.windows(2).any(|pair| pair == ["-m", "8222"]));
-        assert!(args.windows(2).any(|pair| pair == ["-p", "4222"]));
-        let without = nats_server_args(&config, false);
-        assert!(!without.iter().any(|arg| arg == "-m"));
     }
 
     #[test]

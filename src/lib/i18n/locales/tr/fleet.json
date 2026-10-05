@@ -47,5 +47,13 @@
   "orchestrated": "Orchestrated",
   "noSessions": "Ajan oturumu yok",
   "noBackgroundTasks": "Arka plan görevi yok",
-  "backgroundTasksCount": "{{count}} arka plan"
+  "backgroundTasksCount": "{{count}} arka plan",
+  "remoteAccessTitle": "Grok Bot bağla",
+  "remoteAccessBlurb": "Tünel URL'inizi yapıştırın. Lounge host'u allow-list'e ekler ve kopyalanabilir MCP JSON üretir (URL + X-Lounge-Token). cloudflared/ngrok sizin — gömülü binary yok.",
+  "remoteAccessTunnelLabel": "Tünel URL",
+  "remoteAccessAllowHost": "Host'a izin ver",
+  "remoteAccessCopyJson": "MCP JSON kopyala",
+  "remoteAccessCopied": "Kopyalandı",
+  "remoteAccessTokenLabel": "Token",
+  "remoteAccessAllowed": "İzinli hostlar"
 }

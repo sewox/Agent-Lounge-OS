@@ -10,6 +10,7 @@ pub mod hardware;
 pub mod hf_catalog;
 pub mod index_queue;
 pub mod lmr_runtime;
+pub mod lounge_auth;
 pub mod memory_bridge;
 pub mod model_manager;
 pub mod nats_manager;
@@ -50,6 +51,11 @@ pub use graph_ui::{
 pub use index_queue::{
     IndexJob, IndexJobEvent, IndexJobPhase, IndexProgress, IndexQueue, WorkspaceScanResult,
     INDEX_CONCURRENCY, INDEX_JOB_EVENT,
+};
+pub use lounge_auth::{
+    add_allowed_origin, auth_required, authorize_mcp_headers, connect as nats_connect,
+    lounge_token, nats_auth_active, nats_ingress_source_verified, remote_access_info,
+    remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
 };
 pub use memory_bridge::{
     probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode, DEFAULT_GRAPH_UI_PORT,
@@ -230,6 +236,13 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_all_reports_both_services() {
+        let prev = std::env::var_os(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        unsafe {
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
+                "false",
+            );
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -260,5 +273,15 @@ mod tests {
         assert!(!report.all_core_running());
         // Missing optional LMR is not a core crash / SERVICE DEGRADED.
         assert!(!report.core_degraded());
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => {
+                    std::env::remove_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV)
+                }
+            }
+        }
     }
 }

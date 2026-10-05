@@ -34,6 +34,7 @@ use super::mcp_server::{default_mcp_http_bind, ClientCtx, McpServer};
 use super::session_id::{normalize_or_mint_session_id, MAX_MCP_SESSIONS};
 use crate::db::ExperienceStore;
 use crate::kernel::WorkerRegistry;
+use crate::services::lounge_auth::{authorize_mcp_headers, HDR_LOUNGE_TOKEN};
 
 const HDR_SESSION: &str = "mcp-session-id";
 const HDR_CLIENT_NAME: &str = "x-lounge-client-name";
@@ -118,7 +119,25 @@ pub fn router_from_server(server: McpServer) -> Router {
         .with_state(hub)
 }
 
-async fn health(State(hub): State<Hub>) -> impl IntoResponse {
+fn authorize_headers(headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    let token = headers.get(HDR_LOUNGE_TOKEN).and_then(|v| v.to_str().ok());
+    authorize_mcp_headers(host, origin, token).map_err(|err| {
+        (
+            StatusCode::from_u16(err.status()).unwrap_or(StatusCode::FORBIDDEN),
+            Json(serde_json::json!({
+                "error": err.message(),
+                "code": "remote_access_denied"
+            })),
+        )
+    })
+}
+
+async fn health(State(hub): State<Hub>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(err) = authorize_headers(&headers) {
+        return err.into_response();
+    }
     let sessions = hub.sessions.lock().await.len();
     let timeout_snapshot = {
         let guard = hub.server.lock().await;
@@ -131,9 +150,13 @@ async fn health(State(hub): State<Hub>) -> impl IntoResponse {
         "sessions": sessions,
         "timeout_manager": timeout_snapshot,
     }))
+    .into_response()
 }
 
 async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> impl IntoResponse {
+    if let Err(err) = authorize_headers(&headers) {
+        return err.into_response();
+    }
     let raw_session = headers
         .get(HDR_SESSION)
         .and_then(|v| v.to_str().ok())
@@ -209,6 +232,9 @@ async fn mcp_post(State(hub): State<Hub>, headers: HeaderMap, body: String) -> i
 }
 
 async fn mcp_delete(State(hub): State<Hub>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(err) = authorize_headers(&headers) {
+        return err.into_response();
+    }
     let raw_session = headers
         .get(HDR_SESSION)
         .and_then(|v| v.to_str().ok())
@@ -255,7 +281,10 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn sse_ready(State(hub): State<Hub>) -> impl IntoResponse {
+async fn sse_ready(State(hub): State<Hub>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(err) = authorize_headers(&headers) {
+        return err.into_response();
+    }
     let sessions = hub.sessions.lock().await.len();
     let body =
         format!("event: lounge.mcp.ready\ndata: {{\"ok\":true,\"sessions\":{sessions}}}\n\n");
@@ -264,6 +293,7 @@ async fn sse_ready(State(hub): State<Hub>) -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
         body,
     )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -504,5 +534,108 @@ mod tests {
             .unwrap_or("");
         assert!(super::super::session_id::is_valid_session_id(sid));
         assert_ne!(sid, "../evil");
+    }
+
+    #[tokio::test]
+    async fn loopback_mcp_works_without_token() {
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+    }
+
+    #[tokio::test]
+    async fn non_allowlisted_host_rejected() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        crate::services::lounge_auth::clear_allowed_origins();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .header("host", "evil.example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn allowlisted_host_with_valid_token_accepted() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        crate::services::lounge_auth::clear_allowed_origins();
+        crate::services::lounge_auth::add_allowed_origin("https://tunnel.example.com").unwrap();
+        let token = crate::services::lounge_auth::lounge_token();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .header("host", "tunnel.example.com")
+            .header(HDR_LOUNGE_TOKEN, &token)
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+        crate::services::lounge_auth::clear_allowed_origins();
+    }
+
+    #[tokio::test]
+    async fn allowlisted_host_with_invalid_token_rejected() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        crate::services::lounge_auth::clear_allowed_origins();
+        crate::services::lounge_auth::add_allowed_origin("tunnel.example.com").unwrap();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .post(format!("{base}/mcp"))
+            .header("host", "tunnel.example.com")
+            .header(HDR_LOUNGE_TOKEN, "not-the-token")
+            .header("content-type", "application/json")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        crate::services::lounge_auth::clear_allowed_origins();
+    }
+
+    #[tokio::test]
+    async fn zero_bind_host_requires_token() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        crate::services::lounge_auth::clear_allowed_origins();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .header("host", "0.0.0.0:18791")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn spoofed_loopback_host_with_evil_origin_rejected() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        crate::services::lounge_auth::clear_allowed_origins();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .header("host", "127.0.0.1:18791")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 }

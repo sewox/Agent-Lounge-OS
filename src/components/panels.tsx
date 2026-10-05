@@ -12,6 +12,7 @@ import { LocaleSwitch } from "@/components/locale-switch";
 import { ApprovalSoundSettingsPanel } from "@/components/approval-sound-settings";
 import { DestructiveGateSettingsPanel } from "@/components/destructive-gate-settings";
 import { EditorSettingsPanel } from "@/components/editor-settings-panel";
+import { RemoteAccessCard } from "@/components/remote-access-card";
 import { ExperienceGovernanceSettingsPanel } from "@/components/experience-governance-settings";
 import { SemanticMap } from "@/components/SemanticMap";
 import {
@@ -2094,6 +2095,7 @@ export function FleetPanel() {
           </div>
         </aside>
       </div>
+      <RemoteAccessCard />
       <div
         data-qa="fleet-orchestration"
         className="shrink-0 border-t border-outline-variant bg-surface-container-low/60 px-3 py-2"

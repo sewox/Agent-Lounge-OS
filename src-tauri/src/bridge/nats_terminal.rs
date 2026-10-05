@@ -59,7 +59,7 @@ impl NatsTerminalHub {
             let mut backoff = Duration::from_secs(1);
             loop {
                 #[allow(deprecated)]
-                let nc = match nats::connect(&url) {
+                let nc = match crate::services::nats_connect(&url) {
                     Ok(nc) => {
                         backoff = Duration::from_secs(1);
                         nc
