@@ -339,8 +339,7 @@ impl Orchestrator {
         }
 
         if !args.wait {
-            let poll_after =
-                crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
+            let poll_after = crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
             let mut body = json!({
                 "published": true,
                 "task_id": task_id,
@@ -369,8 +368,7 @@ impl Orchestrator {
         // long_running: eşik beklemeden hemen backgrounded + task_id.
         if args.long_running {
             let _ = self.store.try_mark_a2a_wait_timeout(&task_id)?;
-            let poll_after =
-                crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
+            let poll_after = crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
             let mut body = json!({
                 "status": "backgrounded",
                 "task_id": task_id,
@@ -463,8 +461,7 @@ impl Orchestrator {
                         return Ok(payload);
                     }
                 }
-                let poll_after =
-                    crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
+                let poll_after = crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
                 return Ok(json!({
                     "status": "backgrounded",
                     "task_id": task_id,
@@ -904,7 +901,9 @@ impl Orchestrator {
             .iter()
             .filter_map(|t| {
                 if t.get("unclaimed").and_then(|v| v.as_bool()) == Some(true) {
-                    t.get("task_id").and_then(|v| v.as_str()).map(str::to_string)
+                    t.get("task_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
                 } else {
                     None
                 }

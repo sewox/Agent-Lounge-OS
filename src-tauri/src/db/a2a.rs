@@ -2761,12 +2761,7 @@ mod tests {
         store.admit_a2a_task(&mut t1, 10).unwrap();
         store.mark_a2a_wait_timeout(&t1.id).unwrap();
         store
-            .complete_a2a_with_result(
-                &t1.id,
-                TaskStatus::Completed,
-                Some(r#"{"ok":true}"#),
-                false,
-            )
+            .complete_a2a_with_result(&t1.id, TaskStatus::Completed, Some(r#"{"ok":true}"#), false)
             .unwrap();
         // Incomplete orphan
         let mut sess = AgentSession::new("p", "cursor", "mcp", "/tmp", "mcp_meta");
@@ -2779,9 +2774,7 @@ mod tests {
         store
             .set_a2a_task_status(&t2.id, TaskStatus::WaitTimeoutReached)
             .unwrap();
-        store
-            .mark_mcp_session_disconnected("sess-md-gone")
-            .unwrap();
+        store.mark_mcp_session_disconnected("sess-md-gone").unwrap();
         store
             .touch_a2a_updated_at(&t2.id, "2026-10-04T12:00:00.000Z")
             .unwrap();

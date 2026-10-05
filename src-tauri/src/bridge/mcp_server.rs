@@ -543,8 +543,7 @@ impl McpServer {
             .get("include_completed_unclaimed")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        self.orchestrator
-            .list_my_tasks(&client.session_id, include)
+        self.orchestrator.list_my_tasks(&client.session_id, include)
     }
 
     async fn tool_search(&self, args: &Value) -> Result<Value> {
