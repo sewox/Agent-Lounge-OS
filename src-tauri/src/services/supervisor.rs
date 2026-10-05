@@ -430,6 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_optional_lmr_is_not_installed_without_restart_storm() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         let mut manager = ServiceManager::for_test(
             ollama_stub_missing(),
             nats_stub_listening().await,
@@ -489,6 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_marks_installed_but_down_lmr_as_core_degraded() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         let stub = opaque_daemon_stub("ollama");
         let manager = ServiceManager::for_test(
             OllamaService::with_config(OllamaConfig {
@@ -515,6 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn installed_but_unstartable_lmr_hits_restart_limit_via_supervise_once() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         let stub = opaque_daemon_stub("ollama");
         let mut manager = ServiceManager::for_test(
             OllamaService::with_config(OllamaConfig {
@@ -607,6 +610,7 @@ mod tests {
     async fn nats_stub_listening() -> NatsService {
         // Fake TCP is not a NATS server — bypass auth so ensure() reuses the open port
         // without a handshake probe (auth-required path would try --user/--pass restart).
+        // Callers must hold TestAuthGuard for the duration of the test.
         unsafe {
             std::env::set_var(
                 crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,

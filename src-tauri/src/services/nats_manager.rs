@@ -308,17 +308,12 @@ impl NatsService {
             return false;
         };
         // Fail fast — do not hang on a non-NATS TCP listener.
-        let user = creds.user.clone();
-        let pass = creds.password.clone();
-        let url = url.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let _ = std::thread::Builder::new()
-            .name("nats-auth-probe".into())
-            .spawn(move || {
-                let result = nats::Options::with_user_pass(&user, &pass).connect(&url);
-                let _ = tx.send(result.is_ok());
-            });
-        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+        crate::services::lounge_auth::connect_nats_timeout(
+            &url,
+            Some((&creds.user, &creds.password)),
+            Duration::from_secs(5),
+        )
+        .is_ok()
     }
 
     fn mark_auth_active(&self) {
@@ -567,6 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn skips_spawn_when_port_already_open() {
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
         let prev = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
         unsafe {
             std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "false");
@@ -722,12 +718,17 @@ mod tests {
                 "nats-server required for nats_auth_rejects_unauthenticated_when_required: {err}"
             );
         });
-        let unauth = nats::connect(&url);
+        let unauth =
+            super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(5));
         assert!(
             unauth.is_err(),
             "unauthenticated connect must be rejected when nats-server requires user/pass"
         );
-        let auth = nats::Options::with_user_pass(&creds.user, &creds.password).connect(&url);
+        let auth = super::super::lounge_auth::connect_nats_timeout(
+            &url,
+            Some((&creds.user, &creds.password)),
+            Duration::from_secs(5),
+        );
         assert!(auth.is_ok(), "authenticated connect must succeed: {auth:?}");
         let _ = child.kill();
         let _ = child.wait();
@@ -779,16 +780,20 @@ mod tests {
 
         let url = service.endpoint();
         assert!(
-            nats::connect(&url).is_err(),
+            super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(5))
+                .is_err(),
             "plain connect must fail against auth-required server"
         );
         let creds = service
             .credentials()
             .expect("service must have credentials");
         assert!(
-            nats::Options::with_user_pass(&creds.user, &creds.password)
-                .connect(&url)
-                .is_ok(),
+            super::super::lounge_auth::connect_nats_timeout(
+                &url,
+                Some((&creds.user, &creds.password)),
+                Duration::from_secs(5),
+            )
+            .is_ok(),
             "authenticated connect must succeed with service credentials"
         );
         assert!(nats_connect(&url).is_ok());
@@ -867,12 +872,21 @@ mod tests {
             .spawn()
             .context("spawn nats-server")?;
         let url = format!("nats://127.0.0.1:{port}");
+        // Bounded dials: raw nats::connect can hang forever on a non-NATS listener.
         for _ in 0..80 {
             let ok = match creds {
-                Some(c) => nats::Options::with_user_pass(&c.user, &c.password)
-                    .connect(&url)
-                    .is_ok(),
-                None => nats::connect(&url).is_ok(),
+                Some(c) => super::super::lounge_auth::connect_nats_timeout(
+                    &url,
+                    Some((&c.user, &c.password)),
+                    Duration::from_millis(500),
+                )
+                .is_ok(),
+                None => super::super::lounge_auth::connect_nats_timeout(
+                    &url,
+                    None,
+                    Duration::from_millis(500),
+                )
+                .is_ok(),
             };
             if ok {
                 return Ok((url, child));

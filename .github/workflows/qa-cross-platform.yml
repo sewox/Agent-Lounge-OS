@@ -27,7 +27,8 @@ jobs:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     continue-on-error: true
-    timeout-minutes: 45
+    # Fail fast on hangs (was 45m; cargo test alone should finish well under this).
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +63,7 @@ jobs:
         run: bash scripts/ci/install-nats-server.sh
 
       - name: Cargo test
+        timeout-minutes: 20
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   frontend-matrix:
