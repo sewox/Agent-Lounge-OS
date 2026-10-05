@@ -55,6 +55,8 @@ pub struct ClientCtx {
     pub initialized: bool,
     /// MCP oturum kimliği (`Mcp-Session-Id` / stdio süreç kimliği).
     pub session_id: String,
+    /// İstemci initialize'da logging/notifications desteği bildirdi mi (best-effort).
+    pub supports_notifications: bool,
 }
 
 impl Default for ClientCtx {
@@ -64,6 +66,7 @@ impl Default for ClientCtx {
             version: "0".into(),
             initialized: false,
             session_id: Uuid::new_v4().to_string(),
+            supports_notifications: false,
         }
     }
 }
@@ -75,6 +78,7 @@ impl ClientCtx {
             "version": self.version,
             "initialized": self.initialized,
             "session_id": self.session_id,
+            "supports_notifications": self.supports_notifications,
         })
     }
 }
@@ -205,8 +209,8 @@ impl McpServer {
         self.client.label()
     }
 
-    /// Oturum kopması: in-flight cancel kanallarını UserStop ile bilgilendir.
-    /// Backgrounded görevler in_flight map'te yoktur → korunur.
+    /// Oturum kopması: in-flight cancel kanallarını SessionDisconnect ile bilgilendir.
+    /// must_deliver → arka plan; aksi → iptal. Backgrounded map'te yok → korunur.
     pub async fn on_session_disconnect(&self, session_id: &str) -> usize {
         let keys: Vec<String> = {
             let map = self.in_flight.lock().await;
@@ -368,6 +372,14 @@ impl McpServer {
         let version = info.get("version").and_then(|v| v.as_str()).unwrap_or("0");
         client.name = name.to_string();
         client.version = version.to_string();
+        // Best-effort: istemci logging veya experimental.notifications bildirdiyse.
+        let caps = params.get("capabilities").cloned().unwrap_or(json!({}));
+        client.supports_notifications = caps.get("logging").is_some()
+            || caps
+                .pointer("/experimental/notifications")
+                .map(|v| v.as_bool().unwrap_or(true))
+                .unwrap_or(false)
+            || caps.get("notifications").is_some();
 
         let requested = params
             .get("protocolVersion")
@@ -487,6 +499,10 @@ impl McpServer {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
             },
+            "lounge_list_my_tasks" => match self.tool_list_my_tasks(&args, client).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
             "lounge_status" => match self.tool_status(&args, client).await {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
@@ -496,7 +512,39 @@ impl McpServer {
                 true,
             ),
         };
+        let payload = self.attach_pending_results(payload, client);
         Ok(tool_result(payload, is_error))
+    }
+
+    /// Piggyback: oturumda alınmamış hazır sonuç varsa `pending_results` ekle.
+    fn attach_pending_results(&self, mut payload: Value, client: &ClientCtx) -> Value {
+        let Ok(ids) = self.store.pending_a2a_result_ids(&client.session_id) else {
+            return payload;
+        };
+        if ids.is_empty() {
+            return payload;
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("pending_results".into(), json!(ids));
+        }
+        if client.supports_notifications {
+            // Best-effort log — istemci notifications/message'a güvenmemeli; piggyback asıl kanal.
+            eprintln!(
+                "[lounge-mcp] notifications/message level=info session={} pending_results={ids:?} — lounge_wait_task ile alın",
+                client.session_id
+            );
+        }
+        payload
+    }
+
+    async fn tool_list_my_tasks(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
+        validate_schema(SchemaKind::McpListMyTasks, args).map_err(|e| anyhow!(e))?;
+        let include = args
+            .get("include_completed_unclaimed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        self.orchestrator
+            .list_my_tasks(&client.session_id, include)
     }
 
     async fn tool_search(&self, args: &Value) -> Result<Value> {
@@ -1091,12 +1139,12 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "lounge_call_agent",
-            "Mod A→B: başka ajana görev ver; timeout_limit içinde sonuç veya backgrounded. Backgrounded/long_running ise poll_after_secs'e uyarak düzenli lounge_wait_task çağırın; sonuç gelmeden kullanıcıya bitti demeyin. task_token'ı saklayın (yeni oturumda wait için). must_deliver kota aşımında -32029. parent_task_id yok sayılır.",
+            "Mod A→B: başka ajana görev ver; timeout_limit içinde sonuç veya backgrounded. long_running=true ise eşiği beklemeden hemen backgrounded+task_id. Backgrounded/still_running yanıtında poll_after_secs ve next_action'a uyarak düzenli lounge_wait_task çağırın; sonuç gelmeden kullanıcıya bitti demeyin. Arka plan görevlerini lounge_list_my_tasks ile de kontrol edin. task_token'ı saklayın. must_deliver: kopmada iptal yok, orphan EXPIRED yok. Kota aşımında -32029. parent_task_id yok sayılır.",
             include_schema("mcp_call_agent.schema.json"),
         ),
         tool_def(
             "lounge_wait_task",
-            "Aynı oturum veya geçerli task_token ile sonuç long-poll. still_running ise next_action/poll_after_secs'e uyun (15→×1.5→≤60). Sonuç completed/failed olmadan kullanıcıya bitti demeyin.",
+            "Aynı oturum veya geçerli task_token ile sonuç long-poll. still_running ise next_action/poll_after_secs'e uyun (profil eşiğine göre 5–15→×1.5→≤60). Arka plan görevlerini düzenli kontrol edin. Sonuç completed/failed olmadan kullanıcıya bitti demeyin.",
             include_schema("mcp_wait_task.schema.json"),
         ),
         tool_def(
@@ -1106,13 +1154,18 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool_def(
             "lounge_dispatch_task",
-            "NATS lounge.task.requested → Kernel (fire-and-forget; yeni A2A altyapısı). Sonuç: lounge_wait_task.",
+            "NATS lounge.task.requested → Kernel (fire-and-forget). Sonuç: lounge_wait_task. Arka plan görevlerini düzenli kontrol edin (poll_after_secs / lounge_list_my_tasks).",
             include_schema("mcp_dispatch_task.schema.json"),
         ),
         tool_def(
             "lounge_ask_agent",
             "lounge_dispatch_task alias.",
             include_schema("mcp_dispatch_task.schema.json"),
+        ),
+        tool_def(
+            "lounge_list_my_tasks",
+            "Bu oturumun açık ve sonucu alınmamış görevlerini listeler (yalnız kendi görevleriniz). Arka plan işlerini düzenli kontrol etmek için kullanın; pending_results / lounge_wait_task ile sonucu alın.",
+            include_schema("mcp_list_my_tasks.schema.json"),
         ),
         tool_def(
             "lounge_status",
@@ -1145,6 +1198,9 @@ fn include_schema(file: &str) -> Value {
         }
         "mcp_yield_result.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_yield_result.schema.json")
+        }
+        "mcp_list_my_tasks.schema.json" => {
+            include_str!("../../../shared/lounge_protocol/schemas/mcp_list_my_tasks.schema.json")
         }
         "mcp_status.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_status.schema.json")
@@ -1905,12 +1961,14 @@ mod tests {
             version: "1".into(),
             initialized: true,
             session_id: "sess-cursor".into(),
+            supports_notifications: false,
         };
         let mut claude = ClientCtx {
             name: "Claude Desktop".into(),
             version: "2".into(),
             initialized: true,
             session_id: "sess-claude".into(),
+            supports_notifications: false,
         };
 
         let status_cursor = server

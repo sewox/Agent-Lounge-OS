@@ -151,15 +151,25 @@ pub fn configured_must_deliver_ttl() -> Duration {
 
 /// Boş wait sonrası bir sonraki poll_after_secs (15 → ×1.5 → … ≤60).
 pub fn next_poll_after_secs(empty_wait_count: u32) -> u64 {
+    suggested_poll_after_secs(empty_wait_count, POLL_AFTER_SECS_START * 10)
+}
+
+/// Profil eşiğine göre poll önerisi: başlangıç ≈ threshold/10 (5…15), tavan min(60, threshold/2).
+pub fn suggested_poll_after_secs(empty_wait_count: u32, threshold_secs: u64) -> u64 {
+    let start = (threshold_secs / 10).clamp(5, POLL_AFTER_SECS_START);
+    let ceiling = (threshold_secs / 2).clamp(start, POLL_AFTER_SECS_MAX);
     if empty_wait_count == 0 {
-        return POLL_AFTER_SECS_START;
+        return start;
     }
-    let mut v = POLL_AFTER_SECS_START as f64;
+    let mut v = start as f64;
     for _ in 0..empty_wait_count {
         v *= POLL_AFTER_GROWTH;
     }
-    v.floor().min(POLL_AFTER_SECS_MAX as f64) as u64
+    v.floor().min(ceiling as f64) as u64
 }
+
+/// İstemciye gösterilecek next_action metni.
+pub const NEXT_ACTION_WAIT_TASK: &str = "lounge_wait_task(task_id) ile tekrar kontrol et";
 
 /// 32 bayt rastgele → hex token (yalnız bir kez istemciye; DB'de hash).
 pub fn generate_task_token() -> String {
@@ -1215,7 +1225,7 @@ fn parse_rfc3339_age_secs(now: &str, then: &str) -> Option<i64> {
 }
 
 /// Sonuç orphan: backgrounded → tamamlandı, N dk hiç wait yok → EXPIRED.
-/// Çalışan (sonuçsuz) görevleri öldürmez.
+/// Çalışan (sonuçsuz) görevleri öldürmez. `must_deliver` görevler atlanır.
 pub fn expire_result_orphans(
     conn: &Connection,
     now_rfc3339: &str,
@@ -1230,6 +1240,7 @@ pub fn expire_result_orphans(
           AND result_ready_at IS NOT NULL
           AND result_json IS NOT NULL
           AND status IN ('COMPLETED', 'FAILED')
+          AND COALESCE(must_deliver, 0) = 0
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1270,6 +1281,7 @@ pub fn expire_result_orphans(
 
 /// Incomplete orphan: çağıran oturum yok/disconnected + N dk sorgu yok → EXPIRED.
 /// Dönüş: control.stop uygulanacak task_id listesi (henüz terminal olmayanlar).
+/// `must_deliver` görevler atlanır (sonuç alınana kadar EXPIRED yok).
 pub fn expire_incomplete_orphans(
     conn: &Connection,
     now_rfc3339: &str,
@@ -1286,6 +1298,7 @@ pub fn expire_incomplete_orphans(
             'QUEUED', 'DISPATCHED', 'EXECUTING', 'WAIT_TIMEOUT_REACHED',
             'RECOVERY_PENDING', 'PENDING_APPROVAL'
         )
+          AND COALESCE(t.must_deliver, 0) = 0
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1325,6 +1338,115 @@ pub fn expire_incomplete_orphans(
             update_task_status(conn, &id, TaskStatus::Expired)?;
             out.push((id, session_id));
         }
+    }
+    Ok(out)
+}
+
+/// Sonuç hazır ama henüz wait ile alınmamış görev id'leri (oturum kapsamı).
+pub fn pending_result_ids_for_session(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id FROM a2a_tasks
+        WHERE session_id = ?1
+          AND result_ready_at IS NOT NULL
+          AND result_json IS NOT NULL
+          AND status IN ('COMPLETED', 'FAILED')
+          AND (
+            last_wait_at IS NULL
+            OR last_wait_at < result_ready_at
+          )
+        ORDER BY result_ready_at ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Çağıran oturumun açık + (isteğe bağlı) alınmamış sonuçlu görevleri.
+pub fn list_my_a2a_tasks(
+    conn: &Connection,
+    session_id: &str,
+    include_completed_unclaimed: bool,
+) -> Result<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, status, summary, target_agent, created_at, updated_at,
+               COALESCE(must_deliver,0), COALESCE(long_running,0),
+               backgrounded_at, result_ready_at, last_wait_at
+        FROM a2a_tasks
+        WHERE session_id = ?1
+          AND (
+            status IN (
+              'QUEUED', 'DISPATCHED', 'EXECUTING', 'WAIT_TIMEOUT_REACHED',
+              'RECOVERY_PENDING', 'PENDING_APPROVAL', 'NEEDS_HUMAN'
+            )
+            OR (
+              ?2 = 1
+              AND status IN ('COMPLETED', 'FAILED')
+              AND result_ready_at IS NOT NULL
+              AND result_json IS NOT NULL
+              AND (last_wait_at IS NULL OR last_wait_at < result_ready_at)
+            )
+          )
+        ORDER BY created_at DESC
+        "#,
+    )?;
+    let include = if include_completed_unclaimed { 1i64 } else { 0 };
+    let rows = stmt.query_map(params![session_id, include], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            id,
+            status,
+            summary,
+            target,
+            created,
+            updated,
+            must_deliver,
+            long_running,
+            bg,
+            ready,
+            last_wait,
+        ) = row?;
+        let result_ready = ready.is_some();
+        let unclaimed = result_ready
+            && (last_wait.is_none()
+                || last_wait
+                    .as_ref()
+                    .zip(ready.as_ref())
+                    .map(|(lw, r)| lw < r)
+                    .unwrap_or(true));
+        out.push(serde_json::json!({
+            "task_id": id,
+            "status": status,
+            "summary": summary,
+            "target_agent": target,
+            "created_at": created,
+            "updated_at": updated,
+            "must_deliver": must_deliver != 0,
+            "long_running": long_running != 0,
+            "backgrounded": bg.is_some(),
+            "result_ready": result_ready,
+            "unclaimed": unclaimed,
+        }));
     }
     Ok(out)
 }
@@ -1773,8 +1895,8 @@ impl crate::db::ExperienceStore {
         touch_last_wait(&conn, task_id)
     }
 
-    /// Boş wait sayacını artır; yeni poll_after_secs döner.
-    pub fn bump_a2a_empty_wait(&self, task_id: &str) -> Result<u64> {
+    /// Boş wait sayacını artır; profil eşiğine göre poll_after_secs döner.
+    pub fn bump_a2a_empty_wait(&self, task_id: &str, threshold_secs: u64) -> Result<u64> {
         let conn = self.conn.lock().expect("experience db lock");
         let now = now_rfc3339();
         conn.execute(
@@ -1791,7 +1913,10 @@ impl crate::db::ExperienceStore {
             |row| row.get(0),
         )?;
         // count artık artırılmış; next_poll önceki boş dönüş sayısına göre (count-1).
-        Ok(next_poll_after_secs(count.saturating_sub(1).max(0) as u32))
+        Ok(suggested_poll_after_secs(
+            count.saturating_sub(1).max(0) as u32,
+            threshold_secs,
+        ))
     }
 
     pub fn a2a_flags(&self, task_id: &str) -> Result<(bool, bool)> {
@@ -1802,6 +1927,22 @@ impl crate::db::ExperienceStore {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok((row.0 != 0, row.1 != 0))
+    }
+
+    /// Oturumun sonucu hazır ama alınmamış görev id'leri.
+    pub fn pending_a2a_result_ids(&self, session_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        pending_result_ids_for_session(&conn, session_id)
+    }
+
+    /// Çağıran oturumun açık / unclaimed görevleri (yalnız kendi session_id).
+    pub fn list_my_a2a_tasks(
+        &self,
+        session_id: &str,
+        include_completed_unclaimed: bool,
+    ) -> Result<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().expect("experience db lock");
+        list_my_a2a_tasks(&conn, session_id, include_completed_unclaimed)
     }
 
     pub fn set_a2a_task_token_hash(&self, task_id: &str, hash: &str) -> Result<()> {
@@ -2608,5 +2749,76 @@ mod tests {
             store.a2a_task_status(&task.id).unwrap(),
             Some(TaskStatus::WaitTimeoutReached)
         );
+    }
+
+    #[test]
+    fn must_deliver_skipped_from_orphan_expired() {
+        let store = ExperienceStore::memory().unwrap();
+        // Result orphan
+        let mut t1 = LoungeTask::new("mcp:cursor", "p", "md-result");
+        t1.session_id = Some("sess-md".into());
+        t1.must_deliver = true;
+        store.admit_a2a_task(&mut t1, 10).unwrap();
+        store.mark_a2a_wait_timeout(&t1.id).unwrap();
+        store
+            .complete_a2a_with_result(
+                &t1.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+        // Incomplete orphan
+        let mut sess = AgentSession::new("p", "cursor", "mcp", "/tmp", "mcp_meta");
+        sess.id = "sess-md-gone".into();
+        store.upsert_session(&sess).unwrap();
+        let mut t2 = LoungeTask::new("mcp:cursor", "p", "md-incomplete");
+        t2.session_id = Some("sess-md-gone".into());
+        t2.must_deliver = true;
+        store.admit_a2a_task(&mut t2, 10).unwrap();
+        store
+            .set_a2a_task_status(&t2.id, TaskStatus::WaitTimeoutReached)
+            .unwrap();
+        store
+            .mark_mcp_session_disconnected("sess-md-gone")
+            .unwrap();
+        store
+            .touch_a2a_updated_at(&t2.id, "2026-10-04T12:00:00.000Z")
+            .unwrap();
+
+        let (expired, incomplete) = store
+            .expire_a2a_orphans(
+                "2099-01-01T00:00:00.000Z",
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert!(
+            !expired.contains(&t1.id),
+            "must_deliver result orphan EXPIRED olmamalı: {expired:?}"
+        );
+        assert!(
+            !incomplete.iter().any(|(id, _)| id == &t2.id),
+            "must_deliver incomplete orphan EXPIRED olmamalı: {incomplete:?}"
+        );
+        assert_eq!(
+            store.a2a_task_status(&t1.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
+        assert_eq!(
+            store.a2a_task_status(&t2.id).unwrap(),
+            Some(TaskStatus::WaitTimeoutReached)
+        );
+    }
+
+    #[test]
+    fn suggested_poll_respects_profile_threshold() {
+        // unknown 45 → start 5; antigravity 150 → 15
+        assert_eq!(suggested_poll_after_secs(0, 45), 5);
+        assert_eq!(suggested_poll_after_secs(0, 100), 10);
+        assert_eq!(suggested_poll_after_secs(0, 150), 15);
+        assert_eq!(suggested_poll_after_secs(0, 300), 15);
+        let grew = suggested_poll_after_secs(1, 45);
+        assert!(grew > 5 && grew <= 22, "grew={grew}");
     }
 }

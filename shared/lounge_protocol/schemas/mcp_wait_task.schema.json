@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/mcp_wait_task.schema.json",
   "title": "McpWaitTaskArgs",
-  "description": "lounge_wait_task — aynı oturumda veya geçerli task_token ile sonuç long-poll. Hâlâ çalışıyorsa poll_after_secs / next_action'a uyun; sonuç gelmeden kullanıcıya bitti demeyin.",
+  "description": "lounge_wait_task — aynı oturumda veya geçerli task_token ile sonuç long-poll. Hâlâ çalışıyorsa poll_after_secs / next_action'a uyun (lounge_wait_task(task_id) ile tekrar kontrol et); sonuç gelmeden kullanıcıya bitti demeyin. Arka plan görevlerini düzenli kontrol edin.",
   "type": "object",
   "additionalProperties": false,
   "required": ["task_id"],

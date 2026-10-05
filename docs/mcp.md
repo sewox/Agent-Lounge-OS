@@ -121,17 +121,25 @@ Yanıtlarda teşhis: `client_profile`, `timeout_limit_secs`, `profile_source`.
 
 ### Bağlantı kopması (cancel göndermeyen istemciler)
 
-stdio EOF / HTTP `DELETE /mcp` / oturum kapanışı → yalnız **in-flight** (senkron beklenen) çağrılar `CANCELLED` + `lounge.control.stop`. **Backgrounded** görevler bilinçli arka planda: istemci yeni oturumla `lounge_wait_task` ile dönebilir; kopmada iptal **edilmez**.
+stdio EOF / HTTP `DELETE /mcp` / oturum kapanışı → in-flight çağrılara `SessionDisconnect`:
+- varsayılan → `CANCELLED` + `lounge.control.stop`
+- **`must_deliver=true`** → arka plan (`backgrounded`); iptal yok (in-flight olsa bile)
+
+**Backgrounded** görevler in-flight map'te yoktur → kopmada dokunulmaz. İstemci `lounge_wait_task` / `lounge_list_my_tasks` ile dönebilir.
 
 ### Orphan TTL (yedek temizlik)
 
 | Tür | Varsayılan | Davranış |
 |---|---|---|
-| Sonuç orphan | **30 dk** (`LOUNGE_RESULT_ORPHAN_TTL_SECS`) | Backgrounded → sonuç hazır, hiç `lounge_wait_task` yok → `EXPIRED` (çalışanı öldürmez) |
-| Incomplete orphan | **30 dk** (`LOUNGE_INCOMPLETE_ORPHAN_TTL_SECS`) | Çağıran oturum yok/disconnected + sorgu yok → `EXPIRED` + `control.stop` |
+| Sonuç orphan | **30 dk** (`LOUNGE_RESULT_ORPHAN_TTL_SECS`) | Backgrounded → sonuç hazır, hiç `lounge_wait_task` yok → `EXPIRED` (çalışanı öldürmez). **must_deliver atlanır** |
+| Incomplete orphan | **30 dk** (`LOUNGE_INCOMPLETE_ORPHAN_TTL_SECS`) | Çağıran oturum yok/disconnected + sorgu yok → `EXPIRED` + `control.stop`. **must_deliver atlanır** |
 | must_deliver | **24 sa** (`LOUNGE_MUST_DELIVER_TTL_SECS`) | Alınmayan → `FAILED` reason `abandoned`. Kota: oturum 5 / ajan 10 açık; aşımda JSON-RPC **-32029** (sessiz düşürme yok) |
 
-`poll_after_secs`: long_running/backgrounded için 15 sn başlar, her boş wait’te ×1.5, en fazla 60. Yanıtta `next_action` ipucu.
+`long_running=true`: eşik beklenmeden hemen `backgrounded` + `task_id`.
+
+`poll_after_secs`: profil eşiğine göre (~threshold/10, 5…15 sn başlar), her boş wait’te ×1.5, en fazla 60. Yanıtta `next_action`: `lounge_wait_task(task_id) ile tekrar kontrol et`.
+
+`lounge_list_my_tasks`: yalnız çağıran oturumun açık / unclaimed görevleri. Her `lounge_*` yanıtında hazır ama alınmamış sonuçlar için `pending_results: [task_id…]` piggyback (notifications/message best-effort, güvenilmez).
 
 Yeniden bağlanma: `task_token` (düz, bir kez) + DB hash; `lounge_wait_task` aynı oturum **veya** geçerli token. Workspace paylaşımı yok.
 

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/mcp_list_my_tasks.schema.json",
+  "title": "McpListMyTasksArgs",
+  "description": "lounge_list_my_tasks — çağıran oturumun açık ve sonucu alınmamış görevleri (yalnız kendi görevleri).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "include_completed_unclaimed": {
+      "type": "boolean",
+      "default": true,
+      "description": "Sonuç hazır ama wait ile alınmamış görevleri de listele."
+    }
+  }
+}

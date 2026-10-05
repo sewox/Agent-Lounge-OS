@@ -29,12 +29,12 @@
     "long_running": {
       "type": "boolean",
       "default": false,
-      "description": "Uzun iş — backgrounded sonrası poll_after_secs backoff (15→×1.5→≤60)."
+      "description": "true: eşik beklemeden hemen backgrounded + task_id döner (Mod A atlanır)."
     },
     "must_deliver": {
       "type": "boolean",
       "default": false,
-      "description": "Sonuç mutlaka teslim (oturum≤5 / ajan≤10 kota; 24s alınmazsa FAILED abandoned). Kota dolunca JSON-RPC -32029."
+      "description": "true: sonuç zorunlu teslim — bağlantı kopmasında in-flight bile arka plana düşer (iptal yok); orphan EXPIRED uygulanmaz; yalnız context canceled iptal eder. Kota: oturum≤5 / ajan≤10 → -32029."
     }
   }
 }
