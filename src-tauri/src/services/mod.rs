@@ -238,7 +238,10 @@ mod tests {
     async fn ensure_all_reports_both_services() {
         let prev = std::env::var_os(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
         unsafe {
-            std::env::set_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "false");
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
+                "false",
+            );
         }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -272,8 +275,12 @@ mod tests {
         assert!(!report.core_degraded());
         unsafe {
             match prev {
-                Some(v) => std::env::set_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v),
-                None => std::env::remove_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
+                Some(v) => {
+                    std::env::set_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => {
+                    std::env::remove_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV)
+                }
             }
         }
     }

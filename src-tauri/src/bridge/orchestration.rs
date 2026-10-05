@@ -976,7 +976,8 @@ impl Orchestrator {
         let bytes = serde_json::to_vec(task)?;
         tokio::task::spawn_blocking(move || {
             #[allow(deprecated)]
-            let nc = crate::services::nats_connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
+            let nc =
+                crate::services::nats_connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
             nc.publish(&subject, bytes)
                 .map_err(|e| anyhow!("NATS publish: {e}"))?;
             nc.flush().map_err(|e| anyhow!("NATS flush: {e}"))?;
@@ -1010,7 +1011,8 @@ impl Orchestrator {
         let bytes = serde_json::to_vec(&payload)?;
         tokio::task::spawn_blocking(move || {
             #[allow(deprecated)]
-            let nc = crate::services::nats_connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
+            let nc =
+                crate::services::nats_connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
             nc.publish(&subject, bytes)
                 .map_err(|e| anyhow!("NATS publish: {e}"))?;
             nc.flush().map_err(|e| anyhow!("NATS flush: {e}"))?;

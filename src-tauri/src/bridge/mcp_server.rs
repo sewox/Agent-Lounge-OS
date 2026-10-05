@@ -840,7 +840,8 @@ impl McpServer {
         let bytes = serde_json::to_vec(experience)?;
         tokio::task::spawn_blocking(move || {
             #[allow(deprecated)]
-            let nc = crate::services::nats_connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
+            let nc =
+                crate::services::nats_connect(&url).map_err(|e| anyhow!("NATS connect: {e}"))?;
             nc.publish(&subject, bytes)
                 .map_err(|e| anyhow!("NATS publish: {e}"))?;
             nc.flush().map_err(|e| anyhow!("NATS flush: {e}"))?;

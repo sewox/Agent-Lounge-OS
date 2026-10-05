@@ -78,10 +78,7 @@ pub fn auth_required() -> bool {
 }
 
 pub fn nats_auth_active() -> bool {
-    state()
-        .lock()
-        .map(|s| s.nats_auth_active)
-        .unwrap_or(false)
+    state().lock().map(|s| s.nats_auth_active).unwrap_or(false)
 }
 
 pub fn default_creds_path() -> PathBuf {
@@ -92,6 +89,43 @@ pub fn default_creds_path() -> PathBuf {
 
 fn token_path() -> PathBuf {
     lounge_nats_dir().join(TOKEN_FILE_NAME)
+}
+
+fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create secret dir {}", parent.display()))?;
+    }
+    let bytes = contents.as_ref();
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("open secret {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write secret {}", path.display()))?;
+        file.sync_all().ok();
+        // Harden even if the path already existed with wider perms.
+        let mut perms = file
+            .metadata()
+            .with_context(|| format!("stat secret {}", path.display()))?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)
+            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: best-effort plain write; ACL lockdown is OS-specific.
+        std::fs::write(path, bytes).with_context(|| format!("write secret {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn load_or_create_token() -> String {
@@ -110,7 +144,7 @@ fn load_or_create_token() -> String {
     }
     let token = format!("lounge_{}", uuid::Uuid::new_v4().simple());
     let _ = std::fs::create_dir_all(lounge_nats_dir());
-    let _ = std::fs::write(&path, &token);
+    let _ = write_secret_file(&path, &token);
     // SAFETY: single-process Kernel; env is the worker hand-off channel.
     unsafe {
         std::env::set_var(LOUNGE_TOKEN_ENV, &token);
@@ -147,17 +181,13 @@ pub fn load_credentials_file(path: &Path) -> Result<Option<NatsCredentials>> {
 }
 
 pub fn write_credentials_file(path: &Path, creds: &NatsCredentials, nats_url: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create creds dir {}", parent.display()))?;
-    }
     let body = CredsFile {
         user: creds.user.clone(),
         password: creds.password.clone(),
         url: Some(nats_url.to_string()),
     };
     let json = serde_json::to_string_pretty(&body)?;
-    std::fs::write(path, json).with_context(|| format!("write creds {}", path.display()))?;
+    write_secret_file(path, json)?;
     // SAFETY: Kernel → worker credential hand-off via env.
     unsafe {
         std::env::set_var(LOUNGE_NATS_USER_ENV, &creds.user);
@@ -248,7 +278,7 @@ pub fn rotate_lounge_token() -> String {
     let token = format!("lounge_{}", uuid::Uuid::new_v4().simple());
     let path = token_path();
     let _ = std::fs::create_dir_all(lounge_nats_dir());
-    let _ = std::fs::write(&path, &token);
+    let _ = write_secret_file(&path, &token);
     unsafe {
         std::env::set_var(LOUNGE_TOKEN_ENV, &token);
     }
@@ -305,7 +335,10 @@ pub fn parse_host(url_or_host: &str) -> Result<String> {
     } else {
         strip_port(raw.split('/').next().unwrap_or(raw))
     };
-    let host = host.trim().trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    let host = host
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
     if host.is_empty() || host.contains(' ') {
         anyhow::bail!("invalid host: {url_or_host}");
     }
@@ -334,7 +367,8 @@ pub fn is_loopback_host(hostname: &str) -> bool {
         .trim()
         .trim_matches(|c| c == '[' || c == ']')
         .to_ascii_lowercase();
-    matches!(h.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+    // Intentionally exclude 0.0.0.0 — bind-all is not a trust signal behind tunnels.
+    matches!(h.as_str(), "localhost" | "127.0.0.1" | "::1")
 }
 
 fn hostname_from_host_header(host_hdr: &str) -> Option<String> {
@@ -357,6 +391,8 @@ pub enum RemoteAuthFailure {
     HostNotAllowed,
     OriginNotAllowed,
     InvalidOrigin,
+    /// Neither Host nor Origin present — fail closed for remote entry.
+    MissingHost,
 }
 
 impl RemoteAuthFailure {
@@ -371,16 +407,66 @@ impl RemoteAuthFailure {
             Self::HostNotAllowed => "host not allow-listed",
             Self::OriginNotAllowed => "origin host not allow-listed",
             Self::InvalidOrigin => "invalid origin",
+            Self::MissingHost => "missing Host/Origin",
         }
     }
 }
 
+fn token_failure(token_header: Option<&str>) -> RemoteAuthFailure {
+    if token_header
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        RemoteAuthFailure::InvalidToken
+    } else {
+        RemoteAuthFailure::MissingToken
+    }
+}
+
 /// Authorize MCP HTTP request for loopback vs secure-entry (token + allow-list).
+///
+/// Fail-closed rules:
+/// - Missing both Host and Origin → 403
+/// - Any non-loopback Host or Origin → require valid token AND that hostname allow-listed
+/// - Spoofed loopback Host with non-loopback Origin → still enforce Origin
+/// - `0.0.0.0` is **not** loopback
 pub fn authorize_mcp_headers(
     host_header: Option<&str>,
     origin_header: Option<&str>,
     token_header: Option<&str>,
 ) -> std::result::Result<(), RemoteAuthFailure> {
+    let host = host_header
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(hostname_from_host_header);
+    let origin_host = match origin_header.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(origin) => {
+            Some(hostname_from_origin(origin).map_err(|_| RemoteAuthFailure::InvalidOrigin)?)
+        }
+        None => None,
+    };
+
+    if host.is_none() && origin_host.is_none() {
+        return Err(RemoteAuthFailure::MissingHost);
+    }
+
+    let mut remote_hosts: Vec<(String, bool)> = Vec::new(); // (host, from_origin)
+    if let Some(ref h) = host {
+        if !is_loopback_host(h) {
+            remote_hosts.push((h.clone(), false));
+        }
+    }
+    if let Some(ref o) = origin_host {
+        if !is_loopback_host(o) {
+            remote_hosts.push((o.clone(), true));
+        }
+    }
+
+    if remote_hosts.is_empty() {
+        return Ok(());
+    }
+
     let token_ok = {
         let expected = lounge_token();
         token_header
@@ -388,43 +474,20 @@ pub fn authorize_mcp_headers(
             .filter(|t| !t.is_empty() && constant_time_eq(t.as_bytes(), expected.as_bytes()))
             .is_some()
     };
+    if !token_ok {
+        return Err(token_failure(token_header));
+    }
 
     let allowed = allowed_hosts();
-
-    if let Some(origin) = origin_header.map(str::trim).filter(|s| !s.is_empty()) {
-        let origin_host = hostname_from_origin(origin).map_err(|_| RemoteAuthFailure::InvalidOrigin)?;
-        if !is_loopback_host(&origin_host) {
-            if !token_ok {
-                return Err(if token_header.map(str::trim).filter(|s| !s.is_empty()).is_some() {
-                    RemoteAuthFailure::InvalidToken
-                } else {
-                    RemoteAuthFailure::MissingToken
-                });
-            }
-            if !allowed.iter().any(|h| h == &origin_host) {
-                return Err(RemoteAuthFailure::OriginNotAllowed);
-            }
+    for (name, from_origin) in remote_hosts {
+        if !allowed.iter().any(|h| h == &name) {
+            return Err(if from_origin {
+                RemoteAuthFailure::OriginNotAllowed
+            } else {
+                RemoteAuthFailure::HostNotAllowed
+            });
         }
     }
-
-    if let Some(host_hdr) = host_header.map(str::trim).filter(|s| !s.is_empty()) {
-        let Some(host) = hostname_from_host_header(host_hdr) else {
-            return Ok(());
-        };
-        if !is_loopback_host(&host) {
-            if !token_ok {
-                return Err(if token_header.map(str::trim).filter(|s| !s.is_empty()).is_some() {
-                    RemoteAuthFailure::InvalidToken
-                } else {
-                    RemoteAuthFailure::MissingToken
-                });
-            }
-            if !allowed.iter().any(|h| h == &host) {
-                return Err(RemoteAuthFailure::HostNotAllowed);
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -530,13 +593,59 @@ mod tests {
         assert!(is_loopback_host("localhost"));
         assert!(is_loopback_host("::1"));
         assert!(!is_loopback_host("abc.trycloudflare.com"));
+        assert!(
+            !is_loopback_host("0.0.0.0"),
+            "0.0.0.0 must not skip token+allow-list"
+        );
     }
 
     #[test]
     fn remote_auth_loopback_ok_without_token() {
         clear_allowed_origins();
         assert!(authorize_mcp_headers(Some("127.0.0.1:18791"), None, None).is_ok());
-        assert!(authorize_mcp_headers(Some("localhost:18791"), Some("http://127.0.0.1:9"), None).is_ok());
+        assert!(
+            authorize_mcp_headers(Some("localhost:18791"), Some("http://127.0.0.1:9"), None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_auth_missing_host_and_origin_denied() {
+        clear_allowed_origins();
+        let err = authorize_mcp_headers(None, None, None).unwrap_err();
+        assert_eq!(err, RemoteAuthFailure::MissingHost);
+        let err = authorize_mcp_headers(Some(""), Some("  "), None).unwrap_err();
+        assert_eq!(err, RemoteAuthFailure::MissingHost);
+    }
+
+    #[test]
+    fn remote_auth_zero_bind_requires_token_and_allowlist() {
+        clear_allowed_origins();
+        let token = lounge_token();
+        let err = authorize_mcp_headers(Some("0.0.0.0:18791"), None, None).unwrap_err();
+        assert_eq!(err, RemoteAuthFailure::MissingToken);
+        let err = authorize_mcp_headers(Some("0.0.0.0:18791"), None, Some(&token)).unwrap_err();
+        assert_eq!(err, RemoteAuthFailure::HostNotAllowed);
+        add_allowed_origin("0.0.0.0").unwrap();
+        assert!(authorize_mcp_headers(Some("0.0.0.0:18791"), None, Some(&token)).is_ok());
+        clear_allowed_origins();
+    }
+
+    #[test]
+    fn remote_auth_spoofed_loopback_host_with_evil_origin_denied() {
+        clear_allowed_origins();
+        let err =
+            authorize_mcp_headers(Some("127.0.0.1:18791"), Some("https://evil.example"), None)
+                .unwrap_err();
+        assert_eq!(err, RemoteAuthFailure::MissingToken);
+        let token = lounge_token();
+        let err = authorize_mcp_headers(
+            Some("127.0.0.1"),
+            Some("https://evil.example"),
+            Some(&token),
+        )
+        .unwrap_err();
+        assert_eq!(err, RemoteAuthFailure::OriginNotAllowed);
     }
 
     #[test]
@@ -546,7 +655,8 @@ mod tests {
         let err = authorize_mcp_headers(Some("abc.trycloudflare.com"), None, None).unwrap_err();
         assert_eq!(err, RemoteAuthFailure::MissingToken);
 
-        let err = authorize_mcp_headers(Some("abc.trycloudflare.com"), None, Some("bad")).unwrap_err();
+        let err =
+            authorize_mcp_headers(Some("abc.trycloudflare.com"), None, Some("bad")).unwrap_err();
         assert_eq!(err, RemoteAuthFailure::InvalidToken);
 
         let err =
@@ -554,9 +664,7 @@ mod tests {
         assert_eq!(err, RemoteAuthFailure::HostNotAllowed);
 
         add_allowed_origin("https://abc.trycloudflare.com").unwrap();
-        assert!(
-            authorize_mcp_headers(Some("abc.trycloudflare.com"), None, Some(&token)).is_ok()
-        );
+        assert!(authorize_mcp_headers(Some("abc.trycloudflare.com"), None, Some(&token)).is_ok());
         clear_allowed_origins();
     }
 
@@ -571,6 +679,30 @@ mod tests {
         write_credentials_file(&path, &creds, "nats://127.0.0.1:4222").unwrap();
         let loaded = load_credentials_file(&path).unwrap().unwrap();
         assert_eq!(loaded, creds);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_files_are_mode_600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lounge-secret-mode-{}", uuid::Uuid::new_v4()));
+        let creds_path = dir.join("session.creds.json");
+        let token_path = dir.join("lounge.token");
+        write_credentials_file(
+            &creds_path,
+            &NatsCredentials {
+                user: "u".into(),
+                password: "p".into(),
+            },
+            "nats://127.0.0.1:4222",
+        )
+        .unwrap();
+        write_secret_file(&token_path, "lounge_tok").unwrap();
+        let creds_mode = std::fs::metadata(&creds_path).unwrap().permissions().mode() & 0o777;
+        let token_mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(creds_mode, 0o600, "creds mode={creds_mode:#o}");
+        assert_eq!(token_mode, 0o600, "token mode={token_mode:#o}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

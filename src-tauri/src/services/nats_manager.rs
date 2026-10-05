@@ -572,10 +572,7 @@ mod tests {
     async fn skips_spawn_when_port_already_open() {
         let prev = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
         unsafe {
-            std::env::set_var(
-                super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
-                "false",
-            );
+            std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "false");
         }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -594,10 +591,9 @@ mod tests {
         assert!(health.error.is_none());
         unsafe {
             match prev {
-                Some(v) => std::env::set_var(
-                    super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
-                    v,
-                ),
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
                 None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
             }
         }
@@ -725,7 +721,9 @@ mod tests {
             password: format!("p_{}", uuid::Uuid::new_v4().simple()),
         };
         let (url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
-            panic!("nats-server required for nats_auth_rejects_unauthenticated_when_required: {err}");
+            panic!(
+                "nats-server required for nats_auth_rejects_unauthenticated_when_required: {err}"
+            );
         });
         let unauth = nats::connect(&url);
         assert!(
@@ -779,10 +777,9 @@ mod tests {
         crate::services::lounge_auth::deactivate_nats_auth();
         unsafe {
             match prev {
-                Some(v) => std::env::set_var(
-                    super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
-                    v,
-                ),
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
                 None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
             }
         }

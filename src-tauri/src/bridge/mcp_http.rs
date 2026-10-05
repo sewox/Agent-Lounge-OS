@@ -120,15 +120,9 @@ pub fn router_from_server(server: McpServer) -> Router {
 }
 
 fn authorize_headers(headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok());
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok());
-    let token = headers
-        .get(HDR_LOUNGE_TOKEN)
-        .and_then(|v| v.to_str().ok());
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    let token = headers.get(HDR_LOUNGE_TOKEN).and_then(|v| v.to_str().ok());
     authorize_mcp_headers(host, origin, token).map_err(|err| {
         (
             StatusCode::from_u16(err.status()).unwrap_or(StatusCode::FORBIDDEN),
@@ -607,5 +601,36 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
         crate::services::lounge_auth::clear_allowed_origins();
+    }
+
+    #[tokio::test]
+    async fn zero_bind_host_requires_token() {
+        crate::services::lounge_auth::clear_allowed_origins();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .header("host", "0.0.0.0:18791")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn spoofed_loopback_host_with_evil_origin_rejected() {
+        crate::services::lounge_auth::clear_allowed_origins();
+        let store = ExperienceStore::memory().unwrap();
+        let server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let base = start_test_server(server).await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/mcp/health"))
+            .header("host", "127.0.0.1:18791")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 }
