@@ -339,7 +339,7 @@ impl Orchestrator {
         }
 
         if !args.wait {
-            let poll_after = crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
+            let poll_after = crate::db::next_poll_after_secs(0);
             let mut body = json!({
                 "published": true,
                 "task_id": task_id,
@@ -368,7 +368,7 @@ impl Orchestrator {
         // long_running: eşik beklemeden hemen backgrounded + task_id.
         if args.long_running {
             let _ = self.store.try_mark_a2a_wait_timeout(&task_id)?;
-            let poll_after = crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
+            let poll_after = crate::db::next_poll_after_secs(0);
             let mut body = json!({
                 "status": "backgrounded",
                 "task_id": task_id,
@@ -461,7 +461,7 @@ impl Orchestrator {
                         return Ok(payload);
                     }
                 }
-                let poll_after = crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs());
+                let poll_after = crate::db::next_poll_after_secs(0);
                 return Ok(json!({
                     "status": "backgrounded",
                     "task_id": task_id,
@@ -679,7 +679,7 @@ impl Orchestrator {
                 return Ok(payload);
             }
         }
-        let poll_after = crate::db::suggested_poll_after_secs(0, 150);
+        let poll_after = crate::db::next_poll_after_secs(0);
         Ok(json!({
             "status": "backgrounded",
             "task_id": task_id,
@@ -808,11 +808,7 @@ impl Orchestrator {
                     || matches!(status, TaskStatus::WaitTimeoutReached)
                     || must_deliver;
                 let poll_after = if use_backoff {
-                    self.store
-                        .bump_a2a_empty_wait(task_id, timeout_limit.as_secs())
-                        .unwrap_or_else(|_| {
-                            crate::db::suggested_poll_after_secs(0, timeout_limit.as_secs())
-                        })
+                    self.store.bump_a2a_empty_wait(task_id).unwrap_or(15)
                 } else {
                     1
                 };
@@ -883,39 +879,6 @@ impl Orchestrator {
         }
         let _ = self.store.mark_mcp_session_disconnected(session_id);
         n
-    }
-
-    /// Çağıran oturumun açık / unclaimed görevleri.
-    pub fn list_my_tasks(
-        &self,
-        session_id: &str,
-        include_completed_unclaimed: bool,
-    ) -> Result<Value> {
-        if !is_valid_session_id(session_id) {
-            return Err(anyhow!("geçersiz session_id"));
-        }
-        let tasks = self
-            .store
-            .list_my_a2a_tasks(session_id, include_completed_unclaimed)?;
-        let pending: Vec<String> = tasks
-            .iter()
-            .filter_map(|t| {
-                if t.get("unclaimed").and_then(|v| v.as_bool()) == Some(true) {
-                    t.get("task_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        Ok(json!({
-            "tasks": tasks,
-            "count": tasks.len(),
-            "pending_results": pending,
-            "next_action": crate::db::NEXT_ACTION_WAIT_TASK,
-            "note": "Yalnız bu oturumun görevleri. Sonuç için lounge_wait_task(task_id)."
-        }))
     }
 
     pub async fn yield_result(
@@ -1786,7 +1749,7 @@ mod tests {
             .unwrap();
         assert_eq!(bg["status"], "backgrounded");
         assert_eq!(bg["reason"], "long_running");
-        assert!(bg["poll_after_secs"].as_u64().unwrap() >= 5);
+        assert!(bg["poll_after_secs"].as_u64().unwrap() >= 15);
         assert_eq!(
             bg["next_action"].as_str().unwrap(),
             crate::db::NEXT_ACTION_WAIT_TASK
@@ -1878,95 +1841,6 @@ mod tests {
         let tid = out["task_id"].as_str().unwrap();
         let st = orch.store().a2a_task_status(tid).unwrap().unwrap();
         assert_eq!(st, TaskStatus::WaitTimeoutReached);
-    }
-
-    #[tokio::test]
-    async fn list_my_tasks_only_own_session() {
-        let (orch, _clock, session) = orch_manual();
-        let args = CallAgentArgs {
-            target_agent: "worker".into(),
-            task: "mine".into(),
-            project_id: "p".into(),
-            idempotency_key: None,
-            repo_path: None,
-            parent_task_id: None,
-            wait: true,
-            long_running: true,
-            must_deliver: false,
-        };
-        let mine = orch
-            .call_agent(&session, "cursor", args, None)
-            .await
-            .unwrap();
-        let mine_id = mine["task_id"].as_str().unwrap().to_string();
-
-        let other = Uuid::new_v4().to_string();
-        let args2 = CallAgentArgs {
-            target_agent: "worker".into(),
-            task: "theirs".into(),
-            project_id: "p".into(),
-            idempotency_key: None,
-            repo_path: None,
-            parent_task_id: None,
-            wait: true,
-            long_running: true,
-            must_deliver: false,
-        };
-        let _ = orch
-            .call_agent(&other, "cursor", args2, None)
-            .await
-            .unwrap();
-
-        let listed = orch.list_my_tasks(&session, true).unwrap();
-        let tasks = listed["tasks"].as_array().unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0]["task_id"], mine_id);
-
-        let other_list = orch.list_my_tasks(&other, true).unwrap();
-        assert_eq!(other_list["tasks"].as_array().unwrap().len(), 1);
-        assert_ne!(other_list["tasks"][0]["task_id"], mine_id);
-    }
-
-    #[tokio::test]
-    async fn pending_results_after_yield_before_wait() {
-        let (orch, _clock, session) = orch_manual();
-        bind_worker(orch.store(), "w", "worker");
-        let args = CallAgentArgs {
-            target_agent: "worker".into(),
-            task: "pend".into(),
-            project_id: "p".into(),
-            idempotency_key: None,
-            repo_path: None,
-            parent_task_id: None,
-            wait: true,
-            long_running: true,
-            must_deliver: false,
-        };
-        let bg = orch
-            .call_agent(&session, "cursor", args, None)
-            .await
-            .unwrap();
-        let tid = bg["task_id"].as_str().unwrap().to_string();
-        orch.store()
-            .yield_a2a_result(&tid, "w", TaskStatus::Completed, r#"{"done":1}"#)
-            .unwrap();
-        let pending = orch.store().pending_a2a_result_ids(&session).unwrap();
-        assert!(pending.contains(&tid), "pending={pending:?}");
-
-        let listed = orch.list_my_tasks(&session, true).unwrap();
-        assert!(listed["pending_results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v.as_str() == Some(tid.as_str())));
-
-        // Wait alınca pending boşalır.
-        let _ = orch
-            .wait_task(&session, "cursor", &tid, Some(200), None)
-            .await
-            .unwrap();
-        let after = orch.store().pending_a2a_result_ids(&session).unwrap();
-        assert!(!after.contains(&tid), "claimed sonrası pending={after:?}");
     }
 
     #[tokio::test]

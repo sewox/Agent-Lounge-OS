@@ -125,7 +125,7 @@ stdio EOF / HTTP `DELETE /mcp` / oturum kapanışı → in-flight çağrılara `
 - varsayılan → `CANCELLED` + `lounge.control.stop`
 - **`must_deliver=true`** → arka plan (`backgrounded`); iptal yok (in-flight olsa bile)
 
-**Backgrounded** görevler in-flight map'te yoktur → kopmada dokunulmaz. İstemci `lounge_wait_task` / `lounge_list_my_tasks` ile dönebilir.
+**Backgrounded** görevler in-flight map'te yoktur → kopmada dokunulmaz. İstemci `lounge_wait_task` ile dönebilir.
 
 ### Orphan TTL (yedek temizlik)
 
@@ -137,11 +137,11 @@ stdio EOF / HTTP `DELETE /mcp` / oturum kapanışı → in-flight çağrılara `
 
 `long_running=true`: eşik beklenmeden hemen `backgrounded` + `task_id`.
 
-`poll_after_secs`: profil eşiğine göre (~threshold/10, 5…15 sn başlar), her boş wait’te ×1.5, en fazla 60. Yanıtta `next_action`: `lounge_wait_task(task_id) ile tekrar kontrol et`.
-
-`lounge_list_my_tasks`: yalnız çağıran oturumun açık / unclaimed görevleri. Her `lounge_*` yanıtında hazır ama alınmamış sonuçlar için `pending_results: [task_id…]` piggyback (notifications/message best-effort, güvenilmez).
+`poll_after_secs`: long_running/backgrounded için 15 sn başlar, her boş wait’te ×1.5, en fazla 60. Yanıtta `next_action`: `lounge_wait_task(task_id) ile tekrar kontrol et`.
 
 Yeniden bağlanma: `task_token` (düz, bir kez) + DB hash; `lounge_wait_task` aynı oturum **veya** geçerli token. Workspace paylaşımı yok.
+
+PR-4: `lounge_list_my_tasks`, `pending_results` piggyback, `notifications/message`.
 
 ### `notifications/cancelled`
 
