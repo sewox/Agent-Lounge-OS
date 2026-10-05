@@ -568,6 +568,7 @@ impl Orchestrator {
         // sonuçsuz Completed yolları (yerel yürütme / boş bus zarfı) artık hang olmaz.
         match status {
             TaskStatus::Completed => {
+                let _ = self.store.touch_a2a_last_wait(task_id);
                 let result = self.store.a2a_task_result(task_id)?;
                 let missing = result.as_ref().map(|s| s.is_empty()).unwrap_or(true);
                 Ok(Some(json!({
@@ -582,6 +583,7 @@ impl Orchestrator {
             | TaskStatus::Cancelled
             | TaskStatus::Expired
             | TaskStatus::Timeout => {
+                let _ = self.store.touch_a2a_last_wait(task_id);
                 let result = self.store.a2a_task_result(task_id)?;
                 Ok(Some(json!({
                     "status": status.as_str().to_ascii_lowercase(),
@@ -779,10 +781,38 @@ impl Orchestrator {
             };
             if let Some(kind) = cancel_kind {
                 match kind {
-                    CancelKind::UserStop
-                    | CancelKind::SessionDisconnect
-                    | CancelKind::DeadlineExceeded => {
+                    CancelKind::UserStop => {
                         let mut out = self.handle_cancel(task_id, session_id, kind).await?;
+                        merge_diag(&mut out, &diag);
+                        return Ok(out);
+                    }
+                    // Oturum koptu: yalnız long-poll bitsin — görevi iptal etme (backgrounded korunur).
+                    CancelKind::SessionDisconnect => {
+                        let status = self
+                            .store
+                            .a2a_task_status(task_id)?
+                            .unwrap_or(TaskStatus::WaitTimeoutReached);
+                        let poll_after = crate::db::next_poll_after_secs(0);
+                        let mut body = json!({
+                            "status": "still_running",
+                            "task_id": task_id,
+                            "task_status": status.as_str(),
+                            "reason": "session disconnect",
+                            "poll_after_secs": poll_after,
+                            "retry_after_ms": poll_after.saturating_mul(1000),
+                            "next_action": crate::db::NEXT_ACTION_WAIT_TASK,
+                            "timeout_limit_secs": timeout_limit.as_secs(),
+                            "message": "Oturum koptu — görev arka planda sürüyor. lounge_wait_task (veya task_token) ile yeniden bağlanın; iptal edilmedi.",
+                            "hint": "Task was not cancelled. Reconnect and call lounge_wait_task."
+                        });
+                        merge_diag(&mut body, &diag);
+                        return Ok(body);
+                    }
+                    CancelKind::DeadlineExceeded => {
+                        // İstemci wait deadline — görev arka planda kalsın (iptal yok).
+                        let mut out = self
+                            .background_on_cancel(task_id, session_id, "deadline exceeded")
+                            .await?;
                         merge_diag(&mut out, &diag);
                         return Ok(out);
                     }
@@ -1870,5 +1900,109 @@ mod tests {
         let tid = out["task_id"].as_str().unwrap();
         let (md, lr) = orch.store().a2a_flags(tid).unwrap();
         assert!(md && lr);
+    }
+
+    #[tokio::test]
+    async fn wait_task_session_disconnect_does_not_cancel_backgrounded() {
+        // B1: backgrounded göreve wait_task açılıp oturum kapanınca CANCELLED olmamalı;
+        // task_token ile sonraki oturum sonuç alabilmeli.
+        let (orch, clock, session) = orch_manual();
+        bind_worker(orch.store(), "w", "worker");
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "bg-wait-disc".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: true,
+            must_deliver: false,
+        };
+        let bg = orch
+            .call_agent(&session, "cursor", args, None)
+            .await
+            .unwrap();
+        assert_eq!(bg["status"], "backgrounded");
+        let task_id = bg["task_id"].as_str().unwrap().to_string();
+        let token = bg["task_token"].as_str().unwrap().to_string();
+
+        let (tx, rx) = watch::channel(None);
+        let wait = tokio::spawn({
+            let orch = orch.clone();
+            let session = session.clone();
+            let task_id = task_id.clone();
+            async move {
+                orch.wait_task(&session, "cursor", &task_id, Some(5_000), Some(rx))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        clock.advance(Duration::from_millis(20));
+        let _ = tx.send(Some(CancelKind::SessionDisconnect));
+        clock.advance(Duration::from_millis(50));
+        let out = wait.await.unwrap().unwrap();
+        assert_eq!(out["status"], "still_running");
+        assert_eq!(out["reason"], "session disconnect");
+        let st = orch.store().a2a_task_status(&task_id).unwrap().unwrap();
+        assert_eq!(
+            st,
+            TaskStatus::WaitTimeoutReached,
+            "disconnect wait iptal etmemeli"
+        );
+
+        orch.store()
+            .yield_a2a_result(&task_id, "w", TaskStatus::Completed, r#"{"ok":1}"#)
+            .unwrap();
+        let other = Uuid::new_v4().to_string();
+        let claimed = orch
+            .wait_task_with_token(&other, "cursor", &task_id, Some(500), None, Some(&token))
+            .await
+            .unwrap();
+        assert_eq!(claimed["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn try_read_result_marks_delivered_against_orphan_ttl() {
+        // B3: terminal okuma last_wait yazar → sweeper COMPLETED silmez.
+        let (orch, _clock, session) = orch_manual();
+        bind_worker(orch.store(), "w", "worker");
+        let args = CallAgentArgs {
+            target_agent: "worker".into(),
+            task: "deliv-read".into(),
+            project_id: "p".into(),
+            idempotency_key: None,
+            repo_path: None,
+            parent_task_id: None,
+            wait: true,
+            long_running: true,
+            must_deliver: false,
+        };
+        let bg = orch
+            .call_agent(&session, "cursor", args, None)
+            .await
+            .unwrap();
+        let tid = bg["task_id"].as_str().unwrap().to_string();
+        // Wait başı (result'tan önce).
+        let _ = orch.store().touch_a2a_last_wait(&tid);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        orch.store()
+            .yield_a2a_result(&tid, "w", TaskStatus::Completed, r#"{"v":1}"#)
+            .unwrap();
+        let got = orch.try_read_result(&tid, &session).unwrap().unwrap();
+        assert_eq!(got["status"], "completed");
+        let (expired, _) = orch
+            .store()
+            .expire_a2a_orphans(
+                "2099-01-01T00:00:00.000Z",
+                Duration::from_secs(1),
+                Duration::from_secs(1800),
+            )
+            .unwrap();
+        assert!(!expired.contains(&tid), "expired={expired:?}");
+        assert_eq!(
+            orch.store().a2a_task_status(&tid).unwrap(),
+            Some(TaskStatus::Completed)
+        );
     }
 }

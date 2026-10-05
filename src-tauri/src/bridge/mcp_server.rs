@@ -1314,6 +1314,16 @@ pub fn default_mcp_http_url() -> String {
     format!("http://{}", default_mcp_http_bind())
 }
 
+/// Stdio→HTTP proxy reqwest timeout (sn). Varsayılan 320 (≥ claude-code 300 + marj).
+pub fn resolve_proxy_timeout_secs() -> u64 {
+    std::env::var("LOUNGE_MCP_PROXY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .map(|n| n.min(900))
+        .unwrap_or(320)
+}
+
 pub fn mcp_http_reachable() -> bool {
     probe_tcp_host_port(&format!("tcp://{}", default_mcp_http_bind()))
 }
@@ -1399,13 +1409,8 @@ pub async fn run_stdio_embedded(store: ExperienceStore, nats_url: impl Into<Stri
 /// Okuma ile HTTP POST eşzamanlı: uzun tools/call sürerken `cancelled` okunur.
 pub async fn run_stdio_http_proxy() -> Result<()> {
     let base = default_mcp_http_url();
-    // Cursor progress uzatması ≤280 sn; proxy istemci hard-timeout öncesi dönmeli.
-    let proxy_timeout_secs = std::env::var("LOUNGE_MCP_PROXY_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|&n| n > 0)
-        .map(|n| n.min(300))
-        .unwrap_or(290);
+    // En yüksek profil eşiği (claude-code 300) + marj — 290 eski değer Claude Code'u asılı bırakıyordu.
+    let proxy_timeout_secs = resolve_proxy_timeout_secs();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(proxy_timeout_secs))
         .build()
@@ -1535,15 +1540,40 @@ pub async fn run_stdio_http_proxy() -> Result<()> {
                         Ok(text) if !text.trim().is_empty() => {
                             let _ = out_tx.send(text).await;
                         }
-                        _ => {
-                            let _ = request_id;
+                        Ok(_) if !status.is_success() => {
+                            if let Some(id) = request_id {
+                                let err = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": {
+                                        "code": -32000,
+                                        "message": format!("MCP HTTP {status}")
+                                    }
+                                });
+                                let _ = out_tx.send(err.to_string()).await;
+                            }
                         }
+                        _ => {}
                     }
                     if !status.is_success() {
                         eprintln!("[lounge-mcp] HTTP {status}");
                     }
                 }
-                Err(err) => eprintln!("[lounge-mcp] MCP HTTP POST: {err}"),
+                Err(err) => {
+                    eprintln!("[lounge-mcp] MCP HTTP POST: {err}");
+                    // İstemci asılı kalmasın — timeout/bağlantı hatasında JSON-RPC error.
+                    if let Some(id) = request_id {
+                        let err_body = json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32000,
+                                "message": format!("MCP proxy: {err}")
+                            }
+                        });
+                        let _ = out_tx.send(err_body.to_string()).await;
+                    }
+                }
             }
         });
     }
@@ -1972,5 +2002,25 @@ mod tests {
         assert_eq!(latest.len(), 1);
         assert!(!latest[0].reviewed, "MCP rows land unreviewed");
         assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
+    }
+
+    #[test]
+    fn proxy_timeout_default_covers_claude_code_threshold() {
+        // B4: varsayılan ≥ claude-code 300 + marj; eski 290 asılı bırakıyordu.
+        let prev = std::env::var("LOUNGE_MCP_PROXY_TIMEOUT_SECS").ok();
+        std::env::remove_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS");
+        assert!(
+            resolve_proxy_timeout_secs() >= 320,
+            "default={}",
+            resolve_proxy_timeout_secs()
+        );
+        std::env::set_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS", "400");
+        assert_eq!(resolve_proxy_timeout_secs(), 400);
+        std::env::set_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS", "9999");
+        assert_eq!(resolve_proxy_timeout_secs(), 900);
+        match prev {
+            Some(v) => std::env::set_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS", v),
+            None => std::env::remove_var("LOUNGE_MCP_PROXY_TIMEOUT_SECS"),
+        }
     }
 }

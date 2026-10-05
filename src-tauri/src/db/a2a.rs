@@ -1137,9 +1137,10 @@ pub fn touch_dispatched_for_target(conn: &Connection, target_agent: &str) -> Res
     Ok(n as u64)
 }
 
-/// EXECUTING / DISPATCHED / RECOVERY_PENDING / QUEUED / WAIT_TIMEOUT_REACHED sessizliği
-/// → NEEDS_HUMAN. `PENDING_APPROVAL` bilinçli olarak dışarıda (kullanıcı onayı bekleniyor).
-/// `WAIT_TIMEOUT_REACHED`: MCP backgrounded — worker ölürse sonsuz still_running olmasın.
+/// EXECUTING / DISPATCHED / RECOVERY_PENDING / QUEUED sessizliği → NEEDS_HUMAN.
+/// `PENDING_APPROVAL` bilinçli olarak dışarıda (kullanıcı onayı bekleniyor).
+/// `WAIT_TIMEOUT_REACHED` (MCP backgrounded) muaf — eşik > silence (150/210/280/300)
+/// olduğunda long-poll sırasında yanlış NEEDS_HUMAN olmasın; yield kapısı WTR kabul eder.
 pub fn mark_silent_tasks_needs_human(
     conn: &Connection,
     now_rfc3339: &str,
@@ -1149,7 +1150,7 @@ pub fn mark_silent_tasks_needs_human(
     let mut stmt = conn.prepare(
         r#"
         SELECT id, updated_at FROM a2a_tasks
-        WHERE status IN ('EXECUTING', 'DISPATCHED', 'RECOVERY_PENDING', 'QUEUED', 'WAIT_TIMEOUT_REACHED')
+        WHERE status IN ('EXECUTING', 'DISPATCHED', 'RECOVERY_PENDING', 'QUEUED')
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1219,6 +1220,7 @@ fn parse_rfc3339_age_secs(now: &str, then: &str) -> Option<i64> {
 
 /// Sonuç orphan: backgrounded → tamamlandı, N dk hiç wait yok → EXPIRED.
 /// Çalışan (sonuçsuz) görevleri öldürmez. `must_deliver` görevler atlanır.
+/// Teslim edilmiş (last_wait_at >= result_ready_at) atlanır.
 pub fn expire_result_orphans(
     conn: &Connection,
     now_rfc3339: &str,
@@ -1234,6 +1236,7 @@ pub fn expire_result_orphans(
           AND result_json IS NOT NULL
           AND status IN ('COMPLETED', 'FAILED')
           AND COALESCE(must_deliver, 0) = 0
+          AND (last_wait_at IS NULL OR last_wait_at < result_ready_at)
         "#,
     )?;
     let rows = stmt.query_map([], |row| {
@@ -1247,20 +1250,8 @@ pub fn expire_result_orphans(
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, ready_at, last_wait, _bg, _st) = row?;
+        let (id, ready_at, _last_wait, _bg, _st) = row?;
         let Some(ready) = ready_at else { continue };
-        // Wait sonucu hazır olduktan sonra geldiyse orphan değil.
-        if let Some(ref lw) = last_wait {
-            if let (Some(ready_age), Some(wait_age)) = (
-                parse_rfc3339_age_secs(now_rfc3339, &ready),
-                parse_rfc3339_age_secs(now_rfc3339, lw),
-            ) {
-                // last_wait daha yeni (küçük age) → sorgulandı.
-                if wait_age <= ready_age {
-                    continue;
-                }
-            }
-        }
         let Some(age) = parse_rfc3339_age_secs(now_rfc3339, &ready) else {
             continue;
         };
@@ -1336,6 +1327,7 @@ pub fn expire_incomplete_orphans(
 }
 
 /// must_deliver: hazır sonuç veya açık görev TTL aşımı → FAILED + reason abandoned.
+/// Teslim edilmiş sonuçlar (last_wait_at >= result_ready_at) atlanır.
 pub fn abandon_must_deliver_orphans(
     conn: &Connection,
     now_rfc3339: &str,
@@ -1344,7 +1336,7 @@ pub fn abandon_must_deliver_orphans(
     let ttl_secs = ttl.as_secs() as i64;
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, COALESCE(result_ready_at, created_at), status
+        SELECT id, COALESCE(result_ready_at, created_at), status, result_ready_at, last_wait_at
         FROM a2a_tasks
         WHERE must_deliver = 1
           AND status NOT IN ('FAILED', 'CANCELLED', 'EXPIRED', 'TIMEOUT')
@@ -1355,13 +1347,19 @@ pub fn abandon_must_deliver_orphans(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
     let mut abandoned = Vec::new();
     for row in rows {
-        let (id, anchor, status) = row?;
-        // COMPLETED ama hiç alınmamış (last_wait yok veya result_ready'den eski) → abandon.
-        // Açık görevler de TTL ile abandon.
+        let (id, anchor, status, result_ready, last_wait) = row?;
+        // Teslim edilmiş: last_wait result_ready'den sonra veya eşit.
+        if let (Some(ref ready), Some(ref lw)) = (&result_ready, &last_wait) {
+            if lw.as_str() >= ready.as_str() {
+                continue;
+            }
+        }
         let Some(age) = parse_rfc3339_age_secs(now_rfc3339, &anchor) else {
             continue;
         };
@@ -1369,21 +1367,8 @@ pub fn abandon_must_deliver_orphans(
             continue;
         }
         if status == "COMPLETED" {
-            let last_wait: Option<String> = conn
-                .query_row(
-                    "SELECT last_wait_at FROM a2a_tasks WHERE id = ?1",
-                    params![id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            if let Some(ref lw) = last_wait {
-                if let Some(wait_age) = parse_rfc3339_age_secs(now_rfc3339, lw) {
-                    if wait_age <= age {
-                        continue; // alındı
-                    }
-                }
-            }
+            // Sonuç hazır ama hiç wait yok / eski wait → abandon adayı (TTL aşıldı).
+            // Yukarıdaki teslim kontrolü geçtiyse buraya düşer.
         }
         let envelope = serde_json::json!({
             "reason": "abandoned",
@@ -2674,5 +2659,99 @@ mod tests {
         assert_eq!(next_poll_after_secs(0), 15);
         assert_eq!(next_poll_after_secs(1), 22);
         assert!(next_poll_after_secs(10) <= 60);
+    }
+
+    #[test]
+    fn wait_timeout_reached_exempt_from_silence_scan() {
+        // B2: WTR (backgrounded) 120 sn sessizlikte NEEDS_HUMAN olmamalı.
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "bg-silence");
+        task.session_id = Some("sess-sil".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+        store
+            .touch_a2a_updated_at(&task.id, "2026-10-04T12:00:00.000Z")
+            .unwrap();
+        let marked = store
+            .recover_silent_a2a_tasks("2026-10-04T12:05:00.000Z", Duration::from_secs(120))
+            .unwrap();
+        assert!(
+            !marked.contains(&task.id),
+            "WTR silence'tan muaf: {marked:?}"
+        );
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::WaitTimeoutReached)
+        );
+    }
+
+    #[test]
+    fn delivered_completed_not_expired_by_sweeper() {
+        // B3: sonuç alındıktan sonra last_wait yazılır → orphan EXPIRED yok.
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "delivered");
+        task.session_id = Some("sess-del".into());
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+        // Wait başı (result'tan önce) — eski bug: bu last_wait result_ready'den eski kalırdı.
+        store.touch_a2a_last_wait(&task.id).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        store
+            .complete_a2a_with_result(
+                &task.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+        // Teslim: başarılı okuma last_wait'i yeniler.
+        store.touch_a2a_last_wait(&task.id).unwrap();
+        let (expired, _) = store
+            .expire_a2a_orphans(
+                "2099-01-01T00:00:00.000Z",
+                Duration::from_secs(1),
+                Duration::from_secs(1800),
+            )
+            .unwrap();
+        assert!(
+            !expired.contains(&task.id),
+            "teslim edilmiş COMPLETED expire olmamalı: {expired:?}"
+        );
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn delivered_must_deliver_not_abandoned() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut task = LoungeTask::new("mcp:cursor", "p", "md-del");
+        task.session_id = Some("sess-md-del".into());
+        task.must_deliver = true;
+        store.admit_a2a_task(&mut task, 10).unwrap();
+        store.mark_a2a_wait_timeout(&task.id).unwrap();
+        store.touch_a2a_last_wait(&task.id).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        store
+            .complete_a2a_with_result(
+                &task.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+        store.touch_a2a_last_wait(&task.id).unwrap();
+        let abandoned = store
+            .abandon_stale_must_deliver("2099-01-01T00:00:00.000Z", Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            !abandoned.contains(&task.id),
+            "teslim edilmiş must_deliver abandon olmamalı: {abandoned:?}"
+        );
+        assert_eq!(
+            store.a2a_task_status(&task.id).unwrap(),
+            Some(TaskStatus::Completed)
+        );
     }
 }

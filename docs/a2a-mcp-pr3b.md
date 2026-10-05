@@ -1,6 +1,6 @@
 # A2A MCP — PR-3b Tuning & Stability (tasarım notu)
 
-Status: **implemented in PR-3b** (üzerine `main` @ MCP Bridge v2 / #83). Kaynak: Gemini msg57 + ölçümler 2026-10-04/05.
+Status: **implemented in PR-3b** (üzerine `main` @ MCP Bridge v2 / #83). Kaynak: Gemini msg57 + ölçümler 2026-10-04/05; inceleme düzeltmeleri B1–B4.
 
 ## Bu PR'da
 
@@ -8,16 +8,22 @@ Status: **implemented in PR-3b** (üzerine `main` @ MCP Bridge v2 / #83). Kaynak
 |---|---|
 | `ClientProfile` | measured/assumed eşik tablosu; override = hard−20 (unknown 170) |
 | Cursor progress | progressToken → 10 sn heartbeat, Mod A ≤280 sn |
-| In-flight iptal | stdio EOF / `DELETE /mcp` → `SessionDisconnect`: varsayılan CANCELLED+stop; **must_deliver** → arka plan; backgrounded korunur |
-| TTL (ikisi 30 dk, ayarlanabilir) | sonuç orphan → EXPIRED; incomplete orphan → EXPIRED+stop; **must_deliver atlanır** |
+| In-flight iptal | stdio EOF / `DELETE /mcp` → `SessionDisconnect`: Mod A senkron → CANCELLED+stop (must_deliver → arka plan); **wait_task long-poll yalnız biter, görev iptal edilmez**; backgrounded korunur |
+| TTL (ikisi 30 dk, ayarlanabilir) | sonuç orphan → EXPIRED; incomplete orphan → EXPIRED+stop; **must_deliver atlanır**; **teslim (last_wait ≥ result_ready) atlanır** |
+| Sessizlik | WTR (backgrounded) **muaf**; EXECUTING/DISPATCHED/QUEUED/RECOVERY_PENDING → NEEDS_HUMAN |
 | `long_running` | `true` → eşik beklemeden hemen `backgrounded` + `task_id` |
 | `must_deliver` | kopmada iptal yok; orphan EXPIRED yok; 24 sa alınmazsa FAILED(abandoned); kota 5/10 → **-32029** |
 | `poll_after_secs` | 15 → ×1.5 → ≤60; `next_action` + tool açıklamaları |
 | `task_token` | yaratılışta düz token bir kez; DB SHA-256; wait = aynı oturum VEYA token |
+| Proxy timeout | varsayılan **320 sn** (≥ claude-code 300); hata → JSON-RPC error istemciye |
 
 ## PR-4'e taşınan (burada yok)
 
 `lounge_list_my_tasks`, `pending_results` piggyback, `notifications/message`.
+
+## İzleme (bu turda zorunlu değil)
+
+kota TOCTOU; `a2a_flags` hata→iptal; standalone progress yalnız stderr; claude_ai/claude_code host id dashboard uyumsuzluğu; DELETE sonrası POST oturumu geri yazma; `task_token_hash` NATS payload; TTL settings sabitleri yalnız env.
 
 ## ClientProfile özeti
 

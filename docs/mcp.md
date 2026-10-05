@@ -122,10 +122,16 @@ Yanıtlarda teşhis: `client_profile`, `timeout_limit_secs`, `profile_source`.
 ### Bağlantı kopması (cancel göndermeyen istemciler)
 
 stdio EOF / HTTP `DELETE /mcp` / oturum kapanışı → in-flight çağrılara `SessionDisconnect`:
-- varsayılan → `CANCELLED` + `lounge.control.stop`
-- **`must_deliver=true`** → arka plan (`backgrounded`); iptal yok (in-flight olsa bile)
+- **Mod A senkron** (`lounge_call_agent` wait): varsayılan → `CANCELLED` + `lounge.control.stop`; **`must_deliver=true`** → arka plan
+- **`lounge_wait_task` long-poll**: yalnız bekleme biter (`still_running`); görev **iptal edilmez** (backgrounded korunur)
 
 **Backgrounded** görevler in-flight map'te yoktur → kopmada dokunulmaz. İstemci `lounge_wait_task` ile dönebilir.
+
+`WAIT_TIMEOUT_REACHED` sessizlik taramasından **muaf** (eşik > 120 sn profilde yanlış NEEDS_HUMAN yok).
+
+Terminal sonuç okununca `last_wait_at` yenilenir (teslim) → orphan EXPIRED / must_deliver abandoned uygulanmaz.
+
+Stdio HTTP proxy timeout varsayılan **320 sn** (`LOUNGE_MCP_PROXY_TIMEOUT_SECS`); hata/timeout → istemciye JSON-RPC error.
 
 ### Orphan TTL (yedek temizlik)
 
