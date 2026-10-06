@@ -1581,20 +1581,109 @@ mod tests {
         );
     }
 
-    /// Opt-in live Candle inference against real Laya weights.
+    /// Known ROUTING logit for `write_tiny_laya_fixture` (CPU F32, hashed fills).
+    /// Refresh when the fixture generator or candle path changes.
+    const EXPECTED_TINY_ROUTING_LOGIT: f32 = -0.000_304_325_72;
+
+    /// Default-suite Candle forward pass on a tiny in-process fixture (no download).
     ///
-    /// Not run in default CI: weights are large and not present on runners.
-    /// See `docs/qa/rust-opt-in-tests.md`.
+    /// Replaces the retired ignored live-weights test. Real weights run under
+    /// `--features laya-live` via `.github/workflows/nightly-laya.yml`.
     #[test]
-    #[ignore = "requires LAYA_MODEL_DIR with real Candle weights; run: cargo test --manifest-path src-tauri/Cargo.toml -- --ignored live_laya_infer"]
+    fn laya_infer_tiny_fixture() {
+        use crate::kernel::laya::write_tiny_laya_fixture;
+        use std::time::Instant;
+
+        let dir = std::env::temp_dir().join(format!("lounge-laya-tiny-{}", uuid::Uuid::new_v4()));
+        write_tiny_laya_fixture(&dir).expect("write tiny laya fixture");
+        let session = LayaSession::load_cpu(&dir).expect("load tiny fixture");
+        let msg = sample_msg();
+        let packed = pack_message(&session.tokenizer, &msg, &session.cfg);
+        assert_eq!(packed.len(), 3);
+        assert_eq!(packed[0].markers.len(), 3);
+        assert_eq!(packed[1].markers.len(), 3);
+        assert_eq!(packed[2].markers.len(), 2);
+
+        let t0 = Instant::now();
+        let logits = session.infer_batch(packed.clone()).expect("forward pass");
+        let forward_us = t0.elapsed().as_micros();
+        // Timing is informational only — never assert wall-clock (slow CI runners).
+        eprintln!("laya_infer_tiny_fixture forward_pass_us={forward_us}");
+
+        assert_eq!(logits.len(), 3, "batch rows");
+        // Batch is padded to kmax (=3); CONTEXT_MATCH only has 2 real markers.
+        assert!(
+            logits.iter().all(|row| row.len() == 3),
+            "kmax-padded rows: {logits:?}"
+        );
+        for (qi, row) in logits.iter().enumerate() {
+            let real = packed[qi].markers.len();
+            for (oi, z) in row.iter().take(real).enumerate() {
+                assert!(z.is_finite(), "logits[{qi}][{oi}] not finite: {z}");
+            }
+        }
+
+        // Determinism: second forward on the same session must match bit-for-bit.
+        let logits2 = session.infer_batch(packed.clone()).expect("second forward");
+        assert_eq!(logits, logits2, "forward pass must be deterministic");
+
+        // Known-value: pin the absolute ROUTING logit for this fixture generator.
+        let routing0 = logits[0][0];
+        eprintln!("laya_infer_tiny_fixture routing0={routing0} logits={logits:?}");
+        assert!(
+            (routing0 - EXPECTED_TINY_ROUTING_LOGIT).abs() < 1e-4,
+            "known-value ROUTING logit drift: got {routing0}, expected {EXPECTED_TINY_ROUTING_LOGIT}"
+        );
+        // Real option logits must be finite and non-trivial (not the all-zero collapse).
+        for (qi, row) in logits.iter().enumerate() {
+            let real = packed[qi].markers.len();
+            let head = &row[..real];
+            assert!(
+                head.iter().any(|z| z.abs() > 1e-6),
+                "q{qi} logits collapsed to ~0: {head:?}"
+            );
+        }
+
+        let result = result_from_logits(
+            &msg,
+            &packed,
+            &logits,
+            &session.cfg,
+            forward_us,
+            &session.device_name,
+        )
+        .expect("result_from_logits");
+        assert!((0.0..=1.0).contains(&result.knowledge_hit));
+        assert_eq!(result.device, "cpu");
+        assert_eq!(result.routing.probabilities.len(), 3);
+        assert_eq!(result.security.probabilities.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real Candle weights — compiled only with `--features laya-live`.
+    /// Nightly: `.github/workflows/nightly-laya.yml` (sets `LAYA_LIVE_INFER=1`).
+    #[cfg(feature = "laya-live")]
+    #[test]
     fn live_laya_infer() {
+        let enabled = std::env::var("LAYA_LIVE_INFER")
+            .ok()
+            .as_deref()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        assert!(
+            enabled,
+            "live_laya_infer requires LAYA_LIVE_INFER=1 (see docs/qa/rust-opt-in-tests.md)"
+        );
         let dir = std::env::var("LAYA_MODEL_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| laya_dir());
-        let session = LayaSession::load(&dir).expect("LAYA_MODEL_DIR");
+        crate::services::model_manager::ensure_artifacts(&dir, true).unwrap_or_else(|err| {
+            panic!("download/verify Laya weights at {}: {err}", dir.display())
+        });
+        let session = LayaSession::load(&dir).expect("load real Laya weights");
         let msg = sample_msg();
         let packed = pack_message(&session.tokenizer, &msg, &session.cfg);
-        let logits = session.infer_batch(packed.clone()).unwrap();
+        let logits = session.infer_batch(packed.clone()).expect("live forward");
         let result = result_from_logits(
             &msg,
             &packed,
@@ -1603,8 +1692,10 @@ mod tests {
             0,
             &session.device_name,
         )
-        .unwrap();
-        assert!(result.elapsed_ms < 60_000);
+        .expect("result_from_logits");
+        assert_eq!(logits.len(), 3);
         assert!((0.0..=1.0).contains(&result.knowledge_hit));
+        assert!(result.routing.confidence.is_finite());
+        assert!(result.security.confidence.is_finite());
     }
 }

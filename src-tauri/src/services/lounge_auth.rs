@@ -784,6 +784,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// POSIX-only: asserts `mode 0o600` via `PermissionsExt` (no Windows ACL equivalent in-tree).
     #[cfg(unix)]
     #[test]
     fn secret_files_are_mode_600() {

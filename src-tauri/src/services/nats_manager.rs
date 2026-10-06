@@ -668,7 +668,7 @@ mod tests {
                 .context("publish task")?;
             nc.flush().context("flush")?;
             let msg = sub
-                .next_timeout(Duration::from_secs(2))
+                .next_timeout(Duration::from_secs(5))
                 .context("wildcard lounge.> görev mesajı gelmedi")?;
             assert_eq!(msg.subject, "lounge.task.requested");
             let envelope = LoungeMessage::from_nats(&msg.subject, &msg.data);
@@ -719,7 +719,7 @@ mod tests {
             );
         });
         let unauth =
-            super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(5));
+            super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(8));
         assert!(
             unauth.is_err(),
             "unauthenticated connect must be rejected when nats-server requires user/pass"
@@ -727,7 +727,7 @@ mod tests {
         let auth = super::super::lounge_auth::connect_nats_timeout(
             &url,
             Some((&creds.user, &creds.password)),
-            Duration::from_secs(5),
+            Duration::from_secs(8),
         );
         assert!(auth.is_ok(), "authenticated connect must succeed: {auth:?}");
         let _ = child.kill();
@@ -873,7 +873,8 @@ mod tests {
             .context("spawn nats-server")?;
         let url = format!("nats://127.0.0.1:{port}");
         // Bounded dials: raw nats::connect can hang forever on a non-NATS listener.
-        for _ in 0..80 {
+        // ~10s budget (200 × 50ms) absorbs slow Windows/macOS process start without flakes.
+        for _ in 0..200 {
             let ok = match creds {
                 Some(c) => super::super::lounge_auth::connect_nats_timeout(
                     &url,
@@ -889,6 +890,8 @@ mod tests {
                 .is_ok(),
             };
             if ok {
+                // Brief settle so subscribe/publish races on a freshly-bound port are rare.
+                std::thread::sleep(Duration::from_millis(50));
                 return Ok((url, child));
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -897,7 +900,7 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         Err(anyhow::anyhow!(
-            "nats-server spawned but did not accept connections at {url} within ~4s"
+            "nats-server spawned but did not accept connections at {url} within ~10s"
         ))
     }
 
