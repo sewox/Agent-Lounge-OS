@@ -248,11 +248,8 @@ test.describe("VP — vault project grouping", () => {
         .locator('[data-qa="vault-page-row"]')
         .filter({ hasText: /dispatcher\.rs/i })
         .first();
-      if (await dispatcher.count()) {
-        await dispatcher.click();
-      } else {
-        await page.locator('[data-qa="vault-page-row"]').first().click();
-      }
+      await expect(dispatcher, "dispatcher.rs page row must exist in fixture").toBeVisible();
+      await dispatcher.click();
       await expect(page.locator('[data-qa="vault-page-symbols"]')).toBeVisible();
       await expect(page.locator('[data-qa="vault-page-symbols"]')).toContainText(deadLabel);
       const symbols = page.locator('[data-qa="vault-file-symbol"]');

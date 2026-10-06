@@ -4,8 +4,13 @@ import { getIpcLog } from "../harness/tauri-mock";
 import { expect, test } from "@playwright/test";
 
 test.describe("SH — global shell", () => {
-  test("SH-01 · 8 nav links navigate and highlight active", async ({ page }) => {
+  test("SH-01 · 8 nav links navigate and highlight active @smoke", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
+    // App loads: shell chrome + main content (not a white screen).
+    await expect(page.locator('[data-qa="sidebar"]')).toBeVisible();
+    await expect(page.locator("main")).toBeVisible();
+    const mainText = (await page.locator("main").innerText()).trim();
+    expect(mainText.length, "main must render content (no white screen)").toBeGreaterThan(40);
     const links = page.locator('[data-qa="sidebar"] nav a');
     await expect(links).toHaveCount(8);
     const hrefs = await links.evaluateAll((els) => els.map((e) => (e as HTMLAnchorElement).getAttribute("href")));
@@ -100,37 +105,37 @@ test.describe("SH — global shell", () => {
     await expect(daemonBlock).toBeVisible();
     await page.waitForTimeout(500);
     const text = await page.locator('[data-qa="sidebar"]').innerText();
-    expect(/Running|Disconnected|Not installed|Kurulu değil/i.test(text)).toBeTruthy();
-    expect(text).not.toMatch(/\n\s*—\s*\n/);
+    expect(/Running/i.test(text), "core daemons (LMR/NATS) must show Running").toBeTruthy();
+    expect(/Disconnected/i.test(text), "fixture must expose a Disconnected daemon").toBeTruthy();
     // Disconnected (crashed) rows expose Restart Service; not-installed does not.
-    if (/Disconnected/i.test(text) && !/Not installed|Kurulu değil/i.test(text)) {
-      await expect(page.getByRole("button", { name: /Restart Service/i }).first()).toBeVisible();
-    }
+    await expect(
+      page.getByRole("button", { name: /Restart Service|Servisi Yeniden Başlat/i }).first(),
+    ).toBeVisible();
+    expect(text).not.toMatch(/\n\s*—\s*\n/);
   });
 
   test("SH-08 · no header/sidebar overflow (L5)", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const m = await measureLayout(page, "/dashboard");
-    const newNode = page.getByRole("button", { name: "+ New Node" });
-    let newNodeOverflow = false;
-    if (await newNode.count()) {
-      newNodeOverflow = await page.evaluate(() => {
-        const sidebar = document.querySelector('[data-qa="sidebar"]') as HTMLElement | null;
-        const btn = Array.from(document.querySelectorAll("button")).find((b) =>
-          (b.textContent || "").includes("+ New Node"),
-        );
-        if (!sidebar || !btn) return false;
-        const sb = sidebar.getBoundingClientRect();
-        const br = btn.getBoundingClientRect();
-        return br.right > sb.right + 0.5;
-      });
-    }
-    expect(m.l5_pass && !newNodeOverflow).toBe(true);
+    // + New Node was removed (SH-02); Index Workspace is the live header chrome control.
+    const indexBtn = page.getByRole("button", {
+      name: /Index Workspace|Çalışma Alanını Tara/i,
+    });
+    await expect(indexBtn, "Index Workspace control must exist").toBeVisible();
+    const indexOverflow = await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll("button")).find((b) =>
+        /Index Workspace|Çalışma Alanını Tara/i.test(b.textContent || ""),
+      );
+      if (!btn) return true;
+      const br = btn.getBoundingClientRect();
+      return br.right > window.innerWidth + 0.5 || br.left < -0.5;
+    });
+    expect(m.l5_pass && !indexOverflow).toBe(true);
   });
 });
 
 test.describe("X — cross-cutting", () => {
-  test("X-03 · no uncaught console errors on dashboard", async ({ page }) => {
+  test("X-03 · no uncaught console errors on dashboard @smoke", async ({ page }) => {
     const errors = await collectConsoleErrors(page);
     // Must exercise the full Tauri fixture (product path). ApprovalNotificationBridge
     // no longer branches on isTauri() during render, so hydrate matches SSR.
@@ -299,7 +304,7 @@ test.describe("X — cross-cutting", () => {
     expect(settingsTr).not.toMatch(/Routing Policy|Default editor|Alert sound|Destructive operations/i);
   });
 
-  test("X-02 · min font gate delegated to S4 grep (smoke DOM check)", async ({ page }) => {
+  test("X-02 · min font gate delegated to S4 grep (smoke DOM check) @smoke", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const tooSmall = await page.evaluate(() => {
       const bad: string[] = [];

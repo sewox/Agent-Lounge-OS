@@ -872,6 +872,10 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             tasks: 3,
             successes: 2,
           };
+        case "save_markdown_report": {
+          const name = String(args?.defaultName ?? "agent-efficiency.md");
+          return `/tmp/AgentLounge-qa/reports/${name.endsWith(".md") ? name : `${name}.md`}`;
+        }
         // PR-4+ stubs — returning errors surfaces missing UX.
         case "delete_experience":
         case "approve_experience":

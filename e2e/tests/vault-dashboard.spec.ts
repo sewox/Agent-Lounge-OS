@@ -17,7 +17,7 @@ async function openVaultProject(page: import("@playwright/test").Page, name: str
 }
 
 test.describe("DB — dashboard", () => {
-  test("DB-01 · KPI Dead Symbols equals real count (not 127) [full]", async ({ page }) => {
+  test("DB-01 · KPI Dead Symbols equals real count (not 127) [full] @smoke", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const value = await page.locator("main").getByText("DEAD SYMBOLS").locator("xpath=ancestor::*[contains(@class,'rounded')][1]").innerText();
     // With full fixture, deadSymbols.length is 10 — must not be 127.
@@ -37,37 +37,37 @@ test.describe("DB — dashboard", () => {
     await openRoute(page, "/dashboard", "full");
     // Prefer Semantic Map project row — avoid experience cards that also mention the name.
     const node = page.locator('[data-qa="vault-project-row"]').filter({ hasText: /Agent-Lounge-OS/i }).first();
-    if (await node.count()) {
-      await node.click();
-      await page.waitForTimeout(300);
-    }
+    await expect(node, "Agent-Lounge-OS vault project row must exist").toBeVisible();
+    await node.click();
+    await page.waitForTimeout(300);
     const text = await page.locator("main").innerText();
     const kpiDead = /\bDEAD SYMBOLS\b[\s\S]{0,80}?(\d+)/i.exec(text);
-    const clean = /temiz/i.test(text);
+    expect(kpiDead, "DEAD SYMBOLS KPI must render a count").toBeTruthy();
+    expect(Number(kpiDead![1]), "full fixture must report dead > 0").toBeGreaterThan(0);
     // When KPI reports dead > 0, selection must not claim "temiz".
-    if (kpiDead && Number(kpiDead[1]) > 0) {
-      expect(clean, "KPI>0 must not show temiz for selection").toBe(false);
-    }
+    expect(/temiz/i.test(text), "KPI>0 must not show temiz for selection").toBe(false);
   });
 
   test("DB-03 · Event Stream filters + Probe bus", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const all = page.getByRole("button", { name: /^all$/i }).first();
-    const task = page.getByRole("button", { name: /^task$/i }).first();
-    const exp = page.getByRole("button", { name: /^exp$/i }).first();
-    if (await task.count()) await task.click();
-    if (await all.count()) await all.click();
-    if (await exp.count()) await exp.click();
+    const task = page.getByRole("button", { name: /^task/i }).first();
+    const exp = page.getByRole("button", { name: /^exp/i }).first();
+    await expect(task, "task filter must exist").toBeVisible();
+    await expect(all, "all filter must exist").toBeVisible();
+    await expect(exp, "exp filter must exist").toBeVisible();
+    await task.click();
+    await all.click();
+    await exp.click();
     const probe = page.getByRole("button", { name: /Probe/i }).first();
-    if (await probe.count()) {
-      await probe.click();
-      await page.waitForTimeout(200);
-      const log = await getIpcLog(page);
-      expect(log.some((e) => e.cmd === "probe_bus")).toBeTruthy();
-    }
+    await expect(probe, "Probe bus control must exist").toBeVisible();
+    await probe.click();
+    await page.waitForTimeout(200);
+    const log = await getIpcLog(page);
+    expect(log.some((e) => e.cmd === "probe_bus")).toBeTruthy();
   });
 
-  test("DB-04 · Embedded Vault visible in first fold", async ({ page }) => {
+  test("DB-04 · Embedded Vault visible in first fold @smoke", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const vaultTitle = page.getByText(/Semantic Map \+ Experiences/i).first();
     await expect(vaultTitle).toBeVisible();
@@ -233,7 +233,9 @@ test.describe("EX — vault experiences", () => {
       const fixture = (
         window as Window & { __QA_FIXTURE__?: { experiences: Array<Record<string, unknown>> } }
       ).__QA_FIXTURE__;
-      if (!fixture) return;
+      if (!fixture) {
+        throw new Error("__QA_FIXTURE__ missing — Tauri mock fixture required for EX-05b");
+      }
       for (const row of fixture.experiences) {
         if ((row.status ?? "active") === "active") {
           row.reviewed = false;
@@ -279,18 +281,18 @@ test.describe("EX — vault experiences", () => {
   });
 
   test("EX-LAYOUT · Semantic Map + Experiences fill ≥85%", async ({ page }, testInfo) => {
-    if (testInfo.project.name === "D4-scale") {
-      await openRoute(page, "/settings", "full");
-      const scale130 = page
-        .getByRole("radio", { name: /130/i })
-        .or(page.getByRole("button", { name: /130%/ }));
-      if (await scale130.count()) {
-        await scale130.first().click();
-      } else if (await page.getByText("130%").count()) {
-        await page.getByText("130%").first().click();
-      }
-    }
     await openRoute(page, "/vault", "full");
+    if (testInfo.project.name === "D4-scale") {
+      // a11y seal: D4-scale storageState sets al-os-ui-scale=1.3 (16×1.3 = 20.8px).
+      const rem = await page.evaluate(() =>
+        parseFloat(getComputedStyle(document.documentElement).fontSize),
+      );
+      expect(rem, "D4-scale must apply 130% UI rem").toBeGreaterThan(16);
+      const scaleAttr = await page.evaluate(
+        () => document.documentElement.dataset.uiScale || "",
+      );
+      expect(scaleAttr).toBe("1.3");
+    }
     const mTop = await measureLayout(page, "/vault");
     expect(mTop.l1_pass && mTop.l3_pass, formatLayoutFailure(mTop)).toBe(true);
 
@@ -429,6 +431,7 @@ test.describe("DS — dead symbols", () => {
     const before = await rows.count();
     await rows.first().click();
     const name = (await rows.first().innerText()).split("\n")[0]?.trim() || "";
+    expect(name, "ignored dead-symbol row must expose a name").not.toBe("");
     await page.getByRole("button", { name: /^Ignore$/i }).click();
     await page.waitForTimeout(400);
     const after = await rows.count();
@@ -458,13 +461,11 @@ test.describe("DS — dead symbols", () => {
       await page.locator('[data-qa="dead-symbol-total"]').getAttribute("data-qa-total"),
     );
     expect(reloadedTotal).toBe(afterTotal);
-    if (name) {
-      const stillThere = await page
-        .locator('[data-qa="dead-symbol-row"]')
-        .filter({ hasText: name })
-        .count();
-      expect(stillThere).toBe(0);
-    }
+    const stillThere = await page
+      .locator('[data-qa="dead-symbol-row"]')
+      .filter({ hasText: name })
+      .count();
+    expect(stillThere).toBe(0);
   });
 
   test("DS-06 · Ignore List tab restore", async ({ page }) => {
