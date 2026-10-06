@@ -81,7 +81,8 @@ jobs:
             -- --exact --list)
           echo "$OUT"
           echo "$OUT" | grep -Fq "${LAYA_LIVE_TEST}: test"
-          COUNT=$(echo "$OUT" | grep -c ': test$' || true)
+          # grep -c exits 1 on zero matches; `|| :` keeps set -e happy without hiding output.
+          COUNT=$(echo "$OUT" | grep -c ': test$' || :)
           test "$COUNT" -eq 1
 
   laya-live:
