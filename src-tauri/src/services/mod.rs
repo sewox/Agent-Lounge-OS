@@ -236,6 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_all_reports_both_services() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
         let prev = std::env::var_os(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
         unsafe {
             std::env::set_var(

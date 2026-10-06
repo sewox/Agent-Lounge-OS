@@ -78,8 +78,6 @@ pub fn auth_required() -> bool {
 }
 
 pub fn nats_auth_active() -> bool {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     state().lock().map(|s| s.nats_auth_active).unwrap_or(false)
 }
 
@@ -215,8 +213,6 @@ pub fn ensure_session_credentials(nats_url: &str) -> Result<Option<NatsCredentia
     if !auth_required() {
         return Ok(None);
     }
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     let mut guard = state().lock().expect("lounge_auth poison");
     if let Some(existing) = guard.creds.clone() {
         let path = default_creds_path();
@@ -231,16 +227,12 @@ pub fn ensure_session_credentials(nats_url: &str) -> Result<Option<NatsCredentia
 }
 
 pub fn activate_nats_auth(creds: NatsCredentials) {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     let mut guard = state().lock().expect("lounge_auth poison");
     guard.creds = Some(creds);
     guard.nats_auth_active = true;
 }
 
 pub fn deactivate_nats_auth() {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     if let Ok(mut guard) = state().lock() {
         guard.nats_auth_active = false;
     }
@@ -256,8 +248,6 @@ pub fn current_credentials() -> Option<NatsCredentials> {
 
 /// Authenticated NATS connect when session auth is active; otherwise plain.
 pub fn connect(url: &str) -> Result<nats::Connection> {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     if nats_auth_active() {
         let creds = current_credentials().ok_or_else(|| {
             anyhow::anyhow!(
@@ -265,11 +255,58 @@ pub fn connect(url: &str) -> Result<nats::Connection> {
                  (set {LOUNGE_NATS_USER_ENV}/{LOUNGE_NATS_PASS_ENV} or {LOUNGE_NATS_CREDS_FILE_ENV})"
             )
         })?;
-        return nats::Options::with_user_pass(&creds.user, &creds.password)
-            .connect(url)
-            .map_err(|e| anyhow::anyhow!("NATS connect (auth): {e}"));
+        return connect_nats(url, Some((&creds.user, &creds.password)));
     }
-    nats::connect(url).map_err(|e| anyhow::anyhow!("NATS connect: {e}"))
+    connect_nats(url, None)
+}
+
+/// Bounded NATS dial used by tests and by [`connect`] under `cfg(test)`.
+/// Production (non-test) builds call the nats crate directly without a wall-clock cap.
+fn connect_nats(url: &str, user_pass: Option<(&str, &str)>) -> Result<nats::Connection> {
+    #[cfg(not(test))]
+    {
+        match user_pass {
+            Some((user, pass)) => nats::Options::with_user_pass(user, pass)
+                .connect(url)
+                .map_err(|e| anyhow::anyhow!("NATS connect (auth): {e}")),
+            None => nats::connect(url).map_err(|e| anyhow::anyhow!("NATS connect: {e}")),
+        }
+    }
+    #[cfg(test)]
+    {
+        connect_nats_timeout(url, user_pass, std::time::Duration::from_secs(5))
+    }
+}
+
+/// Dial NATS on a helper thread and fail loudly if the handshake exceeds `timeout`.
+///
+/// The sync `nats` 0.26 client can block indefinitely on a non-NATS TCP listener
+/// (auth probe / test helpers must never hang the process on that path).
+pub fn connect_nats_timeout(
+    url: &str,
+    user_pass: Option<(&str, &str)>,
+    timeout: std::time::Duration,
+) -> Result<nats::Connection> {
+    let url_owned = url.to_string();
+    let creds = user_pass.map(|(u, p)| (u.to_string(), p.to_string()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("nats-connect-timeout".into())
+        .spawn(move || {
+            let result = match &creds {
+                Some((user, pass)) => nats::Options::with_user_pass(user, pass).connect(&url_owned),
+                None => nats::connect(&url_owned),
+            };
+            let _ = tx.send(result);
+        })
+        .context("spawn nats-connect-timeout thread")?;
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(nc)) => Ok(nc),
+        Ok(Err(e)) => Err(anyhow::anyhow!("NATS connect: {e}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "NATS connect timed out after {timeout:?} to {url}"
+        )),
+    }
 }
 
 /// NATS ingress trust: verified only when the local bus enforces session credentials.
@@ -278,8 +315,6 @@ pub fn nats_ingress_source_verified() -> bool {
 }
 
 pub fn lounge_token() -> String {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     state()
         .lock()
         .map(|s| s.lounge_token.clone())
@@ -287,8 +322,6 @@ pub fn lounge_token() -> String {
 }
 
 pub fn rotate_lounge_token() -> String {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     let token = format!("lounge_{}", uuid::Uuid::new_v4().simple());
     let path = token_path();
     let _ = std::fs::create_dir_all(lounge_nats_dir());
@@ -303,8 +336,6 @@ pub fn rotate_lounge_token() -> String {
 }
 
 pub fn allowed_hosts() -> Vec<String> {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     state()
         .lock()
         .map(|s| {
@@ -317,8 +348,6 @@ pub fn allowed_hosts() -> Vec<String> {
 
 /// Parse a tunnel URL (or bare host) and add its hostname to the allow-list.
 pub fn add_allowed_origin(url_or_host: &str) -> Result<String> {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     let host = parse_host(url_or_host).context("invalid tunnel URL / host")?;
     let mut guard = state().lock().expect("lounge_auth poison");
     guard.allowed_hosts.insert(host.clone());
@@ -334,8 +363,6 @@ pub fn remove_allowed_origin(host: &str) -> bool {
 }
 
 pub fn clear_allowed_origins() {
-    #[cfg(test)]
-    let _sync = auth_state_sync();
     if let Ok(mut s) = state().lock() {
         s.allowed_hosts.clear();
     }
@@ -572,62 +599,32 @@ pub fn remote_access_info(mcp_bind: &str, tunnel_url: Option<&str>) -> RemoteAcc
     }
 }
 
-/// Serialize parallel tests that share process-wide lounge auth state.
+/// Serialize parallel tests that mutate process-wide lounge auth state / env.
+///
+/// Important: this lock is **only** held by [`TestAuthGuard`] for the duration of a
+/// mutating test. Public auth APIs must **not** acquire it — doing so deadlocks
+/// multi-thread `#[tokio::test]` when an HTTP/NATS helper thread calls
+/// `lounge_token` / `authorize_mcp_headers` / `activate_nats_auth` while the test
+/// task still holds the guard across `.await` (macOS/Windows CI hang).
+///
+/// In-memory auth fields are already protected by [`state`]'s `Mutex`.
 #[cfg(test)]
-static TEST_AUTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TEST_AUTH_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[cfg(test)]
-thread_local! {
-    static AUTH_LOCK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-struct AuthStateSync {
-    _mutex: Option<std::sync::MutexGuard<'static, ()>>,
-}
-
-#[cfg(test)]
-fn auth_state_sync() -> AuthStateSync {
-    let depth = AUTH_LOCK_DEPTH.with(|c| c.get());
-    if depth > 0 {
-        AUTH_LOCK_DEPTH.with(|c| c.set(depth + 1));
-        return AuthStateSync { _mutex: None };
-    }
-    let guard = TEST_AUTH_LOCK
-        .lock()
-        .expect("lounge_auth test lock poisoned");
-    AUTH_LOCK_DEPTH.with(|c| c.set(1));
-    AuthStateSync {
-        _mutex: Some(guard),
-    }
-}
-
-#[cfg(test)]
-impl Drop for AuthStateSync {
-    fn drop(&mut self) {
-        AUTH_LOCK_DEPTH.with(|c| {
-            let d = c.get();
-            debug_assert!(d > 0, "auth lock depth underflow");
-            if d <= 1 {
-                c.set(0);
-            } else {
-                c.set(d - 1);
-            }
-        });
-    }
-}
-
+/// RAII guard: exclusive access for tests that flip auth env / allow-list / creds.
 #[cfg(test)]
 pub struct TestAuthGuard {
-    _sync: AuthStateSync,
+    _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
 impl TestAuthGuard {
     pub fn new() -> Self {
-        let sync = auth_state_sync();
+        let serial = TEST_AUTH_SERIAL
+            .lock()
+            .expect("lounge_auth test serial poisoned");
         reset_test_state();
-        Self { _sync: sync }
+        Self { _serial: serial }
     }
 }
 
@@ -819,5 +816,25 @@ mod tests {
         assert!(info.mcp_json.contains("X-Lounge-Token"));
         assert!(info.mcp_json.contains(&info.lounge_token));
         assert!(info.mcp_json.contains("https://abc.trycloudflare.com/mcp"));
+    }
+
+    /// Regression: holding [`TestAuthGuard`] across `.await` must not deadlock when
+    /// another runtime thread reads auth state (MCP HTTP authorize path).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_auth_guard_does_not_deadlock_across_await() {
+        let _guard = TestAuthGuard::new();
+        clear_allowed_origins();
+        let handle = tokio::spawn(async {
+            // Simulate axum/hyper worker thread calling authorize helpers.
+            let token = lounge_token();
+            authorize_mcp_headers(Some("evil.example"), None, Some(&token)).err()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("TestAuthGuard cross-await deadlock regression")
+            .expect("join");
+        assert_eq!(err, Some(RemoteAuthFailure::HostNotAllowed));
+        assert!(allowed_hosts().is_empty());
     }
 }

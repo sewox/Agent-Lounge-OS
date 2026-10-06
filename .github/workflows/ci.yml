@@ -94,6 +94,7 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
 
       - name: Test
+        timeout-minutes: 20
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   workers:
