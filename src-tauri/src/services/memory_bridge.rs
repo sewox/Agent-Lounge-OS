@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use super::probe::{find_executable, first_existing, repo_root_from_crate};
+use super::probe::{find_executable, first_existing, port_owned_by_lounge, repo_root_from_crate};
 use crate::kernel::GuardedCommand;
 use crate::models::{
     AstNode, CodeReference, DeadSymbol, IndexGraph, IndexSnapshot, ProjectList, ProjectSummary,
@@ -20,7 +20,13 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// Index / write tools — large repos must not die at 15s.
 pub const MUTATING_TIMEOUT: Duration = Duration::from_secs(300);
 pub const UI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-pub const DEFAULT_GRAPH_UI_PORT: u16 = 9749;
+/// Antigravity / upstream cbm varsayılanı — Lounge bunu terk eder (legacy migrasyon).
+pub const LEGACY_GRAPH_UI_PORT: u16 = 9749;
+/// Lounge Graph UI port bandı (LMR 18790 / MCP 18791 ailesi).
+pub const GRAPH_UI_PORT_BAND_START: u16 = 18749;
+pub const GRAPH_UI_PORT_BAND_END: u16 = 18759;
+/// Auto mod varsayılan / band başlangıcı.
+pub const DEFAULT_GRAPH_UI_PORT: u16 = GRAPH_UI_PORT_BAND_START;
 /// `list_projects` sonuçları en az bu süre cache'lenir.
 pub const LIST_PROJECTS_CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -30,7 +36,7 @@ const SEMANTIC_CALL_LIMIT: u32 = 800;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransportMode {
-    /// Probe `/api/ui-config`; ayaktaysa HTTP `/rpc`, değilse CLI.
+    /// Sahipliği doğrulanmış portta `/api/ui-config` varsa HTTP `/rpc`, değilse CLI.
     #[default]
     Auto,
     /// Asla HTTP'ye dokunma (test güvenliği).
@@ -57,7 +63,7 @@ impl Default for MemoryBridgeConfig {
 }
 
 impl MemoryBridgeConfig {
-    /// Test / fake-binary yolları — gerçek :9749'a asla vurma.
+    /// Test / fake-binary yolları — gerçek Graph UI portuna asla vurma.
     pub fn force_cli() -> Self {
         Self {
             transport: TransportMode::ForceCli,
@@ -80,6 +86,8 @@ struct ListProjectsCache {
 struct BridgeShared {
     config: RwLock<MemoryBridgeConfig>,
     list_cache: tokio::sync::Mutex<ListProjectsCache>,
+    /// Lounge'un spawn ettiği Graph UI child PID (0 = yok).
+    owned_ui_pid: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -112,8 +120,24 @@ impl MemoryBridge {
                     at: None,
                     rows: Vec::new(),
                 }),
+                owned_ui_pid: AtomicU32::new(0),
             }),
         }
+    }
+
+    pub fn set_owned_ui_pid(&self, pid: Option<u32>) {
+        self.shared
+            .owned_ui_pid
+            .store(pid.unwrap_or(0), Ordering::SeqCst);
+    }
+
+    pub fn owned_ui_pid(&self) -> Option<u32> {
+        let pid = self.shared.owned_ui_pid.load(Ordering::SeqCst);
+        (pid > 0).then_some(pid)
+    }
+
+    pub fn owns_http_port(&self) -> bool {
+        port_owned_by_lounge(self.http_port(), self.owned_ui_pid())
     }
 
     pub fn config(&self) -> MemoryBridgeConfig {
@@ -426,7 +450,7 @@ impl MemoryBridge {
         let cfg = self.config();
         match cfg.transport {
             TransportMode::ForceCli => ToolTransport::Cli,
-            TransportMode::Auto => select_tool_transport(cfg.http_port).await,
+            TransportMode::Auto => select_tool_transport(cfg.http_port, self.owned_ui_pid()).await,
         }
     }
 
@@ -609,7 +633,11 @@ pub async fn probe_ui_config(port: u16) -> bool {
     response.json::<Value>().await.is_ok()
 }
 
-pub async fn select_tool_transport(port: u16) -> ToolTransport {
+/// HTTP `/rpc` yalnız Lounge'un sahip olduğu portta; yabancı cbm asla.
+pub async fn select_tool_transport(port: u16, owned_pid: Option<u32>) -> ToolTransport {
+    if !port_owned_by_lounge(port, owned_pid) {
+        return ToolTransport::Cli;
+    }
     if probe_ui_config(port).await {
         ToolTransport::HttpRpc
     } else {
@@ -1733,13 +1761,19 @@ exit /b 0
         assert_eq!(bridge.config().transport, TransportMode::ForceCli);
     }
 
-    async fn spawn_fake_cbm_http(projects_text: String) -> u16 {
+    struct FakeCbmHttp {
+        port: u16,
+        rpc_hits: Arc<AtomicU32>,
+    }
+
+    async fn spawn_fake_cbm_http(projects_text: String) -> FakeCbmHttp {
         use axum::routing::{get, post};
         use axum::{Json, Router};
-        use std::sync::Arc;
 
         let text = Arc::new(projects_text);
         let text_rpc = text.clone();
+        let rpc_hits = Arc::new(AtomicU32::new(0));
+        let hits_rpc = rpc_hits.clone();
         let app = Router::new()
             .route(
                 "/api/ui-config",
@@ -1749,7 +1783,9 @@ exit /b 0
                 "/rpc",
                 post(move |_body: String| {
                     let text_rpc = text_rpc.clone();
+                    let hits_rpc = hits_rpc.clone();
                     async move {
+                        hits_rpc.fetch_add(1, Ordering::SeqCst);
                         Json(serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": 1,
@@ -1766,7 +1802,7 @@ exit /b 0
             let _ = axum::serve(listener, app).await;
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
-        port
+        FakeCbmHttp { port, rpc_hits }
     }
 
     async fn spawn_hanging_rpc_http() -> u16 {
@@ -1798,52 +1834,117 @@ exit /b 0
         port
     }
 
+    async fn wait_until_owned(port: u16, pid: u32) {
+        use super::super::probe::port_owned_by_lounge;
+        for _ in 0..40 {
+            if port_owned_by_lounge(port, Some(pid)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("port {port} not owned by pid {pid} within timeout");
+    }
+
     #[tokio::test]
-    async fn transport_selects_http_when_ui_config_up() {
-        let port = spawn_fake_cbm_http(r#"{"projects":[]}"#.into()).await;
-        assert_eq!(select_tool_transport(port).await, ToolTransport::HttpRpc);
+    async fn transport_selects_http_only_when_owned() {
+        let fake = spawn_fake_cbm_http(r#"{"projects":[]}"#.into()).await;
+        let self_pid = std::process::id();
+        wait_until_owned(fake.port, self_pid).await;
         assert_eq!(
-            select_tool_transport(1).await,
+            select_tool_transport(fake.port, Some(self_pid)).await,
+            ToolTransport::HttpRpc
+        );
+        assert_eq!(
+            select_tool_transport(fake.port, None).await,
+            ToolTransport::Cli,
+            "sahiplik yoksa yabancı ui-config HTTP seçilmez"
+        );
+        assert_eq!(
+            select_tool_transport(1, Some(self_pid)).await,
             ToolTransport::Cli,
             "kapalı port CLI"
         );
     }
 
     #[tokio::test]
-    async fn list_projects_prefers_http_rpc_over_cli() {
-        let payload = r#"{"projects":[{"name":"http-demo","root_path":"/tmp/http-demo","nodes":1,"edges":0}]}"#;
-        let port = spawn_fake_cbm_http(payload.into()).await;
+    async fn foreign_cbm_receives_zero_rpc_hits() {
+        let fake = spawn_fake_cbm_http(
+            r#"{"projects":[{"name":"foreign","root_path":"/tmp/foreign"}]}"#.into(),
+        )
+        .await;
         let bridge = MemoryBridge::with_config(
-            "/tmp/missing-codebase-memory-mcp-for-http-test",
+            "/tmp/missing-codebase-memory-mcp-foreign-rpc",
             MemoryBridgeConfig {
-                http_port: port,
+                http_port: fake.port,
                 transport: TransportMode::Auto,
                 ..MemoryBridgeConfig::default()
             },
         );
+        // owned_ui_pid yok — yabancı instance.
+        assert_eq!(bridge.select_transport().await, ToolTransport::Cli);
+        let err = bridge
+            .list_projects()
+            .await
+            .expect_err("CLI binary missing");
+        assert!(
+            err.to_string().contains("yok") || err.to_string().contains("missing"),
+            "unexpected: {err}"
+        );
+        assert_eq!(
+            fake.rpc_hits.load(Ordering::SeqCst),
+            0,
+            "foreign cbm /rpc must not be hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_projects_prefers_http_rpc_over_cli() {
+        let payload = r#"{"projects":[{"name":"http-demo","root_path":"/tmp/http-demo","nodes":1,"edges":0}]}"#;
+        let fake = spawn_fake_cbm_http(payload.into()).await;
+        let bridge = MemoryBridge::with_config(
+            "/tmp/missing-codebase-memory-mcp-for-http-test",
+            MemoryBridgeConfig {
+                http_port: fake.port,
+                transport: TransportMode::Auto,
+                ..MemoryBridgeConfig::default()
+            },
+        );
+        let self_pid = std::process::id();
+        wait_until_owned(fake.port, self_pid).await;
+        bridge.set_owned_ui_pid(Some(self_pid));
         let projects = bridge.list_projects().await.expect("http list_projects");
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "http-demo");
         assert_eq!(projects[0].root_path.as_deref(), Some("/tmp/http-demo"));
+        assert!(fake.rpc_hits.load(Ordering::SeqCst) >= 1);
     }
 
     #[tokio::test]
     async fn list_projects_cache_avoids_second_fetch() {
         let payload = r#"{"projects":[{"name":"cached","root_path":"/tmp/c"}]}"#;
-        let port = spawn_fake_cbm_http(payload.into()).await;
+        let fake = spawn_fake_cbm_http(payload.into()).await;
         let bridge = MemoryBridge::with_config(
             "/tmp/missing-for-cache-test",
             MemoryBridgeConfig {
-                http_port: port,
+                http_port: fake.port,
                 transport: TransportMode::Auto,
                 ..MemoryBridgeConfig::default()
             },
         );
+        let self_pid = std::process::id();
+        wait_until_owned(fake.port, self_pid).await;
+        bridge.set_owned_ui_pid(Some(self_pid));
         let first = bridge.list_projects().await.unwrap();
         assert!(bridge.list_projects_cache_age().await.is_some());
+        let hits_after_first = fake.rpc_hits.load(Ordering::SeqCst);
         let second = bridge.list_projects().await.unwrap();
         assert_eq!(first, second);
         assert!(bridge.list_projects_cache_age().await.unwrap() < LIST_PROJECTS_CACHE_TTL);
+        assert_eq!(
+            fake.rpc_hits.load(Ordering::SeqCst),
+            hits_after_first,
+            "cache must avoid second /rpc"
+        );
     }
 
     #[tokio::test]
@@ -1858,6 +1959,9 @@ exit /b 0
                 mutating_timeout: Duration::from_millis(250),
             },
         );
+        let self_pid = std::process::id();
+        wait_until_owned(port, self_pid).await;
+        bridge.set_owned_ui_pid(Some(self_pid));
         let err = bridge
             .run_tool(&[
                 "index_repository",

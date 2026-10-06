@@ -83,6 +83,10 @@ macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 Claude yalnızca stdio başlatır; `lounge-mcp` Kernel HTTP’ye köprü kurar.
 
+## Graph UI port (masaüstü ajanlar)
+
+Lounge’un codebase-memory-mcp **3D Graph UI** dinleme portu Antigravity cbm varsayılanı **9749 değildir**. Lounge bandı **18749–18759** (auto: ilk boş; user: Settings’te sabit). Gerçek portu Tauri `get_graph_ui_status` / Settings’ten okuyun — Grok Bot, Cursor, Antigravity, Claude Desktop **9749 varsaymamalı**. Yabancı bir cbm instance’ı asla adopt edilmez; HTTP `/rpc` yalnız Lounge’un sahip olduğu portta kullanılır.
+
 ## Tool’lar
 
 | Tool | Şema | Not |

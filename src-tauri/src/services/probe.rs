@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, Instant};
+
+use crate::kernel::GuardedCommand;
 
 pub const DEFAULT_OLLAMA_HOST: &str = "127.0.0.1";
 /// Host Ollama (EchoMind / Cursor) varsayılanı. LMR buna dokunmaz.
@@ -335,6 +338,159 @@ pub fn repo_root_from_crate() -> PathBuf {
     repo_root_from_manifest(Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
+/// `127.0.0.1:port` üzerinde kısa süreli bind — port boşsa true.
+pub fn tcp_bind_available(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Portta LISTEN yapan süreç PID'leri (macOS/Linux: lsof, yoksa ss; Windows: netstat).
+pub fn listen_pids(port: u16) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        windows_listen_pids(port)
+    }
+    #[cfg(not(windows))]
+    {
+        unix_listen_pids(port)
+    }
+}
+
+/// PID hâlâ yaşıyor mu? (sysinfo)
+pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
+    sys.process(Pid::from_u32(pid)).is_some()
+}
+
+/// Lounge sahipliği: spawn edilen child canlı VE porttaki dinleyici PID eşleşiyor.
+pub fn port_owned_by_lounge(port: u16, child_pid: Option<u32>) -> bool {
+    let Some(pid) = child_pid.filter(|p| *p > 0) else {
+        return false;
+    };
+    if !process_alive(pid) {
+        return false;
+    }
+    listen_pids(port).contains(&pid)
+}
+
+#[cfg(not(windows))]
+fn unix_listen_pids(port: u16) -> Vec<u32> {
+    let mut set = BTreeSet::new();
+    for pid in lsof_listen_pids(port) {
+        set.insert(pid);
+    }
+    if set.is_empty() {
+        for pid in ss_listen_pids(port) {
+            set.insert(pid);
+        }
+    }
+    set.into_iter().collect()
+}
+
+#[cfg(not(windows))]
+fn lsof_listen_pids(port: u16) -> Vec<u32> {
+    let output = GuardedCommand::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn ss_listen_pids(port: u16) -> Vec<u32> {
+    // `ss -lptn 'sport = :PORT'` — process sütunu `pid=NNN` içerir.
+    let filter = format!("sport = :{port}");
+    let output = GuardedCommand::new("ss")
+        .args(["-lptn", &filter])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_ss_listen_pids(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(not(windows))]
+fn parse_ss_listen_pids(stdout: &str) -> Vec<u32> {
+    let mut set = BTreeSet::new();
+    for line in stdout.lines() {
+        let mut rest = line;
+        while let Some(idx) = rest.find("pid=") {
+            let after = &rest[idx + 4..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                rest = &after[1.min(after.len())..];
+                continue;
+            }
+            if let Ok(pid) = digits.parse::<u32>() {
+                if pid > 0 {
+                    set.insert(pid);
+                }
+            }
+            rest = &after[digits.len()..];
+        }
+    }
+    set.into_iter().collect()
+}
+
+#[cfg(windows)]
+fn windows_listen_pids(port: u16) -> Vec<u32> {
+    let output = GuardedCommand::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    parse_netstat_listen_pids(&String::from_utf8_lossy(&output.stdout), port)
+}
+
+/// Windows `netstat -ano -p tcp` satırlarından LISTEN PID'leri.
+/// `:{port}` yalnızca token sonunda eşleşir (`:1` → `:135` yanlış pozitif yok).
+#[cfg(any(test, windows))]
+pub fn parse_netstat_listen_pids(stdout: &str, port: u16) -> Vec<u32> {
+    let needle = format!(":{port}");
+    let mut set = BTreeSet::new();
+    for line in stdout.lines() {
+        let upper = line.to_ascii_uppercase();
+        if !upper.contains("LISTEN") {
+            continue;
+        }
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let has_port = tokens.iter().any(|token| token.ends_with(&needle));
+        if !has_port {
+            continue;
+        }
+        if let Some(pid_tok) = tokens.last() {
+            if let Ok(pid) = pid_tok.parse::<u32>() {
+                if pid > 0 {
+                    set.insert(pid);
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +671,55 @@ mod tests {
         assert!(EXTRA_BIN_DIRS.contains(&"/usr/local/sbin"));
         assert!(EXTRA_BIN_DIRS.contains(&"/opt/homebrew/sbin"));
         assert!(WINDOWS_PROGRAM_FILES_SUBDIRS.contains(&"nats-server"));
+    }
+
+    #[test]
+    fn unused_port_has_no_listen_pids() {
+        assert!(listen_pids(1).is_empty());
+    }
+
+    #[test]
+    fn tcp_bind_available_roundtrip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!tcp_bind_available(port), "bound port must not be free");
+        drop(listener);
+        assert!(tcp_bind_available(port), "released port must be free");
+    }
+
+    #[test]
+    fn listen_pids_matches_our_test_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let self_pid = std::process::id();
+        let mut found = false;
+        for _ in 0..20 {
+            let pids = listen_pids(port);
+            if pids.contains(&self_pid) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            found,
+            "listen_pids({port}) must include this process pid={self_pid}"
+        );
+        assert!(port_owned_by_lounge(port, Some(self_pid)));
+        assert!(!port_owned_by_lounge(port, Some(u32::MAX)));
+        assert!(!port_owned_by_lounge(port, None));
+        drop(listener);
+    }
+
+    #[test]
+    fn netstat_parser_matches_exact_port_token() {
+        let sample = "\
+  TCP    127.0.0.1:18749        0.0.0.0:0              LISTENING       4242\r\n\
+  TCP    127.0.0.1:1874         0.0.0.0:0              LISTENING       1111\r\n\
+  TCP    0.0.0.0:187490         0.0.0.0:0              LISTENING       2222\r\n\
+  TCP    127.0.0.1:135          0.0.0.0:0              LISTENING       3333\r\n";
+        assert_eq!(parse_netstat_listen_pids(sample, 18749), vec![4242]);
+        assert_eq!(parse_netstat_listen_pids(sample, 1), Vec::<u32>::new());
+        assert_eq!(parse_netstat_listen_pids(sample, 135), vec![3333]);
     }
 }

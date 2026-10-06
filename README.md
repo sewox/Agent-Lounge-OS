@@ -174,6 +174,8 @@ HF deposu: [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/l
 | `LOUNGE_LAYA_DIR` | Laya ağırlık dizini |
 | `OLLAMA_HOST` | Yalnızca **host** Ollama (Lounge LMR değil) |
 
+**Graph UI port:** Lounge `codebase-memory-mcp` UI bandı **18749–18759** (Antigravity/cbm varsayılanı 9749 ile çakışmaz). Canlı port Settings / `get_graph_ui_status` üzerinden okunur — masaüstü ajanlar 9749 varsaymamalı. Ayrıntı: [`docs/mcp.md`](docs/mcp.md).
+
 ### Yararlı komutlar
 
 ```bash

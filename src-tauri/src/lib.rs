@@ -25,14 +25,14 @@ use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys, data_root,
     enable_graph_ui, fix_dead_symbol_with_agent as publish_fix_dead_symbol, graph_ui_status,
-    load_port_from_store, on_main_window_closed,
+    load_port_from_store, load_port_preference_from_store, on_main_window_closed,
     open_dead_symbol_in_editor as open_indexed_dead_symbol, open_or_focus_graph_window,
-    open_path_in_editor, persist_port, record_dead_snapshot, record_whisper_injection,
-    resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, FixDeadSymbolResult,
-    GraphUiState, GraphUiStatus, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus,
-    MemoryBridge, ModelManager, ServiceManager, SharedServices, WorkspaceScanResult,
-    GRAPH_WINDOW_LABEL,
+    open_path_in_editor, persist_port, persist_port_preference, record_dead_snapshot,
+    record_whisper_injection, resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump,
+    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery,
+    FixDeadSymbolResult, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob, IndexProgress,
+    IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    WorkspaceScanResult, GRAPH_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -191,13 +191,17 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(memory.clone());
             app.manage(index_queue);
 
-            // Graph UI port — settings'ten MemoryBridge config'e yükle (process-global yok).
+            // Graph UI port — settings'ten MemoryBridge + mode yükle (process-global yok).
             let port_store = store.clone();
             let port_bridge = memory.clone();
+            let port_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let port = load_port_from_store(&port_store).await;
-                port_bridge.set_http_port(port);
-                log::info!("graph UI port={port}");
+                let pref = load_port_preference_from_store(&port_store).await;
+                port_bridge.set_http_port(pref.port);
+                if let Some(state) = port_app.try_state::<GraphUiState>() {
+                    state.set_port_mode(pref.mode);
+                }
+                log::info!("graph UI port={} mode={}", pref.port, pref.mode.as_str());
             });
 
             // MCP HTTP — Cursor/Claude stdio shim buraya proxy eder (dashboard sync).
@@ -381,6 +385,8 @@ pub fn run_with_start_route(start_route: &'static str) {
             enable_graph_ui_cmd,
             get_graph_ui_port,
             set_graph_ui_port,
+            get_graph_ui_port_mode,
+            set_graph_ui_port_mode,
             markdown_export::save_markdown_report
         ])
         .build(tauri::generate_context!())
@@ -390,7 +396,12 @@ pub fn run_with_start_route(start_route: &'static str) {
                 match event {
                     WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
                         if let Some(state) = app_handle.try_state::<GraphUiState>() {
-                            on_main_window_closed(app_handle, state.inner());
+                            let bridge = app_handle.try_state::<MemoryBridge>();
+                            on_main_window_closed(
+                                app_handle,
+                                state.inner(),
+                                bridge.as_ref().map(|b| b.inner()),
+                            );
                         } else if let Some(window) =
                             app_handle.get_webview_window(GRAPH_WINDOW_LABEL)
                         {
@@ -1539,6 +1550,7 @@ async fn enable_graph_ui_cmd(
     app: tauri::AppHandle,
     services: tauri::State<'_, SharedServices>,
     graph: tauri::State<'_, GraphUiState>,
+    store: tauri::State<'_, ExperienceStore>,
     project_root: Option<String>,
 ) -> Result<(), String> {
     let bridge = {
@@ -1549,7 +1561,8 @@ async fn enable_graph_ui_cmd(
     if !status.binary_found {
         return Err("codebase-memory-mcp bulunamadı".into());
     }
-    if status.port_conflict {
+    // User modunda çakışma engeller; auto modda enable sonraki boş porta geçer.
+    if status.port_conflict && status.port_mode == GraphUiPortMode::User {
         return Err(status
             .conflict_message
             .unwrap_or_else(|| format!("Port {} meşgul", status.port)));
@@ -1558,6 +1571,7 @@ async fn enable_graph_ui_cmd(
         &app,
         graph.inner(),
         &bridge,
+        Some(store.inner()),
         status.cbm_project_name.as_deref(),
     )
     .await
@@ -1594,6 +1608,39 @@ async fn set_graph_ui_port(
         .await
         .map_err(|err| err.to_string())?;
     Ok(port)
+}
+
+#[tauri::command]
+async fn get_graph_ui_port_mode(graph: tauri::State<'_, GraphUiState>) -> Result<String, String> {
+    Ok(graph.port_mode().as_str().into())
+}
+
+#[tauri::command]
+async fn set_graph_ui_port_mode(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, ExperienceStore>,
+    services: tauri::State<'_, SharedServices>,
+    graph: tauri::State<'_, GraphUiState>,
+    mode: String,
+) -> Result<String, String> {
+    let parsed = GraphUiPortMode::parse(&mode)
+        .ok_or_else(|| "port mode must be 'auto' or 'user'".to_string())?;
+    let bridge = {
+        let manager = services.lock().await;
+        manager.memory().clone()
+    };
+    let port = {
+        let live = bridge.http_port();
+        if live > 0 {
+            live
+        } else {
+            load_port_from_store(store.inner()).await
+        }
+    };
+    persist_port_preference(store.inner(), &bridge, &app, graph.inner(), parsed, port)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(parsed.as_str().into())
 }
 
 #[cfg(test)]
