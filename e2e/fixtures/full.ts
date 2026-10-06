@@ -405,7 +405,9 @@ export const FULL_FIXTURE: FixtureDataset = {
   serviceReport: {
     ollama: mkHealth("ollama", "LMR", true, "http://127.0.0.1:18790"),
     nats: mkHealth("nats", "NATS", true, "nats://127.0.0.1:4222"),
-    memory: mkHealth("memory", "Memory Bridge", true, "http://127.0.0.1:7432"),
+    // Memory Bridge crashed — SH-07 asserts Disconnected + Restart Service unconditionally.
+    // Core LMR/NATS stay up so SERVICE DEGRADED banner stays off (coreServicesDegraded).
+    memory: mkHealth("memory", "Memory Bridge", false, "http://127.0.0.1:7432"),
     plugin: mkHealth("plugin", "MCP Plugin", true, "stdio"),
   },
   models: ["llama3.1:8b", "qwen2.5-coder:7b"],

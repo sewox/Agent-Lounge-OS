@@ -179,17 +179,13 @@ test.describe("ST — settings", () => {
 
   test("ST-03 · UI scale radios change root rem", async ({ page }) => {
     await openRoute(page, "/settings", "full");
-    const scale130 = page.getByRole("radio", { name: /130/i }).or(page.getByRole("button", { name: /130%/ }));
-    if (await scale130.count()) {
-      await scale130.first().click();
-      const rem = await page.evaluate(() => getComputedStyle(document.documentElement).fontSize);
-      expect(parseFloat(rem)).toBeGreaterThan(16);
-    } else {
-      // Fallback: click text
-      await page.getByText("130%").first().click();
-      const rem = await page.evaluate(() => getComputedStyle(document.documentElement).fontSize);
-      expect(parseFloat(rem)).toBeGreaterThan(15);
-    }
+    const scale130 = page
+      .getByRole("radio", { name: /130/i })
+      .or(page.getByRole("button", { name: /130%/ }));
+    await expect(scale130.first(), "130% UI scale control must exist").toBeVisible();
+    await scale130.first().click();
+    const rem = await page.evaluate(() => getComputedStyle(document.documentElement).fontSize);
+    expect(parseFloat(rem)).toBeGreaterThan(16);
   });
 
   test("ST-05 · Locked approval checkbox explained", async ({ page }) => {
@@ -631,17 +627,19 @@ test.describe("AP / CP / misc", () => {
 
   test("TL-01 · Telemetry filters + download", async ({ page }) => {
     await openRoute(page, "/telemetry", "full");
-    const dl = page.getByRole("button", { name: /Markdown|indir|Download/i }).first();
     await expect(page.locator("main")).toBeVisible();
-    if (await dl.count()) {
-      const [download] = await Promise.all([
-        page.waitForEvent("download", { timeout: 5000 }).catch(() => null),
-        dl.click(),
-      ]);
-      if (download) {
-        expect(download.suggestedFilename()).toMatch(/md|markdown|report/i);
-      }
-    }
+    const dl = page.getByRole("button", { name: /Markdown|indir|Download/i }).first();
+    await expect(dl, "Markdown download control must exist").toBeVisible();
+    await expect(dl, "report must load before download is enabled").toBeEnabled({ timeout: 15_000 });
+    await dl.click();
+    await expect(page.locator('[data-qa="markdown-save-toast"]')).toBeVisible({ timeout: 10_000 });
+    const toast = await page.locator('[data-qa="markdown-save-toast"]').innerText();
+    expect(toast).toMatch(/Saved|Kaydedildi|\.md/i);
+    const log = await getIpcLog(page);
+    expect(
+      log.some((e) => e.cmd === "save_markdown_report"),
+      "save_markdown_report IPC must run on download",
+    ).toBeTruthy();
   });
 
   test("QT-01 · Quotas filter tabs", async ({ page }) => {

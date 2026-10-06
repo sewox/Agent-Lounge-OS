@@ -57,14 +57,14 @@ export default defineConfig({
     },
     {
       name: "D4-scale",
-      // Include vault-dashboard so EX-* / PATH-adjacent vault cases run at 130% scale.
-      testMatch: /ui-scale|settings|layout|vault-dashboard|health-settings/,
+      // Real 130% UI scale via storageState (al-os-ui-scale=1.3) + deviceScaleFactor.
+      // a11y seal: layout-fill/no-overflow must hold at enlarged rem (root font-size > 16px).
+      testMatch: /layout|vault-dashboard|health-settings/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1280, height: 800 },
-        deviceScaleFactor: 1,
-        // 130% UI scale is applied by the app's ui-scale fixture/query in layout specs;
-        // vault EX-* still need to execute on this project per PR-3 acceptance.
+        deviceScaleFactor: 1.3,
+        storageState: path.join("e2e", "storage", "d4-scale.json"),
       },
     },
   ],

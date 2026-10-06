@@ -1,31 +1,32 @@
-import { describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import {
   acceptsCrossPlatformPath,
   formatExperienceLogSummary,
   formatDisplayPath,
   resolveGraphTotals,
-} from "@/lib/experience";
+} from "@/lib/experience.ts";
 
 describe("formatExperienceLogSummary", () => {
   it("strips markdown dumps and internal TR errors (EX-15)", () => {
     const raw =
       "## Cross-Project Memory ### Tecrübeler\nmemory_bridge hata: repo_path çözümlenemedi\nnodes=2286 edges=7958\nIndexed dispatcher.rs + NATS subjects.";
     const summary = formatExperienceLogSummary(raw);
-    expect(summary).not.toMatch(/##\s*Cross-Project Memory/i);
-    expect(summary).not.toMatch(/memory_bridge hata:/i);
-    expect(summary).toMatch(/Indexed dispatcher\.rs/i);
-    expect(summary).toMatch(/nodes=2286 edges=7958/);
+    assert.doesNotMatch(summary, /##\s*Cross-Project Memory/i);
+    assert.doesNotMatch(summary, /memory_bridge hata:/i);
+    assert.match(summary, /Indexed dispatcher\.rs/i);
+    assert.match(summary, /nodes=2286 edges=7958/);
   });
 });
 
 describe("formatDisplayPath", () => {
   it("preserves cross-platform separators (PATH-01)", () => {
-    expect(formatDisplayPath("C:\\Users\\dev\\main.rs")).toBe("C:\\Users\\dev\\main.rs");
-    expect(formatDisplayPath("/home/dev/main.rs")).toBe("/home/dev/main.rs");
-    expect(formatDisplayPath("mixed/path\\with\\both")).toBe("mixed/path\\with\\both");
-    expect(acceptsCrossPlatformPath("C:\\Users\\dev\\main.rs")).toBe(true);
-    expect(acceptsCrossPlatformPath("/home/dev/main.rs")).toBe(true);
-    expect(acceptsCrossPlatformPath("mixed/path\\with\\both")).toBe(true);
+    assert.equal(formatDisplayPath("C:\\Users\\dev\\main.rs"), "C:\\Users\\dev\\main.rs");
+    assert.equal(formatDisplayPath("/home/dev/main.rs"), "/home/dev/main.rs");
+    assert.equal(formatDisplayPath("mixed/path\\with\\both"), "mixed/path\\with\\both");
+    assert.equal(acceptsCrossPlatformPath("C:\\Users\\dev\\main.rs"), true);
+    assert.equal(acceptsCrossPlatformPath("/home/dev/main.rs"), true);
+    assert.equal(acceptsCrossPlatformPath("mixed/path\\with\\both"), true);
   });
 });
 
@@ -48,7 +49,7 @@ describe("resolveGraphTotals", () => {
         ],
       },
     });
-    expect(totals.nodes).toBe(2286);
-    expect(totals.edges).toBe(7958);
+    assert.equal(totals.nodes, 2286);
+    assert.equal(totals.edges, 7958);
   });
 });
