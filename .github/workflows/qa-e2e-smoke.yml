@@ -64,7 +64,9 @@ jobs:
         run: npm run build
 
       - name: Run @smoke D0 suite
-        run: npx playwright test --project=D0 --grep @smoke
+        # Quote @smoke — PowerShell treats bare @smoke as $smoke.
+        shell: bash
+        run: npx playwright test --project=D0 --grep '@smoke'
         env:
           CI: "1"
 
