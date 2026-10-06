@@ -21,6 +21,9 @@ const INTERNAL_DAEMON_ALLOWLIST: &[&str] = &[
     "netstat",
     "kill",
     "taskkill",
+    // Process cmdline introspection (NATS --pass migration / secret argv checks).
+    "ps",
+    "powershell",
 ];
 
 pub struct GuardedCommand {

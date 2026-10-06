@@ -181,7 +181,9 @@ pub(crate) fn render_nats_auth_config(creds: &NatsCredentials) -> Result<String>
             &hash[..4.min(hash.len())]
         );
     }
-    if hash.contains(&creds.password) {
+    // Only meaningful for longer secrets: bcrypt's base64 alphabet includes
+    // short fragments (e.g. single-letter passwords like "p") by chance.
+    if creds.password.len() >= 8 && hash.contains(&creds.password) {
         anyhow::bail!("bcrypt hash unexpectedly contains plaintext password");
     }
     // Escape quotes/backslashes in user for conf safety (UUIDs are plain, but fail closed).
@@ -716,9 +718,11 @@ pub struct TestAuthGuard {
 #[cfg(test)]
 impl TestAuthGuard {
     pub fn new() -> Self {
+        // Recover from a prior test panic so one failure does not cascade into
+        // every subsequent TestAuthGuard consumer (macOS/Windows CI).
         let serial = TEST_AUTH_SERIAL
             .lock()
-            .expect("lounge_auth test serial poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         reset_test_state();
         Self { _serial: serial }
     }
@@ -1002,8 +1006,8 @@ mod tests {
         write_credentials_file(
             &creds_path,
             &NatsCredentials {
-                user: "u".into(),
-                password: "p".into(),
+                user: "acl_user".into(),
+                password: "acl-secret-password".into(),
             },
             "nats://127.0.0.1:4222",
         )
@@ -1012,8 +1016,8 @@ mod tests {
         write_secret_file(
             &conf_path,
             render_nats_auth_config(&NatsCredentials {
-                user: "u".into(),
-                password: "p".into(),
+                user: "acl_user".into(),
+                password: "acl-secret-password".into(),
             })
             .unwrap(),
         )

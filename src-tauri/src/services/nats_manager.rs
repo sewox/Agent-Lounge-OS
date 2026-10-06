@@ -507,7 +507,11 @@ fn process_cmd_has_pass(cmd: &[impl AsRef<std::ffi::OsStr>]) -> bool {
     })
 }
 
-/// Collect argv strings for a live PID (cross-platform; Linux prefers `/proc`).
+/// Collect argv strings for a live PID (cross-platform).
+///
+/// Linux prefers `/proc/{pid}/cmdline`. macOS/Windows fall back to `ps` /
+/// `Get-CimInstance Win32_Process` because sysinfo often returns an empty
+/// `cmd()` under CI (SIP / limited process info).
 fn process_cmdline(pid: u32) -> Vec<String> {
     #[cfg(target_os = "linux")]
     {
@@ -522,9 +526,30 @@ fn process_cmdline(pid: u32) -> Vec<String> {
             }
         }
     }
-    use sysinfo::{Pid, ProcessesToUpdate, System};
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let via_ps = cmdline_via_ps(pid);
+        if !via_ps.is_empty() {
+            return via_ps;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let via_cim = cmdline_via_win32_cim(pid);
+        if !via_cim.is_empty() {
+            return via_cim;
+        }
+    }
+
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::everything(),
+    );
     let Some(proc) = sys.process(Pid::from_u32(pid)) else {
         return Vec::new();
     };
@@ -532,6 +557,56 @@ fn process_cmdline(pid: u32) -> Vec<String> {
         .iter()
         .map(|s| s.to_string_lossy().into_owned())
         .collect()
+}
+
+/// Tokenize a single process command-line string (handles quoted exe paths).
+fn tokenize_command_line(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    // Prefer shell-word splitting so `"C:\Program Files\…"` stays one token.
+    let words = crate::kernel::policy_gate::shell_words(trimmed);
+    if !words.is_empty() {
+        return words;
+    }
+    trimmed.split_whitespace().map(str::to_string).collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn cmdline_via_ps(pid: u32) -> Vec<String> {
+    let output = GuardedCommand::new("ps")
+        .args(["-p", &pid.to_string(), "-ww", "-o", "args="])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    tokenize_command_line(line.trim())
+}
+
+#[cfg(windows)]
+fn cmdline_via_win32_cim(pid: u32) -> Vec<String> {
+    // Filter by ProcessId so we only tokenize the target (counts/values never logged).
+    let script = format!(
+        "(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine"
+    );
+    let output = GuardedCommand::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    tokenize_command_line(line.trim())
 }
 
 /// Count how many process cmdlines contain `needle` (value never logged).
@@ -560,13 +635,52 @@ fn count_cmdline_matches(needle: &str) -> usize {
                 }
             }
         }
-        matches
+        return matches;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        use sysinfo::{ProcessesToUpdate, System};
+        let output = GuardedCommand::new("ps")
+            .args(["-axww", "-o", "args="])
+            .internal_daemon()
+            .output();
+        let Ok(output) = output else {
+            return 0;
+        };
+        if !output.status.success() {
+            return 0;
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count();
+    }
+    #[cfg(windows)]
+    {
+        let script = r#"Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"#;
+        let output = GuardedCommand::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .internal_daemon()
+            .output();
+        let Ok(output) = output else {
+            return 0;
+        };
+        if !output.status.success() {
+            return 0;
+        }
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
         let mut sys = System::new();
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::everything(),
+        );
         let mut matches = 0usize;
         for proc in sys.processes().values() {
             for arg in proc.cmd() {
