@@ -1222,4 +1222,69 @@ mod tests {
         assert!(listen_pids(1).is_empty());
         assert_eq!(kill_nats_on_port(1), 0);
     }
+
+    /// macOS/Linux: `ps -axww -o args` must show 0 matches for the NATS password
+    /// (counts only — values never printed).
+    #[cfg(unix)]
+    #[test]
+    fn nats_password_absent_from_ps_axww_args() {
+        use crate::kernel::ActionSource;
+        let creds = NatsCredentials {
+            user: format!("ps_u_{}", uuid::Uuid::new_v4().simple()),
+            password: format!("ps_p_{}", uuid::Uuid::new_v4().simple()),
+        };
+        let (_url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
+            panic!("nats-server required for nats_password_absent_from_ps_axww_args: {err}");
+        });
+        let output = GuardedCommand::new("ps")
+            .args(["-axww", "-o", "args"])
+            .source(ActionSource::User)
+            .output()
+            .expect("ps -axww -o args");
+        assert!(output.status.success(), "ps failed");
+        let dump = String::from_utf8_lossy(&output.stdout);
+        let pass_matches = dump.matches(&creds.password).count();
+        assert_eq!(
+            pass_matches, 0,
+            "ps -axww -o args password match count must be 0"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Windows: `Get-CimInstance Win32_Process | Select-Object CommandLine` must show
+    /// 0 matches for the NATS password (counts only — values never printed).
+    #[cfg(windows)]
+    #[test]
+    fn nats_password_absent_from_win32_process_commandline() {
+        use crate::kernel::ActionSource;
+        let creds = NatsCredentials {
+            user: format!("cim_u_{}", uuid::Uuid::new_v4().simple()),
+            password: format!("cim_p_{}", uuid::Uuid::new_v4().simple()),
+        };
+        let (_url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
+            panic!(
+                "nats-server required for nats_password_absent_from_win32_process_commandline: {err}"
+            );
+        });
+        let script = r#"Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"#;
+        let output = GuardedCommand::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .source(ActionSource::User)
+            .output()
+            .expect("Get-CimInstance Win32_Process");
+        assert!(
+            output.status.success(),
+            "powershell Get-CimInstance failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let dump = String::from_utf8_lossy(&output.stdout);
+        let pass_matches = dump.matches(&creds.password).count();
+        assert_eq!(
+            pass_matches, 0,
+            "Get-CimInstance CommandLine password match count must be 0"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

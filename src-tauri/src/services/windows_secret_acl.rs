@@ -2,6 +2,9 @@
 //!
 //! Applies a protected DACL with Full Control for the current user and SYSTEM only
 //! (no inheritance). Fail-closed callers must propagate errors.
+//!
+//! Symbol paths target **windows-sys 0.59** (`GENERIC_ALL` in Foundation,
+//! `SECURITY_NT_AUTHORITY` in Security, SystemServices RIDs are `i32`).
 
 #![cfg(windows)]
 
@@ -10,21 +13,29 @@ use std::ptr;
 
 use anyhow::{bail, Context, Result};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, ERROR_SUCCESS, FALSE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, LocalFree, ERROR_SUCCESS, FALSE, GENERIC_ALL, HANDLE, INVALID_HANDLE_VALUE,
 };
+#[cfg(test)]
+use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
 use windows_sys::Win32::Security::Authorization::{
-    GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS,
-    SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, SET_ACCESS, SE_FILE_OBJECT,
+    TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
-    AllocateAndInitializeSid, CopySid, EqualSid, FreeSid, GetAce, GetLengthSid,
-    GetTokenInformation, IsValidSid, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, GENERIC_ALL, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SECURITY_WORLD_SID_AUTHORITY, TOKEN_QUERY, TOKEN_USER,
+    AllocateAndInitializeSid, CopySid, FreeSid, GetLengthSid, GetTokenInformation, IsValidSid,
+    TokenUser, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSID, SECURITY_NT_AUTHORITY, TOKEN_QUERY, TOKEN_USER,
 };
+#[cfg(test)]
+use windows_sys::Win32::Security::{
+    EqualSid, GetAce, ACCESS_ALLOWED_ACE, ACE_HEADER, PSECURITY_DESCRIPTOR,
+    SECURITY_WORLD_SID_AUTHORITY,
+};
+use windows_sys::Win32::System::SystemServices::SECURITY_LOCAL_SYSTEM_RID;
+#[cfg(test)]
 use windows_sys::Win32::System::SystemServices::{
     DOMAIN_ALIAS_RID_USERS, SECURITY_AUTHENTICATED_USER_RID, SECURITY_BUILTIN_DOMAIN_RID,
-    SECURITY_LOCAL_SYSTEM_RID, SECURITY_NT_AUTHORITY, SECURITY_WORLD_RID,
+    SECURITY_WORLD_RID,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -33,7 +44,7 @@ pub(crate) fn apply_current_user_and_system_only(path: &Path) -> Result<()> {
     unsafe {
         let user_sid = current_user_sid().context("resolve current user SID")?;
         let system_sid =
-            well_known_sid_nt(SECURITY_LOCAL_SYSTEM_RID).context("allocate SYSTEM SID")?;
+            well_known_sid_nt(SECURITY_LOCAL_SYSTEM_RID as u32).context("allocate SYSTEM SID")?;
 
         let mut entries = [
             explicit_access(user_sid.as_ptr()),
@@ -64,6 +75,7 @@ pub(crate) fn apply_current_user_and_system_only(path: &Path) -> Result<()> {
 }
 
 /// True when the DACL contains an ACE for Everyone, Users, or Authenticated Users.
+#[cfg(test)]
 pub(crate) fn dacl_has_broad_aces(path: &Path) -> Result<bool> {
     let wide = path_to_wide(path)?;
     unsafe {
@@ -84,7 +96,7 @@ pub(crate) fn dacl_has_broad_aces(path: &Path) -> Result<bool> {
         }
 
         let everyone = well_known_world_sid()?;
-        let users = well_known_builtin_alias(DOMAIN_ALIAS_RID_USERS)?;
+        let users = well_known_builtin_alias(DOMAIN_ALIAS_RID_USERS as u32)?;
         let auth_users = well_known_auth_users()?;
         let mut found = false;
 
@@ -186,13 +198,14 @@ unsafe fn well_known_sid_nt(rid: u32) -> Result<OwnedSid> {
     owned
 }
 
+#[cfg(test)]
 unsafe fn well_known_world_sid() -> Result<OwnedSid> {
     let mut authority = SECURITY_WORLD_SID_AUTHORITY;
     let mut sid: PSID = ptr::null_mut();
     if AllocateAndInitializeSid(
         &mut authority,
         1,
-        SECURITY_WORLD_RID,
+        SECURITY_WORLD_RID as u32,
         0,
         0,
         0,
@@ -211,13 +224,14 @@ unsafe fn well_known_world_sid() -> Result<OwnedSid> {
     owned
 }
 
+#[cfg(test)]
 unsafe fn well_known_auth_users() -> Result<OwnedSid> {
     let mut authority = SECURITY_NT_AUTHORITY;
     let mut sid: PSID = ptr::null_mut();
     if AllocateAndInitializeSid(
         &mut authority,
         1,
-        SECURITY_AUTHENTICATED_USER_RID,
+        SECURITY_AUTHENTICATED_USER_RID as u32,
         0,
         0,
         0,
@@ -236,13 +250,14 @@ unsafe fn well_known_auth_users() -> Result<OwnedSid> {
     owned
 }
 
+#[cfg(test)]
 unsafe fn well_known_builtin_alias(rid: u32) -> Result<OwnedSid> {
     let mut authority = SECURITY_NT_AUTHORITY;
     let mut sid: PSID = ptr::null_mut();
     if AllocateAndInitializeSid(
         &mut authority,
         2,
-        SECURITY_BUILTIN_DOMAIN_RID,
+        SECURITY_BUILTIN_DOMAIN_RID as u32,
         rid,
         0,
         0,
@@ -271,6 +286,7 @@ unsafe fn copy_sid(src: PSID) -> Result<OwnedSid> {
     Ok(OwnedSid { ptr, _buf: sid_buf })
 }
 
+#[cfg(test)]
 unsafe fn sids_equal(a: PSID, b: PSID) -> bool {
     EqualSid(a, b) != FALSE
 }
