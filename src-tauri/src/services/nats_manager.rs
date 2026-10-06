@@ -10,7 +10,8 @@ use tokio::process::{Child, Command};
 
 use super::lounge_auth::{
     activate_nats_auth, auth_required, connect as nats_connect, current_credentials,
-    deactivate_nats_auth, ensure_session_credentials, NatsCredentials,
+    deactivate_nats_auth, delete_nats_server_conf, ensure_session_credentials,
+    nats_server_conf_path, rotate_session_credentials, write_nats_server_conf, NatsCredentials,
 };
 use super::probe::{
     endpoint, find_executable, listen_pids, lounge_nats_dir, tcp_ready, wait_until,
@@ -96,7 +97,7 @@ pub struct NatsConfig {
     pub http_port: u16,
     pub binary: String,
     pub args: Vec<String>,
-    /// When set, nats-server is started with `--user` / `--pass`.
+    /// When set, nats-server is started with `-c nats-server.conf` (bcrypt auth).
     pub credentials: Option<NatsCredentials>,
 }
 
@@ -219,6 +220,19 @@ impl NatsService {
                     deactivate_nats_auth();
                     return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
                 }
+                Some(_) if listening_nats_has_pass_flag(self.config.port) => {
+                    // Legacy argv leak: do not adopt — rotate once, kill, restart with conf.
+                    log::warn!(
+                        "NATS :{} argv contains --pass — rotating credentials and restarting with conf",
+                        self.config.port
+                    );
+                    let creds = rotate_session_credentials(&self.endpoint())?;
+                    self.config.credentials = Some(creds);
+                    let _ = kill_nats_on_port(self.config.port);
+                    self.kill_child().await;
+                    wait_port_free(&self.config.host, self.config.port).await;
+                    force_respawn = true;
+                }
                 Some(_) if self.auth_connect_ok() => {
                     self.mark_auth_active();
                     return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
@@ -230,17 +244,7 @@ impl NatsService {
                     );
                     let _ = kill_nats_on_port(self.config.port);
                     self.kill_child().await;
-                    let host = self.config.host.clone();
-                    let port = self.config.port;
-                    let _ = wait_until(
-                        Duration::from_secs(2),
-                        Duration::from_millis(80),
-                        move || {
-                            let host = host.clone();
-                            async move { !tcp_ready(&host, port, HEALTH_TIMEOUT).await }
-                        },
-                    )
-                    .await;
+                    wait_port_free(&self.config.host, self.config.port).await;
                     force_respawn = true;
                 }
             }
@@ -249,30 +253,38 @@ impl NatsService {
         if client_ok && !monitor_ok && !force_respawn {
             let killed = kill_nats_on_port(self.config.port);
             if killed == 0 {
-                if self.config.credentials.is_none() {
-                    deactivate_nats_auth();
-                } else if self.auth_connect_ok() {
-                    self.mark_auth_active();
+                // Nothing nats-like to kill on the port. Adopt open TCP unless we must
+                // migrate a legacy `--pass` argv server.
+                if self.config.credentials.is_some()
+                    && listening_nats_has_pass_flag(self.config.port)
+                {
+                    log::warn!(
+                        "NATS :{} monitor yok ve argv --pass — rotate + restart",
+                        self.config.port
+                    );
+                    let creds = rotate_session_credentials(&self.endpoint())?;
+                    self.config.credentials = Some(creds);
+                    let _ = kill_nats_on_port(self.config.port);
+                    self.kill_child().await;
+                    wait_port_free(&self.config.host, self.config.port).await;
+                    // Fall through to spawn_and_wait below.
+                } else {
+                    if self.config.credentials.is_none() {
+                        deactivate_nats_auth();
+                    } else if self.auth_connect_ok() {
+                        self.mark_auth_active();
+                    }
+                    return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
                 }
-                return Ok(self.snapshot(true, Some("tcp kabul ediyor".into()), None));
+            } else {
+                log::error!(
+                    "kritik servis down: NATS HTTP monitor ({}) — {} nats-server geri alındı",
+                    self.monitor_url(),
+                    killed
+                );
+                self.kill_child().await;
+                wait_port_free(&self.config.host, self.config.port).await;
             }
-            log::error!(
-                "kritik servis down: NATS HTTP monitor ({}) — {} nats-server geri alındı",
-                self.monitor_url(),
-                killed
-            );
-            self.kill_child().await;
-            let host = self.config.host.clone();
-            let port = self.config.port;
-            let _ = wait_until(
-                Duration::from_secs(2),
-                Duration::from_millis(80),
-                move || {
-                    let host = host.clone();
-                    async move { !tcp_ready(&host, port, HEALTH_TIMEOUT).await }
-                },
-            )
-            .await;
         }
 
         if !self.runtime_installed() {
@@ -331,6 +343,10 @@ impl NatsService {
                 self.endpoint()
             )
         })?;
+        // Rewrite conf on every launch when auth is enabled.
+        if let Some(creds) = &self.config.credentials {
+            write_nats_server_conf(creds)?;
+        }
         let args = nats_server_args(&self.config, with_monitor);
 
         let std_cmd = GuardedCommand::new(&binary)
@@ -393,10 +409,14 @@ impl NatsService {
     }
 
     async fn kill_child(&mut self) {
+        let started_by_us = self.started_by_us;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
         }
         self.started_by_us = false;
+        if started_by_us {
+            delete_nats_server_conf();
+        }
     }
 }
 
@@ -404,6 +424,19 @@ impl Default for NatsService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+async fn wait_port_free(host: &str, port: u16) {
+    let host = host.to_string();
+    let _ = wait_until(
+        Duration::from_secs(2),
+        Duration::from_millis(80),
+        move || {
+            let host = host.clone();
+            async move { !tcp_ready(&host, port, HEALTH_TIMEOUT).await }
+        },
+    )
+    .await;
 }
 
 fn apply_no_window(_command: &mut Command) {
@@ -439,14 +472,112 @@ pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<S
         args.push("-m".to_string());
         args.push(config.http_port.to_string());
     }
-    if let Some(creds) = &config.credentials {
-        args.push("--user".to_string());
-        args.push(creds.user.clone());
-        args.push("--pass".to_string());
-        args.push(creds.password.clone());
+    if config.credentials.is_some() {
+        args.push("-c".to_string());
+        args.push(nats_server_conf_path().display().to_string());
     }
     args.extend(config.args.iter().cloned());
     args
+}
+
+/// True when a nats-server listening on `port` has `--pass` in its argv (legacy leak).
+fn listening_nats_has_pass_flag(port: u16) -> bool {
+    let pids = listen_pids(port);
+    for pid in pids {
+        let cmd = process_cmdline(pid);
+        if cmd.is_empty() {
+            continue;
+        }
+        // Confirm it looks like nats before treating --pass as our leak signal.
+        let looks_like_nats = cmd.iter().any(|a| {
+            let lower = a.to_ascii_lowercase();
+            lower.contains("nats-server") || lower.ends_with("nats-server.exe")
+        });
+        if looks_like_nats && process_cmd_has_pass(&cmd) {
+            return true;
+        }
+    }
+    false
+}
+
+fn process_cmd_has_pass(cmd: &[impl AsRef<std::ffi::OsStr>]) -> bool {
+    cmd.iter().any(|a| {
+        let s = a.as_ref().to_string_lossy();
+        s == "--pass" || s.starts_with("--pass=")
+    })
+}
+
+/// Collect argv strings for a live PID (cross-platform; Linux prefers `/proc`).
+fn process_cmdline(pid: u32) -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+            let parts: Vec<String> = raw
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect();
+            if !parts.is_empty() {
+                return parts;
+            }
+        }
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let Some(proc) = sys.process(Pid::from_u32(pid)) else {
+        return Vec::new();
+    };
+    proc.cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Count how many process cmdlines contain `needle` (value never logged).
+#[cfg(test)]
+fn count_cmdline_matches(needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut matches = 0usize;
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(pid_str) = name.to_str() else {
+                    continue;
+                };
+                if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                if let Ok(raw) = std::fs::read(entry.path().join("cmdline")) {
+                    let joined = String::from_utf8_lossy(&raw);
+                    if joined.contains(needle) {
+                        matches += 1;
+                    }
+                }
+            }
+        }
+        matches
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use sysinfo::{ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        let mut matches = 0usize;
+        for proc in sys.processes().values() {
+            for arg in proc.cmd() {
+                if arg.to_string_lossy().contains(needle) {
+                    matches += 1;
+                    break;
+                }
+            }
+        }
+        matches
+    }
 }
 
 fn attach_nats_log(command: &mut Command) {
@@ -639,17 +770,35 @@ mod tests {
     }
 
     #[test]
-    fn spawn_args_include_user_pass_when_credentials_set() {
+    fn spawn_args_use_conf_not_user_pass_when_credentials_set() {
         let config = NatsConfig {
             credentials: Some(NatsCredentials {
                 user: "lounge_u".into(),
-                password: "secret".into(),
+                password: "secret-must-not-appear".into(),
             }),
             ..NatsConfig::default()
         };
         let args = nats_server_args(&config, false);
-        assert!(args.windows(2).any(|pair| pair == ["--user", "lounge_u"]));
-        assert!(args.windows(2).any(|pair| pair == ["--pass", "secret"]));
+        assert!(
+            !args.iter().any(|a| a == "--user" || a == "--pass"),
+            "argv must not contain --user/--pass"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "lounge_u" || a == "secret-must-not-appear"),
+            "argv must not contain credential values"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair[0] == "-c"),
+            "argv must include -c <conf>: {args:?}"
+        );
+        let conf_idx = args.iter().position(|a| a == "-c").unwrap();
+        assert!(
+            args[conf_idx + 1].ends_with("nats-server.conf"),
+            "conf path: {}",
+            args[conf_idx + 1]
+        );
     }
 
     #[test]
@@ -663,6 +812,20 @@ mod tests {
                 "nats-server required for nats_auth_rejects_unauthenticated_when_required: {err}"
             );
         });
+        // Child cmdline must not contain password (match count only).
+        let cmdline = process_cmdline(child.id());
+        let pass_hits = cmdline
+            .iter()
+            .filter(|a| a.contains(&creds.password))
+            .count();
+        let user_flag = cmdline.iter().any(|a| a == "--user" || a == "--pass");
+        assert_eq!(pass_hits, 0, "password must not appear in nats-server argv");
+        assert!(!user_flag, "--user/--pass must not appear in argv");
+        assert!(
+            cmdline.iter().any(|a| a == "-c"),
+            "expected -c in argv: {cmdline:?}"
+        );
+
         let unauth =
             super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(8));
         assert!(
@@ -743,7 +906,26 @@ mod tests {
         );
         assert!(nats_connect(&url).is_ok());
 
+        // Spawned child cmdline: no password, has -c (match counts only).
+        if let Some(child) = service.child.as_ref() {
+            let pid = child.id().expect("child pid");
+            let cmd = process_cmdline(pid);
+            let pass_hits = cmd.iter().filter(|a| a.contains(&creds.password)).count();
+            assert_eq!(pass_hits, 0, "password must not appear in child argv");
+            assert!(cmd.iter().any(|a| a == "-c"), "expected -c: {cmd:?}");
+            assert!(!cmd.iter().any(|a| a == "--pass" || a == "--user"));
+        }
+        let conf = temp.join("nats-server.conf");
+        assert!(conf.is_file(), "conf must be rewritten on launch");
+        let conf_body = std::fs::read_to_string(&conf).unwrap();
+        assert!(!conf_body.contains(&creds.password));
+        assert!(conf_body.contains("$2a$"));
+
         service.kill_child().await;
+        assert!(
+            !conf.is_file(),
+            "conf must be deleted on clean shutdown when started_by_us"
+        );
         crate::services::lounge_auth::deactivate_nats_auth();
         unsafe {
             match prev_auth {
@@ -799,11 +981,22 @@ mod tests {
             "-p".to_string(),
             port.to_string(),
         ];
+        // Keep conf dir alive for the child process lifetime.
+        let _conf_dir_keepalive;
         if let Some(c) = creds {
-            args.push("--user".into());
-            args.push(c.user.clone());
-            args.push("--pass".into());
-            args.push(c.password.clone());
+            let dir = std::env::temp_dir().join(format!(
+                "lounge-nats-ephemeral-conf-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&dir).context("create ephemeral conf dir")?;
+            let path = dir.join("nats-server.conf");
+            let body = super::super::lounge_auth::render_nats_auth_config(c)?;
+            super::super::lounge_auth::write_secret_file(&path, body)?;
+            args.push("-c".into());
+            args.push(path.display().to_string());
+            _conf_dir_keepalive = Some(dir);
+        } else {
+            _conf_dir_keepalive = None;
         }
         let mut command = GuardedCommand::new(binary)
             .args(&args)
@@ -837,6 +1030,8 @@ mod tests {
             if ok {
                 // Brief settle so subscribe/publish races on a freshly-bound port are rare.
                 std::thread::sleep(Duration::from_millis(50));
+                // Leak conf dir intentionally until process exits (OS cleans temp).
+                std::mem::forget(_conf_dir_keepalive);
                 return Ok((url, child));
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -847,6 +1042,179 @@ mod tests {
         Err(anyhow::anyhow!(
             "nats-server spawned but did not accept connections at {url} within ~10s"
         ))
+    }
+
+    /// Spawn legacy nats-server with `--user/--pass` on argv (migration fixture).
+    fn spawn_legacy_nats_with_argv_auth(
+        creds: &NatsCredentials,
+    ) -> Result<(u16, std::process::Child)> {
+        let binary = find_executable("nats-server").ok_or_else(|| {
+            anyhow::anyhow!("nats-server not on PATH (install locally or rely on CI install step)")
+        })?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("bind ephemeral port for legacy nats")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        let args = vec![
+            "-a".to_string(),
+            "127.0.0.1".to_string(),
+            "-p".to_string(),
+            port.to_string(),
+            "--user".to_string(),
+            creds.user.clone(),
+            "--pass".to_string(),
+            creds.password.clone(),
+        ];
+        let mut command = GuardedCommand::new(binary)
+            .args(&args)
+            .internal_daemon()
+            .into_std_command()
+            .context("legacy nats GuardedCommand")?;
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn legacy nats-server")?;
+        let url = format!("nats://127.0.0.1:{port}");
+        for _ in 0..200 {
+            if super::super::lounge_auth::connect_nats_timeout(
+                &url,
+                Some((&creds.user, &creds.password)),
+                Duration::from_millis(500),
+            )
+            .is_ok()
+            {
+                std::thread::sleep(Duration::from_millis(50));
+                return Ok((port, child));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(anyhow::anyhow!(
+            "legacy nats-server did not accept auth at {url}"
+        ))
+    }
+
+    #[tokio::test]
+    async fn ensure_migrates_legacy_pass_argv_server() {
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
+        let temp =
+            std::env::temp_dir().join(format!("lounge-nats-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let creds_path = temp.join("session.creds.json");
+        let old_creds = NatsCredentials {
+            user: format!("old_u_{}", uuid::Uuid::new_v4().simple()),
+            password: format!("old_p_{}", uuid::Uuid::new_v4().simple()),
+        };
+        super::super::lounge_auth::write_credentials_file(
+            &creds_path,
+            &old_creds,
+            "nats://127.0.0.1:0",
+        )
+        .unwrap();
+        super::super::lounge_auth::activate_nats_auth(old_creds.clone());
+
+        let (port, mut legacy) =
+            spawn_legacy_nats_with_argv_auth(&old_creds).unwrap_or_else(|err| {
+                panic!("nats-server required for ensure_migrates_legacy_pass_argv_server: {err}");
+            });
+        let legacy_pid = legacy.id();
+        assert!(
+            process_cmd_has_pass(&process_cmdline(legacy_pid)),
+            "fixture must expose --pass on cmdline"
+        );
+
+        let prev_auth = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        let prev_creds_file =
+            std::env::var_os(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV);
+        unsafe {
+            std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "true");
+            std::env::set_var(
+                super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV,
+                &creds_path,
+            );
+        }
+
+        let mut service = NatsService::with_config(NatsConfig {
+            host: "127.0.0.1".into(),
+            port,
+            http_port: 0,
+            binary: "nats-server".into(),
+            args: Vec::new(),
+            credentials: None,
+        });
+        let health = service.ensure().await;
+        assert!(
+            health.running,
+            "migration ensure must start clean server: {:?}",
+            health.error
+        );
+        assert!(service.started_by_us);
+
+        let new_pid = service.child.as_ref().and_then(|c| c.id());
+        assert!(new_pid.is_some());
+        assert_ne!(new_pid, Some(legacy_pid), "must not keep legacy PID");
+
+        let new_cmd = process_cmdline(new_pid.unwrap());
+        assert!(
+            !process_cmd_has_pass(&new_cmd),
+            "new argv must not contain --pass"
+        );
+        assert!(
+            new_cmd.iter().any(|a| a == "-c"),
+            "new argv must use -c conf"
+        );
+
+        let url = service.endpoint();
+        assert!(
+            super::super::lounge_auth::connect_nats_timeout(
+                &url,
+                Some((&old_creds.user, &old_creds.password)),
+                Duration::from_secs(5),
+            )
+            .is_err(),
+            "old leaked credentials must be rejected after rotation"
+        );
+        let new_creds = service.credentials().expect("rotated creds");
+        assert_ne!(new_creds.password, old_creds.password);
+        assert!(
+            super::super::lounge_auth::connect_nats_timeout(
+                &url,
+                Some((&new_creds.user, &new_creds.password)),
+                Duration::from_secs(5),
+            )
+            .is_ok(),
+            "new credentials must work"
+        );
+
+        let pass_matches = count_cmdline_matches(&new_creds.password);
+        assert_eq!(
+            pass_matches, 0,
+            "new password must not appear in any process cmdline (match count)"
+        );
+
+        service.kill_child().await;
+        let _ = legacy.kill();
+        let _ = legacy.wait();
+        crate::services::lounge_auth::deactivate_nats_auth();
+        unsafe {
+            match prev_auth {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
+            }
+            match prev_creds_file {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV),
+            }
+        }
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

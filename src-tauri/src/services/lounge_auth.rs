@@ -24,6 +24,9 @@ pub const HDR_LOUNGE_TOKEN: &str = "x-lounge-token";
 
 const CREDS_FILE_NAME: &str = "session.creds.json";
 const TOKEN_FILE_NAME: &str = "lounge.token";
+pub(crate) const NATS_SERVER_CONF_NAME: &str = "nats-server.conf";
+/// bcrypt cost for nats-server.conf (`$2a$`, 10–11 per PR-S).
+const NATS_BCRYPT_COST: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NatsCredentials {
@@ -91,10 +94,21 @@ fn token_path() -> PathBuf {
     lounge_nats_dir().join(TOKEN_FILE_NAME)
 }
 
-fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+pub(crate) fn nats_server_conf_path() -> PathBuf {
+    // Prefer the session creds directory so tests can isolate via
+    // `LOUNGE_NATS_CREDS_FILE` without mutating `LOUNGE_NATS_DIR` (which races
+    // with path-ownership unit tests under parallel cargo test).
+    match default_creds_path().parent() {
+        Some(dir) => dir.join(NATS_SERVER_CONF_NAME),
+        None => lounge_nats_dir().join(NATS_SERVER_CONF_NAME),
+    }
+}
+
+/// Write a secret file with owner-only access (Unix 0600 / Windows user+SYSTEM DACL).
+/// Fail-closed: ACL/permission hardening errors are returned, never ignored.
+pub(crate) fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create secret dir {}", parent.display()))?;
+        ensure_secret_dir(parent)?;
     }
     let bytes = contents.as_ref();
     #[cfg(unix)]
@@ -120,12 +134,91 @@ fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
         std::fs::set_permissions(path, perms)
             .with_context(|| format!("chmod 0600 {}", path.display()))?;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Windows: best-effort plain write; ACL lockdown is OS-specific.
+        std::fs::write(path, bytes).with_context(|| format!("write secret {}", path.display()))?;
+        apply_user_only_acl(path)
+            .with_context(|| format!("apply user-only ACL to {}", path.display()))?;
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
         std::fs::write(path, bytes).with_context(|| format!("write secret {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Ensure `data/nats` (or any secret parent) exists with locked-down permissions.
+pub(crate) fn ensure_secret_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create secret dir {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir)
+            .with_context(|| format!("stat secret dir {}", dir.display()))?
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir, perms)
+            .with_context(|| format!("chmod 0700 {}", dir.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        apply_user_only_acl(dir)
+            .with_context(|| format!("apply user-only ACL to dir {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Render nats-server authorization config with a bcrypt (`$2a$`) password hash.
+/// The plaintext password never appears in the conf; the hash is quoted so NATS
+/// does not treat `$…` as a variable reference.
+pub(crate) fn render_nats_auth_config(creds: &NatsCredentials) -> Result<String> {
+    let hash = bcrypt::hash_with_result(&creds.password, NATS_BCRYPT_COST)
+        .map_err(|e| anyhow::anyhow!("bcrypt hash failed: {e}"))?
+        .format_for_version(bcrypt::Version::TwoA);
+    if !hash.starts_with("$2a$") {
+        anyhow::bail!(
+            "expected $2a$ bcrypt hash, got prefix {}",
+            &hash[..4.min(hash.len())]
+        );
+    }
+    if hash.contains(&creds.password) {
+        anyhow::bail!("bcrypt hash unexpectedly contains plaintext password");
+    }
+    // Escape quotes/backslashes in user for conf safety (UUIDs are plain, but fail closed).
+    let user = escape_nats_conf_string(&creds.user);
+    let hash_escaped = escape_nats_conf_string(&hash);
+    Ok(format!(
+        "authorization {{\n  user: \"{user}\"\n  password: \"{hash_escaped}\"\n}}\n"
+    ))
+}
+
+fn escape_nats_conf_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Write (or rewrite) `data/nats/nats-server.conf` for the current session credentials.
+pub(crate) fn write_nats_server_conf(creds: &NatsCredentials) -> Result<PathBuf> {
+    let path = nats_server_conf_path();
+    let body = render_nats_auth_config(creds)?;
+    write_secret_file(&path, body)?;
+    Ok(path)
+}
+
+/// Delete the conf when we started nats-server and are shutting it down cleanly.
+pub(crate) fn delete_nats_server_conf() {
+    let path = nats_server_conf_path();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(windows)]
+fn apply_user_only_acl(path: &Path) -> Result<()> {
+    super::windows_secret_acl::apply_current_user_and_system_only(path)
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+pub(crate) fn secret_file_has_broad_aces(path: &Path) -> Result<bool> {
+    super::windows_secret_acl::dacl_has_broad_aces(path)
 }
 
 fn load_or_create_token() -> String {
@@ -143,12 +236,8 @@ fn load_or_create_token() -> String {
         }
     }
     let token = format!("lounge_{}", uuid::Uuid::new_v4().simple());
-    let _ = std::fs::create_dir_all(lounge_nats_dir());
+    // Persist to locked file only — do not leak into process env for all children.
     let _ = write_secret_file(&path, &token);
-    // SAFETY: single-process Kernel; env is the worker hand-off channel.
-    unsafe {
-        std::env::set_var(LOUNGE_TOKEN_ENV, &token);
-    }
     token
 }
 
@@ -188,10 +277,9 @@ pub fn write_credentials_file(path: &Path, creds: &NatsCredentials, nats_url: &s
     };
     let json = serde_json::to_string_pretty(&body)?;
     write_secret_file(path, json)?;
-    // SAFETY: Kernel → worker credential hand-off via env.
+    // Path pointer only — never publish USER/PASS/TOKEN into the process environment
+    // (GuardedCommand strips those for children; see `.with_lounge_secrets()`).
     unsafe {
-        std::env::set_var(LOUNGE_NATS_USER_ENV, &creds.user);
-        std::env::set_var(LOUNGE_NATS_PASS_ENV, &creds.password);
         std::env::set_var(LOUNGE_NATS_CREDS_FILE_ENV, path);
     }
     Ok(())
@@ -224,6 +312,17 @@ pub fn ensure_session_credentials(nats_url: &str) -> Result<Option<NatsCredentia
     write_credentials_file(&path, &creds, nats_url)?;
     guard.creds = Some(creds.clone());
     Ok(Some(creds))
+}
+
+/// Mint fresh credentials (legacy `--pass` argv leak → rotate before restart).
+pub fn rotate_session_credentials(nats_url: &str) -> Result<NatsCredentials> {
+    let creds = generate_session_credentials();
+    let path = default_creds_path();
+    write_credentials_file(&path, &creds, nats_url)?;
+    let mut guard = state().lock().expect("lounge_auth poison");
+    guard.creds = Some(creds.clone());
+    guard.nats_auth_active = false;
+    Ok(creds)
 }
 
 pub fn activate_nats_auth(creds: NatsCredentials) {
@@ -324,11 +423,8 @@ pub fn lounge_token() -> String {
 pub fn rotate_lounge_token() -> String {
     let token = format!("lounge_{}", uuid::Uuid::new_v4().simple());
     let path = token_path();
-    let _ = std::fs::create_dir_all(lounge_nats_dir());
     let _ = write_secret_file(&path, &token);
-    unsafe {
-        std::env::set_var(LOUNGE_TOKEN_ENV, &token);
-    }
+    // Do not publish LOUNGE_TOKEN into the process environment.
     if let Ok(mut guard) = state().lock() {
         guard.lounge_token = token.clone();
     }
@@ -793,6 +889,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lounge-secret-mode-{}", uuid::Uuid::new_v4()));
         let creds_path = dir.join("session.creds.json");
         let token_path = dir.join("lounge.token");
+        let conf_path = dir.join("nats-server.conf");
         write_credentials_file(
             &creds_path,
             &NatsCredentials {
@@ -803,10 +900,132 @@ mod tests {
         )
         .unwrap();
         write_secret_file(&token_path, "lounge_tok").unwrap();
+        let conf = render_nats_auth_config(&NatsCredentials {
+            user: "u".into(),
+            password: "secret-pass".into(),
+        })
+        .unwrap();
+        write_secret_file(&conf_path, conf).unwrap();
         let creds_mode = std::fs::metadata(&creds_path).unwrap().permissions().mode() & 0o777;
         let token_mode = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
+        let conf_mode = std::fs::metadata(&conf_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(creds_mode, 0o600, "creds mode={creds_mode:#o}");
         assert_eq!(token_mode, 0o600, "token mode={token_mode:#o}");
+        assert_eq!(conf_mode, 0o600, "conf mode={conf_mode:#o}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn render_nats_auth_config_uses_bcrypt_not_plaintext() {
+        let _guard = TestAuthGuard::new();
+        let creds = NatsCredentials {
+            user: "lounge_u".into(),
+            password: "super-secret-password-xyz".into(),
+        };
+        let conf = render_nats_auth_config(&creds).unwrap();
+        assert!(conf.contains("authorization"));
+        assert!(conf.contains("user: \"lounge_u\""));
+        assert!(
+            !conf.contains("super-secret-password-xyz"),
+            "plaintext must not appear in conf"
+        );
+        // Extract quoted password field
+        let hash = conf
+            .lines()
+            .find_map(|line| {
+                let t = line.trim();
+                t.strip_prefix("password:")
+                    .map(|rest| rest.trim().trim_matches('"').to_string())
+            })
+            .expect("password field");
+        assert!(
+            hash.starts_with("$2a$"),
+            "expected $2a$ bcrypt hash, got prefix"
+        );
+        assert!(
+            bcrypt::verify(&creds.password, &hash).unwrap(),
+            "bcrypt::verify must succeed"
+        );
+    }
+
+    #[test]
+    fn write_credentials_does_not_set_secret_env_vars() {
+        let _guard = TestAuthGuard::new();
+        let prev_user = std::env::var_os(LOUNGE_NATS_USER_ENV);
+        let prev_pass = std::env::var_os(LOUNGE_NATS_PASS_ENV);
+        let prev_token = std::env::var_os(LOUNGE_TOKEN_ENV);
+        unsafe {
+            std::env::remove_var(LOUNGE_NATS_USER_ENV);
+            std::env::remove_var(LOUNGE_NATS_PASS_ENV);
+            std::env::remove_var(LOUNGE_TOKEN_ENV);
+        }
+        let dir = std::env::temp_dir().join(format!("lounge-creds-env-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("session.creds.json");
+        write_credentials_file(
+            &path,
+            &NatsCredentials {
+                user: "u_env".into(),
+                password: "p_env".into(),
+            },
+            "nats://127.0.0.1:4222",
+        )
+        .unwrap();
+        assert!(std::env::var_os(LOUNGE_NATS_USER_ENV).is_none());
+        assert!(std::env::var_os(LOUNGE_NATS_PASS_ENV).is_none());
+        assert!(std::env::var_os(LOUNGE_TOKEN_ENV).is_none());
+        assert!(std::env::var_os(LOUNGE_NATS_CREDS_FILE_ENV).is_some());
+        unsafe {
+            match prev_user {
+                Some(v) => std::env::set_var(LOUNGE_NATS_USER_ENV, v),
+                None => std::env::remove_var(LOUNGE_NATS_USER_ENV),
+            }
+            match prev_pass {
+                Some(v) => std::env::set_var(LOUNGE_NATS_PASS_ENV, v),
+                None => std::env::remove_var(LOUNGE_NATS_PASS_ENV),
+            }
+            match prev_token {
+                Some(v) => std::env::set_var(LOUNGE_TOKEN_ENV, v),
+                None => std::env::remove_var(LOUNGE_TOKEN_ENV),
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn secret_files_have_no_broad_aces() {
+        let _guard = TestAuthGuard::new();
+        let dir = std::env::temp_dir().join(format!("lounge-acl-{}", uuid::Uuid::new_v4()));
+        let creds_path = dir.join("session.creds.json");
+        let token_path = dir.join("lounge.token");
+        let conf_path = dir.join("nats-server.conf");
+        write_credentials_file(
+            &creds_path,
+            &NatsCredentials {
+                user: "u".into(),
+                password: "p".into(),
+            },
+            "nats://127.0.0.1:4222",
+        )
+        .unwrap();
+        write_secret_file(&token_path, "lounge_tok").unwrap();
+        write_secret_file(
+            &conf_path,
+            render_nats_auth_config(&NatsCredentials {
+                user: "u".into(),
+                password: "p".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        for path in [&creds_path, &token_path, &conf_path] {
+            let broad = secret_file_has_broad_aces(path).expect("read DACL");
+            assert!(
+                !broad,
+                "{} must not grant Everyone/Users/Authenticated Users",
+                path.display()
+            );
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

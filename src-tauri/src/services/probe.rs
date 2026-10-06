@@ -310,16 +310,52 @@ pub fn executable_search_dirs() -> Vec<PathBuf> {
 }
 
 pub fn find_executable(name: &str) -> Option<PathBuf> {
-    let file_name = if cfg!(windows) && !name.ends_with(".exe") {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let candidates = executable_name_candidates(name);
+    for dir in executable_search_dirs() {
+        for file_name in &candidates {
+            let candidate = dir.join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
 
-    executable_search_dirs()
-        .into_iter()
-        .map(|dir| dir.join(&file_name))
-        .find(|candidate| candidate.is_file())
+/// Build PATH lookup names: as-is, plus PATHEXT variants on Windows (`.cmd`/`.bat`/…).
+fn executable_name_candidates(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    if !cfg!(windows) {
+        return out;
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let lower = name.to_ascii_lowercase();
+    let has_known_ext = pathext.split(';').any(|ext| {
+        let e = ext.trim().to_ascii_lowercase();
+        !e.is_empty() && lower.ends_with(&e)
+    });
+    if has_known_ext {
+        return out;
+    }
+    for ext in pathext.split(';') {
+        let ext = ext.trim();
+        if ext.is_empty() {
+            continue;
+        }
+        let with_ext = if ext.starts_with('.') {
+            format!("{name}{ext}")
+        } else {
+            format!("{name}.{ext}")
+        };
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&with_ext)) {
+            out.push(with_ext);
+        }
+    }
+    out
 }
 
 pub fn first_existing(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {

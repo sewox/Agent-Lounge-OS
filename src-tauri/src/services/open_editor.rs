@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{accepts_cross_platform_path, normalize_path_str, ExperienceStore};
 use crate::kernel::{ActionSource, GuardedCommand};
+use crate::services::probe::find_executable;
 
 const SETTING_EDITOR_COMMAND: &str = "editor_command";
 const SETTING_EDITOR_PRESET: &str = "editor_preset";
@@ -318,26 +319,91 @@ fn editor_path_is_absolute_local(local: &str) -> bool {
 
 /// Trusted install roots from the environment — never hard-coded user-writable paths.
 /// `%PROGRAMFILES%`, `%ProgramFiles(x86)%`, `%LOCALAPPDATA%\Programs`.
-/// When a root exists it is canonicalized so it aligns with script canonicalize
-/// (`\\?\C:\…` on Windows); missing roots keep the raw env path.
+/// Missing / invalid roots are dropped (fail-closed) — never keep the raw env value.
 fn trusted_windows_editor_roots_from_env() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();
     for key in ["PROGRAMFILES", "ProgramFiles(x86)"] {
         if let Some(v) = std::env::var_os(key) {
             if !v.is_empty() {
-                roots.push(std::path::PathBuf::from(v));
+                if let Some(sanitized) = sanitize_trusted_root(std::path::Path::new(&v)) {
+                    roots.push(sanitized);
+                }
             }
         }
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         if !local.is_empty() {
-            roots.push(std::path::PathBuf::from(local).join("Programs"));
+            // Validate LOCALAPPDATA itself before appending `\Programs`.
+            if let Some(local_root) = sanitize_trusted_root(std::path::Path::new(&local)) {
+                let programs = local_root.join("Programs");
+                if let Some(sanitized) = sanitize_trusted_root(&programs) {
+                    roots.push(sanitized);
+                }
+            }
         }
     }
     roots
-        .into_iter()
-        .map(|root| std::fs::canonicalize(&root).unwrap_or(root))
-        .collect()
+}
+
+/// Reject relative, drive-relative (`C:foo`), drive roots (`C:\`), UNC, and
+/// non-canonicalizable paths. Missing paths return `None` (dropped).
+pub(crate) fn sanitize_trusted_root(raw: &std::path::Path) -> Option<std::path::PathBuf> {
+    let cow = raw.to_string_lossy();
+    let trimmed = cow.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if matches!(
+        classify_windows_editor_path(trimmed),
+        WinEditorPathKind::Unc
+    ) {
+        return None;
+    }
+    let local = match classify_windows_editor_path(trimmed) {
+        WinEditorPathKind::Local(s) => s,
+        WinEditorPathKind::Unc => return None,
+    };
+    // Reject relative and drive-relative (`C:foo`, `C:`).
+    if !is_absolute_non_drive_root(local) {
+        return None;
+    }
+    // Fail-closed: must exist and canonicalize.
+    let canon = std::fs::canonicalize(local).ok()?;
+    let canon_s = canon.to_string_lossy();
+    let canon_local = match classify_windows_editor_path(&canon_s) {
+        WinEditorPathKind::Local(s) => s.to_string(),
+        WinEditorPathKind::Unc => return None,
+    };
+    if !is_absolute_non_drive_root(&canon_local) {
+        return None;
+    }
+    Some(canon)
+}
+
+/// Absolute local path that is not a bare drive root (`C:\`, `C:/`, `\\?\C:\`).
+fn is_absolute_non_drive_root(local: &str) -> bool {
+    let t = local.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('/') {
+        // POSIX absolute — reject root `/` alone as too broad.
+        return t != "/";
+    }
+    // Windows drive-absolute: `C:\…` / `C:/…` (not `C:code.cmd`).
+    if t.len() < 3 || t.as_bytes()[1] != b':' {
+        return false;
+    }
+    let sep = t.as_bytes()[2];
+    if sep != b'\\' && sep != b'/' {
+        return false; // drive-relative `C:foo`
+    }
+    // Strip trailing separators → `C:` means drive root.
+    let stripped = t.trim_end_matches(['\\', '/']);
+    if stripped.len() == 2 && stripped.as_bytes()[1] == b':' {
+        return false;
+    }
+    true
 }
 
 fn trusted_relative_layouts_for_basename(
@@ -556,12 +622,141 @@ fn expand_custom_template(template: &str, path: &str, line: Option<i64>) -> Vec<
 }
 
 fn spawn_editor_argv(program: &str, args: &[String]) -> Result<()> {
-    let mut cmd = GuardedCommand::new(program).source(ActionSource::User);
+    let resolved = resolve_editor_program(program)?;
+    let spawn_path = resolved.spawn;
+    let mut cmd = GuardedCommand::new(&spawn_path).source(ActionSource::User);
     for arg in args {
         cmd = cmd.arg(arg);
     }
-    let _child = cmd.spawn().with_context(|| format!("spawn {program}"))?;
+    let _child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", spawn_path.display()))?;
     Ok(())
+}
+
+/// Validated canonical editor program path — the exact path that must be spawned (no TOCTOU).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEditorProgram {
+    pub spawn: std::path::PathBuf,
+}
+
+/// Resolve `program` once: canonicalize / PATH lookup, re-check trust, return spawn path.
+pub fn resolve_editor_program(program: &str) -> Result<ResolvedEditorProgram> {
+    let trimmed = program.trim();
+    if trimmed.is_empty() {
+        bail!("editor program is required");
+    }
+    if custom_editor_program_is_denied(trimmed) {
+        let base = custom_editor_program_basename(trimmed);
+        bail!("editor program is not allowed (shell/interpreter denylist): {base}");
+    }
+
+    if editor_program_looks_like_path(trimmed) {
+        resolve_path_shaped_editor(trimmed)
+    } else {
+        resolve_bare_editor_via_path(trimmed)
+    }
+}
+
+fn resolve_path_shaped_editor(program: &str) -> Result<ResolvedEditorProgram> {
+    if matches!(
+        classify_windows_editor_path(program),
+        WinEditorPathKind::Unc
+    ) {
+        bail!("UNC editor paths are not allowed");
+    }
+    let expanded = expand_home_prefix(program);
+    let local = match classify_windows_editor_path(&expanded) {
+        WinEditorPathKind::Local(s) => s.to_string(),
+        WinEditorPathKind::Unc => bail!("UNC editor paths are not allowed"),
+    };
+    if !editor_path_is_absolute_local(&local) && !std::path::Path::new(&local).is_absolute() {
+        bail!("editor path must be absolute");
+    }
+    let canon = std::fs::canonicalize(&local)
+        .with_context(|| format!("canonicalize editor path: {local}"))?;
+
+    // Absolute path-shaped inputs must stay under a trusted root when they are
+    // Windows launcher scripts; other absolute editors still pass denylist.
+    let base = custom_editor_program_basename(&canon.to_string_lossy());
+    if is_allowed_editor_script_basename(&base) {
+        let spawn_candidate = strip_extended_prefix_for_local_spawn(&canon);
+        // Re-check trusted roots on the stripped (and canonical) form.
+        if !is_known_windows_editor_install_path_with_roots(
+            &canon.to_string_lossy(),
+            &trusted_windows_editor_roots_from_env(),
+        ) && !is_known_windows_editor_install_path_with_roots(
+            &spawn_candidate.to_string_lossy(),
+            &trusted_windows_editor_roots_from_env(),
+        ) {
+            bail!(
+                "editor program is not allowed (shell/interpreter denylist): {}",
+                custom_editor_program_basename(program)
+            );
+        }
+        // Strip \\?\ only for local drive paths (never UNC) and re-check.
+        let stripped = strip_extended_prefix_for_local_spawn(&canon);
+        if let Some(s) = stripped.to_str() {
+            if matches!(classify_windows_editor_path(s), WinEditorPathKind::Unc) {
+                bail!("UNC editor paths are not allowed");
+            }
+            if !is_known_windows_editor_install_path_with_roots(
+                s,
+                &trusted_windows_editor_roots_from_env(),
+            ) {
+                // Canonical form already matched above; stripped may differ in sep only.
+                if !is_known_windows_editor_install_path_with_roots(
+                    &canon.to_string_lossy(),
+                    &trusted_windows_editor_roots_from_env(),
+                ) {
+                    bail!("editor trusted-root re-check failed after prefix strip");
+                }
+            }
+        }
+        return Ok(ResolvedEditorProgram { spawn: stripped });
+    }
+
+    // Non-script absolute path: denylist already applied; spawn canonical.
+    if custom_editor_program_is_denied(&canon.to_string_lossy()) {
+        let base = custom_editor_program_basename(&canon.to_string_lossy());
+        bail!("editor program is not allowed (shell/interpreter denylist): {base}");
+    }
+    Ok(ResolvedEditorProgram {
+        spawn: strip_extended_prefix_for_local_spawn(&canon),
+    })
+}
+
+fn resolve_bare_editor_via_path(program: &str) -> Result<ResolvedEditorProgram> {
+    let resolved = find_executable(program)
+        .ok_or_else(|| anyhow::anyhow!("editor program not found on PATH: {program}"))?;
+    let canon = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+    // Re-apply deny-list on the resolved canonical target.
+    // PATH-resolved entries need not be under a trusted root (scoop/choco).
+    let canon_s = canon.to_string_lossy();
+    let base = custom_editor_program_basename(&canon_s);
+    if basename_is_denied_editor(&base) && !is_allowed_editor_script_basename(&base) {
+        bail!("editor program is not allowed (shell/interpreter denylist): {base}");
+    }
+    // Allow-listed script basenames from PATH are OK without trusted-root.
+    if is_denied_script_extension(&base) && !is_allowed_editor_script_basename(&base) {
+        bail!("editor program is not allowed (shell/interpreter denylist): {base}");
+    }
+    Ok(ResolvedEditorProgram {
+        spawn: strip_extended_prefix_for_local_spawn(&canon),
+    })
+}
+
+/// Strip `\\?\` / `//?/` only for local drive paths — never for UNC.
+fn strip_extended_prefix_for_local_spawn(path: &std::path::Path) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if !(s.starts_with(r"\\?\") || s.starts_with("//?/")) {
+        return path.to_path_buf();
+    }
+    match classify_windows_editor_path(&s) {
+        WinEditorPathKind::Local(rest) => std::path::PathBuf::from(rest),
+        // Never strip UNC extended prefixes.
+        WinEditorPathKind::Unc => path.to_path_buf(),
+    }
 }
 
 fn spawn_from_custom_template(
@@ -727,6 +922,64 @@ pub fn windows_opener_argv(path: &str) -> Result<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_trusted_root_rejects_drive_roots_relative_unc() {
+        // String-level rejects (may not exist on disk — still None).
+        for bad in [
+            r"C:\",
+            r"C:/",
+            r"\\?\C:\",
+            r"C:foo",
+            "relative",
+            r".\Programs",
+            r"\\server\share\Programs",
+            r"\\?\UNC\server\share",
+            "",
+            "   ",
+        ] {
+            assert!(
+                sanitize_trusted_root(std::path::Path::new(bad)).is_none(),
+                "must reject: {bad:?}"
+            );
+        }
+        // A real existing non-root directory should sanitize on all OSes.
+        let tmp =
+            std::env::temp_dir().join(format!("lounge-trusted-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let ok = sanitize_trusted_root(&tmp);
+        assert!(ok.is_some(), "existing temp dir must sanitize");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_editor_program_spawn_equals_validated_canonical() {
+        let dir = std::env::temp_dir().join(format!("lounge-resolve-ed-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        let bin = dir.join("fake-editor.exe");
+        #[cfg(not(windows))]
+        let bin = dir.join("fake-editor");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+        }
+        let resolved = resolve_editor_program(bin.to_str().unwrap()).expect("resolve");
+        let canon = std::fs::canonicalize(&bin).unwrap();
+        let expected = strip_extended_prefix_for_local_spawn(&canon);
+        assert_eq!(
+            resolved.spawn, expected,
+            "validated path must equal spawn path"
+        );
+        // Bare unresolvable name → clear error.
+        let err = resolve_editor_program("__no_such_editor_xyz__").unwrap_err();
+        assert!(err.to_string().contains("not found on PATH"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn windows_opener_keeps_ampersand_path_as_single_argv() {
@@ -1085,6 +1338,32 @@ mod tests {
                 custom_editor_program_is_denied(missing.to_str().unwrap()),
                 "missing trusted-layout path must fail closed"
             );
+
+            // PROGRAMFILES = drive root / relative → sanitize drops root (fail-closed).
+            std::env::set_var("PROGRAMFILES", r"C:\");
+            assert!(
+                trusted_windows_editor_roots_from_env()
+                    .iter()
+                    .all(|r| !r.to_string_lossy().eq_ignore_ascii_case(r"C:\")
+                        && !r.to_string_lossy().eq_ignore_ascii_case(r"C:/")),
+                "drive-root PROGRAMFILES must be dropped"
+            );
+            std::env::set_var("PROGRAMFILES", r"relative\path");
+            assert!(
+                !trusted_windows_editor_roots_from_env()
+                    .iter()
+                    .any(|r| r.to_string_lossy().contains("relative")),
+                "relative PROGRAMFILES must be dropped"
+            );
+            // Restore trusted temp PROGRAMFILES for remaining checks.
+            std::env::set_var("PROGRAMFILES", &program_files);
+
+            // resolve_editor_program: spawn target is canonical (junction-safe).
+            let resolved = resolve_editor_program(code_cmd.to_str().unwrap())
+                .expect("resolve trusted code.cmd");
+            let canon = std::fs::canonicalize(&code_cmd).unwrap();
+            let expected = strip_extended_prefix_for_local_spawn(&canon);
+            assert_eq!(resolved.spawn, expected, "verified path == spawn path");
         }));
 
         restore();
