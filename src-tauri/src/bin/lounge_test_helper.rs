@@ -8,8 +8,8 @@
 //! copy/rename it to `codebase-memory-mcp` so GuardedCommand allowlisting matches.
 
 use std::env;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
+use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -71,22 +71,46 @@ fn parse_port_flag(args: &[String]) -> Result<u16, String> {
     Err("missing --port".into())
 }
 
+/// Bind `127.0.0.1:port` for LISTEN.
+///
+/// On Unix, `SO_REUSEADDR` lets the helper re-bind after the parent’s
+/// `tcp_bind_available` probe (bind+drop) which can leave the port briefly
+/// unusable on macOS. On Windows, leave the default (SO_REUSEADDR there allows
+/// duplicate concurrent binds).
+fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let socket = tokio::net::TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
+    #[cfg(not(windows))]
+    {
+        socket
+            .set_reuseaddr(true)
+            .map_err(|e| format!("reuseaddr: {e}"))?;
+    }
+    socket.bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
+    socket
+        .listen(128)
+        .map_err(|e| format!("listen {addr}: {e}"))
+}
+
 fn run_tcp_hold(args: &[String]) -> Result<(), String> {
     let port = parse_port_flag(args)?;
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .map_err(|e| format!("bind 127.0.0.1:{port}: {e}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("set_nonblocking: {e}"))?;
-    // Signal readiness on stdout (tests may ignore).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("runtime: {e}"))?;
+
+    let listener = rt.block_on(async { bind_loopback(port) })?;
+
     let mut out = std::io::stdout();
     let _ = writeln!(out, "tcp-hold-ready port={port} pid={}", std::process::id());
     let _ = out.flush();
-    // Keep the listener alive; accept loop drains spurious connections.
-    loop {
-        let _ = listener.accept();
-        std::thread::sleep(Duration::from_millis(50));
-    }
+
+    rt.block_on(async move {
+        loop {
+            let _ = listener.accept().await;
+        }
+    });
+    Ok(())
 }
 
 fn run_fake_cbm(args: &[String]) -> Result<(), String> {
@@ -94,72 +118,72 @@ fn run_fake_cbm(args: &[String]) -> Result<(), String> {
     let rpc_hits = Arc::new(AtomicU64::new(0));
     let hits = rpc_hits.clone();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+    // Multi-thread runtime: reliable on Windows with CREATE_NO_WINDOW + piped stdin
+    // (no dependency on stdin EOF to keep the process alive).
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(2)
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
-    rt.block_on(async move {
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+    let listener = rt.block_on(async { bind_loopback(port) })?;
 
-        let app = Router::new()
-            .route(
-                "/api/ui-config",
-                get(|| async { Json(serde_json::json!({"lang": "en", "helper": true})) }),
-            )
-            .route(
-                "/rpc",
-                post(move |_body: String| {
-                    let hits = hits.clone();
-                    async move {
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        Json(serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "result": {
-                                "content": [{ "type": "text", "text": "{\"projects\":[]}" }]
-                            }
-                        }))
-                    }
-                }),
-            );
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .map_err(|e| format!("bind 127.0.0.1:{port}: {e}"))?;
-        eprintln!(
-            "fake-cbm-ready port={port} pid={} rpc_hits_path=stderr",
-            std::process::id()
+    let app = Router::new()
+        .route(
+            "/api/ui-config",
+            get(|| async { Json(serde_json::json!({"lang": "en", "helper": true})) }),
+        )
+        .route(
+            "/rpc",
+            post(move |_body: String| {
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "content": [{ "type": "text", "text": "{\"projects\":[]}" }]
+                        }
+                    }))
+                }
+            }),
         );
 
-        // Serve until stdin closes (parent keeps Stdio::piped open) or process killed.
-        let serve = axum::serve(listener, app);
-        tokio::select! {
-            res = serve => {
-                res.map_err(|e| format!("serve: {e}"))?;
-            }
-            _ = stdin_closed() => {}
-        }
-        Ok::<(), String>(())
-    })?;
+    rt.spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
 
-    let _ = rpc_hits;
-    Ok(())
-}
-
-async fn stdin_closed() {
-    tokio::task::spawn_blocking(|| {
-        let mut stdin = std::io::stdin();
-        let mut buf = [0u8; 64];
+    // Self-probe: do not park until the socket actually accepts HTTP.
+    let ready = rt.block_on(async {
+        let url = format!("http://127.0.0.1:{port}/api/ui-config");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            match stdin.read(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(_) => break,
+            if let Ok(resp) = reqwest::get(&url).await {
+                if resp.status().is_success() {
+                    return true;
+                }
             }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-    })
-    .await
-    .ok();
+    });
+    if !ready {
+        return Err(format!(
+            "fake-cbm self-probe failed on 127.0.0.1:{port}/api/ui-config"
+        ));
+    }
+
+    eprintln!("fake-cbm-ready port={port} pid={}", std::process::id());
+    let _ = std::io::stderr().flush();
+
+    // Stay alive until parent kills us (stdin may be piped or null — ignore it).
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
 }

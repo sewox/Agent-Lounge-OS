@@ -18,7 +18,7 @@ use super::memory_bridge::{
     probe_ui_config, MemoryBridge, DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END,
     GRAPH_UI_PORT_BAND_START, LEGACY_GRAPH_UI_PORT, UI_PROBE_TIMEOUT,
 };
-use super::probe::{port_owned_by_lounge, tcp_bind_available, tcp_ready, wait_until};
+use super::probe::{listen_pids, port_owned_by_lounge, tcp_ready, wait_until};
 use crate::kernel::GuardedCommand;
 
 pub const GRAPH_WINDOW_LABEL: &str = "graph-window";
@@ -668,11 +668,14 @@ pub async fn enable_graph_ui_headless(
         return Ok(preferred);
     }
 
+    // Prefer LISTEN-PID emptiness over bind-and-release probes: on macOS a
+    // successful `tcp_bind_available` can leave the port briefly unusable for the
+    // child (TIME_WAIT), causing a false "port free → spawn failed" race.
     let is_free = |port: u16| {
         if port_owned_by_lounge(port, state.spawned_child_pid()) {
             return true;
         }
-        tcp_bind_available(port)
+        listen_pids(port).is_empty()
     };
 
     let selected = match select_graph_ui_port(mode, preferred, band.clone(), is_free) {
@@ -952,7 +955,7 @@ mod tests {
             GraphUiPortMode::Auto,
             GRAPH_UI_PORT_BAND_START,
             default_graph_ui_port_band(),
-            |p| p != foreign_port && tcp_bind_available(p),
+            |p| p != foreign_port && crate::services::probe::tcp_bind_available(p),
         )
         .expect("band has a free port");
         assert_ne!(chosen, foreign_port);

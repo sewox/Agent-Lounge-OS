@@ -751,7 +751,20 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         assert!(!tcp_bind_available(port), "bound port must not be free");
         drop(listener);
-        assert!(tcp_bind_available(port), "released port must be free");
+        // macOS (and occasionally Windows) may briefly refuse re-bind after close
+        // (TIME_WAIT / stack delay). Poll with a hard deadline — still asserts the
+        // real contract that a released local listen port becomes bindable again.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if tcp_bind_available(port) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "released port {port} must become bindable within 3s (macOS/Windows TIME_WAIT)"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]
