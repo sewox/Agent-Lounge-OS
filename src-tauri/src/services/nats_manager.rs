@@ -592,9 +592,8 @@ fn cmdline_via_ps(pid: u32) -> Vec<String> {
 #[cfg(windows)]
 fn cmdline_via_win32_cim(pid: u32) -> Vec<String> {
     // Filter by ProcessId so we only tokenize the target (counts/values never logged).
-    let script = format!(
-        "(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine"
-    );
+    let script =
+        format!("(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine");
     let output = GuardedCommand::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .internal_daemon()
