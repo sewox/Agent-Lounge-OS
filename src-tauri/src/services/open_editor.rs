@@ -1123,6 +1123,7 @@ mod tests {
         assert!(custom_editor_program_is_denied(r".\wsl.exe"));
     }
 
+    /// POSIX-only: denylist follows unix symlinks to shell interpreters.
     #[cfg(unix)]
     #[test]
     fn editor_denylist_follows_symlink_to_shell() {

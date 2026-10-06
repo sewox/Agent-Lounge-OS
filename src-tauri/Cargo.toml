@@ -49,3 +49,8 @@ sha2 = "0.11"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 candle-core = { version = "0.11.0", default-features = false, features = ["metal"] }
 candle-nn = { version = "0.11.0", default-features = false, features = ["metal"] }
+
+[features]
+default = []
+# Real Hugging Face Laya weights inference (nightly). Not enabled in PR CI.
+laya-live = []

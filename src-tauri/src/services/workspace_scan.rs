@@ -359,7 +359,8 @@ mod tests {
 
     #[test]
     fn permission_denied_on_unreadable_root() {
-        // Linux: chmod 000 — CI'da root değilsek PermissionDenied bekleriz.
+        // POSIX-only body: chmod 000 / PermissionsExt. Windows has no equivalent
+        // unreadable-dir probe here; the test is a no-op on Windows by design.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

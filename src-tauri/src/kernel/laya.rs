@@ -531,10 +531,14 @@ pub struct LayaSession {
 
 impl LayaSession {
     pub fn load(dir: &Path) -> Result<Self> {
+        let (device, device_name, dtype) = select_device();
+        Self::load_on(dir, device, device_name, dtype)
+    }
+
+    fn load_on(dir: &Path, device: Device, device_name: String, dtype: DType) -> Result<Self> {
         let cfg = load_runtime_config(&dir.join("rl_agent_config.json"))?;
         let tokenizer = HfTokenizer::from_file(dir.join("tokenizer/tokenizer.json"))?;
         let bert = load_bert_config(&dir.join("encoder/config.json"))?;
-        let (device, device_name, dtype) = select_device();
         let weights = dir.join("model.safetensors");
         let tensors = candle_core::safetensors::load(&weights, &device)
             .with_context(|| format!("safetensors: {}", weights.display()))?;
@@ -551,6 +555,12 @@ impl LayaSession {
             model,
             device,
         })
+    }
+
+    /// CPU / F32 load for deterministic unit tests (ignores Metal).
+    #[cfg(test)]
+    pub fn load_cpu(dir: &Path) -> Result<Self> {
+        Self::load_on(dir, Device::Cpu, "cpu".into(), DType::F32)
     }
 
     pub fn infer_batch(&self, items: Vec<PackedQuestion>) -> Result<Vec<Vec<f32>>> {
@@ -757,6 +767,217 @@ impl TokenEncode for HashTokenizer {
     fn pad_id(&self) -> u32 {
         self.pad
     }
+}
+
+/// Tiny deterministic Laya fixture for default-suite inference coverage.
+///
+/// Writes `encoder/config.json`, WordLevel `tokenizer/tokenizer.json`,
+/// `rl_agent_config.json`, and a `model.safetensors` built via `VarMap` with
+/// fixed weights (no download). Hidden size 32 / 1 BERT layer keeps the
+/// forward pass well under ~10ms on CPU.
+#[cfg(test)]
+pub fn write_tiny_laya_fixture(dir: &Path) -> Result<()> {
+    use candle_nn::VarMap;
+    use std::io::Write;
+
+    std::fs::create_dir_all(dir.join("tokenizer")).context("tiny laya tokenizer dir")?;
+    std::fs::create_dir_all(dir.join("encoder")).context("tiny laya encoder dir")?;
+
+    let encoder = serde_json::json!({
+        "vocab_size": 64,
+        "hidden_size": 32,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 4,
+        "intermediate_size": 64,
+        "max_position_embeddings": 64,
+        "layer_norm_eps": 1e-5,
+        "pad_token_id": 0,
+        "global_attn_every_n_layers": 1,
+        "local_attention": 16,
+        "rope_parameters": {
+            "full_attention": { "rope_theta": 160000.0 },
+            "sliding_attention": { "rope_theta": 10000.0 }
+        }
+    });
+    std::fs::write(
+        dir.join("encoder/config.json"),
+        serde_json::to_vec_pretty(&encoder)?,
+    )?;
+
+    let runtime = serde_json::json!({
+        "max_len": 64,
+        "head_max_len": 48,
+        "temperature": [1.0, 1.0, 1.0],
+        "temperature_by_options": {
+            "choice:3-5": 1.0,
+            "choice:2": 1.0,
+            "noul:2": 1.0
+        }
+    });
+    std::fs::write(
+        dir.join("rl_agent_config.json"),
+        serde_json::to_vec_pretty(&runtime)?,
+    )?;
+
+    // Minimal WordLevel vocab covering lounge_questions + sample payloads.
+    let vocab_pairs: &[(&str, u32)] = &[
+        ("[PAD]", 0),
+        ("[CLS]", 1),
+        ("[SEP]", 2),
+        ("[MASK]", 3),
+        ("[UNK]", 4),
+        ("choice", 5),
+        ("question", 6),
+        ("What", 7),
+        ("kind", 8),
+        ("of", 9),
+        ("lounge", 10),
+        ("message", 11),
+        ("is", 12),
+        ("this", 13),
+        ("Task", 14),
+        ("work", 15),
+        ("order", 16),
+        ("Experience", 17),
+        ("memory", 18),
+        ("Review", 19),
+        ("code", 20),
+        ("review", 21),
+        ("How", 22),
+        ("risky", 23),
+        ("Safe", 24),
+        ("Risky", 25),
+        ("Critical", 26),
+        ("Miss", 27),
+        ("Hit", 28),
+        ("false", 29),
+        ("no", 30),
+        ("the", 31),
+        ("statement", 32),
+        ("does", 33),
+        ("not", 34),
+        ("hold", 35),
+        ("true", 36),
+        ("yes", 37),
+        ("holds", 38),
+        ("subject", 39),
+        ("task", 40),
+        ("requested", 41),
+        ("source_agent", 42),
+        ("cursor", 43),
+        ("type", 44),
+        ("summary", 45),
+        ("index", 46),
+        ("kernel", 47),
+        ("dispatcher", 48),
+        ("a", 49),
+        ("similar", 50),
+        ("record", 51),
+        ("already", 52),
+        ("in", 53),
+        ("for", 54),
+        ("topic", 55),
+        ("noul", 56),
+        ("score", 57),
+        ("security", 58),
+        ("level", 59),
+    ];
+    let mut vocab = serde_json::Map::new();
+    for (tok, id) in vocab_pairs {
+        vocab.insert((*tok).into(), serde_json::json!(id));
+    }
+    // Pad unused ids so vocab_size stays 64 for the encoder config.
+    for id in vocab_pairs.len() as u32..64 {
+        vocab.insert(format!("tok{id}"), serde_json::json!(id));
+    }
+    let added: Vec<serde_json::Value> = (0..5u32)
+        .map(|id| {
+            let content = match id {
+                0 => "[PAD]",
+                1 => "[CLS]",
+                2 => "[SEP]",
+                3 => "[MASK]",
+                _ => "[UNK]",
+            };
+            serde_json::json!({
+                "id": id,
+                "content": content,
+                "single_word": false,
+                "lstrip": false,
+                "rstrip": false,
+                "normalized": false,
+                "special": true
+            })
+        })
+        .collect();
+    let tokenizer = serde_json::json!({
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": added,
+        "normalizer": null,
+        "pre_tokenizer": { "type": "Whitespace" },
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "WordLevel",
+            "unk_token": "[UNK]",
+            "vocab": vocab
+        }
+    });
+    let mut tok_file = std::fs::File::create(dir.join("tokenizer/tokenizer.json"))?;
+    tok_file.write_all(&serde_json::to_vec(&tokenizer)?)?;
+
+    let bert = load_bert_config(&dir.join("encoder/config.json"))?;
+    let device = Device::Cpu;
+    let mut varmap = VarMap::new();
+    {
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let _model = DecisionModel::load(vb, &bert)
+            .map_err(|err| anyhow::anyhow!("tiny model init: {err}"))?;
+    }
+    // Fixed, non-uniform weights → known-value / bit-stable logits across runs.
+    // Constant fills collapse under LayerNorm (zero variance → zero hidden).
+    let names: Vec<String> = {
+        let guard = varmap.data().lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        guard.keys().cloned().collect()
+    };
+    for name in names {
+        let shape = {
+            let guard = varmap.data().lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+            guard
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("missing var {name}"))?
+                .shape()
+                .clone()
+        };
+        let n = shape.elem_count();
+        let mut data = vec![0f32; n];
+        if name.ends_with("bias") {
+            // keep zeros
+        } else if name.contains("norm") && name.ends_with("weight") {
+            data.fill(1.0);
+        } else {
+            let mut h = name.bytes().fold(0x9e37_79b9u64, |a, b| {
+                a.wrapping_mul(0x0100_0000_01b3).wrapping_add(u64::from(b))
+            });
+            for slot in &mut data {
+                h = h.wrapping_mul(6364136223846793005).wrapping_add(1);
+                // Small deterministic values in ≈[-0.05, 0.05]
+                *slot = ((h % 1001) as f32) / 10000.0 - 0.05;
+            }
+        }
+        let tensor = Tensor::from_vec(data, shape, &device)
+            .map_err(|err| anyhow::anyhow!("fill {name}: {err}"))?;
+        varmap
+            .set_one(&name, tensor)
+            .map_err(|err| anyhow::anyhow!("set {name}: {err}"))?;
+    }
+    let weights_path = dir.join("model.safetensors");
+    varmap
+        .save(&weights_path)
+        .map_err(|err| anyhow::anyhow!("save tiny safetensors: {err}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

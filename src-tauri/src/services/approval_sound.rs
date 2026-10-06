@@ -303,6 +303,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// POSIX-only: symlink-to-file rejection uses unix `symlink` + `symlink_metadata`.
     #[test]
     #[cfg(unix)]
     fn validate_source_rejects_symlink() {

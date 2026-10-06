@@ -1488,15 +1488,37 @@ mod tests {
         assert!(err.to_string().contains("path boş"));
     }
 
-    #[cfg(unix)]
+    /// Write an in-tree CLI stub named `codebase-memory-mcp` (Unix shell) or
+    /// `codebase-memory-mcp.cmd` (Windows) so spawn + timeout paths are covered
+    /// on every OS without a real sidecar.
+    fn write_cbm_cli_stub(dir: &Path, unix_body: &str, windows_body: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        #[cfg(unix)]
+        {
+            let _ = windows_body;
+            let script = dir.join("codebase-memory-mcp");
+            std::fs::write(&script, unix_body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+            script
+        }
+        #[cfg(windows)]
+        {
+            let _ = unix_body;
+            let script = dir.join("codebase-memory-mcp.cmd");
+            std::fs::write(&script, windows_body).unwrap();
+            script
+        }
+    }
+
     #[tokio::test]
     async fn lists_projects_via_cli_stub() {
-        // Always runs with an in-tree shell fixture — no silent skip when sidecar is stub/missing.
+        // Always runs with an in-tree fixture — no silent skip when sidecar is stub/missing.
         let dir = std::env::temp_dir().join(format!("lounge-cbm-list-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("codebase-memory-mcp");
-        std::fs::write(
-            &script,
+        let script = write_cbm_cli_stub(
+            &dir,
             r#"#!/bin/sh
 if printf '%s' "$*" | grep -q list_projects; then
   echo '{"projects":[{"name":"fixture-demo","root_path":"/tmp/fixture-demo","nodes":2,"edges":1}]}'
@@ -1505,12 +1527,16 @@ fi
 echo '{}'
 exit 1
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
+            r#"@echo off
+echo %*| findstr /I /C:"list_projects" >nul
+if not errorlevel 1 (
+  echo {"projects":[{"name":"fixture-demo","root_path":"/tmp/fixture-demo","nodes":2,"edges":1}]}
+  exit /b 0
+)
+echo {}
+exit /b 1
+"#,
+        );
 
         let bridge = MemoryBridge::from_binary(&script);
         let projects = bridge.list_projects().await.expect("list_projects parse");
@@ -1521,14 +1547,11 @@ exit 1
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn index_workspace_runs_std_process_command() {
         let dir = std::env::temp_dir().join(format!("lounge-cbm-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("codebase-memory-mcp");
-        std::fs::write(
-            &script,
+        let script = write_cbm_cli_stub(
+            &dir,
             r#"#!/bin/sh
 if printf '%s' "$*" | grep -q get_dead_symbols; then
   echo '{"dead_symbols":[{"name":"cli_dead","kind":"unused"}]}'
@@ -1536,12 +1559,15 @@ if printf '%s' "$*" | grep -q get_dead_symbols; then
 fi
 echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","name":"dead"}],"references":[{"from":"main","to":"live"},{"from":"live","to":"missing"}]}'
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
+            r#"@echo off
+echo %*| findstr /I /C:"get_dead_symbols" >nul
+if not errorlevel 1 (
+  echo {"dead_symbols":[{"name":"cli_dead","kind":"unused"}]}
+  exit /b 0
+)
+echo {"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","name":"dead"}],"references":[{"from":"main","to":"live"},{"from":"live","to":"missing"}]}
+"#,
+        );
 
         let bridge = MemoryBridge::from_binary(&script);
         let graph = bridge
@@ -1565,15 +1591,12 @@ echo '{"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","n
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn tauri_command_path_indexes_and_persists_snapshot() {
         // Fixture CLI stub — no silent skip when real sidecar is missing in CI.
         let dir = std::env::temp_dir().join(format!("lounge-cbm-idx-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("codebase-memory-mcp");
-        std::fs::write(
-            &script,
+        let script = write_cbm_cli_stub(
+            &dir,
             r#"#!/bin/sh
 if printf '%s' "$*" | grep -q index_repository; then
   echo '{"project":"protocol-fixture","status":"indexed","nodes":1,"edges":0,"files":1,"ast_nodes":[{"id":"n1","name":"NodeOne","kind":"function","file":"src/lib.rs","line":1}],"references":[]}'
@@ -1586,12 +1609,21 @@ fi
 echo '{}'
 exit 0
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
+            r#"@echo off
+echo %*| findstr /I /C:"index_repository" >nul
+if not errorlevel 1 (
+  echo {"project":"protocol-fixture","status":"indexed","nodes":1,"edges":0,"files":1,"ast_nodes":[{"id":"n1","name":"NodeOne","kind":"function","file":"src/lib.rs","line":1}],"references":[]}
+  exit /b 0
+)
+echo %*| findstr /I /C:"get_dead_symbols" >nul
+if not errorlevel 1 (
+  echo {"dead_symbols":[]}
+  exit /b 0
+)
+echo {}
+exit /b 0
+"#,
+        );
 
         let repo = dir.join("shared_lounge_protocol");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1847,24 +1879,21 @@ exit 0
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn cli_hard_timeout_kills_sleeping_child() {
         let dir = std::env::temp_dir().join(format!("lounge-cbm-timeout-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("codebase-memory-mcp");
-        std::fs::write(
-            &script,
+        let script = write_cbm_cli_stub(
+            &dir,
             r#"#!/bin/sh
 sleep 30
 echo '{"projects":[]}'
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
+            // ping -n N waits ~N-1 seconds on Windows without requiring sleep.exe.
+            r#"@echo off
+ping -n 31 127.0.0.1 >nul
+echo {"projects":[]}
+"#,
+        );
 
         let bridge = MemoryBridge::from_binary(&script);
         let started = std::time::Instant::now();

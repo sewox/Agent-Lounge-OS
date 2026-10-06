@@ -2204,6 +2204,8 @@ mod tests {
         assert!(confine_index_file_path("/tmp/repo", "src/../../etc/passwd").is_err());
     }
 
+    /// POSIX-only: Windows has no first-class symlink escape semantics comparable to
+    /// `std::os::unix::fs::symlink` + path confinement used by `confine_path`.
     #[cfg(unix)]
     #[test]
     fn confine_rejects_symlink_escaping_repo() {
@@ -2223,6 +2225,8 @@ mod tests {
 
     /// macOS maps `/tmp` → `/private/tmp`. Ancestors of the repo root may be
     /// symlinks; that must not reject a normal in-repo resolve.
+    /// POSIX-only: exercises symlink ancestors (`/tmp` → `/private/tmp` on macOS).
+    /// Windows junction/symlink ACLs differ; covered by non-symlink confine tests.
     #[cfg(unix)]
     #[test]
     fn confine_allows_symlink_ancestor_of_repo() {
