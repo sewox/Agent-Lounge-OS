@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint .",
     "types:check": "next typegen && tsc --noEmit",
-    "test:unit": "node --experimental-strip-types --import ./scripts/node-alias-loader.mjs --test 'src/**/*.test.ts'",
+    "test:unit": "node --experimental-strip-types --import ./scripts/node-alias-loader.mjs --import ./scripts/ci/node-no-navigator.mjs --test \"src/**/*.test.ts\"",
     "test:e2e": "node e2e/gates/no-conditional-asserts.mjs && playwright test",
     "test:e2e:report": "node scripts/qa/generate-baseline-report.mjs",
     "qa:gates": "bash scripts/qa/gates/mock-ban.sh && bash scripts/qa/gates/small-font.sh && bash scripts/qa/gates/hydration-safety.sh && bash scripts/qa/gates/playwright-skip-ban.sh && bash scripts/qa/gates/playwright-config-coverage.sh && node e2e/gates/no-conditional-asserts.mjs",
