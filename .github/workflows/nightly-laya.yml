@@ -1,5 +1,8 @@
 # Nightly real-weights Laya inference (opt-in feature, not #[ignore]).
 # Default PR CI covers the same Candle path via `laya_infer_tiny_fixture`.
+#
+# `--exact` requires the FULL test path; a bare name matches nothing and cargo
+# exits 0 with "0 passed / 1 filtered out". Every run asserts exactly 1 test.
 name: Nightly Laya
 
 on:
@@ -7,9 +10,16 @@ on:
     # 03:15 UTC — after typical dependency mirrors settle.
     - cron: "15 3 * * *"
   workflow_dispatch:
+  # On PRs that touch this wiring: prove the --exact filter matches (no HF download).
+  pull_request:
+    paths:
+      - ".github/workflows/nightly-laya.yml"
+      - "src-tauri/src/kernel/decision_engine.rs"
+      - "src-tauri/Cargo.toml"
+      - "docs/qa/rust-opt-in-tests.md"
 
 concurrency:
-  group: nightly-laya-${{ github.ref }}
+  group: nightly-laya-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,10 +30,64 @@ env:
   RUST_BACKTRACE: 1
   LAYA_LIVE_INFER: "1"
   LOUNGE_LAYA_DIR: ${{ github.workspace }}/.laya-nightly
+  # Full path required for cargo --exact (bare `live_laya_infer` matches 0 tests).
+  LAYA_LIVE_TEST: kernel::decision_engine::tests::live_laya_infer
 
 jobs:
+  filter-proof:
+    name: Prove live_laya_infer filter
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            pkg-config \
+            wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Stage externalBin stub
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Exact --list must show exactly one test
+        run: |
+          set -euo pipefail
+          OUT=$(cargo test \
+            --manifest-path src-tauri/Cargo.toml \
+            --locked \
+            --features laya-live \
+            --lib \
+            "${LAYA_LIVE_TEST}" \
+            -- --exact --list)
+          echo "$OUT"
+          echo "$OUT" | grep -Fq "${LAYA_LIVE_TEST}: test"
+          COUNT=$(echo "$OUT" | grep -c ': test$' || true)
+          test "$COUNT" -eq 1
+
   laya-live:
     name: Laya live infer
+    # Real HF weights: schedule + manual only (not every PR).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -65,10 +129,13 @@ jobs:
 
       - name: Live Candle infer (real safetensors)
         run: |
+          set -euo pipefail
           cargo test \
             --manifest-path src-tauri/Cargo.toml \
             --locked \
             --features laya-live \
             --lib \
-            live_laya_infer \
-            -- --exact --nocapture
+            "${LAYA_LIVE_TEST}" \
+            -- --exact --nocapture 2>&1 | tee /tmp/laya-live.log
+          # Fail loud if --exact filter matches nothing (cargo still exits 0).
+          grep -E 'test result: ok\. 1 passed; 0 failed; 0 ignored' /tmp/laya-live.log

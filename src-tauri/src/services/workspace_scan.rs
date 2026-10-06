@@ -357,31 +357,30 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// POSIX-only: `chmod 000` / `PermissionsExt` unreadable-dir probe.
+    /// Windows ACL denial (icacls) is a different API surface; not a hollow
+    /// cross-platform twin — keep this out of the Windows unit count.
+    #[cfg(unix)]
     #[test]
     fn permission_denied_on_unreadable_root() {
-        // POSIX-only body: chmod 000 / PermissionsExt. Windows has no equivalent
-        // unreadable-dir probe here; the test is a no-op on Windows by design.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let root = temp_root("perm");
-            touch_file(&root.join("Cargo.toml"));
-            let mut perms = fs::metadata(&root).unwrap().permissions();
-            perms.set_mode(0o000);
-            fs::set_permissions(&root, perms).unwrap();
-            let result = discover_projects(&root);
-            // Restore before cleanup so remove_dir_all works.
-            let mut restore = fs::metadata(&root).unwrap().permissions();
-            restore.set_mode(0o755);
-            let _ = fs::set_permissions(&root, restore);
-            match result {
-                Err(WorkspaceScanErrorKind::PermissionDenied) => {}
-                Err(WorkspaceScanErrorKind::EmptyWorkspace) => {
-                    // Bazı ortamlar (root/CI) chmod'u yok sayabilir — izin ver.
-                }
-                other => panic!("expected permission_denied or empty, got {other:?}"),
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("perm");
+        touch_file(&root.join("Cargo.toml"));
+        let mut perms = fs::metadata(&root).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&root, perms).unwrap();
+        let result = discover_projects(&root);
+        // Restore before cleanup so remove_dir_all works.
+        let mut restore = fs::metadata(&root).unwrap().permissions();
+        restore.set_mode(0o755);
+        let _ = fs::set_permissions(&root, restore);
+        match result {
+            Err(WorkspaceScanErrorKind::PermissionDenied) => {}
+            Err(WorkspaceScanErrorKind::EmptyWorkspace) => {
+                // Bazı ortamlar (root/CI) chmod'u yok sayabilir — izin ver.
             }
-            let _ = fs::remove_dir_all(&root);
+            other => panic!("expected permission_denied or empty, got {other:?}"),
         }
+        let _ = fs::remove_dir_all(&root);
     }
 }
