@@ -634,7 +634,7 @@ fn count_cmdline_matches(needle: &str) -> usize {
                 }
             }
         }
-        return matches;
+        matches
     }
     #[cfg(target_os = "macos")]
     {
@@ -642,16 +642,13 @@ fn count_cmdline_matches(needle: &str) -> usize {
             .args(["-axww", "-o", "args="])
             .internal_daemon()
             .output();
-        let Ok(output) = output else {
-            return 0;
-        };
-        if !output.status.success() {
-            return 0;
+        match output {
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.contains(needle))
+                .count(),
+            _ => 0,
         }
-        return String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| line.contains(needle))
-            .count();
     }
     #[cfg(windows)]
     {
@@ -660,16 +657,13 @@ fn count_cmdline_matches(needle: &str) -> usize {
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .internal_daemon()
             .output();
-        let Ok(output) = output else {
-            return 0;
-        };
-        if !output.status.success() {
-            return 0;
+        match output {
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.contains(needle))
+                .count(),
+            _ => 0,
         }
-        return String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| line.contains(needle))
-            .count();
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
