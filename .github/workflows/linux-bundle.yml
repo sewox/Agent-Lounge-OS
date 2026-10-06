@@ -252,8 +252,9 @@ jobs:
           PY
           # MemoryBridge uses `codebase-memory-mcp cli <tool> …` (not bare tool name;
           # bare argv enters MCP stdio and yields empty stdout with closed stdin).
+          # v0.11.0 index_repository flags: --repo-path, --mode (no --format).
           set +e
-          OUT="$("$SIDECAR" cli index_repository --repo-path "$FIXTURE" --mode fast --format json 2>&1)"
+          OUT="$("$SIDECAR" cli index_repository --repo-path "$FIXTURE" --mode fast 2>&1)"
           RC=$?
           set -e
           echo "index_repository exit=${RC}"
@@ -267,8 +268,8 @@ jobs:
             echo "FAIL: index_repository produced empty stdout/stderr"
             exit 1
           fi
-          if ! printf '%s' "$OUT" | grep -Eqi 'node|edge|file|project|index|success|ok|\{'; then
-            echo "FAIL: index_repository produced no recognizable output"
+          if ! printf '%s' "$OUT" | grep -Eqi '"status"[[:space:]]*:[[:space:]]*"indexed"|\"nodes\"|\"edges\"'; then
+            echo "FAIL: index_repository did not report indexed status/nodes/edges"
             exit 1
           fi
           echo "smoke index_repository ok"
