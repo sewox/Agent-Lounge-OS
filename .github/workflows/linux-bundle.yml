@@ -250,10 +250,23 @@ jobs:
           if __name__ == "__main__":
               main()
           PY
-          # Minimal index call: proves the real binary can execute its indexing path.
-          OUT="$("$SIDECAR" index_repository --repo-path "$FIXTURE" --mode fast --format json 2>&1)"
+          # MemoryBridge uses `codebase-memory-mcp cli <tool> …` (not bare tool name;
+          # bare argv enters MCP stdio and yields empty stdout with closed stdin).
+          set +e
+          OUT="$("$SIDECAR" cli index_repository --repo-path "$FIXTURE" --mode fast --format json 2>&1)"
+          RC=$?
+          set -e
+          echo "index_repository exit=${RC}"
           echo "$OUT" | head -c 4000
           echo
+          if [[ "$RC" -ne 0 ]]; then
+            echo "FAIL: index_repository exited ${RC}"
+            exit 1
+          fi
+          if [[ -z "$(printf '%s' "$OUT" | tr -d '[:space:]')" ]]; then
+            echo "FAIL: index_repository produced empty stdout/stderr"
+            exit 1
+          fi
           if ! printf '%s' "$OUT" | grep -Eqi 'node|edge|file|project|index|success|ok|\{'; then
             echo "FAIL: index_repository produced no recognizable output"
             exit 1
