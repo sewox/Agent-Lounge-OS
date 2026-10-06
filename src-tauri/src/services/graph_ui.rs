@@ -3,6 +3,7 @@
 //! Port bandı 18749–18759; Antigravity cbm varsayılanı 9749 ile çakışmaz.
 //! Yabancı `/api/ui-config` asla adopt edilmez; HTTP `/rpc` yalnız sahipli portta.
 
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::Mutex;
@@ -68,7 +69,7 @@ pub struct GraphUiPortPreference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortSelectError {
     UserConflict { port: u16 },
-    BandExhausted,
+    BandExhausted { start: u16, end: u16 },
 }
 
 impl std::fmt::Display for PortSelectError {
@@ -78,15 +79,20 @@ impl std::fmt::Display for PortSelectError {
                 f,
                 "Port {port} meşgul — user modunda otomatik değiştirilmez. Başka bir codebase-memory-mcp (ör. Antigravity) bu portu kullanıyor olabilir; Settings'ten portu değiştirin veya süreci kapatın."
             ),
-            Self::BandExhausted => write!(
+            Self::BandExhausted { start, end } => write!(
                 f,
-                "Graph UI port bandı {GRAPH_UI_PORT_BAND_START}–{GRAPH_UI_PORT_BAND_END} tamamen dolu — bir portu boşaltın veya Settings'te user modunda başka bir port seçin."
+                "Graph UI port bandı {start}–{end} tamamen dolu — bir portu boşaltın veya Settings'te user modunda başka bir port seçin."
             ),
         }
     }
 }
 
 impl std::error::Error for PortSelectError {}
+
+/// Varsayılan Lounge Graph UI port bandı (18749–18759).
+pub fn default_graph_ui_port_band() -> RangeInclusive<u16> {
+    GRAPH_UI_PORT_BAND_START..=GRAPH_UI_PORT_BAND_END
+}
 
 /// Lounge'un spawn ettiği cbm UI çocuğu + status single-flight + window port.
 pub struct GraphUiState {
@@ -279,8 +285,11 @@ pub fn resolve_port_preference(
 pub fn select_graph_ui_port(
     mode: GraphUiPortMode,
     preferred: u16,
+    band: RangeInclusive<u16>,
     is_free: impl Fn(u16) -> bool,
 ) -> Result<u16, PortSelectError> {
+    let start = *band.start();
+    let end = *band.end();
     match mode {
         GraphUiPortMode::User => {
             if preferred == 0 {
@@ -293,17 +302,15 @@ pub fn select_graph_ui_port(
             }
         }
         GraphUiPortMode::Auto => {
-            if (GRAPH_UI_PORT_BAND_START..=GRAPH_UI_PORT_BAND_END).contains(&preferred)
-                && is_free(preferred)
-            {
+            if band.contains(&preferred) && is_free(preferred) {
                 return Ok(preferred);
             }
-            for port in GRAPH_UI_PORT_BAND_START..=GRAPH_UI_PORT_BAND_END {
+            for port in band {
                 if is_free(port) {
                     return Ok(port);
                 }
             }
-            Err(PortSelectError::BandExhausted)
+            Err(PortSelectError::BandExhausted { start, end })
         }
     }
 }
@@ -589,7 +596,8 @@ fn sync_owned_pid(bridge: &MemoryBridge, state: &GraphUiState) {
     bridge.set_owned_ui_pid(state.spawned_child_pid());
 }
 
-async fn spawn_graph_ui_on_port(
+/// Spawn `--ui=true --port=N`; sahiplik doğrulanana kadar bekler.
+pub async fn spawn_graph_ui_on_port(
     state: &GraphUiState,
     bridge: &MemoryBridge,
     port: u16,
@@ -643,63 +651,49 @@ async fn spawn_graph_ui_on_port(
     Ok(())
 }
 
-/// `--ui=true --port=N` spawn; stdin piped (kapanmaz). Hazır olmazsa çocuğu öldürür.
-/// Auto: band seçimi + bind yarışında 1 retry. User: conflict'te asla port değiştirmez.
-pub async fn enable_graph_ui(
-    app: &AppHandle,
+/// Graph UI'yi pencere açmadan başlatır (test + enable_graph_ui çekirdeği).
+/// `band` enjekte edilebilir — CI'da 18749 meşgul olsa da ardışık boş port çifti kullanılır.
+pub async fn enable_graph_ui_headless(
     state: &GraphUiState,
     bridge: &MemoryBridge,
     store: Option<&crate::db::ExperienceStore>,
-    cbm_project: Option<&str>,
-) -> Result<()> {
+    band: RangeInclusive<u16>,
+) -> Result<u16> {
     let mode = state.port_mode();
     let preferred = bridge.http_port();
     let child_pid = state.spawned_child_pid();
+    let band_start = *band.start();
 
-    // Zaten bizim instance ayaktaysa pencereyi aç.
     if port_owned_by_lounge(preferred, child_pid) && probe_ui_config(preferred).await {
-        if let Some(name) = cbm_project.filter(|s| !s.is_empty()) {
-            open_or_focus_graph_window(app, state, preferred, name)?;
-        }
-        return Ok(());
+        return Ok(preferred);
     }
 
     let is_free = |port: u16| {
         if port_owned_by_lounge(port, state.spawned_child_pid()) {
             return true;
         }
-        // Yabancı ui-config / dinleyici → boş değil.
-        if !tcp_bind_available(port) {
-            return false;
-        }
-        true
+        tcp_bind_available(port)
     };
 
-    let selected = match select_graph_ui_port(mode, preferred, is_free) {
+    let selected = match select_graph_ui_port(mode, preferred, band.clone(), is_free) {
         Ok(p) => p,
         Err(err) => bail!("{err}"),
     };
 
-    // Seçilen port zaten bizimse spawn etme.
     if port_owned_by_lounge(selected, state.spawned_child_pid()) && probe_ui_config(selected).await
     {
         bridge.set_http_port(selected);
-        if let Some(name) = cbm_project.filter(|s| !s.is_empty()) {
-            open_or_focus_graph_window(app, state, selected, name)?;
-        }
-        return Ok(());
+        return Ok(selected);
     }
 
     match spawn_graph_ui_on_port(state, bridge, selected).await {
         Ok(()) => {}
         Err(first_err) => {
-            // Bind yarışı: auto modda bir kez sonraki porta retry.
             if mode == GraphUiPortMode::Auto {
-                let retry = select_graph_ui_port(
-                    mode,
-                    selected.saturating_add(1).max(GRAPH_UI_PORT_BAND_START),
-                    |p| p != selected && is_free(p),
-                );
+                let retry_preferred = selected.saturating_add(1).max(band_start);
+                let retry = select_graph_ui_port(mode, retry_preferred, band, |p| {
+                    p != selected && is_free(p)
+                });
                 match retry {
                     Ok(next) if next != selected => {
                         log::warn!(
@@ -707,7 +701,7 @@ pub async fn enable_graph_ui(
                         );
                         spawn_graph_ui_on_port(state, bridge, next).await?;
                     }
-                    Ok(_) | Err(PortSelectError::BandExhausted) => {
+                    Ok(_) | Err(PortSelectError::BandExhausted { .. }) => {
                         bail!("{first_err}; ayrıca port bandı tükendi veya retry yok")
                     }
                     Err(e) => bail!("{first_err}; retry: {e}"),
@@ -727,7 +721,20 @@ pub async fn enable_graph_ui(
             .set_setting(SETTINGS_KEY_MODE.into(), mode.as_str().into())
             .await;
     }
+    Ok(live_port)
+}
 
+/// `--ui=true --port=N` spawn; stdin piped (kapanmaz). Hazır olmazsa çocuğu öldürür.
+/// Auto: band seçimi + bind yarışında 1 retry. User: conflict'te asla port değiştirmez.
+pub async fn enable_graph_ui(
+    app: &AppHandle,
+    state: &GraphUiState,
+    bridge: &MemoryBridge,
+    store: Option<&crate::db::ExperienceStore>,
+    cbm_project: Option<&str>,
+) -> Result<()> {
+    let live_port =
+        enable_graph_ui_headless(state, bridge, store, default_graph_ui_port_band()).await?;
     if let Some(name) = cbm_project.filter(|s| !s.is_empty()) {
         open_or_focus_graph_window(app, state, live_port, name)?;
     }
@@ -805,22 +812,45 @@ mod tests {
 
     #[test]
     fn auto_selects_preferred_when_free() {
-        let port = select_graph_ui_port(GraphUiPortMode::Auto, 18751, |_| true).unwrap();
+        let port = select_graph_ui_port(
+            GraphUiPortMode::Auto,
+            18751,
+            default_graph_ui_port_band(),
+            |_| true,
+        )
+        .unwrap();
         assert_eq!(port, 18751);
     }
 
     #[test]
     fn auto_skips_busy_and_picks_next_in_band() {
         let busy: HashSet<u16> = [18749, 18750].into_iter().collect();
-        let port =
-            select_graph_ui_port(GraphUiPortMode::Auto, 18749, |p| !busy.contains(&p)).unwrap();
+        let port = select_graph_ui_port(
+            GraphUiPortMode::Auto,
+            18749,
+            default_graph_ui_port_band(),
+            |p| !busy.contains(&p),
+        )
+        .unwrap();
         assert_eq!(port, 18751);
     }
 
     #[test]
     fn auto_band_exhausted_returns_clear_error() {
-        let err = select_graph_ui_port(GraphUiPortMode::Auto, 18749, |_| false).unwrap_err();
-        assert_eq!(err, PortSelectError::BandExhausted);
+        let err = select_graph_ui_port(
+            GraphUiPortMode::Auto,
+            18749,
+            default_graph_ui_port_band(),
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PortSelectError::BandExhausted {
+                start: GRAPH_UI_PORT_BAND_START,
+                end: GRAPH_UI_PORT_BAND_END
+            }
+        );
         let msg = err.to_string();
         assert!(msg.contains("18749"));
         assert!(msg.contains("18759"));
@@ -828,7 +858,13 @@ mod tests {
 
     #[test]
     fn user_mode_conflict_does_not_switch() {
-        let err = select_graph_ui_port(GraphUiPortMode::User, 9749, |_| false).unwrap_err();
+        let err = select_graph_ui_port(
+            GraphUiPortMode::User,
+            9749,
+            default_graph_ui_port_band(),
+            |_| false,
+        )
+        .unwrap_err();
         match err {
             PortSelectError::UserConflict { port } => assert_eq!(port, 9749),
             other => panic!("expected UserConflict, got {other:?}"),
@@ -841,7 +877,13 @@ mod tests {
     #[test]
     fn user_mode_keeps_free_port() {
         assert_eq!(
-            select_graph_ui_port(GraphUiPortMode::User, 19001, |_| true).unwrap(),
+            select_graph_ui_port(
+                GraphUiPortMode::User,
+                19001,
+                default_graph_ui_port_band(),
+                |_| true
+            )
+            .unwrap(),
             19001
         );
     }
@@ -906,9 +948,12 @@ mod tests {
         );
 
         // Auto seçici foreign portu atlar (bind dolu).
-        let chosen = select_graph_ui_port(GraphUiPortMode::Auto, GRAPH_UI_PORT_BAND_START, |p| {
-            p != foreign_port && tcp_bind_available(p)
-        })
+        let chosen = select_graph_ui_port(
+            GraphUiPortMode::Auto,
+            GRAPH_UI_PORT_BAND_START,
+            default_graph_ui_port_band(),
+            |p| p != foreign_port && tcp_bind_available(p),
+        )
         .expect("band has a free port");
         assert_ne!(chosen, foreign_port);
         assert!((GRAPH_UI_PORT_BAND_START..=GRAPH_UI_PORT_BAND_END).contains(&chosen));

@@ -491,6 +491,73 @@ pub fn parse_netstat_listen_pids(stdout: &str, port: u16) -> Vec<u32> {
     set.into_iter().collect()
 }
 
+/// Stage `lounge-test-helper` as `codebase-memory-mcp[.exe]` so GuardedCommand allowlist matches.
+/// Returns `(binary_path, scratch_dir)` — caller must keep `scratch_dir` alive.
+pub fn stage_codebase_memory_mcp_double(helper_bin: &Path) -> Result<(PathBuf, PathBuf)> {
+    if !helper_bin.is_file() {
+        anyhow::bail!(
+            "lounge-test-helper missing at {} — cargo must build the bin target",
+            helper_bin.display()
+        );
+    }
+    let scratch = std::env::temp_dir().join(format!(
+        "lounge-cbm-double-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&scratch).with_context(|| format!("create {}", scratch.display()))?;
+    let name = if cfg!(windows) {
+        "codebase-memory-mcp.exe"
+    } else {
+        "codebase-memory-mcp"
+    };
+    let dest = scratch.join(name);
+    std::fs::copy(helper_bin, &dest)
+        .with_context(|| format!("copy {} → {}", helper_bin.display(), dest.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms)?;
+    }
+    Ok((dest, scratch))
+}
+
+/// Spawn allowlisted `codebase-memory-mcp` double in `tcp-hold` mode (LISTEN on port).
+pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Child> {
+    let mut command = GuardedCommand::new(binary)
+        .arg("tcp-hold")
+        .arg(format!("--port={port}"))
+        .internal_daemon()
+        .into_std_command()
+        .with_context(|| format!("tcp-hold gate: {}", binary.display()))?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .with_context(|| format!("tcp-hold spawn: {}", binary.display()))
+}
+
+/// Wait until `port_owned_by_lounge(port, Some(pid))` or timeout.
+pub fn wait_until_port_owned(port: u16, pid: u32, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if port_owned_by_lounge(port, Some(pid)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
