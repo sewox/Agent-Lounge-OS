@@ -22,6 +22,7 @@ pub mod quota_manager;
 pub mod subscription_usage;
 pub mod supervisor;
 pub mod telemetry;
+pub mod window_geometry;
 pub mod workspace_scan;
 
 #[cfg(windows)]
@@ -100,6 +101,11 @@ pub use supervisor::{max_restart_attempts, next_backoff, spawn_supervisor};
 pub use telemetry::{
     build_agent_efficiency_report, record_dead_snapshot, record_whisper_injection,
     AgentEfficiencyReport, EfficiencyReportQuery,
+};
+pub use window_geometry::{
+    persist_window_geometry, persist_window_label, placement_for_window, GeometryStore,
+    LogicalRect, MinSize, MonitorSnapshot, WindowPlacement, FILL_RATIO, GEOMETRY_FILE_NAME,
+    MAIN_WINDOW_LABEL, MIN_HEIGHT_LOGICAL, MIN_WIDTH_LOGICAL,
 };
 pub use workspace_scan::{discover_projects, WorkspaceScanErrorKind};
 

@@ -18,7 +18,10 @@ use super::memory_bridge::{
     probe_ui_config, MemoryBridge, DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END,
     GRAPH_UI_PORT_BAND_START, LEGACY_GRAPH_UI_PORT, UI_PROBE_TIMEOUT,
 };
-use super::probe::{listen_pids, port_owned_by_lounge, tcp_ready, wait_until};
+use super::probe::{data_root, listen_pids, port_owned_by_lounge, tcp_ready, wait_until};
+use super::window_geometry::{
+    persist_window_geometry, placement_for_window, MIN_HEIGHT_LOGICAL, MIN_WIDTH_LOGICAL,
+};
 use crate::kernel::GuardedCommand;
 
 pub const GRAPH_WINDOW_LABEL: &str = "graph-window";
@@ -557,21 +560,27 @@ pub fn open_or_focus_graph_window(
     cbm_project: &str,
 ) -> Result<()> {
     let url = graph_project_url(port, cbm_project)?;
+    let root = data_root();
     if let Some(window) = app.get_webview_window(GRAPH_WINDOW_LABEL) {
         if state.window_port() == Some(port) {
             window.navigate(url).context("graph-window navigate")?;
             window.set_focus().context("graph-window set_focus")?;
             return Ok(());
         }
+        persist_window_geometry(app, &window, GRAPH_WINDOW_LABEL, &root);
         let _ = window.destroy();
         state.set_window_port(None);
     }
 
+    let placement = placement_for_window(app, GRAPH_WINDOW_LABEL, &root);
     let allowed_port = port;
     WebviewWindowBuilder::new(app, GRAPH_WINDOW_LABEL, WebviewUrl::External(url.clone()))
         .title("Codebase Memory · 3D Graph")
-        .inner_size(1280.0, 800.0)
+        .inner_size(placement.width, placement.height)
+        .position(placement.x, placement.y)
+        .min_inner_size(MIN_WIDTH_LOGICAL, MIN_HEIGHT_LOGICAL)
         .resizable(true)
+        .maximizable(true)
         .on_navigation(move |nav| navigation_allowed(nav, allowed_port))
         .on_new_window(|_url, _features| tauri::webview::NewWindowResponse::Deny)
         .build()

@@ -27,12 +27,14 @@ use services::{
     enable_graph_ui, fix_dead_symbol_with_agent as publish_fix_dead_symbol, graph_ui_status,
     load_port_from_store, load_port_preference_from_store, on_main_window_closed,
     open_dead_symbol_in_editor as open_indexed_dead_symbol, open_or_focus_graph_window,
-    open_path_in_editor, persist_port, persist_port_preference, record_dead_snapshot,
-    record_whisper_injection, resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump,
-    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery,
-    FixDeadSymbolResult, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob, IndexProgress,
-    IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
-    WorkspaceScanResult, GRAPH_WINDOW_LABEL,
+    open_path_in_editor, persist_port, persist_port_preference, persist_window_label,
+    placement_for_window, record_dead_snapshot, record_whisper_injection,
+    resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
+    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, FixDeadSymbolResult,
+    GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob, IndexProgress, IndexQueue,
+    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL, MIN_HEIGHT_LOGICAL,
+    MIN_WIDTH_LOGICAL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -72,7 +74,11 @@ pub(crate) fn window_route_for_store(store: &ExperienceStore) -> &'static str {
     }
 }
 
-fn open_main_window(app: &tauri::App, start_route: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn open_main_window(
+    app: &tauri::App,
+    start_route: &str,
+    data_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut window_config = app
         .config()
         .app
@@ -81,6 +87,16 @@ fn open_main_window(app: &tauri::App, start_route: &str) -> Result<(), Box<dyn s
         .cloned()
         .ok_or("main window config missing")?;
     window_config.url = WebviewUrl::App(PathBuf::from(start_route.trim_start_matches('/')));
+    let placement = placement_for_window(app.handle(), MAIN_WINDOW_LABEL, data_root);
+    window_config.width = placement.width;
+    window_config.height = placement.height;
+    window_config.x = Some(placement.x);
+    window_config.y = Some(placement.y);
+    window_config.center = false;
+    window_config.maximized = false;
+    // Portrait 1080-wide: keep mins ≤ 960 logical (config may already match).
+    window_config.min_width = Some(MIN_WIDTH_LOGICAL);
+    window_config.min_height = Some(MIN_HEIGHT_LOGICAL);
     WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
     Ok(())
 }
@@ -128,7 +144,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                     db::default_db_path(&workspace).display()
                 )
             })?;
-            open_main_window(app, start_route)?;
+            open_main_window(app, start_route, &workspace)?;
             let model = default_model_lock();
             let memory = MemoryBridge::discover().unwrap_or_else(|err| {
                 log::warn!("{err}");
@@ -392,9 +408,12 @@ pub fn run_with_start_route(start_route: &'static str) {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match &event {
-            RunEvent::WindowEvent { label, event, .. } if label == "main" => {
+            RunEvent::WindowEvent { label, event, .. } if label == MAIN_WINDOW_LABEL => {
                 match event {
                     WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
+                        let root = services::data_root();
+                        persist_window_label(app_handle, MAIN_WINDOW_LABEL, &root);
+                        persist_window_label(app_handle, GRAPH_WINDOW_LABEL, &root);
                         if let Some(state) = app_handle.try_state::<GraphUiState>() {
                             let bridge = app_handle.try_state::<MemoryBridge>();
                             on_main_window_closed(
@@ -415,6 +434,14 @@ pub fn run_with_start_route(start_route: &'static str) {
                         services::on_app_activated_for_pending_approval(app_handle);
                     }
                     _ => {}
+                }
+            }
+            RunEvent::WindowEvent { label, event, .. } if label == GRAPH_WINDOW_LABEL => {
+                if matches!(
+                    event,
+                    WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+                ) {
+                    persist_window_label(app_handle, GRAPH_WINDOW_LABEL, &services::data_root());
                 }
             }
             #[cfg(target_os = "macos")]
