@@ -1,7 +1,6 @@
-# Non-blocking cross-platform cargo + build (PR-0 / §10.2).
+# Cross-platform cargo + frontend build/unit (PR-0 / §10.2).
 # Linux remains the main Playwright runner (qa-e2e.yml).
-# This workflow keeps the primary CI gate green while we prove
-# windows-latest and macos-latest compile/test paths.
+# These jobs are required gates (no continue-on-error).
 
 name: QA cross-platform
 
@@ -26,7 +25,6 @@ jobs:
   rust-matrix:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     # Fail fast on hangs (was 45m; cargo test alone should finish well under this).
     timeout-minutes: 30
     strategy:
@@ -66,10 +64,14 @@ jobs:
         timeout-minutes: 20
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
+      # Path dependency is not covered by `cargo test` without -p (no [workspace]).
+      - name: Cargo test lounge_protocol
+        timeout-minutes: 5
+        run: cargo test -p lounge_protocol --manifest-path src-tauri/Cargo.toml --locked
+
   frontend-matrix:
-    name: Frontend build (${{ matrix.os }})
+    name: Frontend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -85,6 +87,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # package.json test:unit uses double-quoted glob (Windows cmd-safe) +
+      # node-no-navigator preload (platform.test.ts intent on Node 21+ hosts).
+      - name: Unit tests
+        run: npm run test:unit
 
       - name: Build
         run: npm run build

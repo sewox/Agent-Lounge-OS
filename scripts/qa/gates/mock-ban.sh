@@ -2,7 +2,7 @@
 # S4 mock-ban gate: MOCK_HEALTH / MOCK_NODES / MOCK_QUOTAS / MOCK_EXPERIENCES / MOCK_EVENTS
 # must not remain in live (Tauri) code paths.
 # Allowlist: src/lib/mock/** (browser-harness fixtures only).
-# PR-0: warning mode (exit 0, prints findings). PR-2: set QA_MOCK_BAN_STRICT=1 to fail.
+# Strict by default locally and in CI. Opt out only with QA_MOCK_BAN_STRICT=0.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
@@ -30,7 +30,7 @@ if [[ -n "$HITS" ]]; then
   COUNT="$(printf '%s\n' "$HITS" | grep -c . || true)"
 fi
 
-echo "== mock-ban gate (strict=${QA_MOCK_BAN_STRICT:-0}, tool=$qa_search_tool) =="
+echo "== mock-ban gate (strict=${QA_MOCK_BAN_STRICT:-1}, tool=$qa_search_tool) =="
 if [[ -z "$HITS" ]]; then
   echo "OK: no banned MOCK_(HEALTH|NODES|QUOTAS|EXPERIENCES|EVENTS) outside src/lib/mock/"
   exit 0
@@ -42,8 +42,8 @@ echo
 echo "Policy (K9/K12): Tauri/live mode must not fall back to MOCK_*."
 echo "Browser fixtures belong in src/lib/mock/ (allowlisted)."
 
-if [[ "${QA_MOCK_BAN_STRICT:-0}" == "1" ]]; then
+if [[ "${QA_MOCK_BAN_STRICT:-1}" == "1" ]]; then
   exit 1
 fi
-echo "(warning mode — set QA_MOCK_BAN_STRICT=1 to fail)"
+echo "(warning mode — QA_MOCK_BAN_STRICT=0)"
 exit 0

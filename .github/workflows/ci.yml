@@ -97,6 +97,11 @@ jobs:
         timeout-minutes: 20
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
+      # Path dependency is not covered by `cargo test` without -p (no [workspace]).
+      - name: Test lounge_protocol
+        timeout-minutes: 5
+        run: cargo test -p lounge_protocol --manifest-path src-tauri/Cargo.toml --locked
+
   workers:
     name: Workers
     runs-on: ubuntu-latest
@@ -132,8 +137,9 @@ jobs:
 
       - name: Mock-ban (strict)
         run: bash scripts/qa/gates/mock-ban.sh
-        env:
-          QA_MOCK_BAN_STRICT: "1"
+
+      - name: CI hiding ban (no silent workflow failure)
+        run: bash scripts/qa/gates/ci-hiding-ban.sh
 
       - name: Small-font grep
         run: bash scripts/qa/gates/small-font.sh

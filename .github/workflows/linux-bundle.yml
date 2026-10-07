@@ -1,8 +1,8 @@
-# Non-blocking Linux Tauri bundle for S2-Linux live testing.
-# Builds AppImage + .deb with the real codebase-memory-mcp sidecar when available.
-# Stub fallback renames the artifact to agent-lounge-linux-ui-only.
+# Required Linux Tauri bundle for S2-Linux live testing.
+# Builds AppImage + .deb with the REAL codebase-memory-mcp sidecar only.
+# Failures block the workflow (no continue-on-error / silent UI-only fallback).
 # Bundles are selected via CLI (`--bundles deb,appimage`), not tauri.conf targets.
-# continue-on-error: never blocks required CI.
+# Emergency stub packaging is opt-in via workflow_dispatch only.
 
 name: Linux bundle
 
@@ -16,6 +16,11 @@ on:
       - "package.json"
       - "package-lock.json"
   workflow_dispatch:
+    inputs:
+      allow_stub_sidecar:
+        description: "Emergency UI-only stub packaging (never for PR CI)"
+        type: boolean
+        default: false
 
 concurrency:
   group: linux-bundle-${{ github.ref }}
@@ -40,7 +45,6 @@ jobs:
   linux-bundle:
     name: Build AppImage + deb
     runs-on: ubuntu-22.04
-    continue-on-error: true
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -80,11 +84,29 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Fetch real codebase-memory-mcp (linux-amd64)
-        id: sidecar
-        continue-on-error: true
+      - name: Resolve sidecar mode
+        id: mode
         run: |
           set -euo pipefail
+          ALLOW_STUB="false"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ALLOW_STUB="${{ inputs.allow_stub_sidecar }}"
+          fi
+          if [[ "$ALLOW_STUB" == "true" ]]; then
+            echo "mode=stub" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=agent-lounge-linux-ui-only" >> "$GITHUB_OUTPUT"
+            echo "WARN: workflow_dispatch allow_stub_sidecar=true — UI-only stub packaging"
+          else
+            echo "mode=real" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=agent-lounge-linux" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch real codebase-memory-mcp (linux-amd64)
+        id: sidecar
+        if: steps.mode.outputs.mode == 'real'
+        run: |
+          set -euo pipefail
+          EXPECTED="${CBM_RELEASE#v}"
           URL="https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_RELEASE}/${CBM_ASSET}"
           mkdir -p bridge
           TMP="$(mktemp -d)"
@@ -98,11 +120,15 @@ jobs:
             exit 1
           fi
           install -m 755 "$BIN" bridge/codebase-memory-mcp
-          # Sanitize: first token only (avoid shell metacharacters in GITHUB_ENV).
-          RAW_VER="$(bridge/codebase-memory-mcp --version 2>/dev/null | head -n1 || true)"
+          RAW_VER="$(bridge/codebase-memory-mcp --version 2>&1 | head -n1)"
           VERSION="$(printf '%s' "$RAW_VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
           if [[ -z "$VERSION" ]]; then
-            VERSION="${CBM_RELEASE#v}"
+            echo "FAIL: could not parse --version from: ${RAW_VER}"
+            exit 1
+          fi
+          if [[ "$VERSION" != "$EXPECTED" ]]; then
+            echo "FAIL: sidecar version mismatch: got=${VERSION} expected=${EXPECTED} (raw=${RAW_VER})"
+            exit 1
           fi
           SIZE_B="$(wc -c < bridge/codebase-memory-mcp | tr -d '[:space:]')"
           if [[ "$SIZE_B" -lt 4096 ]]; then
@@ -111,19 +137,20 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "size_bytes=${SIZE_B}" >> "$GITHUB_OUTPUT"
-          echo "ok=1" >> "$GITHUB_OUTPUT"
           echo "sidecar ok: $VERSION ($SIZE_B bytes)"
 
-      - name: Stage externalBin (real or stub fallback)
+      - name: Stage externalBin
         id: stage
         run: |
           set -euo pipefail
-          if [[ "${{ steps.sidecar.outputs.ok }}" == "1" ]]; then
+          MODE="${{ steps.mode.outputs.mode }}"
+          if [[ "$MODE" == "real" ]]; then
             bash src-tauri/scripts/prepare-sidecar.sh
             echo "mode=real" >> "$GITHUB_OUTPUT"
             echo "artifact_name=agent-lounge-linux" >> "$GITHUB_OUTPUT"
+            echo "version=${{ steps.sidecar.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "size_bytes=${{ steps.sidecar.outputs.size_bytes }}" >> "$GITHUB_OUTPUT"
           else
-            echo "WARN: real sidecar unavailable — packaging UI-only stub artifact"
             bash src-tauri/scripts/prepare-sidecar.sh --stub
             echo "mode=stub" >> "$GITHUB_OUTPUT"
             echo "artifact_name=agent-lounge-linux-ui-only" >> "$GITHUB_OUTPUT"
@@ -144,9 +171,9 @@ jobs:
           CI: "true"
 
       - name: Verify sidecar inside .deb
-        if: success()
         run: |
           set -euo pipefail
+          EXPECTED="${CBM_RELEASE#v}"
           DEB="$(ls src-tauri/target/release/bundle/deb/*.deb | head -n1)"
           echo "Inspecting $DEB"
           dpkg -c "$DEB" | tee /tmp/deb-contents.txt | grep -E 'codebase-memory-mcp' || {
@@ -167,22 +194,85 @@ jobs:
               echo "FAIL: bundled sidecar is stub-sized"
               exit 1
             fi
-            RAW_VER="$("$SIDECAR" --version 2>/dev/null | head -n1 || true)"
+            RAW_VER="$("$SIDECAR" --version 2>&1 | head -n1)"
             VERSION="$(printf '%s' "$RAW_VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
             if [[ -z "$VERSION" ]]; then
-              VERSION="${CBM_RELEASE#v}"
+              echo "FAIL: could not parse bundled --version from: ${RAW_VER}"
+              exit 1
+            fi
+            if [[ "$VERSION" != "$EXPECTED" ]]; then
+              echo "FAIL: bundled sidecar version mismatch: got=${VERSION} expected=${EXPECTED} (raw=${RAW_VER})"
+              exit 1
             fi
             echo "bundled --version: $VERSION (raw=${RAW_VER})"
             {
               echo "SIDECAR_VERSION=${VERSION}"
               echo "SIDECAR_SIZE_BYTES=${SIZE_B}"
+              echo "SIDECAR_PATH=${SIDECAR}"
             } >> "$GITHUB_ENV"
           else
             {
               echo "SIDECAR_VERSION=stub"
               echo "SIDECAR_SIZE_BYTES=${SIZE_B}"
+              echo "SIDECAR_PATH=${SIDECAR}"
             } >> "$GITHUB_ENV"
           fi
+
+      - name: Sidecar functional smoke
+        if: steps.stage.outputs.mode == 'real'
+        run: |
+          set -euo pipefail
+          EXPECTED="${CBM_RELEASE#v}"
+          SIDECAR="${SIDECAR_PATH:-}"
+          if [[ -z "$SIDECAR" || ! -x "$SIDECAR" ]]; then
+            echo "FAIL: bundled sidecar path missing or not executable: ${SIDECAR:-<empty>}"
+            exit 1
+          fi
+          RAW_VER="$("$SIDECAR" --version 2>&1 | head -n1)"
+          VERSION="$(printf '%s' "$RAW_VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
+          if [[ "$VERSION" != "$EXPECTED" ]]; then
+            echo "FAIL: smoke --version mismatch: got=${VERSION} expected=${EXPECTED} (raw=${RAW_VER})"
+            exit 1
+          fi
+          echo "smoke --version ok: $VERSION"
+
+          FIXTURE="$(mktemp -d)"
+          trap 'rm -rf "$FIXTURE"' EXIT
+          cat >"$FIXTURE/hello.py" <<'PY'
+          def hello(name: str) -> str:
+              return f"hello {name}"
+
+
+          def main() -> None:
+              print(hello("lounge"))
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+          # MemoryBridge uses `codebase-memory-mcp cli <tool> …` (not bare tool name;
+          # bare argv enters MCP stdio and yields empty stdout with closed stdin).
+          # v0.11.0 index_repository flags: --repo-path, --mode (no --format).
+          set +e
+          OUT="$("$SIDECAR" cli index_repository --repo-path "$FIXTURE" --mode fast 2>&1)"
+          RC=$?
+          set -e
+          echo "index_repository exit=${RC}"
+          echo "$OUT" | head -c 4000
+          echo
+          if [[ "$RC" -ne 0 ]]; then
+            echo "FAIL: index_repository exited ${RC}"
+            exit 1
+          fi
+          if [[ -z "$(printf '%s' "$OUT" | tr -d '[:space:]')" ]]; then
+            echo "FAIL: index_repository produced empty stdout/stderr"
+            exit 1
+          fi
+          if ! printf '%s' "$OUT" | grep -Eqi '"status"[[:space:]]*:[[:space:]]*"indexed"|\"nodes\"|\"edges\"'; then
+            echo "FAIL: index_repository did not report indexed status/nodes/edges"
+            exit 1
+          fi
+          echo "smoke index_repository ok"
 
       - name: Collect artifact files
         if: always()
@@ -213,7 +303,9 @@ jobs:
             VER="${{ steps.sidecar.outputs.version }}"
           fi
           VER="$(printf '%s' "$VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
-          if [[ -z "$VER" ]]; then
+          if [[ -z "$VER" && "$MODE" == "stub" ]]; then
+            VER="stub"
+          elif [[ -z "$VER" ]]; then
             VER="${CBM_RELEASE#v}"
           fi
           SZ="${SIDECAR_SIZE_BYTES:-${{ steps.sidecar.outputs.size_bytes }}}"
@@ -235,7 +327,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.stage.outputs.artifact_name || 'agent-lounge-linux-ui-only' }}
+          name: ${{ steps.stage.outputs.artifact_name || 'agent-lounge-linux' }}
           path: ${{ runner.temp }}/agent-lounge-linux/
           if-no-files-found: warn
           retention-days: 14
