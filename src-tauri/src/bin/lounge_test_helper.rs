@@ -95,15 +95,28 @@ fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
 
 fn run_tcp_hold(args: &[String]) -> Result<(), String> {
     let port = parse_port_flag(args)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
+    // Multi-thread runtime: same rationale as `run_fake_cbm` — current_thread +
+    // CREATE_NO_WINDOW on Windows CI has been observed to leave the LISTEN socket
+    // invisible to GetExtendedTcpTable / netstat for the full ownership wait
+    // (flake: port_owned_by_lounge_matches_spawned_child_id saw []).
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(2)
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
     let listener = rt.block_on(async { bind_loopback(port) })?;
 
+    // Printed only after bind+listen succeed. Prefer stderr: on Windows,
+    // CREATE_NO_WINDOW + piped stdout has been observed to EOF before the
+    // ready line while the process is still alive. Parent waits on connect
+    // and/or this line — never on a fixed sleep alone.
+    let line = format!("tcp-hold-ready port={port} pid={}", std::process::id());
+    let mut err = std::io::stderr();
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
     let mut out = std::io::stdout();
-    let _ = writeln!(out, "tcp-hold-ready port={port} pid={}", std::process::id());
+    let _ = writeln!(out, "{line}");
     let _ = out.flush();
 
     rt.block_on(async move {

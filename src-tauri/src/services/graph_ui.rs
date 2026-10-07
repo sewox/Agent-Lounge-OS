@@ -641,10 +641,21 @@ pub async fn spawn_graph_ui_on_port(
         bail!("Graph UI {ENABLE_READY_DEADLINE:?} içinde hazır olmadı — SemanticMap'e düşülüyor");
     }
 
-    if !port_owned_by_lounge(port, state.spawned_child_pid()) {
+    // HTTP probe already proved the socket accepts — still poll ownership briefly
+    // so Windows GetExtendedTcpTable / netstat can catch up after bind (same race
+    // as the tcp-hold integration test). Bounded; not a retry-until-pass mask.
+    let owned = wait_until(
+        Duration::from_secs(3),
+        Duration::from_millis(50),
+        || async { port_owned_by_lounge(port, state.spawned_child_pid()) },
+    )
+    .await;
+    if !owned {
+        let pid = state.spawned_child_pid();
+        let pids = listen_pids(port);
         state.kill_spawned_child();
         sync_owned_pid(bridge, state);
-        bail!("Graph UI port {port} sahiplik doğrulaması başarısız");
+        bail!("Graph UI port {port} sahiplik doğrulaması başarısız (child={pid:?}, listen_pids={pids:?})");
     }
 
     bridge.set_http_port(port);
