@@ -77,11 +77,12 @@ pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCat
 pub use probe::{
     data_root, ensure_data_layout, listen_pids, lounge_laya_dir, lounge_lmr_binary_path,
     lounge_lmr_dir, lounge_nats_dir, lounge_ollama_endpoint, nats_monitor_endpoint,
-    port_owned_by_lounge, resolve_data_root, resolve_data_root_for_app, spawn_tcp_hold_child,
-    stage_codebase_memory_mcp_double, system_ollama_endpoint, tcp_bind_available,
-    wait_until_port_owned, DataRootEnv, APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT,
+    port_owned_by_lounge, resolve_data_root, resolve_data_root_for_app, system_ollama_endpoint,
+    tcp_bind_available, DataRootEnv, APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT,
     SYSTEM_OLLAMA_PORT,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub use probe::{spawn_tcp_hold_child, stage_codebase_memory_mcp_double, wait_until_port_owned};
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,
     is_quota_approval, limit_policy_percent, lmr_endpoint_up, lmr_runtime_up, normalize_lmr_agent,

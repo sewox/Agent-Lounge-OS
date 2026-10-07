@@ -91,11 +91,12 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --features test-helpers -- -D warnings
 
       - name: Test
         timeout-minutes: 20
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        # test-helpers builds lounge-test-helper (required-features) for ownership integration tests.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --features test-helpers
 
       # Path dependency is not covered by `cargo test` without -p (no [workspace]).
       - name: Test lounge_protocol

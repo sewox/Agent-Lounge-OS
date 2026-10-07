@@ -218,6 +218,20 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
+      - name: Assert lounge-test-helper absent from .deb
+        run: |
+          set -euo pipefail
+          # test-helpers bin must never ship; tauri build omits required-features bins.
+          if [[ ! -f /tmp/deb-contents.txt ]]; then
+            DEB="$(ls src-tauri/target/release/bundle/deb/*.deb | head -n1)"
+            dpkg -c "$DEB" > /tmp/deb-contents.txt
+          fi
+          if grep -E 'lounge-test-helper' /tmp/deb-contents.txt; then
+            echo "FAIL: lounge-test-helper must not be packaged in the .deb"
+            exit 1
+          fi
+          echo "ok: lounge-test-helper absent from .deb listing"
+
       - name: Sidecar functional smoke
         if: steps.stage.outputs.mode == 'real'
         run: |

@@ -4,8 +4,9 @@
 //! - `tcp-hold --port=N` — bind TCP LISTEN on `127.0.0.1:N` and park until killed.
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
 //!
-//! Production builds may include this binary; it is only invoked from tests. Spawn paths
-//! copy/rename it to `codebase-memory-mcp` so GuardedCommand allowlisting matches.
+//! Built only with `--features test-helpers` (`required-features` on the [[bin]]).
+//! Release / `tauri build` omit this feature, so the helper never ships in installers.
+//! Tests stage a copy renamed to `codebase-memory-mcp` for GuardedCommand allowlisting.
 
 use std::env;
 use std::io::Write;

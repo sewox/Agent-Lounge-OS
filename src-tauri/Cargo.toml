@@ -19,6 +19,7 @@ path = "src/bin/lounge_mcp.rs"
 [[bin]]
 name = "lounge-test-helper"
 path = "src/bin/lounge_test_helper.rs"
+required-features = ["test-helpers"]
 
 [build-dependencies]
 tauri-build = { version = "2.7.1", features = [] }
@@ -54,7 +55,17 @@ sha2 = "0.11"
 candle-core = { version = "0.11.0", default-features = false, features = ["metal"] }
 candle-nn = { version = "0.11.0", default-features = false, features = ["metal"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
+] }
+
 [features]
 default = []
 # Real Hugging Face Laya weights inference (nightly). Not enabled in PR CI.
 laya-live = []
+# Test-only Graph UI ownership helpers + lounge-test-helper bin.
+# Required for `tests/graph_ui_port_ownership.rs`. Never enable for release/tauri builds.
+test-helpers = []

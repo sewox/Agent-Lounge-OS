@@ -62,7 +62,8 @@ jobs:
 
       - name: Cargo test
         timeout-minutes: 20
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        # test-helpers builds lounge-test-helper (required-features) for ownership integration tests.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --features test-helpers
 
       # Path dependency is not covered by `cargo test` without -p (no [workspace]).
       - name: Cargo test lounge_protocol
