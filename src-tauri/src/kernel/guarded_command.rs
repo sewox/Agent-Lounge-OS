@@ -28,10 +28,30 @@ const INTERNAL_DAEMON_ALLOWLIST: &[&str] = &[
 ];
 
 /// Absolute Windows PowerShell for allowlisted CIM cmdline reads.
-#[cfg(windows)]
+/// Available on all targets so unit tests can assert exact-path gating.
 pub fn windows_powershell_exe() -> std::path::PathBuf {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
-    std::path::Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        std::path::Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        // Canonical path used by cross-platform allowlist unit tests.
+        std::path::PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    }
+}
+
+fn path_eq_ci(program: &OsStr, expected: &std::path::Path) -> bool {
+    let a = program
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let b = expected
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    a == b
 }
 
 /// Absolute `ps` for allowlisted cmdline introspection.
@@ -214,12 +234,15 @@ impl GuardedCommand {
                 bail!("internal_daemon ps argv not allowlisted");
             }
         }
-        // powershell: absolute powershell.exe + fixed Get-CimInstance ProcessId script.
-        // Reject planted powershell.cmd/.bat even though program_base strips those suffixes.
+        // powershell: must equal windows_powershell_exe() (case-insensitive) +
+        // fixed Get-CimInstance ProcessId script. Bare `powershell.exe` / PATH /
+        // C:\evil\powershell.exe / .cmd plantings are rejected.
         if base == "powershell" {
-            let raw_lower = self.program.to_string_lossy().to_ascii_lowercase();
-            if !raw_lower.ends_with("powershell.exe") {
-                bail!("internal_daemon powershell must be absolute powershell.exe");
+            if !path_eq_ci(&self.program, &windows_powershell_exe()) {
+                bail!(
+                    "internal_daemon powershell must be exactly {}",
+                    windows_powershell_exe().display()
+                );
             }
             if !powershell_internal_daemon_argv_ok(&args) {
                 bail!(
@@ -420,8 +443,10 @@ mod tests {
     #[test]
     fn internal_daemon_rejects_arbitrary_powershell_argv() {
         let _guard = test_lock();
-        let exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-        let err = GuardedCommand::new(exe)
+        let exe = windows_powershell_exe();
+        let allowlisted_script =
+            "(Get-CimInstance Win32_Process -Filter \"ProcessId = 1\").CommandLine";
+        let err = GuardedCommand::new(&exe)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -449,12 +474,40 @@ mod tests {
             "bare powershell name (not powershell.exe path) must be rejected"
         );
 
+        let err = GuardedCommand::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                allowlisted_script,
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "bare powershell.exe (PATH/CWD resolution) must be rejected"
+        );
+
+        let err = GuardedCommand::new(r"C:\evil\powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                allowlisted_script,
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "C:\\evil\\powershell.exe must be rejected even with allowlisted script"
+        );
+
         let err = GuardedCommand::new(r"C:\evil\powershell.cmd")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "(Get-CimInstance Win32_Process -Filter \"ProcessId = 1\").CommandLine",
+                allowlisted_script,
             ])
             .internal_daemon()
             .into_std_command();
@@ -463,7 +516,7 @@ mod tests {
             "planted powershell.cmd must not match even with allowlisted script"
         );
 
-        let ok = GuardedCommand::new(exe)
+        let ok = GuardedCommand::new(&exe)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -474,7 +527,7 @@ mod tests {
             .into_std_command();
         assert!(
             ok.is_ok(),
-            "absolute powershell.exe + ProcessId filter must be allowed: {}",
+            "exact windows_powershell_exe() + ProcessId filter must be allowed: {}",
             ok.err().map(|e| e.to_string()).unwrap_or_default()
         );
     }

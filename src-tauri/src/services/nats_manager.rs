@@ -1367,9 +1367,36 @@ mod tests {
         assert_eq!(kill_nats_on_port(1), 0);
     }
 
+    /// True when `dump` has a line that names `nats-server` and also carries
+    /// this child's unique ephemeral port or exact `-c` conf path (so a bare
+    /// `-c` somewhere else in the listing cannot satisfy the control).
+    fn argv_dump_has_spawned_nats_markers(dump: &str, port: u16, conf_path: Option<&str>) -> bool {
+        let port_s = port.to_string();
+        dump.lines().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            if !lower.contains("nats-server") {
+                return false;
+            }
+            if line.contains(&port_s) {
+                return true;
+            }
+            if let Some(conf) = conf_path {
+                if line.contains(conf) {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    fn spawned_nats_conf_path(child_pid: u32) -> Option<String> {
+        let cmd = process_cmdline(child_pid);
+        cmd.windows(2).find(|w| w[0] == "-c").map(|w| w[1].clone())
+    }
+
     /// macOS/Linux: `ps -axww -o args` — 0 matches for NATS password, user, and
-    /// `lounge_token()` (counts only). Positive control: dump must include `-c`
-    /// / conf / unique port so a vacuous empty listing cannot pass.
+    /// `lounge_token()` (counts only). Positive control: a nats-server line with
+    /// this child's unique port or exact conf path.
     #[cfg(unix)]
     #[test]
     fn nats_password_absent_from_ps_axww_args() {
@@ -1387,6 +1414,7 @@ mod tests {
             .next()
             .and_then(|p| p.parse::<u16>().ok())
             .expect("ephemeral url port");
+        let conf = spawned_nats_conf_path(child.id());
         let output = GuardedCommand::new(crate::kernel::guarded_command::unix_ps_exe())
             .args(["-axww", "-o", "args="])
             .internal_daemon()
@@ -1397,12 +1425,9 @@ mod tests {
             "ps failed (vacuous zero-match not allowed)"
         );
         let dump = String::from_utf8_lossy(&output.stdout);
-        let has_nats = dump.contains("nats-server");
-        let has_port = dump.contains(&port.to_string());
-        let has_conf = dump.contains("nats-server.conf") || dump.contains("-c");
         assert!(
-            has_nats && (has_port || has_conf),
-            "positive control: ps dump must include spawned nats-server markers"
+            argv_dump_has_spawned_nats_markers(&dump, port, conf.as_deref()),
+            "positive control: ps dump must include a nats-server line with this child's port or exact conf path"
         );
         assert_eq!(
             dump.matches(&creds.password).count(),
@@ -1424,8 +1449,8 @@ mod tests {
     }
 
     /// Windows: `Get-CimInstance Win32_Process` CommandLine — 0 matches for
-    /// password, user, and `lounge_token()` (counts only). Positive control
-    /// requires the spawned nats-server markers in the dump.
+    /// password, user, and `lounge_token()` (counts only). Positive control:
+    /// a nats-server line with this child's unique port or exact conf path.
     #[cfg(windows)]
     #[test]
     fn nats_password_absent_from_win32_process_commandline() {
@@ -1446,6 +1471,7 @@ mod tests {
             .next()
             .and_then(|p| p.parse::<u16>().ok())
             .expect("ephemeral url port");
+        let conf = spawned_nats_conf_path(child.id());
         let script = r#"Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"#;
         let output = GuardedCommand::new(crate::kernel::guarded_command::windows_powershell_exe())
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -1458,11 +1484,8 @@ mod tests {
         );
         let dump = String::from_utf8_lossy(&output.stdout);
         assert!(
-            dump.to_ascii_lowercase().contains("nats-server")
-                && (dump.contains(&port.to_string())
-                    || dump.contains("-c")
-                    || dump.contains("nats-server.conf")),
-            "positive control: CIM dump must include spawned nats-server markers"
+            argv_dump_has_spawned_nats_markers(&dump, port, conf.as_deref()),
+            "positive control: CIM dump must include a nats-server line with this child's port or exact conf path"
         );
         assert_eq!(
             dump.matches(&creds.password).count(),
