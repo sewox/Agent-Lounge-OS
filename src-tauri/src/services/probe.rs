@@ -491,8 +491,18 @@ fn parse_ss_listen_pids(stdout: &str) -> Vec<u32> {
 #[cfg(windows)]
 fn windows_listen_pids(port: u16) -> Vec<u32> {
     // Prefer GetExtendedTcpTable — language-independent (netstat state text is localized).
+    // If the API succeeds with an empty set, still consult structural netstat: a
+    // just-spawned listener can lag in the TCP table on Windows CI.
     match listen_pids_via_extended_tcp_table(port) {
-        Ok(pids) => pids,
+        Ok(pids) if !pids.is_empty() => pids,
+        Ok(_) => {
+            let via_netstat = windows_listen_pids_via_netstat(port);
+            if via_netstat.is_empty() {
+                Vec::new()
+            } else {
+                via_netstat
+            }
+        }
         Err(_) => windows_listen_pids_via_netstat(port),
     }
 }

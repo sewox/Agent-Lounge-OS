@@ -95,8 +95,13 @@ fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
 
 fn run_tcp_hold(args: &[String]) -> Result<(), String> {
     let port = parse_port_flag(args)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
+    // Multi-thread runtime: same rationale as `run_fake_cbm` — current_thread +
+    // CREATE_NO_WINDOW on Windows CI can leave the LISTEN socket invisible to
+    // GetExtendedTcpTable / netstat for the full wait_until_port_owned window
+    // (flake: port_owned_by_lounge_matches_spawned_child_id saw []).
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(2)
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
