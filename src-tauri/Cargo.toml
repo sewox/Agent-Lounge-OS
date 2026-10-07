@@ -50,17 +50,23 @@ tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 safetensors = "0.4"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
 sha2 = "0.11"
-
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-candle-core = { version = "0.11.0", default-features = false, features = ["metal"] }
-candle-nn = { version = "0.11.0", default-features = false, features = ["metal"] }
+bcrypt = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_NetworkManagement_IpHelper",
   "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Memory",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
 ] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+candle-core = { version = "0.11.0", default-features = false, features = ["metal"] }
+candle-nn = { version = "0.11.0", default-features = false, features = ["metal"] }
 
 [features]
 default = []

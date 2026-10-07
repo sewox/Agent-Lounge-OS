@@ -21,7 +21,84 @@ const INTERNAL_DAEMON_ALLOWLIST: &[&str] = &[
     "netstat",
     "kill",
     "taskkill",
+    // Process cmdline introspection (NATS --pass migration / secret argv checks).
+    // Callers must use absolute `/bin/ps` and `%SystemRoot%\…\powershell.exe`.
+    "ps",
+    "powershell",
 ];
+
+/// Absolute Windows PowerShell for allowlisted CIM cmdline reads.
+/// Available on all targets so unit tests can assert exact-path gating.
+pub fn windows_powershell_exe() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        std::path::Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        // Canonical path used by cross-platform allowlist unit tests.
+        std::path::PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    }
+}
+
+fn path_eq_ci(program: &OsStr, expected: &std::path::Path) -> bool {
+    let a = program
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let b = expected
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    a == b
+}
+
+/// Absolute `ps` for allowlisted cmdline introspection.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn unix_ps_exe() -> &'static str {
+    "/bin/ps"
+}
+
+fn powershell_cim_processid_script_ok(script: &str) -> bool {
+    // Exact: (Get-CimInstance Win32_Process -Filter "ProcessId = <digits>").CommandLine
+    const PREFIX: &str = "(Get-CimInstance Win32_Process -Filter \"ProcessId = ";
+    const SUFFIX: &str = "\").CommandLine";
+    let Some(mid) = script
+        .strip_prefix(PREFIX)
+        .and_then(|s| s.strip_suffix(SUFFIX))
+    else {
+        return false;
+    };
+    !mid.is_empty() && mid.chars().all(|c| c.is_ascii_digit())
+}
+
+fn ps_internal_daemon_argv_ok(args: &[String]) -> bool {
+    // Single-PID: -p <pid> -ww -o args=
+    if args.len() == 5
+        && args[0] == "-p"
+        && args[1].chars().all(|c| c.is_ascii_digit())
+        && !args[1].is_empty()
+        && args[2] == "-ww"
+        && args[3] == "-o"
+        && args[4] == "args="
+    {
+        return true;
+    }
+    // Full listing (test/migration scan): -axww -o args=
+    if args.len() == 3 && args[0] == "-axww" && args[1] == "-o" && args[2] == "args=" {
+        return true;
+    }
+    false
+}
+
+fn powershell_internal_daemon_argv_ok(args: &[String]) -> bool {
+    args.len() == 4
+        && args[0] == "-NoProfile"
+        && args[1] == "-NonInteractive"
+        && args[2] == "-Command"
+        && powershell_cim_processid_script_ok(&args[3])
+}
 
 pub struct GuardedCommand {
     program: OsString,
@@ -29,6 +106,9 @@ pub struct GuardedCommand {
     source: ActionSource,
     /// When true, skip gate (ONLY for justified internal daemon launches).
     bypass_gate: bool,
+    /// When true, inject Lounge secrets into the child env (workers / MCP shim).
+    /// Default false: strip `LOUNGE_NATS_USER` / `LOUNGE_NATS_PASS` / `LOUNGE_TOKEN`.
+    pass_lounge_secrets: bool,
 }
 
 impl GuardedCommand {
@@ -38,6 +118,7 @@ impl GuardedCommand {
             args: Vec::new(),
             source: ActionSource::System,
             bypass_gate: false,
+            pass_lounge_secrets: false,
         }
     }
 
@@ -67,6 +148,20 @@ impl GuardedCommand {
     pub(crate) fn internal_daemon(mut self) -> Self {
         self.bypass_gate = true;
         self.source = ActionSource::System;
+        self
+    }
+
+    /// Opt-in: pass Lounge NATS/token secrets to this child only.
+    /// Prefer consumers that read `LOUNGE_NATS_CREDS_FILE` (0600/DACL) over plaintext env.
+    ///
+    /// Intended consumers (Kernel-spawned): external NATS workers (`workers/bot_template.py`)
+    /// and the `lounge-mcp` stdio shim when launched by Lounge.
+    ///
+    /// Desktop agents (Grok Bot, Cursor, Antigravity, Claude Desktop) keep using the creds
+    /// file path + `X-Lounge-Token` from `remote_access_info` / mcp.json — they are not
+    /// spawned through GuardedCommand.
+    pub fn with_lounge_secrets(mut self) -> Self {
+        self.pass_lounge_secrets = true;
         self
     }
 
@@ -114,9 +209,9 @@ impl GuardedCommand {
         if !allowed {
             bail!("internal_daemon not allowlisted for program: {base}");
         }
+        let args = self.argv_strings();
         // kill/taskkill: pid-only argv
         if base == "kill" || base == "taskkill" {
-            let args = self.argv_strings();
             let ok = args.iter().all(|a| {
                 a == "/PID"
                     || a == "/F"
@@ -127,6 +222,32 @@ impl GuardedCommand {
             });
             if !ok {
                 bail!("internal_daemon kill/taskkill only allows pid flags");
+            }
+        }
+        // ps: absolute /bin/ps + fixed argv only (no arbitrary flags).
+        if base == "ps" {
+            let raw = self.program.to_string_lossy();
+            if raw.as_ref() != "/bin/ps" {
+                bail!("internal_daemon ps must be /bin/ps (got {raw})");
+            }
+            if !ps_internal_daemon_argv_ok(&args) {
+                bail!("internal_daemon ps argv not allowlisted");
+            }
+        }
+        // powershell: must equal windows_powershell_exe() (case-insensitive) +
+        // fixed Get-CimInstance ProcessId script. Bare `powershell.exe` / PATH /
+        // C:\evil\powershell.exe / .cmd plantings are rejected.
+        if base == "powershell" {
+            if !path_eq_ci(&self.program, &windows_powershell_exe()) {
+                bail!(
+                    "internal_daemon powershell must be exactly {}",
+                    windows_powershell_exe().display()
+                );
+            }
+            if !powershell_internal_daemon_argv_ok(&args) {
+                bail!(
+                    "internal_daemon powershell only allows -NoProfile -NonInteractive -Command with Get-CimInstance ProcessId filter"
+                );
             }
         }
         Ok(())
@@ -206,6 +327,7 @@ impl GuardedCommand {
         #[allow(clippy::disallowed_methods)]
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
+        apply_lounge_secret_env(&mut cmd, self.pass_lounge_secrets);
         cmd
     }
 
@@ -214,6 +336,32 @@ impl GuardedCommand {
         cmd.stdout(cfg);
         Ok(cmd)
     }
+}
+
+/// Default DENY: strip secret env vars from every child. Opt-in via `pass_lounge_secrets`.
+fn apply_lounge_secret_env(cmd: &mut Command, pass_lounge_secrets: bool) {
+    use crate::services::lounge_auth::{
+        current_credentials, default_creds_path, lounge_token, LOUNGE_NATS_CREDS_FILE_ENV,
+        LOUNGE_NATS_PASS_ENV, LOUNGE_NATS_USER_ENV, LOUNGE_TOKEN_ENV,
+    };
+
+    // Always strip first so inherited process env cannot leak to editors/cbm/ollama/nats.
+    cmd.env_remove(LOUNGE_NATS_USER_ENV);
+    cmd.env_remove(LOUNGE_NATS_PASS_ENV);
+    cmd.env_remove(LOUNGE_TOKEN_ENV);
+
+    if !pass_lounge_secrets {
+        return;
+    }
+
+    // Prefer creds-file path; also set USER/PASS/TOKEN for workers that still read env.
+    let creds_path = default_creds_path();
+    cmd.env(LOUNGE_NATS_CREDS_FILE_ENV, &creds_path);
+    if let Some(creds) = current_credentials() {
+        cmd.env(LOUNGE_NATS_USER_ENV, &creds.user);
+        cmd.env(LOUNGE_NATS_PASS_ENV, &creds.password);
+    }
+    cmd.env(LOUNGE_TOKEN_ENV, lounge_token());
 }
 
 /// Classify without executing — for UI approval banners / tests.
@@ -288,6 +436,123 @@ mod tests {
             .internal_daemon()
             .into_std_command();
         assert!(err.is_ok(), "kill.exe should strip .exe and exact-match");
+    }
+
+    /// Arbitrary `powershell -Command …` must not bypass the policy gate via
+    /// `internal_daemon` (only the fixed Get-CimInstance ProcessId template).
+    #[test]
+    fn internal_daemon_rejects_arbitrary_powershell_argv() {
+        let _guard = test_lock();
+        let exe = windows_powershell_exe();
+        let allowlisted_script =
+            "(Get-CimInstance Win32_Process -Filter \"ProcessId = 1\").CommandLine";
+        let err = GuardedCommand::new(&exe)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Remove-Item -Recurse C:\\temp\\x",
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "destructive powershell -Command must be rejected"
+        );
+        let msg = format!("{}", err.unwrap_err());
+        assert!(
+            msg.contains("powershell") || msg.contains("Get-CimInstance"),
+            "got: {msg}"
+        );
+
+        let err = GuardedCommand::new("powershell")
+            .args(["-Command", "Get-Process"])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "bare powershell name (not powershell.exe path) must be rejected"
+        );
+
+        let err = GuardedCommand::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                allowlisted_script,
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "bare powershell.exe (PATH/CWD resolution) must be rejected"
+        );
+
+        let err = GuardedCommand::new(r"C:\evil\powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                allowlisted_script,
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "C:\\evil\\powershell.exe must be rejected even with allowlisted script"
+        );
+
+        let err = GuardedCommand::new(r"C:\evil\powershell.cmd")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                allowlisted_script,
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            err.is_err(),
+            "planted powershell.cmd must not match even with allowlisted script"
+        );
+
+        let ok = GuardedCommand::new(&exe)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-CimInstance Win32_Process -Filter \"ProcessId = 42\").CommandLine",
+            ])
+            .internal_daemon()
+            .into_std_command();
+        assert!(
+            ok.is_ok(),
+            "exact windows_powershell_exe() + ProcessId filter must be allowed: {}",
+            ok.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn internal_daemon_rejects_arbitrary_ps_argv() {
+        let _guard = test_lock();
+        let err = GuardedCommand::new("ps")
+            .args(["-axww", "-o", "args="])
+            .internal_daemon()
+            .into_std_command();
+        assert!(err.is_err(), "bare ps (not /bin/ps) must be rejected");
+
+        let err = GuardedCommand::new("/bin/ps")
+            .args(["aux"])
+            .internal_daemon()
+            .into_std_command();
+        assert!(err.is_err(), "arbitrary ps argv must be rejected");
+
+        let ok = GuardedCommand::new("/bin/ps")
+            .args(["-p", "1", "-ww", "-o", "args="])
+            .internal_daemon()
+            .into_std_command();
+        assert!(ok.is_ok(), "allowlisted /bin/ps argv must pass: {ok:?}");
     }
 
     /// F22: Windows launcher suffixes must strip for allowlist AND must not
@@ -497,5 +762,136 @@ mod tests {
                 .into_std_command();
             let _ = expect_confirm_id(result);
         }
+    }
+
+    #[test]
+    fn child_env_strips_lounge_secrets_by_default() {
+        let _guard = test_lock();
+        let auth = crate::services::lounge_auth::TestAuthGuard::new();
+        let _auth = auth;
+        // Seed parent env as if Kernel had leaked secrets (pre-PR-S behaviour).
+        let marker_user = format!("leak_u_{}", uuid::Uuid::new_v4().simple());
+        let marker_pass = format!("leak_p_{}", uuid::Uuid::new_v4().simple());
+        let marker_token = format!("leak_t_{}", uuid::Uuid::new_v4().simple());
+        unsafe {
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_NATS_USER_ENV,
+                &marker_user,
+            );
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_NATS_PASS_ENV,
+                &marker_pass,
+            );
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_TOKEN_ENV,
+                &marker_token,
+            );
+        }
+
+        let dump = dump_child_env(false);
+        let user_hits = dump.matches(&marker_user).count()
+            + dump
+                .lines()
+                .filter(|l| l.contains("LOUNGE_NATS_USER="))
+                .count();
+        let pass_hits = dump.matches(&marker_pass).count()
+            + dump
+                .lines()
+                .filter(|l| l.contains("LOUNGE_NATS_PASS="))
+                .count();
+        let token_hits = dump.matches(&marker_token).count()
+            + dump.lines().filter(|l| l.contains("LOUNGE_TOKEN=")).count();
+        // Report match counts only — never echo secret values.
+        assert_eq!(user_hits, 0, "LOUNGE_NATS_USER match count must be 0");
+        assert_eq!(pass_hits, 0, "LOUNGE_NATS_PASS match count must be 0");
+        assert_eq!(token_hits, 0, "LOUNGE_TOKEN match count must be 0");
+
+        unsafe {
+            std::env::remove_var(crate::services::lounge_auth::LOUNGE_NATS_USER_ENV);
+            std::env::remove_var(crate::services::lounge_auth::LOUNGE_NATS_PASS_ENV);
+            std::env::remove_var(crate::services::lounge_auth::LOUNGE_TOKEN_ENV);
+        }
+    }
+
+    #[test]
+    fn child_env_passes_lounge_secrets_when_opted_in() {
+        let _guard = test_lock();
+        let _auth = crate::services::lounge_auth::TestAuthGuard::new();
+        let dir = std::env::temp_dir().join(format!("lounge-gc-secrets-{}", uuid::Uuid::new_v4()));
+        let creds_path = dir.join("session.creds.json");
+        let creds = crate::services::lounge_auth::NatsCredentials {
+            user: format!("opt_u_{}", uuid::Uuid::new_v4().simple()),
+            password: format!("opt_p_{}", uuid::Uuid::new_v4().simple()),
+        };
+        crate::services::lounge_auth::write_credentials_file(
+            &creds_path,
+            &creds,
+            "nats://127.0.0.1:4222",
+        )
+        .unwrap();
+        crate::services::lounge_auth::activate_nats_auth(creds.clone());
+        let token = crate::services::lounge_auth::lounge_token();
+        // Ensure parent does not already export secrets (opt-in must inject them).
+        unsafe {
+            std::env::remove_var(crate::services::lounge_auth::LOUNGE_NATS_USER_ENV);
+            std::env::remove_var(crate::services::lounge_auth::LOUNGE_NATS_PASS_ENV);
+            std::env::remove_var(crate::services::lounge_auth::LOUNGE_TOKEN_ENV);
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_NATS_CREDS_FILE_ENV,
+                &creds_path,
+            );
+        }
+
+        let dump = dump_child_env(true);
+        let user_present = dump
+            .lines()
+            .any(|l| l.starts_with("LOUNGE_NATS_USER=") && l.contains(&creds.user));
+        let pass_present = dump
+            .lines()
+            .any(|l| l.starts_with("LOUNGE_NATS_PASS=") && l.contains(&creds.password));
+        let token_present = dump
+            .lines()
+            .any(|l| l.starts_with("LOUNGE_TOKEN=") && l.contains(&token));
+        assert!(
+            user_present,
+            "with_lounge_secrets must set LOUNGE_NATS_USER"
+        );
+        assert!(
+            pass_present,
+            "with_lounge_secrets must set LOUNGE_NATS_PASS"
+        );
+        assert!(token_present, "with_lounge_secrets must set LOUNGE_TOKEN");
+        // Match counts only in assertion messages — values stay in locals.
+        assert_eq!(
+            dump.matches(&creds.user).count().min(1),
+            1,
+            "user match count"
+        );
+
+        crate::services::lounge_auth::deactivate_nats_auth();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn dump_child_env(with_secrets: bool) -> String {
+        #[cfg(windows)]
+        let (prog, args): (&str, &[&str]) = ("cmd", &["/C", "set"]);
+        #[cfg(not(windows))]
+        let (prog, args): (&str, &[&str]) = ("env", &[]);
+
+        let mut gc = GuardedCommand::new(prog).args(args.iter().copied());
+        if with_secrets {
+            gc = gc.with_lounge_secrets();
+        }
+        // `env` / `cmd` are not allowlisted daemons — use User source + allow.
+        let output = gc
+            .source(ActionSource::User)
+            .output()
+            .expect("spawn env dump child");
+        assert!(
+            output.status.success(),
+            "env dump failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 }

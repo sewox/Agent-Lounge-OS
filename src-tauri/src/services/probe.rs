@@ -310,16 +310,52 @@ pub fn executable_search_dirs() -> Vec<PathBuf> {
 }
 
 pub fn find_executable(name: &str) -> Option<PathBuf> {
-    let file_name = if cfg!(windows) && !name.ends_with(".exe") {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let candidates = executable_name_candidates(name);
+    for dir in executable_search_dirs() {
+        for file_name in &candidates {
+            let candidate = dir.join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
 
-    executable_search_dirs()
-        .into_iter()
-        .map(|dir| dir.join(&file_name))
-        .find(|candidate| candidate.is_file())
+/// Build PATH lookup names: as-is, plus PATHEXT variants on Windows (`.cmd`/`.bat`/…).
+fn executable_name_candidates(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    if !cfg!(windows) {
+        return out;
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let lower = name.to_ascii_lowercase();
+    let has_known_ext = pathext.split(';').any(|ext| {
+        let e = ext.trim().to_ascii_lowercase();
+        !e.is_empty() && lower.ends_with(&e)
+    });
+    if has_known_ext {
+        return out;
+    }
+    for ext in pathext.split(';') {
+        let ext = ext.trim();
+        if ext.is_empty() {
+            continue;
+        }
+        let with_ext = if ext.starts_with('.') {
+            format!("{name}{ext}")
+        } else {
+            format!("{name}.{ext}")
+        };
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&with_ext)) {
+            out.push(with_ext);
+        }
+    }
+    out
 }
 
 pub fn first_existing(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -1115,6 +1151,37 @@ mod tests {
         assert!(EXTRA_BIN_DIRS.contains(&"/usr/local/sbin"));
         assert!(EXTRA_BIN_DIRS.contains(&"/opt/homebrew/sbin"));
         assert!(WINDOWS_PROGRAM_FILES_SUBDIRS.contains(&"nats-server"));
+    }
+
+    /// Localized Windows netstat State words must still yield listen PIDs so
+    /// NATS `--pass` migration does not silently skip non-English hosts.
+    /// Uses #92's `parse_netstat_listen_pids` (foreign-unbound structural match).
+    #[test]
+    fn localized_netstat_listen_pids_support_migration_detection() {
+        let sample = "\
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:4222           0.0.0.0:0              DİNLEME         4242
+  TCP    127.0.0.1:4222         0.0.0.0:0              ABHÖREN         4243
+  TCP    0.0.0.0:4222           0.0.0.0:0              LISTENING       4244
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       892
+  TCP    127.0.0.1:4222         10.0.0.1:54321         ESTABLISHED     9999
+  TCP    0.0.0.0:1              0.0.0.0:0              DİNLEME         111
+";
+        let pids = parse_netstat_listen_pids(sample, 4222);
+        assert_eq!(
+            pids,
+            vec![4242, 4243, 4244],
+            "Turkish/German/English listen rows must all resolve (no LISTEN word required)"
+        );
+        assert!(
+            parse_netstat_listen_pids(sample, 1).contains(&111),
+            ":1 must not false-positive on :135"
+        );
+        assert!(
+            !pids.contains(&9999),
+            "ESTABLISHED foreign must not count as listen"
+        );
+        assert!(!pids.contains(&892), "unrelated listen port must not match");
     }
 
     #[test]

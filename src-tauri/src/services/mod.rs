@@ -24,6 +24,9 @@ pub mod supervisor;
 pub mod telemetry;
 pub mod workspace_scan;
 
+#[cfg(windows)]
+mod windows_secret_acl;
+
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
