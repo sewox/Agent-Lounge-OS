@@ -10,11 +10,6 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    paths:
-      - ".github/workflows/linux-bundle.yml"
-      - "src-tauri/**"
-      - "package.json"
-      - "package-lock.json"
   workflow_dispatch:
     inputs:
       allow_stub_sidecar:
