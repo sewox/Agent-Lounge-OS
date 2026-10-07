@@ -452,17 +452,83 @@ fn parse_ss_listen_pids(stdout: &str) -> Vec<u32> {
     set.into_iter().collect()
 }
 
+/// How to combine GetExtendedTcpTable family results with structural netstat.
+/// Pure so unit tests cover the decision on every OS (compiled under `test`
+/// even when the Win32 callers are `cfg(windows)`-only).
+#[cfg(any(test, windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenPidMergeKind {
+    /// Both AF_INET and AF_INET6 succeeded — trust API PIDs only.
+    ApiOnly,
+    /// One family failed — merge successful-family PIDs with netstat (deduped).
+    MergeWithNetstat,
+    /// Both families failed — netstat only.
+    NetstatOnly,
+}
+
+#[cfg(any(test, windows))]
+fn listen_pid_merge_kind(ipv4_ok: bool, ipv6_ok: bool) -> ListenPidMergeKind {
+    match (ipv4_ok, ipv6_ok) {
+        (true, true) => ListenPidMergeKind::ApiOnly,
+        (false, false) => ListenPidMergeKind::NetstatOnly,
+        _ => ListenPidMergeKind::MergeWithNetstat,
+    }
+}
+
+/// Deduped union of API listener PIDs and structural-netstat PIDs.
+#[cfg(any(test, windows))]
+fn merge_listen_pid_sets(api_pids: &[u32], netstat_pids: &[u32]) -> Vec<u32> {
+    let mut set = BTreeSet::new();
+    for pid in api_pids.iter().chain(netstat_pids.iter()) {
+        if *pid > 0 {
+            set.insert(*pid);
+        }
+    }
+    set.into_iter().collect()
+}
+
+#[cfg(windows)]
+fn warn_extended_tcp_table_once(port: u16, detail: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    // `detail` must carry the Win32 status DWORD(s) from GetExtendedTcpTable.
+    log::warn!(
+        "listen_pids({port}): GetExtendedTcpTable failed ({detail}); falling back to netstat"
+    );
+}
+
 #[cfg(windows)]
 fn windows_listen_pids(port: u16) -> Vec<u32> {
     // Prefer GetExtendedTcpTable — language-independent (netstat state text is localized).
-    match listen_pids_via_extended_tcp_table(port) {
-        Ok(pids) => pids,
-        Err(err) => {
-            // Never swallow API failure silently — netstat is a fallback, not a cover-up.
-            eprintln!(
-                "listen_pids({port}): GetExtendedTcpTable failed ({err}); falling back to netstat"
+    let scanned = listen_pids_via_extended_tcp_table(port);
+    let kind = listen_pid_merge_kind(scanned.ipv4_ok(), scanned.ipv6_ok());
+    match kind {
+        ListenPidMergeKind::ApiOnly => scanned.pids,
+        ListenPidMergeKind::NetstatOnly => {
+            warn_extended_tcp_table_once(
+                port,
+                &format!(
+                    "AF_INET: {}; AF_INET6: {}",
+                    scanned.v4_error.as_deref().unwrap_or("?"),
+                    scanned.v6_error.as_deref().unwrap_or("?")
+                ),
             );
             windows_listen_pids_via_netstat(port)
+        }
+        ListenPidMergeKind::MergeWithNetstat => {
+            // Partial family failure must not be silent — log both sides + consult netstat.
+            let detail = match (&scanned.v4_error, &scanned.v6_error) {
+                (Some(e4), Some(e6)) => format!("AF_INET: {e4}; AF_INET6: {e6}"),
+                (Some(e4), None) => format!("AF_INET: {e4}"),
+                (None, Some(e6)) => format!("AF_INET6: {e6}"),
+                (None, None) => "unexpected MergeWithNetstat without family error".into(),
+            };
+            warn_extended_tcp_table_once(port, &detail);
+            let via_netstat = windows_listen_pids_via_netstat(port);
+            merge_listen_pid_sets(&scanned.pids, &via_netstat)
         }
     }
 }
@@ -479,17 +545,38 @@ fn windows_listen_pids_via_netstat(port: u16) -> Vec<u32> {
     parse_netstat_listen_pids(&String::from_utf8_lossy(&output.stdout), port)
 }
 
-/// Owner-PID TCP listeners via `GetExtendedTcpTable` (AF_INET + AF_INET6).
+/// Per-family GetExtendedTcpTable scan (AF_INET + AF_INET6).
 #[cfg(windows)]
-fn listen_pids_via_extended_tcp_table(port: u16) -> Result<Vec<u32>, String> {
+struct ExtendedTcpTableListenScan {
+    pids: Vec<u32>,
+    v4_error: Option<String>,
+    v6_error: Option<String>,
+}
+
+#[cfg(windows)]
+impl ExtendedTcpTableListenScan {
+    fn ipv4_ok(&self) -> bool {
+        self.v4_error.is_none()
+    }
+    fn ipv6_ok(&self) -> bool {
+        self.v6_error.is_none()
+    }
+}
+
+/// Owner-PID TCP listeners via `GetExtendedTcpTable` (AF_INET + AF_INET6).
+/// Partial family failures are returned in the error fields — caller must log
+/// and merge with netstat (see [`listen_pid_merge_kind`]).
+#[cfg(windows)]
+fn listen_pids_via_extended_tcp_table(port: u16) -> ExtendedTcpTableListenScan {
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
     let mut set = BTreeSet::new();
     let v4 = collect_ipv4_owner_pid_listeners(AF_INET as u32, port, &mut set);
     let v6 = collect_ipv6_owner_pid_listeners(AF_INET6 as u32, port, &mut set);
-    match (v4, v6) {
-        (Err(e4), Err(e6)) => Err(format!("AF_INET: {e4}; AF_INET6: {e6}")),
-        (Ok(()), Ok(())) | (Ok(()), Err(_)) | (Err(_), Ok(())) => Ok(set.into_iter().collect()),
+    ExtendedTcpTableListenScan {
+        pids: set.into_iter().collect(),
+        v4_error: v4.err(),
+        v6_error: v6.err(),
     }
 }
 
@@ -524,7 +611,7 @@ fn get_extended_tcp_table_bytes(family: u32) -> Result<Vec<u8>, String> {
             return Ok(Vec::new());
         }
         if status != ERROR_INSUFFICIENT_BUFFER || size == 0 {
-            return Err(format!("size query status={status} size={size}"));
+            return Err(format!("size query win32_status={status} size={size}"));
         }
         for _ in 0..8 {
             let mut buf = vec![0u8; size as usize];
@@ -543,13 +630,13 @@ fn get_extended_tcp_table_bytes(family: u32) -> Result<Vec<u8>, String> {
                 continue;
             }
             if status != 0 {
-                return Err(format!("fill status={status} needed={needed}"));
+                return Err(format!("fill win32_status={status} needed={needed}"));
             }
             buf.truncate(needed as usize);
             return Ok(buf);
         }
         Err(format!(
-            "ERROR_INSUFFICIENT_BUFFER persisted after retries (last size={size})"
+            "ERROR_INSUFFICIENT_BUFFER (win32_status={ERROR_INSUFFICIENT_BUFFER}) persisted after retries (last size={size})"
         ))
     }
 }
@@ -1070,18 +1157,15 @@ mod tests {
         let mut last = String::from("(no attempt)");
         let mut found = false;
         for _ in 0..40 {
-            match listen_pids_via_extended_tcp_table(port) {
-                Ok(pids) if pids.contains(&self_pid) => {
-                    found = true;
-                    break;
-                }
-                Ok(pids) => {
-                    last = format!("Ok({pids:?}) missing pid={self_pid}");
-                }
-                Err(err) => {
-                    last = format!("Err({err})");
-                }
+            let scan = listen_pids_via_extended_tcp_table(port);
+            if scan.pids.contains(&self_pid) {
+                found = true;
+                break;
             }
+            last = format!(
+                "pids={:?} v4_err={:?} v6_err={:?}",
+                scan.pids, scan.v4_error, scan.v6_error
+            );
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(
@@ -1089,6 +1173,43 @@ mod tests {
             "GetExtendedTcpTable must find pid={self_pid} on :{port} without netstat; last={last}"
         );
         drop(listener);
+    }
+
+    #[test]
+    fn listen_pid_merge_kind_covers_family_outcomes() {
+        assert_eq!(
+            listen_pid_merge_kind(true, true),
+            ListenPidMergeKind::ApiOnly
+        );
+        assert_eq!(
+            listen_pid_merge_kind(false, false),
+            ListenPidMergeKind::NetstatOnly
+        );
+        assert_eq!(
+            listen_pid_merge_kind(true, false),
+            ListenPidMergeKind::MergeWithNetstat
+        );
+        assert_eq!(
+            listen_pid_merge_kind(false, true),
+            ListenPidMergeKind::MergeWithNetstat
+        );
+    }
+
+    #[test]
+    fn merge_listen_pid_sets_dedupes_and_drops_zero() {
+        assert_eq!(
+            merge_listen_pid_sets(&[10, 20], &[20, 30, 0]),
+            vec![10, 20, 30]
+        );
+        assert_eq!(merge_listen_pid_sets(&[], &[7]), vec![7]);
+        assert_eq!(merge_listen_pid_sets(&[5], &[]), vec![5]);
+        assert!(merge_listen_pid_sets(&[], &[]).is_empty());
+        // Partial-family failure path: API found v4 pid, netstat supplies v6-only peer.
+        assert_eq!(
+            merge_listen_pid_sets(&[4242], &[5150]),
+            vec![4242, 5150],
+            "MergeWithNetstat must keep PIDs from both sources"
+        );
     }
 
     #[test]
