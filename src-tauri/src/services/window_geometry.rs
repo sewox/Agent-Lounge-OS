@@ -10,20 +10,25 @@
 //!   cannot obtain a visible frame it falls back to the full monitor size.
 //! - **Wayland:** many compositors expose only the full geometry as the work
 //!   area (no exclusive-zone subtraction); we still centre at 90% of whatever
-//!   is reported so behaviour stays consistent cross-platform.
-//! - Positions are stored and restored in **global physical pixels** so
-//!   mixed-DPI layouts (Windows / X11) do not round-trip through a single
-//!   logical scale. Inner size stays logical (CSS pixels).
+//!   is reported so behaviour stays consistent cross-platform. Wayland also
+//!   typically **ignores `set_position`** — size restore still applies.
+//! - Positions are stored from `outer_position()` (tao “physical”). On
+//!   **Windows / X11** that is a true global physical space. On **macOS**
+//!   tao scales by the window’s current backing factor, so restore converts
+//!   to logical points via the *target* monitor’s scale before `set_position`.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, Runtime, WebviewWindow, WindowEvent};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize,
+    Runtime, WebviewWindow, WindowEvent,
+};
 
 /// Matches `tauri.conf.json` main window label.
 pub const MAIN_WINDOW_LABEL: &str = "main";
@@ -116,12 +121,41 @@ pub struct OpenPlacement {
     pub center: bool,
     pub min_width: f64,
     pub min_height: f64,
+    /// Monitor the geometry was resolved against (for mixed-DPI apply).
+    pub target: Option<MonitorSnapshot>,
+}
+
+/// OS family for apply-coordinate conversion (pure / testable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOs {
+    MacOs,
+    WindowsOrLinux,
+}
+
+/// Platform-specific coordinates ready for `set_position` / `set_size`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ApplyCoords {
+    /// macOS: logical points (CG points).
+    Logical {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    /// Windows / X11: global physical pixels.
+    Physical {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// In-memory cache + debounced disk writer (shared via `app.manage`).
 pub struct GeometrySession {
     data_root: PathBuf,
     cache: Mutex<BTreeMap<String, CacheEntry>>,
+    write_lock: Mutex<()>,
     generation: AtomicU64,
 }
 
@@ -189,6 +223,65 @@ fn sanitize_scale(scale: f64) -> f64 {
     } else {
         1.0
     }
+}
+
+/// Convert saved geometry into set_position/set_size units for `os`.
+///
+/// On macOS, tao’s `PhysicalPosition` is divided by the *hidden window’s*
+/// current scale, so we feed logical points derived with the **target**
+/// monitor scale instead. Windows/X11 use true global physical pixels.
+pub fn apply_coords_for_os(
+    geom: &SavedGeometry,
+    target: &MonitorSnapshot,
+    os: ApplyOs,
+) -> ApplyCoords {
+    match os {
+        ApplyOs::MacOs => {
+            let scale = sanitize_scale(target.scale_factor);
+            ApplyCoords::Logical {
+                x: geom.x_phys as f64 / scale,
+                y: geom.y_phys as f64 / scale,
+                width: geom.width,
+                height: geom.height,
+            }
+        }
+        ApplyOs::WindowsOrLinux => {
+            let (width, height) =
+                logical_to_physical_size(geom.width, geom.height, target.scale_factor);
+            ApplyCoords::Physical {
+                x: geom.x_phys,
+                y: geom.y_phys,
+                width,
+                height,
+            }
+        }
+    }
+}
+
+pub fn current_apply_os() -> ApplyOs {
+    if cfg!(target_os = "macos") {
+        ApplyOs::MacOs
+    } else {
+        ApplyOs::WindowsOrLinux
+    }
+}
+
+fn recover_mutex<'a, T>(
+    result: Result<MutexGuard<'a, T>, std::sync::PoisonError<MutexGuard<'a, T>>>,
+    what: &str,
+) -> MutexGuard<'a, T> {
+    match result {
+        Ok(g) => g,
+        Err(poisoned) => {
+            log::warn!("window geometry {what} lock poisoned; recovering");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn global_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 /// Preferred mins capped by the work area (logical).
@@ -372,6 +465,7 @@ pub fn resolve_open_placement(
                             center: false,
                             min_width: mw,
                             min_height: mh,
+                            target: Some(mon.clone()),
                         };
                     }
                 }
@@ -384,6 +478,7 @@ pub fn resolve_open_placement(
         center: false,
         min_width: min_w,
         min_height: min_h,
+        target: Some(primary.clone()),
     }
 }
 
@@ -470,14 +565,13 @@ pub fn save_geometry_store(path: &Path, store: &GeometryStore) -> Result<(), Str
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    static PART_SEQ: AtomicU64 = AtomicU64::new(0);
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(GEOMETRY_FILE_NAME);
-    let tmp = path.with_file_name(format!("{file_name}.part"));
-    if tmp.exists() {
-        remove_file_logged(&tmp, "window geometry eski .part silinemedi");
-    }
+    let seq = PART_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!("{file_name}.part.{}.{}", std::process::id(), seq));
     fs::write(&tmp, bytes).map_err(|err| {
         format!(
             "window geometry geçici yazılamadı ({}): {err}",
@@ -513,6 +607,7 @@ impl GeometrySession {
         Arc::new(Self {
             data_root,
             cache: Mutex::new(BTreeMap::new()),
+            write_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
         })
     }
@@ -527,18 +622,14 @@ impl GeometrySession {
 
     /// Update in-memory cache for a label (no disk I/O).
     pub fn cache_entry(&self, window_label: &str, monitor_key: String, geometry: SavedGeometry) {
-        match self.cache.lock() {
-            Ok(mut guard) => {
-                guard.insert(
-                    window_label.to_string(),
-                    CacheEntry {
-                        monitor_key,
-                        geometry,
-                    },
-                );
-            }
-            Err(err) => log::warn!("window geometry cache kilitlenemedi: {err}"),
-        }
+        let mut guard = recover_mutex(self.cache.lock(), "cache");
+        guard.insert(
+            window_label.to_string(),
+            CacheEntry {
+                monitor_key,
+                geometry,
+            },
+        );
     }
 
     /// Capture from a live window into the cache when persist is allowed.
@@ -578,19 +669,29 @@ impl GeometrySession {
     }
 
     /// Write cache → disk immediately (CloseRequested / Exit).
+    ///
+    /// Bumps `generation` so in-flight debounce tasks no-op after this flush.
     pub fn flush(&self) {
-        let cache = match self.cache.lock() {
-            Ok(guard) => guard.clone(),
-            Err(err) => {
-                log::warn!("window geometry cache kilitlenemedi (flush): {err}");
-                return;
-            }
-        };
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let _write = recover_mutex(self.write_lock.lock(), "write");
+        let cache = recover_mutex(self.cache.lock(), "cache").clone();
         if cache.is_empty() {
             return;
         }
         let path = self.store_path();
-        let mut store = load_geometry_store_or_default(&path);
+        let mut store = match load_geometry_store(&path) {
+            Ok(s) => s,
+            Err(err) => {
+                if err.contains("JSON bozuk") {
+                    log::warn!("{err}");
+                    quarantine_corrupt_store(&path);
+                    GeometryStore::default()
+                } else {
+                    log::warn!("{err}; flush atlandı (mevcut kayıtlar korunuyor)");
+                    return;
+                }
+            }
+        };
         store.merge_cache(&cache);
         if let Err(err) = save_geometry_store(&path, &store) {
             log::warn!("{err}");
@@ -607,9 +708,27 @@ impl GeometrySession {
 }
 
 fn window_allows_persist<R: Runtime>(window: &WebviewWindow<R>) -> bool {
-    let minimized = window.is_minimized().unwrap_or(false);
-    let maximized = window.is_maximized().unwrap_or(false);
-    let fullscreen = window.is_fullscreen().unwrap_or(false);
+    let minimized = match window.is_minimized() {
+        Ok(v) => v,
+        Err(err) => {
+            log::warn!("is_minimized okunamadı: {err}");
+            false
+        }
+    };
+    let maximized = match window.is_maximized() {
+        Ok(v) => v,
+        Err(err) => {
+            log::warn!("is_maximized okunamadı: {err}");
+            false
+        }
+    };
+    let fullscreen = match window.is_fullscreen() {
+        Ok(v) => v,
+        Err(err) => {
+            log::warn!("is_fullscreen okunamadı: {err}");
+            false
+        }
+    };
     persist_allowed(minimized, maximized, fullscreen)
 }
 
@@ -702,23 +821,59 @@ pub fn placement_for_window<R: Runtime>(
                 center: true,
                 min_width: MIN_WIDTH_LOGICAL,
                 min_height: MIN_HEIGHT_LOGICAL,
+                target: None,
             }
         }
     }
 }
 
-/// Apply physical position on a hidden window, then show (mixed-DPI safe).
+fn apply_coords_to_window<R: Runtime>(
+    window: &WebviewWindow<R>,
+    coords: &ApplyCoords,
+) -> Result<(), String> {
+    match *coords {
+        ApplyCoords::Logical {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            window
+                .set_position(LogicalPosition::new(x, y))
+                .map_err(|err| format!("set_position(logical): {err}"))?;
+            window
+                .set_size(LogicalSize::new(width, height))
+                .map_err(|err| format!("set_size(logical): {err}"))?;
+        }
+        ApplyCoords::Physical {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            window
+                .set_position(PhysicalPosition::new(x, y))
+                .map_err(|err| format!("set_position(physical): {err}"))?;
+            window
+                .set_size(PhysicalSize::new(width, height))
+                .map_err(|err| format!("set_size(physical): {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Place a hidden window, then show. Position/size errors are warned; only `show` fails hard.
 pub fn apply_placement_show<R: Runtime>(
     window: &WebviewWindow<R>,
     placement: &OpenPlacement,
 ) -> Result<(), String> {
     if !placement.center {
-        window
-            .set_position(PhysicalPosition::new(
-                placement.geometry.x_phys,
-                placement.geometry.y_phys,
-            ))
-            .map_err(|err| format!("set_position: {err}"))?;
+        if let Some(ref target) = placement.target {
+            let coords = apply_coords_for_os(&placement.geometry, target, current_apply_os());
+            if let Err(err) = apply_coords_to_window(window, &coords) {
+                log::warn!("window placement uygulanamadı (show devam): {err}");
+            }
+        }
     }
     window.show().map_err(|err| format!("window show: {err}"))?;
     Ok(())
@@ -734,7 +889,14 @@ pub fn handle_window_event(app: &AppHandle, label: &str, event: &WindowEvent) {
             session.on_moved_or_resized(app, label);
         }
         WindowEvent::CloseRequested { .. } => {
-            session.flush_labels(app, &[label]);
+            if label == MAIN_WINDOW_LABEL {
+                session.flush_labels(
+                    app,
+                    &[MAIN_WINDOW_LABEL, super::graph_ui::GRAPH_WINDOW_LABEL],
+                );
+            } else {
+                session.flush_labels(app, &[label]);
+            }
         }
         _ => {}
     }
@@ -773,9 +935,22 @@ pub fn persist_window_geometry<R: Runtime>(
         return;
     }
     // Fallback when session is not managed (should be rare).
+    let _write = recover_mutex(global_write_lock().lock(), "write");
     let root = crate::services::data_root();
     let path = geometry_store_path(&root);
-    let mut store = load_geometry_store_or_default(&path);
+    let mut store = match load_geometry_store(&path) {
+        Ok(s) => s,
+        Err(err) => {
+            if err.contains("JSON bozuk") {
+                log::warn!("{err}");
+                quarantine_corrupt_store(&path);
+                GeometryStore::default()
+            } else {
+                log::warn!("{err}; fallback persist atlandı");
+                return;
+            }
+        }
+    };
     store.set(window_label, key, geom);
     if let Err(err) = save_geometry_store(&path, &store) {
         log::warn!("{err}");
@@ -1095,8 +1270,16 @@ mod tests {
         );
         save_geometry_store(&path, &store).unwrap();
         assert!(path.is_file());
-        let part = path.with_file_name(format!("{GEOMETRY_FILE_NAME}.part"));
-        assert!(!part.exists(), "atomic write must remove the .part file");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic write must not leave .part files: {leftovers:?}"
+        );
         let loaded = load_geometry_store(&path).unwrap();
         assert_eq!(loaded, store);
         let _ = fs::remove_file(&path);
@@ -1179,6 +1362,150 @@ mod tests {
         assert_eq!(rec.last_monitor.as_deref(), Some("Dell|1920x1080"));
         let g = rec.monitors.get("Dell|1920x1080").unwrap();
         assert_eq!(g.x_phys, 10);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_coords_mac_vs_windows_retina_primary_dell_secondary() {
+        // MacBook@2 primary at 0; Dell@1 to the right (tao-style physical origin 3024).
+        let dell = desktop_1080p_right_of_macbook();
+        let saved = SavedGeometry {
+            x_phys: 1552,
+            y_phys: 80,
+            width: 1600.0,
+            height: 900.0,
+        };
+        let mac = apply_coords_for_os(&saved, &dell, ApplyOs::MacOs);
+        assert_eq!(
+            mac,
+            ApplyCoords::Logical {
+                x: 1552.0, // 1552 / 1.0 target scale
+                y: 80.0,
+                width: 1600.0,
+                height: 900.0,
+            }
+        );
+        let win = apply_coords_for_os(&saved, &dell, ApplyOs::WindowsOrLinux);
+        assert_eq!(
+            win,
+            ApplyCoords::Physical {
+                x: 1552,
+                y: 80,
+                width: 1600,
+                height: 900,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_coords_mac_vs_windows_1x_primary_2x_secondary() {
+        // Reverse layout: Dell@1 primary; MacBook@2 to its right.
+        let mut macbook = macbook_retina();
+        macbook.work_area_phys.x = 1920; // right of 1080p
+        let saved_on_mac = SavedGeometry {
+            // Saved while on MacBook@2: outer_position = points × 2.
+            // 100 pt onto the secondary → x_phys = 1920*2-ish in real tao, but
+            // for the pure formula we only need target.scale == 2.
+            x_phys: 4000,
+            y_phys: 100,
+            width: 1200.0,
+            height: 800.0,
+        };
+        let mac = apply_coords_for_os(&saved_on_mac, &macbook, ApplyOs::MacOs);
+        assert_eq!(
+            mac,
+            ApplyCoords::Logical {
+                x: 2000.0, // 4000 / 2
+                y: 50.0,
+                width: 1200.0,
+                height: 800.0,
+            }
+        );
+        let win = apply_coords_for_os(&saved_on_mac, &macbook, ApplyOs::WindowsOrLinux);
+        assert_eq!(
+            win,
+            ApplyCoords::Physical {
+                x: 4000,
+                y: 100,
+                width: 2400, // 1200 * 2
+                height: 1600,
+            }
+        );
+    }
+
+    #[test]
+    fn concurrent_flush_leaves_valid_latest_store() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let dir = std::env::temp_dir().join(format!(
+            "lounge-geom-concurrent-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let session = GeometrySession::new(dir.clone());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for thread_id in 0..2 {
+            let session = Arc::clone(&session);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for i in 0..40 {
+                    let label = if thread_id == 0 {
+                        MAIN_WINDOW_LABEL
+                    } else {
+                        "graph-window"
+                    };
+                    session.cache_entry(
+                        label,
+                        format!("Mon-{thread_id}|1920x1080"),
+                        SavedGeometry {
+                            x_phys: thread_id * 1000 + i,
+                            y_phys: i,
+                            width: 1000.0 + f64::from(i),
+                            height: 700.0,
+                        },
+                    );
+                    session.flush();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("flush thread");
+        }
+        // Final authoritative write from the main thread.
+        session.cache_entry(
+            MAIN_WINDOW_LABEL,
+            "Final|1920x1080".into(),
+            SavedGeometry {
+                x_phys: 42,
+                y_phys: 24,
+                width: 1111.0,
+                height: 777.0,
+            },
+        );
+        session.flush();
+
+        let path = geometry_store_path(&dir);
+        let loaded = load_geometry_store(&path).expect("final store must parse");
+        let main = loaded.windows.get(MAIN_WINDOW_LABEL).expect("main entry");
+        assert_eq!(main.last_monitor.as_deref(), Some("Final|1920x1080"));
+        let g = main.monitors.get("Final|1920x1080").unwrap();
+        assert_eq!(g.x_phys, 42);
+        assert!((g.width - 1111.0).abs() < f64::EPSILON);
+        assert!(loaded.windows.contains_key("graph-window"));
+
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover part files: {leftovers:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

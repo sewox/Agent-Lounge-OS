@@ -36,7 +36,6 @@ use services::{
     IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
     WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
-use std::sync::Arc;
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
@@ -426,13 +425,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 if label == MAIN_WINDOW_LABEL {
                     match event {
                         WindowEvent::CloseRequested { .. } => {
-                            // Flush graph too before teardown (Destroyed must not persist).
-                            if let Some(session) = app_handle.try_state::<Arc<GeometrySession>>() {
-                                session.flush_labels(
-                                    app_handle,
-                                    &[MAIN_WINDOW_LABEL, GRAPH_WINDOW_LABEL],
-                                );
-                            }
+                            // Geometry flush is handled in handle_window_event (main+graph).
                             if let Some(state) = app_handle.try_state::<GraphUiState>() {
                                 let bridge = app_handle.try_state::<MemoryBridge>();
                                 on_main_window_closed(
