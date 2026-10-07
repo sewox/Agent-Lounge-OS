@@ -107,10 +107,16 @@ fn run_tcp_hold(args: &[String]) -> Result<(), String> {
 
     let listener = rt.block_on(async { bind_loopback(port) })?;
 
-    // Printed only after bind+listen succeed — parent must wait on this line
-    // (not a fixed sleep / bare listen_pids poll) before asserting ownership.
+    // Printed only after bind+listen succeed. Prefer stderr: on Windows,
+    // CREATE_NO_WINDOW + piped stdout has been observed to EOF before the
+    // ready line while the process is still alive. Parent waits on connect
+    // and/or this line — never on a fixed sleep alone.
+    let line = format!("tcp-hold-ready port={port} pid={}", std::process::id());
+    let mut err = std::io::stderr();
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
     let mut out = std::io::stdout();
-    let _ = writeln!(out, "tcp-hold-ready port={port} pid={}", std::process::id());
+    let _ = writeln!(out, "{line}");
     let _ = out.flush();
 
     rt.block_on(async move {

@@ -15,7 +15,8 @@ use app_lib::services::memory_bridge::{
 use app_lib::services::{
     enable_graph_ui_headless, listen_pids, port_owned_by_lounge, probe_ui_config,
     spawn_tcp_hold_child, stage_codebase_memory_mcp_double, tcp_bind_available,
-    wait_tcp_hold_ready, wait_until_port_owned, GraphUiPortMode, GraphUiState,
+    tcp_hold_ready_err_is_port_collision, wait_tcp_hold_ready, wait_until_port_owned,
+    GraphUiPortMode, GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -190,11 +191,18 @@ async fn port_owned_by_lounge_matches_spawned_child_id() {
             }
             Err(err) => {
                 let exited = child.try_wait().ok().flatten();
+                let pids = listen_pids(port);
+                let foreign = !pids.is_empty() && !pids.contains(&child_pid);
                 let _ = child.kill();
                 let _ = child.wait();
-                last_err = format!("attempt {attempt} port={port} pid={child_pid}: {err}");
-                if exited.is_some() && attempt < 8 {
-                    // Child died before ready ⇒ bind race on ephemeral port; try a new port.
+                last_err = format!(
+                    "attempt {attempt} port={port} pid={child_pid}: {err}; listen_pids={pids:?}"
+                );
+                // Retry only on ephemeral collision / child exit — not on a live
+                // child that fails ownership after accept-ready.
+                if attempt < 8
+                    && (exited.is_some() || foreign || tcp_hold_ready_err_is_port_collision(&err))
+                {
                     continue;
                 }
                 panic!("tcp-hold readiness failed (not an ephemeral collision retry): {last_err}");

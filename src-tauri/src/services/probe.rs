@@ -794,10 +794,9 @@ pub fn stage_codebase_memory_mcp_double(helper_bin: &Path) -> Result<(PathBuf, P
 
 /// Spawn allowlisted `codebase-memory-mcp` double in `tcp-hold` mode (LISTEN on port).
 ///
-/// Stdout is piped so callers can wait on the `tcp-hold-ready` line printed
-/// after bind+listen (see [`wait_tcp_hold_ready`]). Do not discard that signal
-/// and poll `listen_pids` alone — on Windows the TCP owner table can lag or the
-/// child can exit on ephemeral-port collision before any listener appears.
+/// Stderr is piped for the optional `tcp-hold-ready` line. Primary readiness is
+/// still a successful loopback connect + PID ownership (see [`wait_tcp_hold_ready`])
+/// because Windows `CREATE_NO_WINDOW` can EOF piped stdio while the child lives.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Child> {
     let mut command = GuardedCommand::new(binary)
@@ -808,8 +807,8 @@ pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Ch
         .with_context(|| format!("tcp-hold gate: {}", binary.display()))?;
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -820,12 +819,17 @@ pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Ch
         .with_context(|| format!("tcp-hold spawn: {}", binary.display()))
 }
 
-/// Block until the tcp-hold child prints `tcp-hold-ready port={port} pid={child.id()}`
-/// (emitted only after successful bind+listen), or until `timeout`.
+/// Block until the tcp-hold child is accept-ready on `port` and
+/// `listen_pids` includes `child.id()`, or until `timeout`.
 ///
-/// This is a real readiness signal — not a sleep and not a retry-until-assert-pass
-/// loop. If the child exits without printing ready (e.g. bind lost a race on the
-/// ephemeral port), returns an error describing the exit status.
+/// Real readiness signals (not a sleep):
+/// 1. Optional `tcp-hold-ready` line on stderr (after bind+listen), and/or
+/// 2. Successful `TcpStream` connect to `127.0.0.1:port`.
+///
+/// Then confirm ownership via [`wait_until_port_owned`].
+///
+/// Returns a distinct error when another PID owns the port (ephemeral collision)
+/// so callers can retry with a new port — never retry-until-assert-pass.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn wait_tcp_hold_ready(
     child: &mut std::process::Child,
@@ -833,70 +837,87 @@ pub fn wait_tcp_hold_ready(
     timeout: Duration,
 ) -> Result<()> {
     use std::io::{BufRead, BufReader};
+    use std::net::{SocketAddr, TcpStream};
     use std::sync::mpsc;
 
-    let stdout = child
-        .stdout
-        .take()
-        .context("tcp-hold stdout missing — spawn_tcp_hold_child must pipe stdout")?;
     let expected_pid = child.id();
-    let expected = format!("tcp-hold-ready port={port} pid={expected_pid}");
-    let (tx, rx) = mpsc::channel::<Result<String, String>>();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    let _ = tx.send(Err("tcp-hold stdout EOF before ready line".into()));
-                    return;
-                }
-                Ok(_) => {
-                    let trimmed = line.trim().to_string();
-                    if trimmed == expected {
-                        let _ = tx.send(Ok(trimmed));
+    let expected_line = format!("tcp-hold-ready port={port} pid={expected_pid}");
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let start = std::time::Instant::now();
+
+    // Best-effort ready-line reader (stderr). Pipe EOF must not abort connect wait.
+    let line_rx = child.stderr.take().map(|stderr| {
+        let (tx, rx) = mpsc::channel::<()>();
+        let want = expected_line.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => return,
+                    Ok(_) if line.trim() == want => {
+                        let _ = tx.send(());
                         return;
                     }
-                    if !trimmed.is_empty() {
-                        let _ = tx.send(Err(format!(
-                            "unexpected tcp-hold stdout line: {trimmed:?} (want {expected:?})"
-                        )));
-                        return;
-                    }
-                }
-                Err(err) => {
-                    let _ = tx.send(Err(format!("tcp-hold stdout read: {err}")));
-                    return;
+                    Ok(_) => {}
+                    Err(_) => return,
                 }
             }
-        }
+        });
+        rx
     });
 
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(msg)) => {
-            let status = child.try_wait().ok().flatten();
+    let mut saw_accept = false;
+    while start.elapsed() < timeout {
+        if let Some(status) = child.try_wait().context("tcp-hold try_wait")? {
             anyhow::bail!(
-                "{msg}; child_status={status:?}; listen_pids={:?}",
+                "tcp-hold exited before accept-ready: status={status:?}; listen_pids={:?}",
                 listen_pids(port)
             );
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let status = child.try_wait().ok().flatten();
-            anyhow::bail!(
-                "tcp-hold-ready not received within {timeout:?} for port={port} pid={expected_pid}; child_status={status:?}; listen_pids={:?}",
-                listen_pids(port)
-            );
+
+        if line_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+            saw_accept = true;
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let status = child.try_wait().ok().flatten();
-            anyhow::bail!(
-                "tcp-hold ready waiter disconnected; child_status={status:?}; listen_pids={:?}",
-                listen_pids(port)
-            );
+
+        if !saw_accept && TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
+            saw_accept = true;
         }
+
+        if saw_accept {
+            let remain = timeout.saturating_sub(start.elapsed());
+            if remain.is_zero() {
+                break;
+            }
+            if wait_until_port_owned(port, expected_pid, remain.min(Duration::from_millis(200))) {
+                return Ok(());
+            }
+            let pids = listen_pids(port);
+            if !pids.is_empty() && !pids.contains(&expected_pid) {
+                anyhow::bail!(
+                    "tcp-hold foreign_port_collision: port={port} accept-ready but listen_pids={pids:?} (want child {expected_pid})"
+                );
+            }
+            // Accepting but owner table empty/lagging — keep polling until timeout.
+        }
+
+        std::thread::sleep(Duration::from_millis(25));
     }
+
+    let status = child.try_wait().ok().flatten();
+    anyhow::bail!(
+        "tcp-hold not ready within {timeout:?} for port={port} pid={expected_pid}; saw_accept={saw_accept}; child_status={status:?}; listen_pids={:?}",
+        listen_pids(port)
+    );
+}
+
+/// True when [`wait_tcp_hold_ready`] failed because another process holds the port
+/// (safe to retry with a new ephemeral port).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn tcp_hold_ready_err_is_port_collision(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains("foreign_port_collision") || text.contains("exited before accept-ready")
 }
 
 /// Wait until `port_owned_by_lounge(port, Some(pid))` or timeout.
@@ -1210,6 +1231,19 @@ mod tests {
             vec![4242, 5150],
             "MergeWithNetstat must keep PIDs from both sources"
         );
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[test]
+    fn tcp_hold_ready_err_is_port_collision_matches_markers() {
+        let foreign = anyhow::anyhow!(
+            "tcp-hold foreign_port_collision: port=1 accept-ready but listen_pids=[9]"
+        );
+        let exited = anyhow::anyhow!("tcp-hold exited before accept-ready: status=exit");
+        let other = anyhow::anyhow!("tcp-hold not ready within 5s");
+        assert!(tcp_hold_ready_err_is_port_collision(&foreign));
+        assert!(tcp_hold_ready_err_is_port_collision(&exited));
+        assert!(!tcp_hold_ready_err_is_port_collision(&other));
     }
 
     #[test]
