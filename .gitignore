@@ -76,6 +76,11 @@ data/laya/
 experiences/*.sqlite
 experiences/*.sqlite-journal
 
+# Window geometry (debug data_root = repo root)
+/window_geometry.json
+/window_geometry.json.part
+/window_geometry.json.corrupt
+
 # MCP probe harness logs / matrix outputs (keep .gitkeep)
 tools/mcp-probe/logs/**
 !tools/mcp-probe/logs/.gitkeep

@@ -103,9 +103,9 @@ pub use telemetry::{
     AgentEfficiencyReport, EfficiencyReportQuery,
 };
 pub use window_geometry::{
-    persist_window_geometry, persist_window_label, placement_for_window, GeometryStore,
-    LogicalRect, MinSize, MonitorSnapshot, WindowPlacement, FILL_RATIO, GEOMETRY_FILE_NAME,
-    MAIN_WINDOW_LABEL, MIN_HEIGHT_LOGICAL, MIN_WIDTH_LOGICAL,
+    apply_placement_show, flush_session, handle_window_event, persist_window_geometry,
+    placement_for_window, GeometrySession, MAIN_WINDOW_LABEL, MIN_HEIGHT_LOGICAL,
+    MIN_WIDTH_LOGICAL,
 };
 pub use workspace_scan::{discover_projects, WorkspaceScanErrorKind};
 
