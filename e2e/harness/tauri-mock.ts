@@ -731,15 +731,56 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return f.graphUiPort;
         case "set_graph_ui_port": {
           f.graphUiPort = Number(args?.port ?? f.graphUiPort);
+          f.graphUiPortMode = "user";
+          if (f.graphUiStatus && typeof f.graphUiStatus === "object") {
+            f.graphUiStatus = {
+              ...f.graphUiStatus,
+              port: f.graphUiPort,
+              port_mode: "user",
+            };
+          }
           return f.graphUiPort;
         }
+        case "get_graph_ui_port_mode":
+          return f.graphUiPortMode ?? "auto";
+        case "set_graph_ui_port_mode": {
+          const mode = String(args?.mode ?? "auto") === "user" ? "user" : "auto";
+          f.graphUiPortMode = mode;
+          if (f.graphUiStatus && typeof f.graphUiStatus === "object") {
+            f.graphUiStatus = { ...f.graphUiStatus, port_mode: mode };
+          }
+          return mode;
+        }
         case "get_graph_ui_status":
-          return f.graphUiStatus;
+          return {
+            binary_found: true,
+            ui_available: Boolean(f.graphUiStatus?.enabled),
+            project_indexed: false,
+            cbm_project_name: null,
+            port: f.graphUiPort,
+            port_conflict: false,
+            conflict_message: null,
+            port_mode: f.graphUiPortMode ?? "auto",
+            owned_by_lounge: Boolean(f.graphUiStatus?.enabled),
+            ...f.graphUiStatus,
+          };
         case "enable_graph_ui_cmd":
-          f.graphUiStatus = { ...f.graphUiStatus, enabled: true };
+          f.graphUiStatus = {
+            ...f.graphUiStatus,
+            enabled: true,
+            port: f.graphUiPort,
+            port_mode: f.graphUiPortMode ?? "auto",
+            owned_by_lounge: true,
+          };
           return null;
         case "open_graph_ui":
-          f.graphUiStatus = { ...f.graphUiStatus, running: true, url: `http://127.0.0.1:${f.graphUiPort}` };
+          f.graphUiStatus = {
+            ...f.graphUiStatus,
+            running: true,
+            url: `http://127.0.0.1:${f.graphUiPort}`,
+            port: f.graphUiPort,
+            owned_by_lounge: true,
+          };
           return null;
         case "get_discovery_report": {
           const d = f.discovery;

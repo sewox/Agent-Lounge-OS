@@ -197,7 +197,16 @@ export type FixtureDataset = {
   discovery: DiscoveryReport;
   connectedTools: { id: string; name: string; kind: string; source: string; selected?: boolean }[];
   graphUiPort: number;
-  graphUiStatus: { enabled: boolean; running: boolean; url: string | null; detail: string | null };
+  graphUiPortMode?: "auto" | "user";
+  graphUiStatus: {
+    enabled: boolean;
+    running: boolean;
+    url: string | null;
+    detail: string | null;
+    port?: number;
+    port_mode?: "auto" | "user";
+    owned_by_lounge?: boolean;
+  };
   workers: { id: string; name: string; kind: string; is_active: boolean; enabled: boolean; model?: string }[];
   agentSessions: {
     id: string;

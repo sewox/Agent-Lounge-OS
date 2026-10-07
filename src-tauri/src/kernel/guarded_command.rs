@@ -17,6 +17,7 @@ const INTERNAL_DAEMON_ALLOWLIST: &[&str] = &[
     "ollama",
     "lmr",
     "lsof",
+    "ss",
     "netstat",
     "kill",
     "taskkill",

@@ -44,9 +44,11 @@ pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
 };
 pub use graph_ui::{
-    enable_graph_ui, graph_ui_status, load_port_from_store, on_main_window_closed,
-    open_or_focus_graph_window, persist_port, resolve_cbm_project_name, GraphUiState,
-    GraphUiStatus, GRAPH_WINDOW_LABEL,
+    default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless, graph_ui_status,
+    load_port_from_store, load_port_preference_from_store, on_main_window_closed,
+    open_or_focus_graph_window, persist_port, persist_port_preference, resolve_cbm_project_name,
+    select_graph_ui_port, spawn_graph_ui_on_port, GraphUiPortMode, GraphUiState, GraphUiStatus,
+    GRAPH_WINDOW_LABEL,
 };
 pub use index_queue::{
     IndexJob, IndexJobEvent, IndexJobPhase, IndexProgress, IndexQueue, WorkspaceScanResult,
@@ -59,6 +61,7 @@ pub use lounge_auth::{
 };
 pub use memory_bridge::{
     probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode, DEFAULT_GRAPH_UI_PORT,
+    GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, LEGACY_GRAPH_UI_PORT,
 };
 pub use model_manager::{LayaEnginePhase, LayaEngineStatus, ModelManager, LAYA_ENGINE_EVENT};
 pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};
@@ -72,11 +75,14 @@ pub use open_editor::{
 };
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
 pub use probe::{
-    data_root, ensure_data_layout, lounge_laya_dir, lounge_lmr_binary_path, lounge_lmr_dir,
-    lounge_nats_dir, lounge_ollama_endpoint, nats_monitor_endpoint, resolve_data_root,
-    resolve_data_root_for_app, system_ollama_endpoint, DataRootEnv, APP_IDENTIFIER,
-    LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
+    data_root, ensure_data_layout, listen_pids, lounge_laya_dir, lounge_lmr_binary_path,
+    lounge_lmr_dir, lounge_nats_dir, lounge_ollama_endpoint, nats_monitor_endpoint,
+    port_owned_by_lounge, resolve_data_root, resolve_data_root_for_app, system_ollama_endpoint,
+    tcp_bind_available, DataRootEnv, APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT,
+    SYSTEM_OLLAMA_PORT,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub use probe::{spawn_tcp_hold_child, stage_codebase_memory_mcp_double, wait_until_port_owned};
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,
     is_quota_approval, limit_policy_percent, lmr_endpoint_up, lmr_runtime_up, normalize_lmr_agent,

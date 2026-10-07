@@ -14,6 +14,8 @@ export type GraphUiStatus = {
   port: number;
   port_conflict: boolean;
   conflict_message: string | null;
+  port_mode: "auto" | "user";
+  owned_by_lounge: boolean;
 };
 
 type GraphUiButtonProps = {

@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, Instant};
+
+use crate::kernel::GuardedCommand;
 
 pub const DEFAULT_OLLAMA_HOST: &str = "127.0.0.1";
 /// Host Ollama (EchoMind / Cursor) varsayılanı. LMR buna dokunmaz.
@@ -335,6 +338,385 @@ pub fn repo_root_from_crate() -> PathBuf {
     repo_root_from_manifest(Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
+/// `127.0.0.1:port` üzerinde kısa süreli bind — port boşsa true.
+pub fn tcp_bind_available(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Portta LISTEN yapan süreç PID'leri (macOS/Linux: lsof, yoksa ss; Windows: netstat).
+pub fn listen_pids(port: u16) -> Vec<u32> {
+    #[cfg(windows)]
+    {
+        windows_listen_pids(port)
+    }
+    #[cfg(not(windows))]
+    {
+        unix_listen_pids(port)
+    }
+}
+
+/// PID hâlâ yaşıyor mu? (sysinfo)
+pub fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
+    sys.process(Pid::from_u32(pid)).is_some()
+}
+
+/// Lounge sahipliği: spawn edilen child canlı VE porttaki dinleyici PID eşleşiyor.
+pub fn port_owned_by_lounge(port: u16, child_pid: Option<u32>) -> bool {
+    let Some(pid) = child_pid.filter(|p| *p > 0) else {
+        return false;
+    };
+    if !process_alive(pid) {
+        return false;
+    }
+    listen_pids(port).contains(&pid)
+}
+
+#[cfg(not(windows))]
+fn unix_listen_pids(port: u16) -> Vec<u32> {
+    let mut set = BTreeSet::new();
+    for pid in lsof_listen_pids(port) {
+        set.insert(pid);
+    }
+    if set.is_empty() {
+        for pid in ss_listen_pids(port) {
+            set.insert(pid);
+        }
+    }
+    set.into_iter().collect()
+}
+
+#[cfg(not(windows))]
+fn lsof_listen_pids(port: u16) -> Vec<u32> {
+    let output = GuardedCommand::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn ss_listen_pids(port: u16) -> Vec<u32> {
+    // `ss -lptn 'sport = :PORT'` — process sütunu `pid=NNN` içerir.
+    let filter = format!("sport = :{port}");
+    let output = GuardedCommand::new("ss")
+        .args(["-lptn", &filter])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_ss_listen_pids(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(not(windows))]
+fn parse_ss_listen_pids(stdout: &str) -> Vec<u32> {
+    let mut set = BTreeSet::new();
+    for line in stdout.lines() {
+        let mut rest = line;
+        while let Some(idx) = rest.find("pid=") {
+            let after = &rest[idx + 4..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                rest = &after[1.min(after.len())..];
+                continue;
+            }
+            if let Ok(pid) = digits.parse::<u32>() {
+                if pid > 0 {
+                    set.insert(pid);
+                }
+            }
+            rest = &after[digits.len()..];
+        }
+    }
+    set.into_iter().collect()
+}
+
+#[cfg(windows)]
+fn windows_listen_pids(port: u16) -> Vec<u32> {
+    // Prefer GetExtendedTcpTable — language-independent (netstat state text is localized).
+    match listen_pids_via_extended_tcp_table(port) {
+        Ok(pids) => pids,
+        Err(_) => windows_listen_pids_via_netstat(port),
+    }
+}
+
+#[cfg(windows)]
+fn windows_listen_pids_via_netstat(port: u16) -> Vec<u32> {
+    let output = GuardedCommand::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .internal_daemon()
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    parse_netstat_listen_pids(&String::from_utf8_lossy(&output.stdout), port)
+}
+
+/// Owner-PID TCP listeners via `GetExtendedTcpTable` (AF_INET + AF_INET6).
+#[cfg(windows)]
+fn listen_pids_via_extended_tcp_table(port: u16) -> Result<Vec<u32>, ()> {
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    let mut set = BTreeSet::new();
+    let v4 = collect_ipv4_owner_pid_listeners(AF_INET as u32, port, &mut set);
+    let v6 = collect_ipv6_owner_pid_listeners(AF_INET6 as u32, port, &mut set);
+    if v4.is_err() && v6.is_err() {
+        return Err(());
+    }
+    Ok(set.into_iter().collect())
+}
+
+#[cfg(windows)]
+fn net_order_port(dw: u32) -> u16 {
+    u16::from_be((dw & 0xFFFF) as u16)
+}
+
+#[cfg(windows)]
+fn collect_ipv4_owner_pid_listeners(
+    family: u32,
+    port: u16,
+    out: &mut BTreeSet<u32>,
+) -> Result<(), ()> {
+    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+        TCP_TABLE_OWNER_PID_LISTENER,
+    };
+
+    unsafe {
+        let mut size: u32 = 0;
+        let status = GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            family,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+        if status != ERROR_INSUFFICIENT_BUFFER || size == 0 {
+            return Err(());
+        }
+        let mut buf = vec![0u8; size as usize];
+        let status = GetExtendedTcpTable(
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            0,
+            family,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+        if status != 0 {
+            return Err(());
+        }
+        if (size as usize) < std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
+            return Err(());
+        }
+        let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
+        let count = table.dwNumEntries as usize;
+        let rows_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCPROW_OWNER_PID;
+        for i in 0..count {
+            let row = &*rows_ptr.add(i);
+            if net_order_port(row.dwLocalPort) != port {
+                continue;
+            }
+            if row.dwOwningPid > 0 {
+                out.insert(row.dwOwningPid);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn collect_ipv6_owner_pid_listeners(
+    family: u32,
+    port: u16,
+    out: &mut BTreeSet<u32>,
+) -> Result<(), ()> {
+    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
+        TCP_TABLE_OWNER_PID_LISTENER,
+    };
+
+    unsafe {
+        let mut size: u32 = 0;
+        let status = GetExtendedTcpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            family,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+        if status != ERROR_INSUFFICIENT_BUFFER || size == 0 {
+            return Err(());
+        }
+        let mut buf = vec![0u8; size as usize];
+        let status = GetExtendedTcpTable(
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            0,
+            family,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        );
+        if status != 0 {
+            return Err(());
+        }
+        if (size as usize) < std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>() {
+            return Err(());
+        }
+        let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
+        let count = table.dwNumEntries as usize;
+        let rows_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCP6ROW_OWNER_PID;
+        for i in 0..count {
+            let row = &*rows_ptr.add(i);
+            if net_order_port(row.dwLocalPort) != port {
+                continue;
+            }
+            if row.dwOwningPid > 0 {
+                out.insert(row.dwOwningPid);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Windows `netstat -ano -p tcp` listener PIDs — **language-independent**.
+///
+/// Does not match the localized State column (`LISTENING` / `DİNLEME` / `ABHÖREN`).
+/// A LISTEN row is identified structurally: TCP proto, local address ends with `:{port}`,
+/// foreign address is unbound (`0.0.0.0:0` / `[::]:0` / `*:*`), last token is PID.
+/// `:{port}` only matches at the end of a token (`:1` must not hit `:135`).
+#[cfg(any(test, windows))]
+pub fn parse_netstat_listen_pids(stdout: &str, port: u16) -> Vec<u32> {
+    let needle = format!(":{port}");
+    let mut set = BTreeSet::new();
+    for line in stdout.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        // Proto Local Foreign State PID  → ≥5 tokens (State may be multi-byte localized).
+        if tokens.len() < 5 {
+            continue;
+        }
+        let proto = tokens[0];
+        if !proto.eq_ignore_ascii_case("TCP") {
+            continue;
+        }
+        let local = tokens[1];
+        let foreign = tokens[2];
+        if !local.ends_with(&needle) {
+            continue;
+        }
+        if !netstat_foreign_is_unbound_listener(foreign) {
+            continue;
+        }
+        if let Ok(pid) = tokens[tokens.len() - 1].parse::<u32>() {
+            if pid > 0 {
+                set.insert(pid);
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Foreign address column for a listening socket (not an established connection).
+#[cfg(any(test, windows))]
+fn netstat_foreign_is_unbound_listener(foreign: &str) -> bool {
+    matches!(foreign, "0.0.0.0:0" | "[::]:0" | "*:*" | "*:0" | "[::0]:0")
+}
+
+/// Stage `lounge-test-helper` as `codebase-memory-mcp[.exe]` so GuardedCommand allowlist matches.
+/// Returns `(binary_path, scratch_dir)` — caller must keep `scratch_dir` alive.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn stage_codebase_memory_mcp_double(helper_bin: &Path) -> Result<(PathBuf, PathBuf)> {
+    if !helper_bin.is_file() {
+        anyhow::bail!(
+            "lounge-test-helper missing at {} — cargo must build the bin target",
+            helper_bin.display()
+        );
+    }
+    let scratch = std::env::temp_dir().join(format!(
+        "lounge-cbm-double-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&scratch).with_context(|| format!("create {}", scratch.display()))?;
+    let name = if cfg!(windows) {
+        "codebase-memory-mcp.exe"
+    } else {
+        "codebase-memory-mcp"
+    };
+    let dest = scratch.join(name);
+    std::fs::copy(helper_bin, &dest)
+        .with_context(|| format!("copy {} → {}", helper_bin.display(), dest.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest, perms)?;
+    }
+    Ok((dest, scratch))
+}
+
+/// Spawn allowlisted `codebase-memory-mcp` double in `tcp-hold` mode (LISTEN on port).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Child> {
+    let mut command = GuardedCommand::new(binary)
+        .arg("tcp-hold")
+        .arg(format!("--port={port}"))
+        .internal_daemon()
+        .into_std_command()
+        .with_context(|| format!("tcp-hold gate: {}", binary.display()))?;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .with_context(|| format!("tcp-hold spawn: {}", binary.display()))
+}
+
+/// Wait until `port_owned_by_lounge(port, Some(pid))` or timeout.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn wait_until_port_owned(port: u16, pid: u32, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if port_owned_by_lounge(port, Some(pid)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +897,94 @@ mod tests {
         assert!(EXTRA_BIN_DIRS.contains(&"/usr/local/sbin"));
         assert!(EXTRA_BIN_DIRS.contains(&"/opt/homebrew/sbin"));
         assert!(WINDOWS_PROGRAM_FILES_SUBDIRS.contains(&"nats-server"));
+    }
+
+    #[test]
+    fn unused_port_has_no_listen_pids() {
+        assert!(listen_pids(1).is_empty());
+    }
+
+    #[test]
+    fn tcp_bind_available_roundtrip() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!tcp_bind_available(port), "bound port must not be free");
+        drop(listener);
+        // macOS (and occasionally Windows) may briefly refuse re-bind after close
+        // (TIME_WAIT / stack delay). Poll with a hard deadline — still asserts the
+        // real contract that a released local listen port becomes bindable again.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if tcp_bind_available(port) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "released port {port} must become bindable within 3s (macOS/Windows TIME_WAIT)"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn listen_pids_matches_our_test_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let self_pid = std::process::id();
+        let mut found = false;
+        for _ in 0..20 {
+            let pids = listen_pids(port);
+            if pids.contains(&self_pid) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            found,
+            "listen_pids({port}) must include this process pid={self_pid}"
+        );
+        assert!(port_owned_by_lounge(port, Some(self_pid)));
+        assert!(!port_owned_by_lounge(port, Some(u32::MAX)));
+        assert!(!port_owned_by_lounge(port, None));
+        drop(listener);
+    }
+
+    #[test]
+    fn netstat_parser_matches_exact_port_token() {
+        let sample = "\
+  TCP    127.0.0.1:18749        0.0.0.0:0              LISTENING       4242\r\n\
+  TCP    127.0.0.1:1874         0.0.0.0:0              LISTENING       1111\r\n\
+  TCP    0.0.0.0:187490         0.0.0.0:0              LISTENING       2222\r\n\
+  TCP    127.0.0.1:135          0.0.0.0:0              LISTENING       3333\r\n";
+        assert_eq!(parse_netstat_listen_pids(sample, 18749), vec![4242]);
+        assert_eq!(parse_netstat_listen_pids(sample, 1), Vec::<u32>::new());
+        assert_eq!(parse_netstat_listen_pids(sample, 135), vec![3333]);
+    }
+
+    #[test]
+    fn netstat_parser_accepts_turkish_dinleme_state() {
+        // Turkish Windows localizes LISTENING → DİNLEME; must still resolve PID.
+        let sample = "\
+  TCP    127.0.0.1:18749        0.0.0.0:0              DİNLEME         4242\r\n\
+  TCP    0.0.0.0:18749          0.0.0.0:0              DİNLEME         4242\r\n\
+  TCP    127.0.0.1:18749        10.0.0.5:443          ESTABLISHED     9999\r\n";
+        assert_eq!(parse_netstat_listen_pids(sample, 18749), vec![4242]);
+        assert!(
+            !parse_netstat_listen_pids(sample, 18749).contains(&9999),
+            "established connection must not count as listen"
+        );
+    }
+
+    #[test]
+    fn netstat_parser_accepts_german_abhoren_state() {
+        // German Windows localizes LISTENING → ABHÖREN; must still resolve PID.
+        let sample = "\
+  TCP    127.0.0.1:18749        0.0.0.0:0              ABHÖREN         5150\r\n\
+  TCP    [::]:18749             [::]:0                 ABHÖREN         5150\r\n\
+  TCP    127.0.0.1:80           0.0.0.0:0              ABHÖREN         80\r\n";
+        assert_eq!(parse_netstat_listen_pids(sample, 18749), vec![5150]);
+        assert_eq!(parse_netstat_listen_pids(sample, 80), vec![80]);
+        assert_eq!(parse_netstat_listen_pids(sample, 1), Vec::<u32>::new());
     }
 }

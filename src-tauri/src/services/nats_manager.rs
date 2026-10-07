@@ -13,8 +13,8 @@ use super::lounge_auth::{
     deactivate_nats_auth, ensure_session_credentials, NatsCredentials,
 };
 use super::probe::{
-    endpoint, find_executable, lounge_nats_dir, tcp_ready, wait_until, DEFAULT_NATS_HOST,
-    DEFAULT_NATS_HTTP_PORT, DEFAULT_NATS_PORT,
+    endpoint, find_executable, listen_pids, lounge_nats_dir, tcp_ready, wait_until,
+    DEFAULT_NATS_HOST, DEFAULT_NATS_HTTP_PORT, DEFAULT_NATS_PORT,
 };
 use crate::kernel::{DecisionGate, GuardedCommand};
 use crate::models::{ServiceHealth, ServiceId};
@@ -498,61 +498,6 @@ fn kill_nats_on_port(port: u16) -> usize {
         }
     }
     killed
-}
-
-fn listen_pids(port: u16) -> Vec<u32> {
-    #[cfg(windows)]
-    {
-        windows_listen_pids(port)
-    }
-    #[cfg(not(windows))]
-    {
-        unix_listen_pids(port)
-    }
-}
-
-#[cfg(not(windows))]
-fn unix_listen_pids(port: u16) -> Vec<u32> {
-    let output = GuardedCommand::new("lsof")
-        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
-        .internal_daemon()
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.trim().parse().ok())
-        .collect()
-}
-
-#[cfg(windows)]
-fn windows_listen_pids(port: u16) -> Vec<u32> {
-    let output = GuardedCommand::new("netstat")
-        .args(["-ano", "-p", "tcp"])
-        .internal_daemon()
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    // Match local address tokens that end with `:{port}` — substring
-    // `contains(":1")` falsely hits `:135`, `:139`, `:445`, etc.
-    let needle = format!(":{port}");
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| {
-            let upper = line.to_ascii_uppercase();
-            if !upper.contains("LISTEN") {
-                return false;
-            }
-            line.split_whitespace()
-                .any(|token| token.ends_with(&needle))
-        })
-        .filter_map(|line| line.split_whitespace().last()?.parse().ok())
-        .collect()
 }
 
 #[cfg(test)]
