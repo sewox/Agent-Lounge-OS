@@ -457,7 +457,13 @@ fn windows_listen_pids(port: u16) -> Vec<u32> {
     // Prefer GetExtendedTcpTable — language-independent (netstat state text is localized).
     match listen_pids_via_extended_tcp_table(port) {
         Ok(pids) => pids,
-        Err(_) => windows_listen_pids_via_netstat(port),
+        Err(err) => {
+            // Never swallow API failure silently — netstat is a fallback, not a cover-up.
+            eprintln!(
+                "listen_pids({port}): GetExtendedTcpTable failed ({err}); falling back to netstat"
+            );
+            windows_listen_pids_via_netstat(port)
+        }
     }
 }
 
@@ -475,33 +481,31 @@ fn windows_listen_pids_via_netstat(port: u16) -> Vec<u32> {
 
 /// Owner-PID TCP listeners via `GetExtendedTcpTable` (AF_INET + AF_INET6).
 #[cfg(windows)]
-fn listen_pids_via_extended_tcp_table(port: u16) -> Result<Vec<u32>, ()> {
+fn listen_pids_via_extended_tcp_table(port: u16) -> Result<Vec<u32>, String> {
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
     let mut set = BTreeSet::new();
     let v4 = collect_ipv4_owner_pid_listeners(AF_INET as u32, port, &mut set);
     let v6 = collect_ipv6_owner_pid_listeners(AF_INET6 as u32, port, &mut set);
-    if v4.is_err() && v6.is_err() {
-        return Err(());
+    match (v4, v6) {
+        (Err(e4), Err(e6)) => Err(format!("AF_INET: {e4}; AF_INET6: {e6}")),
+        (Ok(()), Ok(())) | (Ok(()), Err(_)) | (Err(_), Ok(())) => Ok(set.into_iter().collect()),
     }
-    Ok(set.into_iter().collect())
 }
 
 #[cfg(windows)]
 fn net_order_port(dw: u32) -> u16 {
+    // MSDN: dwLocalPort is network byte order; only the low 16 bits are valid.
     u16::from_be((dw & 0xFFFF) as u16)
 }
 
+/// Fill `GetExtendedTcpTable` with retries when the table grows between the
+/// size query and the read (`ERROR_INSUFFICIENT_BUFFER` race).
 #[cfg(windows)]
-fn collect_ipv4_owner_pid_listeners(
-    family: u32,
-    port: u16,
-    out: &mut BTreeSet<u32>,
-) -> Result<(), ()> {
+fn get_extended_tcp_table_bytes(family: u32) -> Result<Vec<u8>, String> {
     use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-        TCP_TABLE_OWNER_PID_LISTENER,
+        GetExtendedTcpTable, TCP_TABLE_OWNER_PID_LISTENER,
     };
 
     unsafe {
@@ -514,24 +518,63 @@ fn collect_ipv4_owner_pid_listeners(
             TCP_TABLE_OWNER_PID_LISTENER,
             0,
         );
+        // Null buffer: expect INSUFFICIENT_BUFFER with a required size. NO_ERROR
+        // with size==0 means an empty table for this family.
+        if status == 0 && size == 0 {
+            return Ok(Vec::new());
+        }
         if status != ERROR_INSUFFICIENT_BUFFER || size == 0 {
-            return Err(());
+            return Err(format!("size query status={status} size={size}"));
         }
-        let mut buf = vec![0u8; size as usize];
-        let status = GetExtendedTcpTable(
-            buf.as_mut_ptr().cast(),
-            &mut size,
-            0,
-            family,
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        );
-        if status != 0 {
-            return Err(());
+        for _ in 0..8 {
+            let mut buf = vec![0u8; size as usize];
+            let mut needed = size;
+            let status = GetExtendedTcpTable(
+                buf.as_mut_ptr().cast(),
+                &mut needed,
+                0,
+                family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            );
+            if status == ERROR_INSUFFICIENT_BUFFER {
+                // Table grew — resize and retry (do not silently fall through).
+                size = needed.max(size.saturating_add(256));
+                continue;
+            }
+            if status != 0 {
+                return Err(format!("fill status={status} needed={needed}"));
+            }
+            buf.truncate(needed as usize);
+            return Ok(buf);
         }
-        if (size as usize) < std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
-            return Err(());
-        }
+        Err(format!(
+            "ERROR_INSUFFICIENT_BUFFER persisted after retries (last size={size})"
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn collect_ipv4_owner_pid_listeners(
+    family: u32,
+    port: u16,
+    out: &mut BTreeSet<u32>,
+) -> Result<(), String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    };
+
+    let buf = get_extended_tcp_table_bytes(family)?;
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if buf.len() < std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
+        return Err(format!(
+            "buffer too small for MIB_TCPTABLE_OWNER_PID ({} bytes)",
+            buf.len()
+        ));
+    }
+    unsafe {
         let table = &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID);
         let count = table.dwNumEntries as usize;
         let rows_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCPROW_OWNER_PID;
@@ -553,41 +596,22 @@ fn collect_ipv6_owner_pid_listeners(
     family: u32,
     port: u16,
     out: &mut BTreeSet<u32>,
-) -> Result<(), ()> {
-    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+) -> Result<(), String> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
-        TCP_TABLE_OWNER_PID_LISTENER,
+        MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
     };
 
+    let buf = get_extended_tcp_table_bytes(family)?;
+    if buf.is_empty() {
+        return Ok(());
+    }
+    if buf.len() < std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>() {
+        return Err(format!(
+            "buffer too small for MIB_TCP6TABLE_OWNER_PID ({} bytes)",
+            buf.len()
+        ));
+    }
     unsafe {
-        let mut size: u32 = 0;
-        let status = GetExtendedTcpTable(
-            std::ptr::null_mut(),
-            &mut size,
-            0,
-            family,
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        );
-        if status != ERROR_INSUFFICIENT_BUFFER || size == 0 {
-            return Err(());
-        }
-        let mut buf = vec![0u8; size as usize];
-        let status = GetExtendedTcpTable(
-            buf.as_mut_ptr().cast(),
-            &mut size,
-            0,
-            family,
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        );
-        if status != 0 {
-            return Err(());
-        }
-        if (size as usize) < std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>() {
-            return Err(());
-        }
         let table = &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID);
         let count = table.dwNumEntries as usize;
         let rows_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCP6ROW_OWNER_PID;
@@ -682,6 +706,11 @@ pub fn stage_codebase_memory_mcp_double(helper_bin: &Path) -> Result<(PathBuf, P
 }
 
 /// Spawn allowlisted `codebase-memory-mcp` double in `tcp-hold` mode (LISTEN on port).
+///
+/// Stdout is piped so callers can wait on the `tcp-hold-ready` line printed
+/// after bind+listen (see [`wait_tcp_hold_ready`]). Do not discard that signal
+/// and poll `listen_pids` alone — on Windows the TCP owner table can lag or the
+/// child can exit on ephemeral-port collision before any listener appears.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Child> {
     let mut command = GuardedCommand::new(binary)
@@ -692,7 +721,7 @@ pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Ch
         .with_context(|| format!("tcp-hold gate: {}", binary.display()))?;
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
@@ -704,7 +733,88 @@ pub fn spawn_tcp_hold_child(binary: &Path, port: u16) -> Result<std::process::Ch
         .with_context(|| format!("tcp-hold spawn: {}", binary.display()))
 }
 
+/// Block until the tcp-hold child prints `tcp-hold-ready port={port} pid={child.id()}`
+/// (emitted only after successful bind+listen), or until `timeout`.
+///
+/// This is a real readiness signal — not a sleep and not a retry-until-assert-pass
+/// loop. If the child exits without printing ready (e.g. bind lost a race on the
+/// ephemeral port), returns an error describing the exit status.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn wait_tcp_hold_ready(
+    child: &mut std::process::Child,
+    port: u16,
+    timeout: Duration,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("tcp-hold stdout missing — spawn_tcp_hold_child must pipe stdout")?;
+    let expected_pid = child.id();
+    let expected = format!("tcp-hold-ready port={port} pid={expected_pid}");
+    let (tx, rx) = mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = tx.send(Err("tcp-hold stdout EOF before ready line".into()));
+                    return;
+                }
+                Ok(_) => {
+                    let trimmed = line.trim().to_string();
+                    if trimmed == expected {
+                        let _ = tx.send(Ok(trimmed));
+                        return;
+                    }
+                    if !trimmed.is_empty() {
+                        let _ = tx.send(Err(format!(
+                            "unexpected tcp-hold stdout line: {trimmed:?} (want {expected:?})"
+                        )));
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(format!("tcp-hold stdout read: {err}")));
+                    return;
+                }
+            }
+        }
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(msg)) => {
+            let status = child.try_wait().ok().flatten();
+            anyhow::bail!(
+                "{msg}; child_status={status:?}; listen_pids={:?}",
+                listen_pids(port)
+            );
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let status = child.try_wait().ok().flatten();
+            anyhow::bail!(
+                "tcp-hold-ready not received within {timeout:?} for port={port} pid={expected_pid}; child_status={status:?}; listen_pids={:?}",
+                listen_pids(port)
+            );
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let status = child.try_wait().ok().flatten();
+            anyhow::bail!(
+                "tcp-hold ready waiter disconnected; child_status={status:?}; listen_pids={:?}",
+                listen_pids(port)
+            );
+        }
+    }
+}
+
 /// Wait until `port_owned_by_lounge(port, Some(pid))` or timeout.
+/// Prefer [`wait_tcp_hold_ready`] (or an HTTP probe) first so this is ownership
+/// confirmation after a real bind signal — not the sole readiness mechanism.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn wait_until_port_owned(port: u16, pid: u32, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
@@ -947,6 +1057,37 @@ mod tests {
         assert!(port_owned_by_lounge(port, Some(self_pid)));
         assert!(!port_owned_by_lounge(port, Some(u32::MAX)));
         assert!(!port_owned_by_lounge(port, None));
+        drop(listener);
+    }
+
+    /// Prove the Win32 API path itself (not netstat fallback) sees a live listener.
+    #[cfg(windows)]
+    #[test]
+    fn extended_tcp_table_api_finds_live_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let self_pid = std::process::id();
+        let mut last = String::from("(no attempt)");
+        let mut found = false;
+        for _ in 0..40 {
+            match listen_pids_via_extended_tcp_table(port) {
+                Ok(pids) if pids.contains(&self_pid) => {
+                    found = true;
+                    break;
+                }
+                Ok(pids) => {
+                    last = format!("Ok({pids:?}) missing pid={self_pid}");
+                }
+                Err(err) => {
+                    last = format!("Err({err})");
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            found,
+            "GetExtendedTcpTable must find pid={self_pid} on :{port} without netstat; last={last}"
+        );
         drop(listener);
     }
 

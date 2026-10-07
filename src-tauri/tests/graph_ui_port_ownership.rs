@@ -15,7 +15,7 @@ use app_lib::services::memory_bridge::{
 use app_lib::services::{
     enable_graph_ui_headless, listen_pids, port_owned_by_lounge, probe_ui_config,
     spawn_tcp_hold_child, stage_codebase_memory_mcp_double, tcp_bind_available,
-    wait_until_port_owned, GraphUiPortMode, GraphUiState,
+    wait_tcp_hold_ready, wait_until_port_owned, GraphUiPortMode, GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -135,50 +135,73 @@ async fn spawn_foreign_cbm_on(port: u16) -> ForeignCbm {
 #[tokio::test]
 async fn port_owned_by_lounge_matches_spawned_child_id() {
     let (binary, _scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage helper");
-
-    let hold = TcpListener::bind("127.0.0.1:0").expect("ephemeral");
-    let port = hold.local_addr().expect("addr").port();
-    drop(hold);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !tcp_bind_available(port) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "ephemeral port {port} must free before tcp-hold spawn"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let mut child = spawn_tcp_hold_child(&binary, port).expect("spawn tcp-hold child");
-    let child_pid = child.id();
     let parent_pid = std::process::id();
-    assert_ne!(child_pid, parent_pid, "child must be a distinct process");
 
-    assert!(
-        wait_until_port_owned(port, child_pid, Duration::from_secs(5)),
-        "listen_pids({port}) must include spawned child.id()={child_pid}; saw {:?}",
-        listen_pids(port)
-    );
-    assert!(
-        port_owned_by_lounge(port, Some(child_pid)),
-        "owned for child.id()"
-    );
-    assert!(
-        !port_owned_by_lounge(port, Some(parent_pid)),
-        "parent PID must not own child's listen port"
-    );
-
-    let _ = child.kill();
-    let _ = child.wait();
-    for _ in 0..40 {
-        if !port_owned_by_lounge(port, Some(child_pid)) {
-            break;
+    // Ephemeral ports can be stolen between parent release and child bind under
+    // parallel cargo test. Only retry when the child *exited* (bind lost) —
+    // never retry-until-assert-pass while a live child fails ownership.
+    let mut last_err = String::new();
+    for attempt in 1..=8u32 {
+        let hold = TcpListener::bind("127.0.0.1:0").expect("ephemeral");
+        let port = hold.local_addr().expect("addr").port();
+        drop(hold);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !tcp_bind_available(port) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ephemeral port {port} must free before tcp-hold spawn"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut child = spawn_tcp_hold_child(&binary, port).expect("spawn tcp-hold child");
+        let child_pid = child.id();
+        assert_ne!(child_pid, parent_pid, "child must be a distinct process");
+
+        match wait_tcp_hold_ready(&mut child, port, Duration::from_secs(5)) {
+            Ok(()) => {
+                assert!(
+                    wait_until_port_owned(port, child_pid, Duration::from_secs(5)),
+                    "after tcp-hold-ready, listen_pids({port}) must include child.id()={child_pid}; saw {:?}",
+                    listen_pids(port)
+                );
+                assert!(
+                    port_owned_by_lounge(port, Some(child_pid)),
+                    "owned for child.id()"
+                );
+                assert!(
+                    !port_owned_by_lounge(port, Some(parent_pid)),
+                    "parent PID must not own child's listen port"
+                );
+
+                let _ = child.kill();
+                let _ = child.wait();
+                for _ in 0..40 {
+                    if !port_owned_by_lounge(port, Some(child_pid)) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                assert!(
+                    !port_owned_by_lounge(port, Some(child_pid)),
+                    "dead/exited child.id()={child_pid} must not own port {port}"
+                );
+                return;
+            }
+            Err(err) => {
+                let exited = child.try_wait().ok().flatten();
+                let _ = child.kill();
+                let _ = child.wait();
+                last_err = format!("attempt {attempt} port={port} pid={child_pid}: {err}");
+                if exited.is_some() && attempt < 8 {
+                    // Child died before ready ⇒ bind race on ephemeral port; try a new port.
+                    continue;
+                }
+                panic!("tcp-hold readiness failed (not an ephemeral collision retry): {last_err}");
+            }
+        }
     }
-    assert!(
-        !port_owned_by_lounge(port, Some(child_pid)),
-        "dead/exited child.id()={child_pid} must not own port {port}"
-    );
+    panic!("tcp-hold could not bind an ephemeral port after 8 attempts: {last_err}");
 }
 
 /// Acceptance: foreign ui-config on first band port is not adopted; Lounge spawns next.
