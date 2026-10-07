@@ -935,6 +935,37 @@ mod tests {
         assert!(WINDOWS_PROGRAM_FILES_SUBDIRS.contains(&"nats-server"));
     }
 
+    /// Localized Windows netstat State words must still yield listen PIDs so
+    /// NATS `--pass` migration does not silently skip non-English hosts.
+    /// Uses #92's `parse_netstat_listen_pids` (foreign-unbound structural match).
+    #[test]
+    fn localized_netstat_listen_pids_support_migration_detection() {
+        let sample = "\
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:4222           0.0.0.0:0              DİNLEME         4242
+  TCP    127.0.0.1:4222         0.0.0.0:0              ABHÖREN         4243
+  TCP    0.0.0.0:4222           0.0.0.0:0              LISTENING       4244
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       892
+  TCP    127.0.0.1:4222         10.0.0.1:54321         ESTABLISHED     9999
+  TCP    0.0.0.0:1              0.0.0.0:0              DİNLEME         111
+";
+        let pids = parse_netstat_listen_pids(sample, 4222);
+        assert_eq!(
+            pids,
+            vec![4242, 4243, 4244],
+            "Turkish/German/English listen rows must all resolve (no LISTEN word required)"
+        );
+        assert!(
+            parse_netstat_listen_pids(sample, 1).contains(&111),
+            ":1 must not false-positive on :135"
+        );
+        assert!(
+            !pids.contains(&9999),
+            "ESTABLISHED foreign must not count as listen"
+        );
+        assert!(!pids.contains(&892), "unrelated listen port must not match");
+    }
+
     #[test]
     fn unused_port_has_no_listen_pids() {
         assert!(listen_pids(1).is_empty());

@@ -481,23 +481,67 @@ pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<S
 }
 
 /// True when a nats-server listening on `port` has `--pass` in its argv (legacy leak).
+///
+/// Primary path uses [`listen_pids`]. Fallback scans every `nats-server` process
+/// cmdline for `--pass` plus this port so migration still runs when listen-PID
+/// lookup fails (e.g. older English-only netstat parsers on localized Windows).
 fn listening_nats_has_pass_flag(port: u16) -> bool {
-    let pids = listen_pids(port);
-    for pid in pids {
+    use std::collections::BTreeSet;
+    let listen = listen_pids(port);
+    let mut candidates: BTreeSet<u32> = listen.iter().copied().collect();
+    for pid in nats_server_pids() {
+        candidates.insert(pid);
+    }
+    for pid in candidates {
         let cmd = process_cmdline(pid);
         if cmd.is_empty() {
             continue;
         }
-        // Confirm it looks like nats before treating --pass as our leak signal.
-        let looks_like_nats = cmd.iter().any(|a| {
-            let lower = a.to_ascii_lowercase();
-            lower.contains("nats-server") || lower.ends_with("nats-server.exe")
-        });
-        if looks_like_nats && process_cmd_has_pass(&cmd) {
+        if !cmd_looks_like_nats(&cmd) || !process_cmd_has_pass(&cmd) {
+            continue;
+        }
+        // listen_pids already scoped to `port`; fallback PIDs must mention it.
+        if listen.contains(&pid) || cmdline_mentions_port(&cmd, port) {
             return true;
         }
     }
     false
+}
+
+fn cmd_looks_like_nats(cmd: &[String]) -> bool {
+    cmd.iter().any(|a| {
+        let lower = a.to_ascii_lowercase();
+        lower.contains("nats-server") || lower.ends_with("nats-server.exe")
+    })
+}
+
+fn cmdline_mentions_port(cmd: &[String], port: u16) -> bool {
+    let port_s = port.to_string();
+    cmd.windows(2)
+        .any(|w| (w[0] == "-p" || w[0] == "--port") && w[1] == port_s)
+        || cmd.iter().any(|a| {
+            a == &format!("--port={port}")
+                || a == &format!("-p={port}")
+                || a.ends_with(&format!(":{port}"))
+        })
+}
+
+fn nats_server_pids() -> Vec<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+    sys.processes()
+        .iter()
+        .filter(|(_, proc)| {
+            let name = proc.name().to_string_lossy().to_ascii_lowercase();
+            name == "nats-server" || name == "nats-server.exe"
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect()
 }
 
 fn process_cmd_has_pass(cmd: &[impl AsRef<std::ffi::OsStr>]) -> bool {
@@ -575,7 +619,7 @@ fn tokenize_command_line(line: &str) -> Vec<String> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn cmdline_via_ps(pid: u32) -> Vec<String> {
-    let output = GuardedCommand::new("ps")
+    let output = GuardedCommand::new(crate::kernel::guarded_command::unix_ps_exe())
         .args(["-p", &pid.to_string(), "-ww", "-o", "args="])
         .internal_daemon()
         .output();
@@ -594,7 +638,7 @@ fn cmdline_via_win32_cim(pid: u32) -> Vec<String> {
     // Filter by ProcessId so we only tokenize the target (counts/values never logged).
     let script =
         format!("(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine");
-    let output = GuardedCommand::new("powershell")
+    let output = GuardedCommand::new(crate::kernel::guarded_command::windows_powershell_exe())
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .internal_daemon()
         .output();
@@ -609,6 +653,7 @@ fn cmdline_via_win32_cim(pid: u32) -> Vec<String> {
 }
 
 /// Count how many process cmdlines contain `needle` (value never logged).
+/// Panics if the OS process listing tool fails — a vacuous 0 is not acceptable.
 #[cfg(test)]
 fn count_cmdline_matches(needle: &str) -> usize {
     if needle.is_empty() {
@@ -617,20 +662,19 @@ fn count_cmdline_matches(needle: &str) -> usize {
     #[cfg(target_os = "linux")]
     {
         let mut matches = 0usize;
-        if let Ok(entries) = std::fs::read_dir("/proc") {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(pid_str) = name.to_str() else {
-                    continue;
-                };
-                if !pid_str.chars().all(|c| c.is_ascii_digit()) {
-                    continue;
-                }
-                if let Ok(raw) = std::fs::read(entry.path().join("cmdline")) {
-                    let joined = String::from_utf8_lossy(&raw);
-                    if joined.contains(needle) {
-                        matches += 1;
-                    }
+        let entries = std::fs::read_dir("/proc").expect("/proc must be readable for cmdline scan");
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid_str) = name.to_str() else {
+                continue;
+            };
+            if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read(entry.path().join("cmdline")) {
+                let joined = String::from_utf8_lossy(&raw);
+                if joined.contains(needle) {
+                    matches += 1;
                 }
             }
         }
@@ -638,52 +682,43 @@ fn count_cmdline_matches(needle: &str) -> usize {
     }
     #[cfg(target_os = "macos")]
     {
-        let output = GuardedCommand::new("ps")
+        let output = GuardedCommand::new(crate::kernel::guarded_command::unix_ps_exe())
             .args(["-axww", "-o", "args="])
             .internal_daemon()
-            .output();
-        match output {
-            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter(|line| line.contains(needle))
-                .count(),
-            _ => 0,
-        }
+            .output()
+            .expect("ps -axww cmdline dump must succeed");
+        assert!(
+            output.status.success(),
+            "ps -axww failed (vacuous zero-match not allowed)"
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
     }
     #[cfg(windows)]
     {
+        // Full dump is not allowlisted for internal_daemon — use User source.
+        // Match counts only; never log the needle.
+        use crate::kernel::ActionSource;
         let script = r#"Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"#;
-        let output = GuardedCommand::new("powershell")
+        let output = GuardedCommand::new(crate::kernel::guarded_command::windows_powershell_exe())
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .internal_daemon()
-            .output();
-        match output {
-            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter(|line| line.contains(needle))
-                .count(),
-            _ => 0,
-        }
+            .source(ActionSource::User)
+            .output()
+            .expect("Get-CimInstance cmdline dump must succeed");
+        assert!(
+            output.status.success(),
+            "Get-CimInstance failed (vacuous zero-match not allowed)"
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything(),
-        );
-        let mut matches = 0usize;
-        for proc in sys.processes().values() {
-            for arg in proc.cmd() {
-                if arg.to_string_lossy().contains(needle) {
-                    matches += 1;
-                    break;
-                }
-            }
-        }
-        matches
+        panic!("count_cmdline_matches unsupported on this OS");
     }
 }
 
@@ -1014,14 +1049,16 @@ mod tests {
         assert!(nats_connect(&url).is_ok());
 
         // Spawned child cmdline: no password, has -c (match counts only).
-        if let Some(child) = service.child.as_ref() {
-            let pid = child.id().expect("child pid");
-            let cmd = process_cmdline(pid);
-            let pass_hits = cmd.iter().filter(|a| a.contains(&creds.password)).count();
-            assert_eq!(pass_hits, 0, "password must not appear in child argv");
-            assert!(cmd.iter().any(|a| a == "-c"), "expected -c: {cmd:?}");
-            assert!(!cmd.iter().any(|a| a == "--pass" || a == "--user"));
-        }
+        let child = service
+            .child
+            .as_ref()
+            .expect("nats service must own a child process after ensure");
+        let pid = child.id().expect("child pid");
+        let cmd = process_cmdline(pid);
+        let pass_hits = cmd.iter().filter(|a| a.contains(&creds.password)).count();
+        assert_eq!(pass_hits, 0, "password must not appear in child argv");
+        assert!(cmd.iter().any(|a| a == "-c"), "expected -c: {cmd:?}");
+        assert!(!cmd.iter().any(|a| a == "--pass" || a == "--user"));
         let conf = temp.join("nats-server.conf");
         assert!(conf.is_file(), "conf must be rewritten on launch");
         let conf_body = std::fs::read_to_string(&conf).unwrap();
@@ -1330,66 +1367,117 @@ mod tests {
         assert_eq!(kill_nats_on_port(1), 0);
     }
 
-    /// macOS/Linux: `ps -axww -o args` must show 0 matches for the NATS password
-    /// (counts only — values never printed).
+    /// macOS/Linux: `ps -axww -o args` — 0 matches for NATS password, user, and
+    /// `lounge_token()` (counts only). Positive control: dump must include `-c`
+    /// / conf / unique port so a vacuous empty listing cannot pass.
     #[cfg(unix)]
     #[test]
     fn nats_password_absent_from_ps_axww_args() {
-        use crate::kernel::ActionSource;
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
         let creds = NatsCredentials {
             user: format!("ps_u_{}", uuid::Uuid::new_v4().simple()),
             password: format!("ps_p_{}", uuid::Uuid::new_v4().simple()),
         };
-        let (_url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
+        let token = super::super::lounge_auth::lounge_token();
+        let (url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
             panic!("nats-server required for nats_password_absent_from_ps_axww_args: {err}");
         });
-        let output = GuardedCommand::new("ps")
-            .args(["-axww", "-o", "args"])
-            .source(ActionSource::User)
+        let port = url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .expect("ephemeral url port");
+        let output = GuardedCommand::new(crate::kernel::guarded_command::unix_ps_exe())
+            .args(["-axww", "-o", "args="])
+            .internal_daemon()
             .output()
-            .expect("ps -axww -o args");
-        assert!(output.status.success(), "ps failed");
+            .expect("ps -axww -o args=");
+        assert!(
+            output.status.success(),
+            "ps failed (vacuous zero-match not allowed)"
+        );
         let dump = String::from_utf8_lossy(&output.stdout);
-        let pass_matches = dump.matches(&creds.password).count();
+        let has_nats = dump.contains("nats-server");
+        let has_port = dump.contains(&port.to_string());
+        let has_conf = dump.contains("nats-server.conf") || dump.contains("-c");
+        assert!(
+            has_nats && (has_port || has_conf),
+            "positive control: ps dump must include spawned nats-server markers"
+        );
         assert_eq!(
-            pass_matches, 0,
-            "ps -axww -o args password match count must be 0"
+            dump.matches(&creds.password).count(),
+            0,
+            "ps password match count must be 0"
+        );
+        assert_eq!(
+            dump.matches(&creds.user).count(),
+            0,
+            "ps NATS user match count must be 0"
+        );
+        assert_eq!(
+            dump.matches(&token).count(),
+            0,
+            "ps LOUNGE_TOKEN match count must be 0"
         );
         let _ = child.kill();
         let _ = child.wait();
     }
 
-    /// Windows: `Get-CimInstance Win32_Process | Select-Object CommandLine` must show
-    /// 0 matches for the NATS password (counts only — values never printed).
+    /// Windows: `Get-CimInstance Win32_Process` CommandLine — 0 matches for
+    /// password, user, and `lounge_token()` (counts only). Positive control
+    /// requires the spawned nats-server markers in the dump.
     #[cfg(windows)]
     #[test]
     fn nats_password_absent_from_win32_process_commandline() {
         use crate::kernel::ActionSource;
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
         let creds = NatsCredentials {
             user: format!("cim_u_{}", uuid::Uuid::new_v4().simple()),
             password: format!("cim_p_{}", uuid::Uuid::new_v4().simple()),
         };
-        let (_url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
+        let token = super::super::lounge_auth::lounge_token();
+        let (url, mut child) = spawn_ephemeral_nats_with_auth(&creds).unwrap_or_else(|err| {
             panic!(
                 "nats-server required for nats_password_absent_from_win32_process_commandline: {err}"
             );
         });
+        let port = url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .expect("ephemeral url port");
         let script = r#"Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine"#;
-        let output = GuardedCommand::new("powershell")
+        let output = GuardedCommand::new(crate::kernel::guarded_command::windows_powershell_exe())
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .source(ActionSource::User)
             .output()
             .expect("Get-CimInstance Win32_Process");
         assert!(
             output.status.success(),
-            "powershell Get-CimInstance failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "powershell Get-CimInstance failed (vacuous zero-match not allowed)"
         );
         let dump = String::from_utf8_lossy(&output.stdout);
-        let pass_matches = dump.matches(&creds.password).count();
+        assert!(
+            dump.to_ascii_lowercase().contains("nats-server")
+                && (dump.contains(&port.to_string())
+                    || dump.contains("-c")
+                    || dump.contains("nats-server.conf")),
+            "positive control: CIM dump must include spawned nats-server markers"
+        );
         assert_eq!(
-            pass_matches, 0,
-            "Get-CimInstance CommandLine password match count must be 0"
+            dump.matches(&creds.password).count(),
+            0,
+            "Get-CimInstance password match count must be 0"
+        );
+        assert_eq!(
+            dump.matches(&creds.user).count(),
+            0,
+            "Get-CimInstance NATS user match count must be 0"
+        );
+        assert_eq!(
+            dump.matches(&token).count(),
+            0,
+            "Get-CimInstance LOUNGE_TOKEN match count must be 0"
         );
         let _ = child.kill();
         let _ = child.wait();
