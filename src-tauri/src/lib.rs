@@ -23,16 +23,18 @@ use models::{
 };
 use services::autodiscover::discovery_report;
 use services::{
-    api_keys_from_store, build_agent_efficiency_report, collect_quota_state_with_keys, data_root,
-    enable_graph_ui, fix_dead_symbol_with_agent as publish_fix_dead_symbol, graph_ui_status,
-    load_port_from_store, load_port_preference_from_store, on_main_window_closed,
-    open_dead_symbol_in_editor as open_indexed_dead_symbol, open_or_focus_graph_window,
-    open_path_in_editor, persist_port, persist_port_preference, record_dead_snapshot,
-    record_whisper_injection, resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump,
-    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery,
-    FixDeadSymbolResult, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob, IndexProgress,
+    api_keys_from_store, apply_placement_show, build_agent_efficiency_report,
+    collect_quota_state_with_keys, data_root, enable_graph_ui,
+    fix_dead_symbol_with_agent as publish_fix_dead_symbol, flush_session, graph_ui_status,
+    handle_window_event, load_port_from_store, load_port_preference_from_store,
+    on_main_window_closed, open_dead_symbol_in_editor as open_indexed_dead_symbol,
+    open_or_focus_graph_window, open_path_in_editor, persist_port, persist_port_preference,
+    placement_for_window, record_dead_snapshot, record_whisper_injection,
+    resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
+    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, FixDeadSymbolResult,
+    GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob, IndexProgress,
     IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
-    WorkspaceScanResult, GRAPH_WINDOW_LABEL,
+    WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -72,7 +74,11 @@ pub(crate) fn window_route_for_store(store: &ExperienceStore) -> &'static str {
     }
 }
 
-fn open_main_window(app: &tauri::App, start_route: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn open_main_window(
+    app: &tauri::App,
+    start_route: &str,
+    data_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut window_config = app
         .config()
         .app
@@ -81,7 +87,25 @@ fn open_main_window(app: &tauri::App, start_route: &str) -> Result<(), Box<dyn s
         .cloned()
         .ok_or("main window config missing")?;
     window_config.url = WebviewUrl::App(PathBuf::from(start_route.trim_start_matches('/')));
-    WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
+    let placement = placement_for_window(app.handle(), MAIN_WINDOW_LABEL, data_root);
+    window_config.width = placement.geometry.width;
+    window_config.height = placement.geometry.height;
+    window_config.min_width = Some(placement.min_width);
+    window_config.min_height = Some(placement.min_height);
+    window_config.maximized = false;
+    window_config.visible = false;
+    if placement.center {
+        window_config.center = true;
+        window_config.x = None;
+        window_config.y = None;
+    } else {
+        // Physical position applied after build (mixed-DPI safe); skip logical x/y.
+        window_config.center = false;
+        window_config.x = None;
+        window_config.y = None;
+    }
+    let window = WebviewWindowBuilder::from_config(app.handle(), &window_config)?.build()?;
+    apply_placement_show(&window, &placement)?;
     Ok(())
 }
 
@@ -128,7 +152,9 @@ pub fn run_with_start_route(start_route: &'static str) {
                     db::default_db_path(&workspace).display()
                 )
             })?;
-            open_main_window(app, start_route)?;
+            let geometry_session = GeometrySession::new(workspace.clone());
+            app.manage(geometry_session);
+            open_main_window(app, start_route, &workspace)?;
             let model = default_model_lock();
             let memory = MemoryBridge::discover().unwrap_or_else(|err| {
                 log::warn!("{err}");
@@ -392,29 +418,45 @@ pub fn run_with_start_route(start_route: &'static str) {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match &event {
-            RunEvent::WindowEvent { label, event, .. } if label == "main" => {
-                match event {
-                    WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
-                        if let Some(state) = app_handle.try_state::<GraphUiState>() {
-                            let bridge = app_handle.try_state::<MemoryBridge>();
-                            on_main_window_closed(
-                                app_handle,
-                                state.inner(),
-                                bridge.as_ref().map(|b| b.inner()),
-                            );
-                        } else if let Some(window) =
-                            app_handle.get_webview_window(GRAPH_WINDOW_LABEL)
-                        {
-                            let _ = window.destroy();
+            RunEvent::WindowEvent { label, event, .. }
+                if label == MAIN_WINDOW_LABEL || label == GRAPH_WINDOW_LABEL =>
+            {
+                handle_window_event(app_handle, label, event);
+                if label == MAIN_WINDOW_LABEL {
+                    match event {
+                        WindowEvent::CloseRequested { .. } => {
+                            // Geometry flush is handled in handle_window_event (main+graph).
+                            if let Some(state) = app_handle.try_state::<GraphUiState>() {
+                                let bridge = app_handle.try_state::<MemoryBridge>();
+                                on_main_window_closed(
+                                    app_handle,
+                                    state.inner(),
+                                    bridge.as_ref().map(|b| b.inner()),
+                                );
+                            } else if let Some(window) =
+                                app_handle.get_webview_window(GRAPH_WINDOW_LABEL)
+                            {
+                                let _ = window.destroy();
+                            }
                         }
+                        WindowEvent::Destroyed => {
+                            if let Some(state) = app_handle.try_state::<GraphUiState>() {
+                                let bridge = app_handle.try_state::<MemoryBridge>();
+                                on_main_window_closed(
+                                    app_handle,
+                                    state.inner(),
+                                    bridge.as_ref().map(|b| b.inner()),
+                                );
+                            }
+                        }
+                        // Desktop notification plugins do not deliver onAction. When the OS
+                        // activates/focuses the app (toast click, Alt-Tab, taskbar), raise the
+                        // pending-approval banner via focus_app_for_approval.
+                        WindowEvent::Focused(true) => {
+                            services::on_app_activated_for_pending_approval(app_handle);
+                        }
+                        _ => {}
                     }
-                    // Desktop notification plugins do not deliver onAction. When the OS
-                    // activates/focuses the app (toast click, Alt-Tab, taskbar), raise the
-                    // pending-approval banner via focus_app_for_approval.
-                    WindowEvent::Focused(true) => {
-                        services::on_app_activated_for_pending_approval(app_handle);
-                    }
-                    _ => {}
                 }
             }
             #[cfg(target_os = "macos")]
@@ -422,6 +464,8 @@ pub fn run_with_start_route(start_route: &'static str) {
                 services::on_app_activated_for_pending_approval(app_handle);
             }
             RunEvent::Exit | RunEvent::ExitRequested { .. } => {
+                // Cmd+Q / Dock Quit may skip CloseRequested — flush cached geometry.
+                flush_session(app_handle);
                 if let Some(state) = app_handle.try_state::<GraphUiState>() {
                     state.kill_spawned_child();
                 }
