@@ -4,6 +4,7 @@ pub mod approval_notify;
 pub mod approval_sound;
 pub mod auto_archive;
 pub mod autodiscover;
+pub mod cbm_ui_config;
 pub mod dead_symbol_actions;
 pub mod graph_ui;
 pub mod hardware;
@@ -44,12 +45,16 @@ pub use approval_notify::{
 };
 pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;
+pub use cbm_ui_config::{
+    cbm_cache_dir, cbm_cache_dir_from, cbm_ui_config_path, migrate_lounge_cbm_config_pollution,
+    restore_cbm_ui_config, snapshot_cbm_ui_config_at, CbmUiConfigSnapshot, RestoreOutcome,
+};
 pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
 };
 pub use graph_ui::{
-    default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless, graph_ui_status,
-    load_port_from_store, load_port_preference_from_store, on_main_window_closed,
+    classify_port_status, default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless,
+    graph_ui_status, load_port_from_store, load_port_preference_from_store, on_main_window_closed,
     open_or_focus_graph_window, persist_port, persist_port_preference, resolve_cbm_project_name,
     select_graph_ui_port, spawn_graph_ui_on_port, GraphUiPortMode, GraphUiState, GraphUiStatus,
     GRAPH_WINDOW_LABEL,
