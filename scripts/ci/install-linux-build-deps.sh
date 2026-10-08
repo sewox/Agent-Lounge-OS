@@ -53,6 +53,127 @@ escape_host_for_sed() {
   printf '%s' "$1" | sed 's/\./\\./g'
 }
 
+# --- Distro / package-manager detection (testable via --classify-os-release) ---
+
+os_release_path() {
+  printf '%s' "${CI_APT_OS_RELEASE_PATH:-/etc/os-release}"
+}
+
+# Read a single KEY from an os-release file (handles optional quotes).
+# Prints empty and returns 0 when missing (callers must not rely on || true).
+read_os_release_field() {
+  local file="$1"
+  local key="$2"
+  local line="" raw=""
+  if [[ ! -f "$file" ]]; then
+    printf ''
+    return 0
+  fi
+  set +e
+  line="$(grep -E "^${key}=" "$file" | head -n1)"
+  set -e
+  if [[ -z "$line" ]]; then
+    printf ''
+    return 0
+  fi
+  raw="${line#*=}"
+  raw="${raw#\"}"
+  raw="${raw%\"}"
+  raw="${raw#\'}"
+  raw="${raw%\'}"
+  printf '%s' "$raw"
+}
+
+# True when ID or ID_LIKE contains a debian/ubuntu token (apt family).
+is_apt_based_os_release() {
+  local file="${1:-$(os_release_path)}"
+  local id="" like="" token
+  id="$(read_os_release_field "$file" ID)"
+  like="$(read_os_release_field "$file" ID_LIKE)"
+  # shellcheck disable=SC2086
+  for token in $id $like; do
+    case "$token" in
+      debian|ubuntu) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+os_release_id() {
+  local file="${1:-$(os_release_path)}"
+  local id=""
+  id="$(read_os_release_field "$file" ID)"
+  if [[ -n "$id" ]]; then
+    printf '%s' "$id"
+    return 0
+  fi
+  # Non-Linux hosts have no os-release.
+  local uname_s
+  uname_s="$(uname -s 2>/dev/null)"
+  if [[ -z "$uname_s" ]]; then
+    uname_s="unknown"
+  fi
+  case "$uname_s" in
+    Darwin) printf 'macos' ;;
+    MINGW*|MSYS*|CYGWIN*) printf 'windows' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+detect_package_manager() {
+  # Prefer the real package manager binary, not apt-config alone.
+  if command -v apt-get >/dev/null 2>&1; then
+    printf 'apt'
+  elif command -v dnf >/dev/null 2>&1; then
+    printf 'dnf'
+  elif command -v yum >/dev/null 2>&1; then
+    printf 'yum'
+  elif command -v zypper >/dev/null 2>&1; then
+    printf 'zypper'
+  elif command -v pacman >/dev/null 2>&1; then
+    printf 'pacman'
+  elif command -v apk >/dev/null 2>&1; then
+    printf 'apk'
+  else
+    printf 'unknown'
+  fi
+}
+
+skip_apt_gate_message() {
+  local id pm
+  id="$(os_release_id)"
+  pm="$(detect_package_manager)"
+  printf 'skip: apt gate not applicable on %s (package manager: %s)\n' "$id" "$pm"
+}
+
+# Refuse to half-run apt install on non-Debian/Ubuntu hosts.
+require_apt_based_host() {
+  local file id pm
+  file="$(os_release_path)"
+  if is_apt_based_os_release "$file"; then
+    return 0
+  fi
+  id="$(os_release_id "$file")"
+  pm="$(detect_package_manager)"
+  echo "::error::install-linux-build-deps.sh is for Debian/Ubuntu apt only (Build AppImage + deb). Detected ID=${id} package manager=${pm}; refusing to run."
+  return 1
+}
+
+classify_os_release() {
+  local file="$1"
+  local id="" like="" apt_based="false"
+  if [[ ! -f "$file" ]]; then
+    echo "::error::os-release file not found: $file" >&2
+    return 1
+  fi
+  id="$(read_os_release_field "$file" ID)"
+  like="$(read_os_release_field "$file" ID_LIKE)"
+  if is_apt_based_os_release "$file"; then
+    apt_based="true"
+  fi
+  printf 'apt_based=%s id=%s id_like=%s\n' "$apt_based" "$id" "$like"
+}
+
 write_apt_ci_conf() {
   local dest="${1:-$APT_CONF_DROPIN}"
   local content
@@ -355,6 +476,9 @@ worst_case_seconds() {
 }
 
 main() {
+  if ! require_apt_based_host; then
+    exit 1
+  fi
   write_apt_ci_conf
   echo "== apt-config (Retries/Timeout) =="
   dump_apt_timeouts
@@ -409,10 +533,50 @@ self_test() {
   fi
   echo "ok: step budget ${worst}s < ${budget}s"
 
+  # 1b2) os-release classification (fake files; no real distros required).
+  # Fields separated by ';' (avoid '||' which trips ci-hiding-ban scanners).
+  local os_cases=(
+    "ubuntu;ID=ubuntu;ID_LIKE=debian;true"
+    "debian;ID=debian;;true"
+    "fedora;ID=fedora;ID_LIKE=\"rhel fedora\";false"
+    "opensuse;ID=\"opensuse-leap\";ID_LIKE=\"suse opensuse\";false"
+    "arch;ID=arch;ID_LIKE=archlinux;false"
+    "alpine;ID=alpine;;false"
+  )
+  local case_spec name id_line like_line expect got
+  for case_spec in "${os_cases[@]}"; do
+    IFS=';' read -r name id_line like_line expect <<<"$case_spec"
+    {
+      printf '%s\n' "$id_line"
+      if [[ -n "$like_line" ]]; then
+        printf '%s\n' "$like_line"
+      fi
+    } >"$dir/os-release-$name"
+    got="$(classify_os_release "$dir/os-release-$name")"
+    if [[ "$expect" == "true" ]]; then
+      if ! printf '%s' "$got" | grep -Fq 'apt_based=true'; then
+        echo "FAIL: expected apt_based=true for $name, got: $got" >&2
+        rm -rf "$dir"
+        return 1
+      fi
+    else
+      if ! printf '%s' "$got" | grep -Fq 'apt_based=false'; then
+        echo "FAIL: expected apt_based=false for $name, got: $got" >&2
+        rm -rf "$dir"
+        return 1
+      fi
+    fi
+  done
+  echo "ok: os-release classification cases (ubuntu/debian/fedora/opensuse/arch/alpine)"
+
   # 1c) later-sorted override: file layer loses, -o opts win.
-  # On Linux GitHub Actions, apt-config must exist (FAIL if missing).
-  # Elsewhere without apt-config (macOS/Windows CI, non-Debian Linux dev): skip.
-  if command -v apt-config >/dev/null 2>&1; then
+  # Distro-aware: only Debian/Ubuntu-family runs the apt-config gate.
+  # Fail loudly only on CI + apt-family + missing apt-config (broken runner).
+  local apt_family=0
+  if is_apt_based_os_release "$(os_release_path)"; then
+    apt_family=1
+  fi
+  if [[ "$apt_family" -eq 1 ]] && command -v apt-config >/dev/null 2>&1; then
     local parts="$dir/apt-parts"
     mkdir -p "$parts"
     write_apt_ci_conf "$parts/${APT_CONF_BASENAME}"
@@ -463,13 +627,13 @@ EOF
       return 1
     fi
     echo "ok: -o opts gate passes under later-sorted Retries 1 override"
+  elif [[ "$apt_family" -eq 1 && "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    echo "::error::apt-config missing on Debian/Ubuntu GitHub Actions runner — cannot verify -o opts gate"
+    rm -rf "$dir"
+    return 1
   else
-    if [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_OS:-}" == "Linux" ]]; then
-      echo "::error::apt-config missing on Linux GitHub Actions runner — cannot verify -o opts gate"
-      rm -rf "$dir"
-      return 1
-    fi
-    echo "ok: skipping apt-config override self-test (apt-config not on this OS)"
+    # Non-apt distro, or apt-family without apt-config outside CI, or macOS/Windows.
+    skip_apt_gate_message
   fi
 
   # 1d) sed host escaping
@@ -613,6 +777,15 @@ EOF
 
 if [[ "${1:-}" == "--self-test" ]]; then
   self_test
+  exit $?
+fi
+
+if [[ "${1:-}" == "--classify-os-release" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    echo "::error::usage: $0 --classify-os-release /path/to/os-release" >&2
+    exit 2
+  fi
+  classify_os_release "$2"
   exit $?
 fi
 

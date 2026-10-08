@@ -31,7 +31,9 @@ Branch protection (owner-managed) can require these **16** check names. They mus
 
 **Build AppImage + deb** (`linux-bundle.yml` → job `linux-bundle`) installs GTK/WebKit build deps via apt. Ubuntu mirrors on GitHub-hosted runners can stall mid-`apt-get update` / `install` (seen 2026-10-07: `azure.archive.ubuntu.com` timed out / was ignored, then the run hung ~40 minutes on `https://archive.ubuntu.com` until cancelled).
 
-Mitigations in `scripts/ci/install-linux-build-deps.sh` (step name unchanged):
+`scripts/ci/install-linux-build-deps.sh` is **Ubuntu/Debian apt only** (the ubuntu-22.04 bundle job). It reads `/etc/os-release` (`ID` / `ID_LIKE`) and treats a host as apt-based only when those fields contain `debian` or `ubuntu`. On any other distro it refuses immediately with `::error::`, naming the detected ID and package manager (`dnf` / `yum` / `zypper` / `pacman` / `apk` / `unknown`). Self-tests on non-apt hosts (and macOS/Windows) print an explicit `skip: apt gate not applicable on <ID> (package manager: …)` line — never a bare `ok`. On Debian/Ubuntu GitHub Actions, a missing `apt-config` is a broken runner and fails with `::error::`.
+
+Mitigations (step name unchanged):
 
 1. **apt options** via `/etc/apt/apt.conf.d/zzzz-agent-lounge-ci-retries` (must be lexically last; asserted at runtime) plus matching `apt-get -o` flags: `Acquire::Retries "5"`, HTTP/HTTPS/FTP timeouts `30`s, `DPkg::Lock::Timeout "120"`. Effective config is checked with `apt-config -o … dump` (same `-o` set as `apt-get`).
 2. **Step `timeout-minutes: 25`** so a stall fails fast instead of consuming the job’s 90-minute budget, while still allowing 3 full attempts (update 180s + install 290s + backoff 10/30 → worst case 1450s < 1500s, slack for cleanup).
