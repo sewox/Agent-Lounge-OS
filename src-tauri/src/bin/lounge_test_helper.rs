@@ -142,7 +142,7 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
             return Ok(None);
         }
         let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        if handle == INVALID_HANDLE_VALUE || handle as usize == 0 {
             return Err(format!(
                 "listen-stdin: GetStdHandle(STD_INPUT_HANDLE) failed: {}",
                 std::io::Error::last_os_error()
