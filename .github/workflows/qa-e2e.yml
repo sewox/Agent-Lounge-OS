@@ -22,9 +22,8 @@ jobs:
   e2e:
     name: Playwright e2e
     runs-on: ubuntu-latest
-    # Suite itself is ~10–15m; browser cache hit keeps install near seconds.
-    # First-run / cache-miss still downloads once. Keep headroom above suite time.
-    timeout-minutes: 30
+    # Apt OS-deps step budget is 26m; suite ~10–15m; browser cache hit is seconds.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -50,19 +49,20 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}-chromium
 
-      # Cache miss: download Chromium + install OS deps.
+      # OS deps always via hardened installer (never playwright install-deps / --with-deps).
+      - name: Install Playwright OS deps
+        timeout-minutes: 26
+        run: bash scripts/ci/install-playwright-os-deps.sh chromium
+
+      # Cache miss: download Chromium only (OS deps already installed above).
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
-      # Cache hit: browsers restored; still install OS deps (not in browser cache).
-      # `playwright install chromium` is a no-op download when binaries are present,
-      # and backfills if the restored cache was incomplete.
-      - name: Install Playwright OS deps (cache hit)
+      # Cache hit: browsers restored; backfill if the restored cache was incomplete.
+      - name: Install Playwright browsers (cache hit backfill)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: |
-          npx playwright install-deps chromium
-          npx playwright install chromium
+        run: npx playwright install chromium
 
       - name: Build static UI
         run: npm run build
