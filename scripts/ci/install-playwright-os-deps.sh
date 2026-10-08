@@ -74,17 +74,27 @@ EOF
 
   local npx_bin="${CI_PLAYWRIGHT_NPX:-npx}"
   local pw_rc=0
+  local pw_out="${capture_dir}/npx.out"
+  local pw_err="${capture_dir}/npx.err"
+  # Keep playwright chatter off this function's stdout — callers parse package
+  # lines from stdout only (process-sub / while-read). Noise here becomes fake
+  # apt package names (e.g. "Installing dependencies...").
   set +e
-  PATH="${capture_dir}:${PATH}" "$npx_bin" playwright install-deps "$browser"
+  PATH="${capture_dir}:${PATH}" "$npx_bin" playwright install-deps "$browser" \
+    >"$pw_out" 2>"$pw_err"
   pw_rc=$?
   set -e
   if [[ "$pw_rc" -ne 0 ]]; then
-    echo "::error::playwright install-deps capture failed (exit=${pw_rc})"
+    echo "::error::playwright install-deps capture failed (exit=${pw_rc})" >&2
+    [[ -s "$pw_err" ]] && cat "$pw_err" >&2
+    [[ -s "$pw_out" ]] && cat "$pw_out" >&2
     rm -rf "$capture_dir"
     return 1
   fi
   if [[ ! -s "$packages_file" ]]; then
-    echo "::error::playwright install-deps did not invoke apt-get install (no packages captured)"
+    echo "::error::playwright install-deps did not invoke apt-get install (no packages captured)" >&2
+    [[ -s "$pw_err" ]] && cat "$pw_err" >&2
+    [[ -s "$pw_out" ]] && cat "$pw_out" >&2
     rm -rf "$capture_dir"
     return 1
   fi
@@ -93,6 +103,12 @@ EOF
   local p q seen
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
+    # Refuse status lines / paths that leaked into the capture file.
+    if [[ ! "$p" =~ ^[a-zA-Z0-9][a-zA-Z0-9+.-]*$ ]]; then
+      echo "::error::captured non-package token from playwright apt-get: $(printf '%q' "$p")" >&2
+      rm -rf "$capture_dir"
+      return 1
+    fi
     seen=0
     for q in "${pkgs[@]+"${pkgs[@]}"}"; do
       if [[ "$q" == "$p" ]]; then
@@ -107,7 +123,7 @@ EOF
   rm -rf "$capture_dir"
 
   if [[ "${#pkgs[@]}" -eq 0 ]]; then
-    echo "::error::captured empty playwright apt package list"
+    echo "::error::captured empty playwright apt package list" >&2
     return 1
   fi
   printf '%s\n' "${pkgs[@]}"
@@ -124,6 +140,9 @@ if [[ "${1:-}" != "playwright" || "${2:-}" != "install-deps" ]]; then
   echo "stub npx unexpected args: $*" >&2
   exit 2
 fi
+# Real playwright prints status on stdout before apt-get; capture must ignore it.
+echo "Installing dependencies..."
+echo "Switching to root user to install dependencies..."
 sudo -- sh -c 'apt-get update&& apt-get install -y --no-install-recommends libasound2t64 libnss3 xvfb'
 EOF
   chmod +x "${dir}/npx"
@@ -165,6 +184,12 @@ EOF
     rm -rf "$dir"
     return 1
   fi
+  if printf '%s' "$out" | grep -Eqi 'HARDENED.*(Installing dependencies|Switching to root)'; then
+    echo "FAIL: playwright stdout leaked into apt package list:" >&2
+    echo "$out" >&2
+    rm -rf "$dir"
+    return 1
+  fi
   rm -rf "$dir"
   echo "install-playwright-os-deps self-test: ok"
   return 0
@@ -185,9 +210,21 @@ if ! bash "$HARDENED_APT" --check-host-only; then
   exit 1
 fi
 
-mapfile -t PKGS < <(capture_playwright_apt_packages "$BROWSER")
+# bash 3.2 (macOS /CI unit hosts): no mapfile. Capture to a file so set -e
+# sees capture failures (process-sub exit status is easy to miss).
+_pw_pkgs_file="$(mktemp "${TMPDIR:-/tmp}/pw-pkgs.XXXXXX")"
+if ! capture_playwright_apt_packages "$BROWSER" >"$_pw_pkgs_file"; then
+  rm -f "$_pw_pkgs_file"
+  exit 1
+fi
+PKGS=()
+while IFS= read -r _pw_pkg; do
+  [[ -z "$_pw_pkg" ]] && continue
+  PKGS+=("$_pw_pkg")
+done <"$_pw_pkgs_file"
+rm -f "$_pw_pkgs_file"
 if [[ "${#PKGS[@]}" -eq 0 ]]; then
-  echo "::error::no playwright apt packages captured for browser=${BROWSER}"
+  echo "::error::no playwright apt packages captured for browser=${BROWSER}" >&2
   exit 1
 fi
 echo "playwright apt packages (${#PKGS[@]}): ${PKGS[*]}"
