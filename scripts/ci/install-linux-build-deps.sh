@@ -19,17 +19,51 @@ APT_GET_O_OPTS=(
   -o DPkg::Lock::Timeout=120
 )
 MAX_ATTEMPTS=3
-# Per-command budgets fit step timeout-minutes: 25 (1500s):
-# worst case 3×(180+290)+10+30 = 1450s < 1500s (50s slack for cleanup).
+# Force-kill apt-get if it ignores SIGTERM after the duration (`timeout -k`).
+TIMEOUT_KILL_AFTER_SEC=15
+# Per-command budgets fit step timeout-minutes: 26 (1560s), including -k kill wait:
+# worst case 3×((180+15)+(290+15))+10+30 = 1540s < 1560s.
 UPDATE_TIMEOUT_SEC=180
 INSTALL_TIMEOUT_SEC=290
 BACKOFFS=(10 30)
-STEP_TIMEOUT_MINUTES=25
-# Force-kill apt-get if it ignores SIGTERM after the duration.
-TIMEOUT_KILL_AFTER_SEC=15
+STEP_TIMEOUT_MINUTES=26
 
 # Set on first mirror mutation; used to restore originals on later attempts.
 APT_SOURCES_BACKUP_DIR=""
+
+# Temp dirs registered for EXIT cleanup (avoid RETURN traps — they fire on nested returns).
+_CI_APT_TEMP_DIRS=()
+register_temp_dir() {
+  _CI_APT_TEMP_DIRS+=("$1")
+}
+cleanup_temp_dirs() {
+  local d
+  for d in "${_CI_APT_TEMP_DIRS[@]+"${_CI_APT_TEMP_DIRS[@]}"}"; do
+    if [[ -n "$d" && -d "$d" ]]; then
+      rm -rf "$d"
+    fi
+  done
+  _CI_APT_TEMP_DIRS=()
+}
+trap cleanup_temp_dirs EXIT
+
+# Optional fake root for mirror self-tests (no sudo; paths under $CI_APT_TEST_MIRROR_ROOT/etc/apt).
+apt_etc_dir() {
+  if [[ -n "${CI_APT_TEST_MIRROR_ROOT:-}" ]]; then
+    printf '%s/etc/apt' "${CI_APT_TEST_MIRROR_ROOT}"
+  else
+    printf '/etc/apt'
+  fi
+}
+
+# Run a privileged filesystem op: sudo in production; plain in mirror self-tests.
+run_priv() {
+  if [[ -n "${CI_APT_TEST_MIRROR_ROOT:-}" ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
 
 # Package list must stay in sync with linux-bundle.yml (Build AppImage + deb).
 PACKAGES=(
@@ -76,11 +110,14 @@ read_os_release_field() {
     printf ''
     return 0
   fi
+  # Strip CR from CRLF os-release files (Windows checkouts / odd images).
+  line="${line//$'\r'/}"
   raw="${line#*=}"
   raw="${raw#\"}"
   raw="${raw%\"}"
   raw="${raw#\'}"
   raw="${raw%\'}"
+  raw="${raw//$'\r'/}"
   printf '%s' "$raw"
 }
 
@@ -143,7 +180,12 @@ skip_apt_gate_message() {
   local id pm
   id="$(os_release_id)"
   pm="$(detect_package_manager)"
-  printf 'skip: apt gate not applicable on %s (package manager: %s)\n' "$id" "$pm"
+  if is_apt_based_os_release "$(os_release_path)"; then
+    # Apt-family but apt-config missing (local/non-CI) — not "not applicable".
+    printf 'skip: apt-config missing on %s (non-CI); -o opts gate not run (package manager: %s)\n' "$id" "$pm"
+  else
+    printf 'skip: apt gate not applicable on %s (package manager: %s)\n' "$id" "$pm"
+  fi
 }
 
 # Refuse to half-run apt install on non-Debian/Ubuntu hosts.
@@ -297,22 +339,38 @@ backup_apt_sources() {
   fi
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
     APT_SOURCES_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources-dry.XXXXXX")"
+    register_temp_dir "${APT_SOURCES_BACKUP_DIR}"
     echo "dry-run: backup apt sources -> ${APT_SOURCES_BACKUP_DIR}"
     return 0
   fi
+  local etc
+  etc="$(apt_etc_dir)"
   APT_SOURCES_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources.XXXXXX")"
-  mkdir -p "${APT_SOURCES_BACKUP_DIR}/sources.list.d"
-  if [[ -f /etc/apt/sources.list ]]; then
-    sudo cp -a /etc/apt/sources.list "${APT_SOURCES_BACKUP_DIR}/sources.list"
+  register_temp_dir "${APT_SOURCES_BACKUP_DIR}"
+  if ! mkdir -p "${APT_SOURCES_BACKUP_DIR}/sources.list.d"; then
+    echo "::error::failed to create apt sources backup directory"
+    return 1
+  fi
+  if [[ -f "${etc}/sources.list" ]]; then
+    if ! run_priv cp -a "${etc}/sources.list" "${APT_SOURCES_BACKUP_DIR}/sources.list"; then
+      echo "::error::failed to back up ${etc}/sources.list"
+      return 1
+    fi
   fi
   local f
-  for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+  for f in "${etc}/sources.list.d"/*.list "${etc}/sources.list.d"/*.sources; do
     if [[ -f "$f" ]]; then
-      sudo cp -a "$f" "${APT_SOURCES_BACKUP_DIR}/sources.list.d/$(basename "$f")"
+      if ! run_priv cp -a "$f" "${APT_SOURCES_BACKUP_DIR}/sources.list.d/$(basename "$f")"; then
+        echo "::error::failed to back up $f"
+        return 1
+      fi
     fi
   done
-  if [[ -f /etc/apt/apt-mirrors.txt ]]; then
-    sudo cp -a /etc/apt/apt-mirrors.txt "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt"
+  if [[ -f "${etc}/apt-mirrors.txt" ]]; then
+    if ! run_priv cp -a "${etc}/apt-mirrors.txt" "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt"; then
+      echo "::error::failed to back up ${etc}/apt-mirrors.txt"
+      return 1
+    fi
   fi
   echo "Backed up apt sources to ${APT_SOURCES_BACKUP_DIR}"
 }
@@ -326,17 +384,28 @@ restore_apt_sources() {
     echo "dry-run: restore apt sources from ${APT_SOURCES_BACKUP_DIR}"
     return 0
   fi
+  local etc
+  etc="$(apt_etc_dir)"
   if [[ -f "${APT_SOURCES_BACKUP_DIR}/sources.list" ]]; then
-    sudo cp -a "${APT_SOURCES_BACKUP_DIR}/sources.list" /etc/apt/sources.list
+    if ! run_priv cp -a "${APT_SOURCES_BACKUP_DIR}/sources.list" "${etc}/sources.list"; then
+      echo "::error::failed to restore ${etc}/sources.list"
+      return 1
+    fi
   fi
   local f
   for f in "${APT_SOURCES_BACKUP_DIR}/sources.list.d"/*; do
     if [[ -f "$f" ]]; then
-      sudo cp -a "$f" "/etc/apt/sources.list.d/$(basename "$f")"
+      if ! run_priv cp -a "$f" "${etc}/sources.list.d/$(basename "$f")"; then
+        echo "::error::failed to restore $f"
+        return 1
+      fi
     fi
   done
   if [[ -f "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt" ]]; then
-    sudo cp -a "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+    if ! run_priv cp -a "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt" "${etc}/apt-mirrors.txt"; then
+      echo "::error::failed to restore ${etc}/apt-mirrors.txt"
+      return 1
+    fi
   fi
   echo "Restored apt sources from ${APT_SOURCES_BACKUP_DIR}"
 }
@@ -351,7 +420,11 @@ backup_mentions_host() {
   if [[ -z "${APT_SOURCES_BACKUP_DIR}" || ! -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
     return 1
   fi
-  grep -RFq "$host" "${APT_SOURCES_BACKUP_DIR}" 2>/dev/null
+  set +e
+  grep -RFq "$host" "${APT_SOURCES_BACKUP_DIR}"
+  local grc=$?
+  set -e
+  return "$grc"
 }
 
 switch_ubuntu_mirror() {
@@ -362,16 +435,22 @@ switch_ubuntu_mirror() {
     echo "dry-run: switch mirror ${from_host} -> ${to_host}"
     return 0
   fi
-  local from_esc
+  local from_esc etc f
   from_esc="$(escape_host_for_sed "$from_host")"
-  local f
-  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+  etc="$(apt_etc_dir)"
+  for f in "${etc}/sources.list" "${etc}/sources.list.d"/*.list "${etc}/sources.list.d"/*.sources; do
     if [[ -f "$f" ]]; then
-      sudo sed -i "s#//${from_esc}#//${to_host}#g" "$f"
+      if ! run_priv sed -i "s#//${from_esc}#//${to_host}#g" "$f"; then
+        echo "::error::failed to rewrite mirror host in $f (${from_host} -> ${to_host})"
+        return 1
+      fi
     fi
   done
-  if [[ -f /etc/apt/apt-mirrors.txt ]]; then
-    sudo sed -i "s#//${from_esc}#//${to_host}#g" /etc/apt/apt-mirrors.txt
+  if [[ -f "${etc}/apt-mirrors.txt" ]]; then
+    if ! run_priv sed -i "s#//${from_esc}#//${to_host}#g" "${etc}/apt-mirrors.txt"; then
+      echo "::error::failed to rewrite mirror host in ${etc}/apt-mirrors.txt"
+      return 1
+    fi
   fi
   echo "Switched apt mirror host: ${from_host} -> ${to_host}"
 }
@@ -469,10 +548,13 @@ step_budget_seconds() {
 worst_case_seconds() {
   local backoff_sum=0
   local b
+  local per_attempt
   for b in "${BACKOFFS[@]}"; do
     backoff_sum=$((backoff_sum + b))
   done
-  echo $((MAX_ATTEMPTS * (UPDATE_TIMEOUT_SEC + INSTALL_TIMEOUT_SEC) + backoff_sum))
+  # Each timed command may wait TIMEOUT_KILL_AFTER_SEC after SIGTERM (-k).
+  per_attempt=$((UPDATE_TIMEOUT_SEC + TIMEOUT_KILL_AFTER_SEC + INSTALL_TIMEOUT_SEC + TIMEOUT_KILL_AFTER_SEC ))
+  echo $((MAX_ATTEMPTS * per_attempt + backoff_sum))
 }
 
 main() {
@@ -489,8 +571,7 @@ main() {
 self_test() {
   local dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-deps.XXXXXX")"
-  # Explicit cleanup only — no RETURN/EXIT traps (RETURN fires on nested
-  # function returns; EXIT + env-prefixed function calls is fragile).
+  register_temp_dir "$dir"
 
   # 1) drop-in content
   write_apt_ci_conf "$dir/${APT_CONF_BASENAME}"
@@ -502,36 +583,36 @@ self_test() {
   do
     if ! grep -Fq "$needle" "$dir/${APT_CONF_BASENAME}"; then
       echo "FAIL: apt conf missing: $needle" >&2
-      rm -rf "$dir"
       return 1
     fi
   done
 
-  # 1b) step budget: 3×(180+290)+10+30 = 1450 < 25×60 = 1500
+  # 1b) step budget includes timeout -k kill wait:
+  # 3×((180+15)+(290+15))+10+30 = 1540 < 26×60 = 1560
   local worst budget
   worst="$(worst_case_seconds)"
   budget="$(step_budget_seconds)"
   if [[ "$worst" -ge "$budget" ]]; then
     echo "FAIL: worst-case ${worst}s >= step budget ${budget}s" >&2
-    rm -rf "$dir"
     return 1
   fi
   if [[ "$UPDATE_TIMEOUT_SEC" -ne 180 || "$INSTALL_TIMEOUT_SEC" -ne 290 ]]; then
     echo "FAIL: expected update=180 install=290, got ${UPDATE_TIMEOUT_SEC}/${INSTALL_TIMEOUT_SEC}" >&2
-    rm -rf "$dir"
     return 1
   fi
-  if [[ "$STEP_TIMEOUT_MINUTES" -ne 25 ]]; then
-    echo "FAIL: expected STEP_TIMEOUT_MINUTES=25, got ${STEP_TIMEOUT_MINUTES}" >&2
-    rm -rf "$dir"
+  if [[ "$TIMEOUT_KILL_AFTER_SEC" -ne 15 ]]; then
+    echo "FAIL: expected TIMEOUT_KILL_AFTER_SEC=15, got ${TIMEOUT_KILL_AFTER_SEC}" >&2
     return 1
   fi
-  if [[ "$worst" -ne 1450 || "$budget" -ne 1500 ]]; then
-    echo "FAIL: expected worst=1450 budget=1500, got ${worst}/${budget}" >&2
-    rm -rf "$dir"
+  if [[ "$STEP_TIMEOUT_MINUTES" -ne 26 ]]; then
+    echo "FAIL: expected STEP_TIMEOUT_MINUTES=26, got ${STEP_TIMEOUT_MINUTES}" >&2
     return 1
   fi
-  echo "ok: step budget ${worst}s < ${budget}s"
+  if [[ "$worst" -ne 1540 || "$budget" -ne 1560 ]]; then
+    echo "FAIL: expected worst=1540 budget=1560, got ${worst}/${budget}" >&2
+    return 1
+  fi
+  echo "ok: step budget ${worst}s < ${budget}s (includes -k ${TIMEOUT_KILL_AFTER_SEC}s)"
 
   # 1b2) os-release classification (fake files; no real distros required).
   # Fields separated by ';' (avoid '||' which trips ci-hiding-ban scanners).
@@ -556,18 +637,27 @@ self_test() {
     if [[ "$expect" == "true" ]]; then
       if ! printf '%s' "$got" | grep -Fq 'apt_based=true'; then
         echo "FAIL: expected apt_based=true for $name, got: $got" >&2
-        rm -rf "$dir"
         return 1
       fi
     else
       if ! printf '%s' "$got" | grep -Fq 'apt_based=false'; then
         echo "FAIL: expected apt_based=false for $name, got: $got" >&2
-        rm -rf "$dir"
         return 1
       fi
     fi
   done
-  echo "ok: os-release classification cases (ubuntu/debian/fedora/opensuse/arch/alpine)"
+  # CRLF os-release must still parse.
+  printf 'ID=ubuntu\r\nID_LIKE=debian\r\n' >"$dir/os-release-crlf"
+  got="$(classify_os_release "$dir/os-release-crlf")"
+  if ! printf '%s' "$got" | grep -Fq 'apt_based=true'; then
+    echo "FAIL: CRLF os-release not classified as apt-based: $got" >&2
+    return 1
+  fi
+  if ! printf '%s' "$got" | grep -Fq 'id=ubuntu'; then
+    echo "FAIL: CRLF os-release id not stripped: $got" >&2
+    return 1
+  fi
+  echo "ok: os-release classification cases (ubuntu/debian/fedora/opensuse/arch/alpine + CRLF)"
 
   # 1c) later-sorted override: file layer loses, -o opts win.
   # Distro-aware: only Debian/Ubuntu-family runs the apt-config gate.
@@ -589,7 +679,6 @@ EOF
     last="$(LC_ALL=C ls "$parts" | tail -1)"
     if [[ "$last" == "$APT_CONF_BASENAME" ]]; then
       echo "FAIL: expected override file to sort after drop-in, last=${last}" >&2
-      rm -rf "$dir"
       return 1
     fi
     # APT_CONFIG + Dir::Etc::parts isolates parts (plain -o Dir::Etc::parts is a no-op on jammy).
@@ -604,32 +693,27 @@ EOF
     if printf '%s\n' "$file_dump" | grep -Fq 'Acquire::Retries "5"'; then
       echo "FAIL: file-layer dump should show Retries 1 under later-sorted override" >&2
       echo "$file_dump" >&2
-      rm -rf "$dir"
       return 1
     fi
     if ! printf '%s\n' "$file_dump" | grep -Fq 'Acquire::Retries "1"'; then
       echo "FAIL: file-layer dump missing Retries 1" >&2
       echo "$file_dump" >&2
-      rm -rf "$dir"
       return 1
     fi
     echo "ok: file-layer gate would fail under later-sorted Retries 1 override"
     if ! printf '%s\n' "$o_dump" | grep -Fq 'Acquire::Retries "5"'; then
       echo "FAIL: -o opts dump should show Retries 5" >&2
       echo "$o_dump" >&2
-      rm -rf "$dir"
       return 1
     fi
     if ! printf '%s\n' "$o_dump" | grep -Fq 'Acquire::http::Timeout "30"'; then
       echo "FAIL: -o opts dump should show http Timeout 30" >&2
       echo "$o_dump" >&2
-      rm -rf "$dir"
       return 1
     fi
     echo "ok: -o opts gate passes under later-sorted Retries 1 override"
   elif [[ "$apt_family" -eq 1 && "${GITHUB_ACTIONS:-}" == "true" ]]; then
     echo "::error::apt-config missing on Debian/Ubuntu GitHub Actions runner — cannot verify -o opts gate"
-    rm -rf "$dir"
     return 1
   else
     # Non-apt distro, or apt-family without apt-config outside CI, or macOS/Windows.
@@ -641,9 +725,85 @@ EOF
   esc="$(escape_host_for_sed 'azure.archive.ubuntu.com')"
   if [[ "$esc" != 'azure\.archive\.ubuntu\.com' ]]; then
     echo "FAIL: escape_host_for_sed got: $esc" >&2
-    rm -rf "$dir"
     return 1
   fi
+
+  # 1e) backup/switch must surface cp/sed failures even under `if !` (set -e disabled).
+  local mroot="$dir/mirror-root"
+  mkdir -p "$mroot/etc/apt/sources.list.d"
+  printf 'deb http://azure.archive.ubuntu.com/ubuntu jammy main\n' >"$mroot/etc/apt/sources.list"
+  local stubbin="$dir/failbin"
+  mkdir -p "$stubbin"
+  cat >"$stubbin/cp" <<'EOF'
+#!/usr/bin/env bash
+echo "stub cp failing" >&2
+exit 1
+EOF
+  chmod +x "$stubbin/cp"
+  cat >"$stubbin/sed" <<'EOF'
+#!/usr/bin/env bash
+echo "stub sed failing" >&2
+exit 1
+EOF
+  chmod +x "$stubbin/sed"
+  APT_SOURCES_BACKUP_DIR=""
+  set +e
+  CI_APT_DRY_RUN=0 CI_APT_TEST_MIRROR_ROOT="$mroot" PATH="$stubbin:$PATH" \
+    backup_apt_sources >"$dir/backup-fail.log" 2>&1
+  local backup_rc=$?
+  set -e
+  if [[ "$backup_rc" -eq 0 ]]; then
+    echo "FAIL: backup_apt_sources should fail when cp fails" >&2
+    return 1
+  fi
+  if ! grep -Fq '::error::failed to back up' "$dir/backup-fail.log"; then
+    echo "FAIL: missing ::error:: on backup cp failure" >&2
+    cat "$dir/backup-fail.log" >&2
+    return 1
+  fi
+  # Successful backup then failing sed on switch.
+  APT_SOURCES_BACKUP_DIR=""
+  # Use real cp for backup, stub sed for switch.
+  set +e
+  CI_APT_DRY_RUN=0 CI_APT_TEST_MIRROR_ROOT="$mroot" \
+    backup_apt_sources >"$dir/backup-ok.log" 2>&1
+  local backup_ok_rc=$?
+  set -e
+  if [[ "$backup_ok_rc" -ne 0 ]]; then
+    echo "FAIL: backup_apt_sources should succeed with real cp" >&2
+    cat "$dir/backup-ok.log" >&2
+    return 1
+  fi
+  set +e
+  CI_APT_DRY_RUN=0 CI_APT_TEST_MIRROR_ROOT="$mroot" PATH="$stubbin:$PATH" \
+    switch_ubuntu_mirror "azure.archive.ubuntu.com" "archive.ubuntu.com" \
+    >"$dir/switch-fail.log" 2>&1
+  local switch_rc=$?
+  set -e
+  if [[ "$switch_rc" -eq 0 ]]; then
+    echo "FAIL: switch_ubuntu_mirror should fail when sed fails" >&2
+    return 1
+  fi
+  if ! grep -Fq '::error::failed to rewrite mirror host' "$dir/switch-fail.log"; then
+    echo "FAIL: missing ::error:: on sed failure" >&2
+    cat "$dir/switch-fail.log" >&2
+    return 1
+  fi
+  # And under `if !` (same set -e exemption as install_with_retries).
+  set +e
+  if ! CI_APT_DRY_RUN=0 CI_APT_TEST_MIRROR_ROOT="$mroot" PATH="$stubbin:$PATH" \
+      switch_ubuntu_mirror "azure.archive.ubuntu.com" "archive.ubuntu.com" \
+      >"$dir/switch-if.log" 2>&1; then
+    switch_rc=1
+  else
+    switch_rc=0
+  fi
+  set -e
+  if [[ "$switch_rc" -eq 0 ]]; then
+    echo "FAIL: switch under if ! should still return non-zero when sed fails" >&2
+    return 1
+  fi
+  echo "ok: mirror backup/switch surface cp/sed failures with ::error::"
 
   # timeout shim: accept `timeout [-k SEC] DURATION CMD…`
   cat >"$dir/fake-timeout" <<'EOF'
@@ -715,7 +875,6 @@ EOF
   tries="$(cat "$dir/flaky-state")"
   if [[ "$tries" -ne 3 ]]; then
     echo "FAIL: expected 3 update attempts, got $tries" >&2
-    rm -rf "$dir"
     return 1
   fi
 
@@ -740,13 +899,11 @@ EOF
   set -e
   if [[ "$rc" -eq 0 ]]; then
     echo "FAIL: expected non-zero from exhausted retries" >&2
-    rm -rf "$dir"
     return 1
   fi
   if ! printf '%s' "$err_out" | grep -Fq '::error::Install Linux build dependencies failed'; then
     echo "FAIL: missing ::error:: on final failure" >&2
     echo "$err_out" >&2
-    rm -rf "$dir"
     return 1
   fi
 
@@ -758,19 +915,16 @@ EOF
   )
   if [[ "${#PACKAGES[@]}" -ne "${#expected[@]}" ]]; then
     echo "FAIL: package count drift" >&2
-    rm -rf "$dir"
     return 1
   fi
   local i
   for i in "${!expected[@]}"; do
     if [[ "${PACKAGES[$i]}" != "${expected[$i]}" ]]; then
       echo "FAIL: package drift at $i: ${PACKAGES[$i]} != ${expected[$i]}" >&2
-      rm -rf "$dir"
       return 1
     fi
   done
 
-  rm -rf "$dir"
   echo "install-linux-build-deps self-test: ok"
   return 0
 }
