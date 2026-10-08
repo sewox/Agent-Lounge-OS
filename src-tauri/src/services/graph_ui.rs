@@ -1005,8 +1005,20 @@ pub async fn spawn_graph_ui_on_port_with_store(
         let _guard = super::listen_handoff::complete_listen_handoff(pending, &mut child)
             .context("complete Graph UI listen handoff")?;
     }
-    // Drop unused stderr pipe after handoff so the child cannot block on a full pipe.
-    drop(child.stderr.take());
+    // Drain leftover stderr (do not close the pipe — Windows helpers die on
+    // ERROR_BROKEN_PIPE if the parent drops the read end while they still write).
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 512];
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+    }
     state.store_child(child);
     sync_owned_pid(bridge, state);
 
