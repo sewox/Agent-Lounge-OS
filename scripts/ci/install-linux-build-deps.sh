@@ -7,7 +7,16 @@
 #   bash scripts/ci/install-linux-build-deps.sh --self-test
 set -euo pipefail
 
-APT_CONF_DROPIN="/etc/apt/apt.conf.d/80-ci-retries"
+# Lexically last so runner image drop-ins (Timeout 15 / Retries 1) cannot override.
+APT_CONF_DROPIN="/etc/apt/apt.conf.d/99zz-ci-retries"
+# Command-line -o wins over every apt.conf.d file (belt + suspenders).
+APT_GET_O_OPTS=(
+  -o Acquire::Retries=5
+  -o Acquire::http::Timeout=30
+  -o Acquire::https::Timeout=30
+  -o Acquire::ftp::Timeout=30
+  -o DPkg::Lock::Timeout=120
+)
 MAX_ATTEMPTS=3
 ATTEMPT_TIMEOUT_SEC=600
 BACKOFFS=(10 30)
@@ -46,12 +55,13 @@ EOF
     printf '%s\n' "$content" >"$dest"
     return 0
   fi
+  # Remove older drop-in name from the first revision of this script.
+  sudo rm -f /etc/apt/apt.conf.d/80-ci-retries
   printf '%s\n' "$content" | sudo tee "$dest" >/dev/null
 }
 
 dump_apt_timeouts() {
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
-    # Simulate what apt-config dump | grep would show after our drop-in.
     cat <<'EOF'
 Acquire::Retries "5";
 Acquire::http::Timeout "30";
@@ -59,10 +69,27 @@ Acquire::https::Timeout "30";
 EOF
     return 0
   fi
-  apt-config dump | grep -E 'Retries|Timeout' || {
-    echo "::error::apt-config dump did not report Retries/Timeout — drop-in missing?"
+  echo "== drop-in ${APT_CONF_DROPIN} =="
+  cat "$APT_CONF_DROPIN"
+  echo "== apt-config dump (Retries/Timeout) =="
+  local dumped
+  set +e
+  dumped="$(apt-config dump | grep -E 'Acquire::(Retries|http::Timeout|https::Timeout|ftp::Timeout)|DPkg::Lock::Timeout')"
+  set -e
+  printf '%s\n' "$dumped"
+  if ! printf '%s\n' "$dumped" | grep -Fq 'Acquire::Retries "5"'; then
+    echo "::error::Acquire::Retries is not 5 — drop-in overridden or missing. apt.conf.d:"
+    ls -la /etc/apt/apt.conf.d/ >&2
     return 1
-  }
+  fi
+  if ! printf '%s\n' "$dumped" | grep -Fq 'Acquire::http::Timeout "30"'; then
+    echo "::error::Acquire::http::Timeout is not 30 — drop-in overridden or missing."
+    return 1
+  fi
+  if ! printf '%s\n' "$dumped" | grep -Fq 'Acquire::https::Timeout "30"'; then
+    echo "::error::Acquire::https::Timeout is not 30 — drop-in overridden or missing."
+    return 1
+  fi
 }
 
 clean_apt_partial_state() {
@@ -115,12 +142,12 @@ run_apt_install_once() {
   local apt_bin="${CI_APT_GET_BIN:-apt-get}"
   # Explicit || return so exit codes propagate under both set -e and set +e.
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
-    "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" update || return $?
-    "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" install -y "${PACKAGES[@]}" || return $?
+    "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
+    "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
     return 0
   fi
-  sudo "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" update || return $?
-  sudo "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" install -y "${PACKAGES[@]}" || return $?
+  sudo "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
+  sudo "$timeout_bin" "$ATTEMPT_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
   return 0
 }
 
@@ -213,8 +240,15 @@ EOF
   cat >"$dir/apt-flaky.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# Only fail on `update` so one failure = one attempt.
-if [[ "${1:-}" == "update" ]]; then
+# Only fail on `update` so one failure = one attempt (-o flags may precede the verb).
+is_update=0
+for a in "$@"; do
+  if [[ "$a" == "update" ]]; then
+    is_update=1
+    break
+  fi
+done
+if [[ "$is_update" -eq 1 ]]; then
   STATE_FILE="${CI_APT_FLAKY_STATE:?}"
   n="$(cat "$STATE_FILE")"
   n=$((n + 1))
