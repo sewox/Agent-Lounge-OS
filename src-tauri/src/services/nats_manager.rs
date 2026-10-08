@@ -1059,16 +1059,31 @@ mod tests {
         assert_eq!(pass_hits, 0, "password must not appear in child argv");
         assert!(cmd.iter().any(|a| a == "-c"), "expected -c: {cmd:?}");
         assert!(!cmd.iter().any(|a| a == "--pass" || a == "--user"));
-        let conf = temp.join("nats-server.conf");
-        assert!(conf.is_file(), "conf must be rewritten on launch");
+        // Resolve conf from the live child `-c` path first. On macOS CI, TMPDIR is
+        // often a symlink (/var/folders → /private/var/folders); reconstructing via
+        // temp.join can disagree with the path written at spawn time.
+        let expected = super::super::lounge_auth::nats_server_conf_path();
+        let conf = spawned_nats_conf_path(pid)
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .chain([expected.clone(), temp.join("nats-server.conf")])
+            .find(|p| p.is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "conf must be rewritten on launch (expected={}, temp={}, argv={cmd:?})",
+                    expected.display(),
+                    temp.display()
+                )
+            });
         let conf_body = std::fs::read_to_string(&conf).unwrap();
         assert!(!conf_body.contains(&creds.password));
         assert!(conf_body.contains("$2a$"));
 
         service.kill_child().await;
         assert!(
-            !conf.is_file(),
-            "conf must be deleted on clean shutdown when started_by_us"
+            !expected.is_file(),
+            "conf must be deleted on clean shutdown when started_by_us ({})",
+            expected.display()
         );
         crate::services::lounge_auth::deactivate_nats_auth();
         unsafe {
