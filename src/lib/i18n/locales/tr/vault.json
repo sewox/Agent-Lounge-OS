@@ -98,5 +98,15 @@
   "symbols": "{{count}} sembol",
   "indexedFiles": "İndekslenmiş dosyalar",
   "selected": "seçili: {{name}}",
-  "nodesRefs": "{{count}} düğüm / ref"
+  "nodesRefs": "{{count}} düğüm / ref",
+  "graphEnable": "Graph UI’yi Etkinleştir",
+  "graphEnableWithPort": "Graph UI’yi Etkinleştir · {{port}}",
+  "graphOpen": "3D Graph’i Aç",
+  "graphIndexFirst": "Önce çalışma alanını indeksleyin",
+  "graphPortBusy": "Port {{port}} meşgul",
+  "graphAutoPortInfo": "{{busy}} başka bir süreç tarafından kullanılıyor; {{next}} kullanılacak",
+  "graphEnableConfirmTitle": "Graph UI’yi Etkinleştir",
+  "graphEnableConfirmBody": "Ne başlar: codebase-memory-mcp Graph UI (--ui=true).\nPort: {{port}} (meşgulse Ayarlar → Graph UI’den değiştirin).\nNasıl durdurulur: Graph penceresini kapatın veya Lounge’dan çıkın (yalnız Lounge’un başlattığı süreç durur).\nKapatma: kalıcı enable bayrağı otomatik geri alınmaz — UI’yi kapatmak için enable akışını / MCP ayarlarını yeniden çalıştırın.\n\nBu ayar TÜM codebase-memory oturumlarına uygulanır (Claude, Cursor vb.).\n\nDevam edilsin mi?",
+  "graphEnableConfirmOk": "Etkinleştir",
+  "graphEnableConfirmCancel": "İptal"
 }

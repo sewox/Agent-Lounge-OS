@@ -218,6 +218,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(index_queue);
 
             // Graph UI port — settings'ten MemoryBridge + mode yükle (process-global yok).
+            // Also run one-time shared CBM config.json pollution migration.
             let port_store = store.clone();
             let port_bridge = memory.clone();
             let port_app = app.handle().clone();
@@ -228,6 +229,11 @@ pub fn run_with_start_route(start_route: &'static str) {
                     state.set_port_mode(pref.mode);
                 }
                 log::info!("graph UI port={} mode={}", pref.port, pref.mode.as_str());
+                if let Err(err) =
+                    services::cbm_ui_config::run_startup_cbm_config_migration(&port_store).await
+                {
+                    log::warn!("cbm ui config migration: {err}");
+                }
             });
 
             // MCP HTTP — Cursor/Claude stdio shim buraya proxy eder (dashboard sync).
@@ -468,6 +474,7 @@ pub fn run_with_start_route(start_route: &'static str) {
                 flush_session(app_handle);
                 if let Some(state) = app_handle.try_state::<GraphUiState>() {
                     state.kill_spawned_child();
+                    state.restore_cbm_config_best_effort();
                 }
             }
             _ => {}

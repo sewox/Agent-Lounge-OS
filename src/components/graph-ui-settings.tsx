@@ -18,6 +18,8 @@ type GraphUiLiveStatus = {
   port: number;
   port_conflict: boolean;
   conflict_message: string | null;
+  info_message?: string | null;
+  remap_from_port?: number | null;
   port_mode: GraphUiPortMode;
   owned_by_lounge: boolean;
 };
@@ -171,8 +173,18 @@ export function GraphUiSettings() {
               {ownershipLabel}
             </p>
             {live?.conflict_message ? (
-              <p className="font-body text-meta text-on-surface-variant" role="status">
+              <p className="font-body text-meta text-error" role="status">
                 {live.conflict_message}
+              </p>
+            ) : null}
+            {live?.info_message && !live.port_conflict ? (
+              <p className="font-body text-meta text-on-surface-variant" role="status">
+                {live.remap_from_port != null
+                  ? t("graphAutoPortInfo", {
+                      busy: live.remap_from_port,
+                      next: live.port,
+                    })
+                  : live.info_message}
               </p>
             ) : null}
           </div>

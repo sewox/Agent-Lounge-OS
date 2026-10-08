@@ -65,6 +65,7 @@
   "graphStateEnabled": "Durum: etkin · {{port}} portunda dinliyor",
   "graphStateDisabled": "Durum: kapalı · etkinleştirilince {{port}} portu kullanılır",
   "graphStateConflict": "Durum: {{port}} çakışması — yabancı dinleyici; Auto atlar, User değiştirmez",
+  "graphAutoPortInfo": "{{busy}} başka bir süreç tarafından kullanılıyor; {{next}} kullanılacak",
   "diagnosticsTitle": "Tanılama ve günlükler",
   "diagnosticsDesc": "Kernel ve supervisor günlükleri uygulama veri dizinine yazılır; boş yönlendirilmiş stdout olsa bile teşhis edilebilir bir dosya kalır.",
   "diagnosticsDataRoot": "Veri kökü",

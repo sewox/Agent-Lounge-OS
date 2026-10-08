@@ -98,5 +98,15 @@
   "symbols": "{{count}} symbols",
   "indexedFiles": "Indexed files",
   "selected": "selected: {{name}}",
-  "nodesRefs": "{{count}} nodes / refs"
+  "nodesRefs": "{{count}} nodes / refs",
+  "graphEnable": "Enable Graph UI",
+  "graphEnableWithPort": "Enable Graph UI · {{port}}",
+  "graphOpen": "Open 3D Graph",
+  "graphIndexFirst": "Index workspace first",
+  "graphPortBusy": "Port {{port}} is busy",
+  "graphAutoPortInfo": "{{busy}} is in use by another process; {{next}} will be used",
+  "graphEnableConfirmTitle": "Enable Graph UI",
+  "graphEnableConfirmBody": "What starts: codebase-memory-mcp Graph UI (--ui=true).\nPort: {{port}} (change in Settings → Graph UI if busy).\nHow to stop: close the Graph window, or quit Lounge (stops only the process Lounge started).\nDisable: the persistent enable flag is not auto-reverted — re-run enable flow / MCP settings to turn UI off.\n\nThis setting applies to ALL codebase-memory sessions (Claude, Cursor, etc.).\n\nContinue?",
+  "graphEnableConfirmOk": "Enable",
+  "graphEnableConfirmCancel": "Cancel"
 }

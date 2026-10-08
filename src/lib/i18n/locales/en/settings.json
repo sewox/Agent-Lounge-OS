@@ -65,6 +65,7 @@
   "graphStateEnabled": "Status: enabled · listening on port {{port}}",
   "graphStateDisabled": "Status: disabled · will use port {{port}} when enabled",
   "graphStateConflict": "Status: port {{port}} conflict — foreign listener; Auto will skip, User will not switch",
+  "graphAutoPortInfo": "{{busy}} is in use by another process; {{next}} will be used",
   "diagnosticsTitle": "Diagnostics & logs",
   "diagnosticsDesc": "Kernel and supervisor logs are written under the app data directory so empty redirected stdout still leaves a diagnosable file.",
   "diagnosticsDataRoot": "Data root",
