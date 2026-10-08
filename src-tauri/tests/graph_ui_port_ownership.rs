@@ -2,6 +2,11 @@
 //!
 //! These integration tests must pass on Linux, macOS, and Windows CI without
 //! `#[ignore]`, skip, hollow cfg gates, or soft early returns.
+//!
+//! Port allocation rule: never reserve → free → rebind. Keep the `std`
+//! `TcpListener` alive and hand it over (`from_std` for in-process axum,
+//! `--listen-fd` on Unix, or Windows exclusive→SO_REUSEADDR convert +
+//! `--reuse-bind`). Parent reservations use a plain exclusive bind.
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -14,9 +19,10 @@ use app_lib::services::memory_bridge::{
 };
 use app_lib::services::{
     classify_port_status, enable_graph_ui_headless, listen_pids, port_owned_by_lounge,
-    probe_ui_config, spawn_tcp_hold_child, stage_codebase_memory_mcp_double, tcp_bind_available,
-    tcp_hold_ready_err_is_port_collision, wait_tcp_hold_ready, wait_until_port_owned,
-    GraphUiPortMode, GraphUiState,
+    probe_ui_config, spawn_tcp_hold_ephemeral, spawn_tcp_hold_on_std_listener,
+    stage_codebase_memory_mcp_double, std_listener_to_tokio, wait_tcp_hold_ephemeral_ready,
+    wait_tcp_hold_ready, wait_until_port_not_owned, wait_until_port_owned, GraphUiPortMode,
+    GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -25,31 +31,37 @@ fn helper_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lounge-test-helper"))
 }
 
-/// Hold a foreign slot + two free successors so Auto retry still has a port if
-/// one free port is briefly unusable after release (macOS TIME_WAIT).
+/// Contiguous band: foreign slot + two successor slots, all still bound.
 struct HeldBand {
     foreign_port: u16,
     band_end: u16,
-    /// Keeps free band ports reserved until enable.
-    hold_free: Vec<TcpListener>,
+    foreign: TcpListener,
+    /// Successor ports still reserved (hand over or stage; never free-then-rebind).
+    successors: Vec<TcpListener>,
+}
+
+/// Exclusive loopback bind — must fail if another socket is already listening.
+fn bind_loopback_exclusive(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port))
 }
 
 fn reserve_held_band() -> HeldBand {
     for _ in 0..300 {
-        let hold_foreign = match TcpListener::bind("127.0.0.1:0") {
+        // Plain exclusive bind for the reservation lifetime (B1). Windows
+        // handoff converts to SO_REUSEADDR only immediately before spawn.
+        let foreign = match bind_loopback_exclusive(0) {
             Ok(l) => l,
             Err(_) => continue,
         };
-        let foreign_port = hold_foreign.local_addr().expect("addr").port();
-        // Need foreign+1 and foreign+2 free and holdable.
+        let foreign_port = foreign.local_addr().expect("addr").port();
         if foreign_port >= u16::MAX - 2 {
             continue;
         }
-        let mut hold_free = Vec::with_capacity(2);
+        let mut successors = Vec::with_capacity(2);
         let mut ok = true;
         for offset in 1u16..=2 {
-            match TcpListener::bind(("127.0.0.1", foreign_port + offset)) {
-                Ok(l) => hold_free.push(l),
+            match bind_loopback_exclusive(foreign_port + offset) {
+                Ok(l) => successors.push(l),
                 Err(_) => {
                     ok = false;
                     break;
@@ -59,24 +71,34 @@ fn reserve_held_band() -> HeldBand {
         if !ok {
             continue;
         }
-        let band_end = foreign_port + 2;
-        // Release foreign slot for in-process axum; keep free ports held.
-        drop(hold_foreign);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !tcp_bind_available(foreign_port) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "foreign port {foreign_port} did not free after drop"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
         return HeldBand {
             foreign_port,
-            band_end,
-            hold_free,
+            band_end: foreign_port + 2,
+            foreign,
+            successors,
         };
     }
     panic!("could not reserve held contiguous port band");
+}
+
+/// B1: exclusive reservation must fail when the port is already listened on
+/// (Linux, macOS, Windows — SO_REUSEADDR parent reserve would wrongly succeed
+/// on Windows and create a new port race).
+#[test]
+fn exclusive_port_reservation_rejects_busy_port() {
+    let held = bind_loopback_exclusive(0).expect("bind ephemeral exclusive listener");
+    let port = held.local_addr().expect("addr").port();
+    let err = bind_loopback_exclusive(port)
+        .expect_err("exclusive TcpListener::bind must fail on a port that is already listening");
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+        ),
+        "expected AddrInUse (or PermissionDenied), got {:?}: {err}",
+        err.kind()
+    );
+    drop(held);
 }
 
 struct ForeignCbm {
@@ -85,7 +107,8 @@ struct ForeignCbm {
     _task: tokio::task::JoinHandle<()>,
 }
 
-async fn spawn_foreign_cbm_on(port: u16) -> ForeignCbm {
+async fn spawn_foreign_cbm_on_listener(listener: TcpListener) -> ForeignCbm {
+    let port = listener.local_addr().expect("foreign addr").port();
     let rpc_hits = Arc::new(AtomicU32::new(0));
     let hits = rpc_hits.clone();
     let app = Router::new()
@@ -109,11 +132,10 @@ async fn spawn_foreign_cbm_on(port: u16) -> ForeignCbm {
                 }
             }),
         );
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .unwrap_or_else(|e| panic!("foreign bind :{port}: {e}"));
+    let tokio_listener =
+        std_listener_to_tokio(listener).unwrap_or_else(|e| panic!("foreign from_std :{port}: {e}"));
     let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(tokio_listener, app).await;
     });
     for _ in 0..80 {
         if probe_ui_config(port).await {
@@ -133,119 +155,80 @@ async fn spawn_foreign_cbm_on(port: u16) -> ForeignCbm {
 }
 
 /// Acceptance: listen_pids / ownership match a Lounge-spawned child.id() — not parent.
+/// Child binds ephemeral `--port=0` (no parent reserve/free/rebind).
 #[tokio::test]
 async fn port_owned_by_lounge_matches_spawned_child_id() {
     let (binary, _scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage helper");
     let parent_pid = std::process::id();
 
-    // Ephemeral ports can be stolen between parent release and child bind under
-    // parallel cargo test. Only retry when the child *exited* (bind lost) —
-    // never retry-until-assert-pass while a live child fails ownership.
-    let mut last_err = String::new();
-    for attempt in 1..=8u32 {
-        let hold = TcpListener::bind("127.0.0.1:0").expect("ephemeral");
-        let port = hold.local_addr().expect("addr").port();
-        drop(hold);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !tcp_bind_available(port) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "ephemeral port {port} must free before tcp-hold spawn"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut child = spawn_tcp_hold_ephemeral(&binary).expect("spawn ephemeral tcp-hold");
+    let child_pid = child.id();
+    assert_ne!(child_pid, parent_pid, "child must be a distinct process");
+
+    let port = wait_tcp_hold_ephemeral_ready(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|e| panic!("ephemeral tcp-hold ready: {e}"));
+
+    assert!(
+        wait_until_port_owned(port, child_pid, Duration::from_secs(5)),
+        "after tcp-hold-ready, listen_pids({port}) must include child.id()={child_pid}; saw {:?}",
+        listen_pids(port)
+    );
+    assert!(
+        port_owned_by_lounge(port, Some(child_pid)),
+        "owned for child.id()"
+    );
+    assert!(
+        !port_owned_by_lounge(port, Some(parent_pid)),
+        "parent PID must not own child's listen port"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+    for _ in 0..40 {
+        if !port_owned_by_lounge(port, Some(child_pid)) {
+            break;
         }
-
-        let mut child = spawn_tcp_hold_child(&binary, port).expect("spawn tcp-hold child");
-        let child_pid = child.id();
-        assert_ne!(child_pid, parent_pid, "child must be a distinct process");
-
-        match wait_tcp_hold_ready(&mut child, port, Duration::from_secs(5)) {
-            Ok(()) => {
-                assert!(
-                    wait_until_port_owned(port, child_pid, Duration::from_secs(5)),
-                    "after tcp-hold-ready, listen_pids({port}) must include child.id()={child_pid}; saw {:?}",
-                    listen_pids(port)
-                );
-                assert!(
-                    port_owned_by_lounge(port, Some(child_pid)),
-                    "owned for child.id()"
-                );
-                assert!(
-                    !port_owned_by_lounge(port, Some(parent_pid)),
-                    "parent PID must not own child's listen port"
-                );
-
-                let _ = child.kill();
-                let _ = child.wait();
-                for _ in 0..40 {
-                    if !port_owned_by_lounge(port, Some(child_pid)) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                assert!(
-                    !port_owned_by_lounge(port, Some(child_pid)),
-                    "dead/exited child.id()={child_pid} must not own port {port}"
-                );
-                return;
-            }
-            Err(err) => {
-                let exited = child.try_wait().ok().flatten();
-                let pids = listen_pids(port);
-                let foreign = !pids.is_empty() && !pids.contains(&child_pid);
-                let _ = child.kill();
-                let _ = child.wait();
-                last_err = format!(
-                    "attempt {attempt} port={port} pid={child_pid}: {err}; listen_pids={pids:?}"
-                );
-                // Retry only on ephemeral collision / child exit — not on a live
-                // child that fails ownership after accept-ready.
-                if attempt < 8
-                    && (exited.is_some() || foreign || tcp_hold_ready_err_is_port_collision(&err))
-                {
-                    continue;
-                }
-                panic!("tcp-hold readiness failed (not an ephemeral collision retry): {last_err}");
-            }
-        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("tcp-hold could not bind an ephemeral port after 8 attempts: {last_err}");
+    assert!(
+        !port_owned_by_lounge(port, Some(child_pid)),
+        "dead/exited child.id()={child_pid} must not own port {port}"
+    );
 }
 
 /// S2: Auto remap to a successor already owned by Lounge → ui_available=true.
-/// Preferred must be a distinct PID (tcp-hold child); owned UI is this process.
+/// Preferred = tcp-hold child via listen handoff; owned UI = in-process from_std.
 #[tokio::test]
 async fn classify_auto_owned_successor_reports_ui_available() {
     let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage helper");
-    let held = reserve_held_band();
+    let mut held = reserve_held_band();
     let preferred = held.foreign_port;
-    let owned_port = preferred + 1;
     let band_end = held.band_end;
-    drop(held.hold_free);
+    assert!(
+        !held.successors.is_empty(),
+        "successor[0] reserved for owned UI"
+    );
+    let owned_listener = held.successors.remove(0);
+    let owned_port = owned_listener.local_addr().expect("owned addr").port();
+    // Keep the spare successor reserved so nothing steals band_end mid-test.
+    let _spare = held.successors;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !tcp_bind_available(preferred) || !tcp_bind_available(owned_port) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "band ports must free before spawn"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    let mut foreign = spawn_tcp_hold_child(&binary, preferred).expect("foreign tcp-hold");
+    let (mut foreign, foreign_port, handoff_guard) =
+        spawn_tcp_hold_on_std_listener(&binary, held.foreign).expect("foreign handoff");
+    assert_eq!(foreign_port, preferred);
     wait_tcp_hold_ready(&mut foreign, preferred, Duration::from_secs(5))
         .unwrap_or_else(|e| panic!("foreign ready: {e}"));
+    drop(handoff_guard);
     assert_ne!(foreign.id(), std::process::id());
 
     let app = Router::new().route(
         "/api/ui-config",
         get(|| async { Json(serde_json::json!({"lang": "en", "lounge": true})) }),
     );
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", owned_port))
-        .await
-        .unwrap_or_else(|e| panic!("owned bind :{owned_port}: {e}"));
+    let tokio_listener = std_listener_to_tokio(owned_listener)
+        .unwrap_or_else(|e| panic!("owned from_std :{owned_port}: {e}"));
     let _owned_task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(tokio_listener, app).await;
     });
     for _ in 0..80 {
         if probe_ui_config(owned_port).await {
@@ -260,6 +243,15 @@ async fn classify_auto_owned_successor_reports_ui_available() {
         wait_until_port_owned(owned_port, child_pid, Duration::from_secs(5)),
         "test process must own {owned_port}; pids={:?}",
         listen_pids(owned_port)
+    );
+    // After SO_REUSEADDR handoff, Windows may briefly still list this process on
+    // preferred until the closed parent descriptor leaves the TCP table.
+    let parent_off_preferred =
+        wait_until_port_not_owned(preferred, child_pid, Duration::from_secs(5));
+    assert!(
+        parent_off_preferred,
+        "parent must leave preferred {preferred} after handoff drop; pids={:?}",
+        listen_pids(preferred)
     );
     assert!(!port_owned_by_lounge(preferred, Some(child_pid)));
 
@@ -286,31 +278,14 @@ async fn classify_auto_owned_successor_reports_ui_available() {
 }
 
 /// Acceptance: foreign ui-config on first band port is not adopted; Lounge spawns next.
+/// Free successors are staged as listen handoffs — never free-then-rebind.
 #[tokio::test]
 async fn enable_graph_ui_skips_foreign_band_port_owns_child() {
     let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage helper");
     let held = reserve_held_band();
     let band_start = held.foreign_port;
     let band_end = held.band_end;
-    let foreign = spawn_foreign_cbm_on(band_start).await;
-    assert!(
-        !tcp_bind_available(band_start),
-        "foreign must occupy band start"
-    );
-    // Release reserved free ports immediately before enable.
-    drop(held.hold_free);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let any_free = (band_start + 1..=band_end).any(tcp_bind_available);
-        if any_free {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "band {band_start}..={band_end} must free a successor after releasing holds"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let foreign = spawn_foreign_cbm_on_listener(held.foreign).await;
 
     let bridge = MemoryBridge::with_config(
         &binary,
@@ -326,6 +301,10 @@ async fn enable_graph_ui_skips_foreign_band_port_owns_child() {
     let cbm_cfg = scratch.join("cbm-cache").join("config.json");
     std::fs::create_dir_all(cbm_cfg.parent().unwrap()).expect("cbm cache dir");
     state.set_cbm_config_path_override(Some(cbm_cfg));
+
+    for successor in held.successors {
+        state.stage_listen_handoff(successor);
+    }
 
     let live = enable_graph_ui_headless(&state, &bridge, None, band_start..=band_end)
         .await
