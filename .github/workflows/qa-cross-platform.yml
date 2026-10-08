@@ -70,6 +70,55 @@ jobs:
         timeout-minutes: 5
         run: cargo test -p lounge_protocol --manifest-path src-tauri/Cargo.toml --locked
 
+  # TEMPORARY (PR-Test-NATS-Env): prove auth/conf path race is gone — 20× loop.
+  # Remove this job before final merge once macOS/Windows/Linux evidence is posted.
+  nats-auth-race-stability:
+    name: NATS auth race stability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl file \
+            libayatana-appindicator3-dev libgtk-3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev pkg-config wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: nats-race-stability
+
+      - name: Stage externalBin stub
+        shell: bash
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Install nats-server
+        shell: bash
+        run: bash scripts/ci/install-nats-server.sh
+
+      - name: Build test binary
+        shell: bash
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --features test-helpers --lib --no-run
+
+      - name: NATS auth race suite ×20 (zero failures)
+        shell: bash
+        timeout-minutes: 30
+        run: bash scripts/ci/nats-auth-race-stability.sh 20
+
   frontend-matrix:
     name: Frontend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
