@@ -971,9 +971,9 @@ pub async fn spawn_graph_ui_on_port_with_store(
     let pending_handoff = {
         if let Some(listener) = state.take_listen_handoff(port) {
             // Unix: stdin null + --listen-fd (CLOEXEC cleared in child pre_exec).
-            // Windows: attach sets stdin piped + --listen-proto-stdin; stderr
-            // piped for listen-adopted after WSADuplicateSocketW.
-            // Skip CREATE_NO_WINDOW — breaks piped stdio on CI.
+            // Windows: attach sets --listen-socket=HANDLE (inheritable); stderr
+            // piped for listen-adopted + bInheritHandles. Skip CREATE_NO_WINDOW.
+
             #[cfg(unix)]
             {
                 command.stdin(Stdio::null());

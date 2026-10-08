@@ -5,12 +5,13 @@
 //! Unix: pass `--listen-fd=N`; clear `FD_CLOEXEC` only in the child via
 //! `pre_exec` so concurrent spawns cannot inherit the LISTEN socket.
 //!
-//! Windows: parent keeps an **exclusive** bind; hand off via
-//! `WSADuplicateSocketW` + `--listen-proto-stdin` (child `WSASocketW`), then
-//! drop parent after `listen-adopted`. Do **not** use child `--reuse-bind`
-//! over an exclusive parent — same-user specific+specific SO_REUSEADDR fails
-//! with WSAEACCES (10013) on modern Windows. Never free-then-rebind.
-//! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks piped stdio).
+//! Windows: parent keeps an **exclusive** bind; mark the SOCKET inheritable,
+//! pass `--listen-socket=HANDLE` (same handle value in the child per Win32
+//! inheritance), wait for `listen-adopted`, then drop the parent descriptor.
+//! Do **not** use child SO_REUSEADDR over an exclusive parent — that fails
+//! with WSAEACCES (10013). Never free-then-rebind.
+//! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks handle
+//! inheritance / piped stdio). Piped stderr keeps `bInheritHandles=TRUE`.
 
 use std::net::TcpListener;
 use std::process::{Child, Command};
@@ -73,10 +74,21 @@ pub fn attach_inherited_listener_owned(
 
     #[cfg(windows)]
     {
+        use std::os::windows::io::AsRawSocket;
         use std::process::Stdio;
-        let _ = &listener;
-        command.stdin(Stdio::piped());
-        command.arg("--listen-proto-stdin");
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+        let socket = listener.as_raw_socket();
+        let ok = unsafe {
+            SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Piped stderr ⇒ CreateProcess bInheritHandles=TRUE so the SOCKET is
+        // duplicated into the child at the same handle value.
+        command.stdin(Stdio::null());
+        command.arg(format!("--listen-socket={socket}"));
         Ok(PendingListenHandoff { listener })
     }
 
@@ -93,8 +105,8 @@ pub fn attach_inherited_listener_owned(
 /// Finish handoff after spawn.
 ///
 /// Unix: drop parent fd (child inherited it via pre_exec CLOEXEC clear).
-/// Windows: `WSADuplicateSocketW` → write protocol info on stdin → wait for
-/// `listen-adopted` (bounded) → drop parent so the child alone owns the port.
+/// Windows: wait for `listen-adopted` (bounded), then drop parent so the child
+/// alone owns the port for accept / `listen_pids`.
 pub fn complete_listen_handoff(
     pending: PendingListenHandoff,
     child: &mut Child,
@@ -108,37 +120,10 @@ pub fn complete_listen_handoff(
 
     #[cfg(windows)]
     {
-        use std::io::Write;
-        use std::mem::{size_of, MaybeUninit};
         use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Networking::WinSock::{
-            WSADuplicateSocketW, SOCKET, SOCKET_ERROR, WSAPROTOCOL_INFOW,
-        };
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
 
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "listen handoff: child stdin pipe missing",
-            )
-        })?;
-        let socket = pending.listener.as_raw_socket() as SOCKET;
         let pid = child.id();
-        let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
-        let rc = unsafe { WSADuplicateSocketW(socket, pid, info.as_mut_ptr()) };
-        if rc == SOCKET_ERROR {
-            return Err(std::io::Error::last_os_error());
-        }
-        let info = unsafe { info.assume_init() };
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&info as *const WSAPROTOCOL_INFOW).cast::<u8>(),
-                size_of::<WSAPROTOCOL_INFOW>(),
-            )
-        };
-        stdin.write_all(bytes)?;
-        stdin.flush()?;
-        drop(stdin);
-
         let stderr = child.stderr.take().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -146,8 +131,9 @@ pub fn complete_listen_handoff(
             )
         })?;
         wait_listen_adopted_line(stderr, pid, Duration::from_secs(5))?;
-        // Child has its own SOCKET; release parent so accept / listen_pids
-        // attach to the child alone.
+        // Stop further concurrent spawns from inheriting this HANDLE.
+        let socket = pending.listener.as_raw_socket();
+        let _ = unsafe { SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0) };
         drop(pending.listener);
         Ok(ListenHandoffGuard::none())
     }
@@ -195,8 +181,6 @@ fn wait_listen_adopted_line(
                         if trimmed.starts_with("listen-adopted ")
                             && trimmed.contains(&format!("pid={expected_pid}"))
                         {
-                            // Drain leftover stderr so the child is not killed by
-                            // a full pipe / ERROR_BROKEN_PIPE on further writes.
                             let mut buf = [0u8; 512];
                             loop {
                                 match stderr.read(&mut buf) {

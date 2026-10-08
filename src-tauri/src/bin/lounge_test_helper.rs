@@ -5,8 +5,8 @@
 //! - `tcp-hold --port=0` — bind an ephemeral loopback port (reported in ready line).
 //! - `tcp-hold --listen-fd=N` (Unix) — adopt a pre-bound LISTEN fd from the parent
 //!   (CLOEXEC cleared only in the child's `pre_exec`).
-//! - `tcp-hold --listen-proto-stdin` (Windows) — read `WSAPROTOCOL_INFOW` from stdin
-//!   and `WSASocketW` (parent reserved exclusively; no SO_REUSEADDR rebind).
+//! - `tcp-hold --listen-socket=HANDLE` (Windows) — adopt an inheritable LISTEN
+//!   SOCKET from the parent (exclusive reserve; no SO_REUSEADDR rebind).
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
 //!   Same listen handoff flags are supported.
 //!
@@ -66,8 +66,22 @@ fn parse_port_flag(args: &[String]) -> Result<Option<u16>, String> {
     Ok(None)
 }
 
-fn has_listen_proto_stdin(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--listen-proto-stdin")
+#[cfg(windows)]
+fn parse_listen_socket(args: &[String]) -> Result<Option<u64>, String> {
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("--listen-socket=") {
+            return rest
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|e| format!("bad --listen-socket=: {e}"));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn has_listen_socket_request(args: &[String]) -> bool {
+    args.iter().any(|a| a.starts_with("--listen-socket="))
 }
 
 #[cfg(unix)]
@@ -84,8 +98,11 @@ fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
 }
 
 fn has_listen_handoff_request(args: &[String]) -> bool {
-    if has_listen_proto_stdin(args) {
-        return true;
+    #[cfg(windows)]
+    {
+        if has_listen_socket_request(args) {
+            return true;
+        }
     }
     #[cfg(unix)]
     {
@@ -148,59 +165,26 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
 
     #[cfg(windows)]
     {
-        use std::io::Read;
-        use std::mem::{size_of, zeroed, MaybeUninit};
+        use std::mem::zeroed;
         use std::os::windows::io::{FromRawSocket, RawSocket};
-        use windows_sys::Win32::Networking::WinSock::{
-            WSASocketW, WSAStartup, INVALID_SOCKET, WSADATA, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
-        };
+        use windows_sys::Win32::Networking::WinSock::{WSAStartup, WSADATA};
 
-        if !has_listen_proto_stdin(args) {
+        if !has_listen_socket_request(args) {
             return Ok(None);
         }
-        // Fresh helper process: WSASocketW requires WSAStartup (os error 10093
-        // otherwise). std/tokio only init Winsock lazily on their first bind.
-        // WSAStartup is refcounted — safe to call more than once.
+        // Winsock must be up before socket ops on a raw HANDLE.
         {
             let mut data: WSADATA = unsafe { zeroed() };
-            let rc = unsafe { WSAStartup(0x0202, &mut data) }; // MAKEWORD(2, 2)
+            let rc = unsafe { WSAStartup(0x0202, &mut data) };
             if rc != 0 {
                 return Err(format!("WSAStartup failed: {rc}"));
             }
         }
-
-        let mut stdin = std::io::stdin().lock();
-        let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
-        let bytes = unsafe {
-            std::slice::from_raw_parts_mut(
-                info.as_mut_ptr().cast::<u8>(),
-                size_of::<WSAPROTOCOL_INFOW>(),
-            )
-        };
-        stdin
-            .read_exact(bytes)
-            .map_err(|e| format!("listen-proto-stdin read: {e}"))?;
-        let mut info = unsafe { info.assume_init() };
-        // FROM_PROTOCOL_INFO (-1): af/type/protocol taken from lpProtocolInfo.
-        const FROM_PROTOCOL_INFO: i32 = -1;
-        let socket = unsafe {
-            WSASocketW(
-                FROM_PROTOCOL_INFO,
-                FROM_PROTOCOL_INFO,
-                FROM_PROTOCOL_INFO,
-                &mut info,
-                0,
-                WSA_FLAG_OVERLAPPED,
-            )
-        };
-        if socket == INVALID_SOCKET {
-            return Err(format!(
-                "WSASocketW from protocol info failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: WSASocketW returned a live SOCKET we now own.
-        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket as RawSocket) };
+        let handle = parse_listen_socket(args)?
+            .ok_or_else(|| "listen-socket requested but missing".to_string())?;
+        // SAFETY: parent marked the SOCKET inheritable; Win32 keeps the same
+        // handle value in the child when bInheritHandles is TRUE.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(handle as RawSocket) };
         std_listener
             .set_nonblocking(true)
             .map_err(|e| format!("nonblocking: {e}"))?;
@@ -258,7 +242,6 @@ fn run_tcp_hold(args: &[String]) -> Result<(), String> {
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
-    // Blocking stdin protocol-info read must not sit inside an async task.
     let (listener, port) = {
         let _enter = rt.enter();
         take_or_bind_listener(args)?
