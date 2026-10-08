@@ -128,13 +128,14 @@ pub fn complete_listen_handoff(
     #[cfg(windows)]
     {
         let pid = child.id();
+        let port = pending.listener.local_addr()?.port();
         let stderr = child.stderr.take().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "listen handoff: child stderr pipe missing",
             )
         })?;
-        wait_listen_adopted_line(stderr, pid, Duration::from_secs(5))?;
+        wait_child_handoff_ready(stderr, child, port, pid, Duration::from_secs(5))?;
         drop(pending.listener);
         Ok(ListenHandoffGuard::none())
     }
@@ -149,16 +150,24 @@ pub fn complete_listen_handoff(
     }
 }
 
-/// Wait for `listen-adopted ... pid=P` with a real timeout (reader thread + channel).
+/// Wait until the child owns the handoff port (real readiness, bounded).
+///
+/// Success when either:
+/// 1. stderr shows `listen-adopted ... pid=P`, or
+/// 2. [`crate::services::probe::listen_pids`] includes the child (covers cases
+///    where the child bound but stderr delivery to the parent is flaky).
 #[cfg(windows)]
-fn wait_listen_adopted_line(
+fn wait_child_handoff_ready(
     mut stderr: impl std::io::Read + Send + 'static,
+    child: &mut Child,
+    port: u16,
     expected_pid: u32,
     timeout: Duration,
 ) -> std::io::Result<()> {
     use std::sync::mpsc;
+    use std::time::Instant;
 
-    let (tx, rx) = mpsc::channel::<std::io::Result<()>>();
+    let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
     std::thread::spawn(move || {
         let mut line = Vec::new();
         let mut byte = [0u8; 1];
@@ -189,7 +198,7 @@ fn wait_listen_adopted_line(
                                     Ok(_) => {}
                                 }
                             }
-                            break Ok(());
+                            break Ok(seen);
                         }
                         line.clear();
                     } else {
@@ -206,15 +215,43 @@ fn wait_listen_adopted_line(
         let _ = tx.send(result);
     });
 
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("timed out waiting for listen-adopted from pid {expected_pid}"),
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            format!("listen-adopted waiter disconnected for pid {expected_pid}"),
-        )),
+    let start = Instant::now();
+    loop {
+        match rx.try_recv() {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(err)) => return Err(err),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    format!("listen-adopted waiter disconnected for pid {expected_pid}"),
+                ));
+            }
+        }
+
+        if super::probe::listen_pids(port).contains(&expected_pid) {
+            return Ok(());
+        }
+
+        if let Some(status) = child.try_wait()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "handoff child exited before ready: status={status:?}; listen_pids={:?}",
+                    super::probe::listen_pids(port)
+                ),
+            ));
+        }
+
+        if start.elapsed() > timeout {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "timed out waiting for handoff child pid={expected_pid} on port {port}; listen_pids={:?}; child_alive=true",
+                    super::probe::listen_pids(port)
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
