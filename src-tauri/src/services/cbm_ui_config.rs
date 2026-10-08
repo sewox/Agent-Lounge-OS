@@ -83,7 +83,7 @@ pub fn port_in_lounge_band(port: u16) -> bool {
 }
 
 pub fn looks_like_lounge_pollution(cfg: &CbmUiConfigFile) -> bool {
-    matches!(cfg.ui_enabled, Some(true)) && cfg.ui_port.is_some_and(|p| port_in_lounge_band(p))
+    matches!(cfg.ui_enabled, Some(true)) && cfg.ui_port.is_some_and(port_in_lounge_band)
 }
 
 pub fn read_cbm_ui_config(path: &Path) -> Result<Option<(CbmUiConfigFile, String)>> {
