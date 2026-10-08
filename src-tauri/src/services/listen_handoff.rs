@@ -84,7 +84,7 @@ pub fn complete_listen_handoff(
         use std::mem::{size_of, MaybeUninit};
         use std::os::windows::io::AsRawSocket;
         use windows_sys::Win32::Networking::WinSock::{
-            WSADuplicateSocketW, SOCKET_ERROR, WSAPROTOCOL_INFOW,
+            WSADuplicateSocketW, SOCKET, SOCKET_ERROR, WSAPROTOCOL_INFOW,
         };
 
         let mut stdin = child.stdin.take().ok_or_else(|| {
@@ -93,7 +93,7 @@ pub fn complete_listen_handoff(
                 "listen handoff: child stdin pipe missing",
             )
         })?;
-        let socket = pending.listener.as_raw_socket();
+        let socket = pending.listener.as_raw_socket() as SOCKET;
         let pid = child.id();
         let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
         let rc = unsafe { WSADuplicateSocketW(socket, pid, info.as_mut_ptr()) };
