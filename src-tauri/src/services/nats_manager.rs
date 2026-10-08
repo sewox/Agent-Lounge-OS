@@ -10,8 +10,9 @@ use tokio::process::{Child, Command};
 
 use super::lounge_auth::{
     activate_nats_auth, auth_required, connect as nats_connect, current_credentials,
-    deactivate_nats_auth, delete_nats_server_conf, ensure_session_credentials,
-    nats_server_conf_path, rotate_session_credentials, write_nats_server_conf, NatsCredentials,
+    deactivate_nats_auth, delete_nats_server_conf, ensure_session_credentials_at,
+    nats_server_conf_path_for, rotate_session_credentials_at, write_nats_server_conf,
+    NatsCredentials,
 };
 use super::probe::{
     endpoint, find_executable, listen_pids, lounge_nats_dir, tcp_ready, wait_until,
@@ -19,6 +20,7 @@ use super::probe::{
 };
 use crate::kernel::{DecisionGate, GuardedCommand};
 use crate::models::{ServiceHealth, ServiceId};
+use std::path::PathBuf;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(400);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -99,6 +101,11 @@ pub struct NatsConfig {
     pub args: Vec<String>,
     /// When set, nats-server is started with `-c nats-server.conf` (bcrypt auth).
     pub credentials: Option<NatsCredentials>,
+    /// Explicit session credentials file. When set, conf/creds read+write+delete
+    /// use this path (and its sibling `nats-server.conf`) instead of re-reading
+    /// process env on every call — required for test isolation and to avoid
+    /// `set_var(LOUNGE_NATS_CREDS_FILE)` races across parallel tests.
+    pub creds_file: Option<PathBuf>,
 }
 
 impl Default for NatsConfig {
@@ -110,7 +117,22 @@ impl Default for NatsConfig {
             binary: "nats-server".to_string(),
             args: Vec::new(),
             credentials: None,
+            creds_file: None,
         }
+    }
+}
+
+impl NatsConfig {
+    /// Resolved session creds path: pinned `creds_file`, else `default_creds_path()`.
+    pub fn resolved_creds_file(&self) -> PathBuf {
+        self.creds_file
+            .clone()
+            .unwrap_or_else(super::lounge_auth::default_creds_path)
+    }
+
+    /// Sibling `nats-server.conf` for [`Self::resolved_creds_file`].
+    pub fn resolved_conf_file(&self) -> PathBuf {
+        nats_server_conf_path_for(&self.resolved_creds_file())
     }
 }
 
@@ -226,7 +248,9 @@ impl NatsService {
                         "NATS :{} argv contains --pass — rotating credentials and restarting with conf",
                         self.config.port
                     );
-                    let creds = rotate_session_credentials(&self.endpoint())?;
+                    let path = self.config.resolved_creds_file();
+                    self.config.creds_file = Some(path.clone());
+                    let creds = rotate_session_credentials_at(&path, &self.endpoint())?;
                     self.config.credentials = Some(creds);
                     let _ = kill_nats_on_port(self.config.port);
                     self.kill_child().await;
@@ -262,7 +286,9 @@ impl NatsService {
                         "NATS :{} monitor yok ve argv --pass — rotate + restart",
                         self.config.port
                     );
-                    let creds = rotate_session_credentials(&self.endpoint())?;
+                    let path = self.config.resolved_creds_file();
+                    self.config.creds_file = Some(path.clone());
+                    let creds = rotate_session_credentials_at(&path, &self.endpoint())?;
                     self.config.credentials = Some(creds);
                     let _ = kill_nats_on_port(self.config.port);
                     self.kill_child().await;
@@ -307,7 +333,11 @@ impl NatsService {
             deactivate_nats_auth();
             return Ok(());
         }
-        let creds = ensure_session_credentials(&self.endpoint())?
+        // Pin the resolved path on the config so later write/delete/spawn use the
+        // same location even if another thread mutates process env.
+        let path = self.config.resolved_creds_file();
+        self.config.creds_file = Some(path.clone());
+        let creds = ensure_session_credentials_at(&path, &self.endpoint())?
             .or_else(current_credentials)
             .context("LOUNGE_AUTH_REQUIRED but failed to mint NATS credentials")?;
         self.config.credentials = Some(creds);
@@ -345,7 +375,9 @@ impl NatsService {
         })?;
         // Rewrite conf on every launch when auth is enabled.
         if let Some(creds) = &self.config.credentials {
-            write_nats_server_conf(creds)?;
+            let path = self.config.resolved_creds_file();
+            self.config.creds_file = Some(path.clone());
+            write_nats_server_conf(&path, creds)?;
         }
         let args = nats_server_args(&self.config, with_monitor);
 
@@ -415,7 +447,7 @@ impl NatsService {
         }
         self.started_by_us = false;
         if started_by_us {
-            delete_nats_server_conf();
+            delete_nats_server_conf(&self.config.resolved_creds_file());
         }
     }
 }
@@ -474,7 +506,7 @@ pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<S
     }
     if config.credentials.is_some() {
         args.push("-c".to_string());
-        args.push(nats_server_conf_path().display().to_string());
+        args.push(config.resolved_conf_file().display().to_string());
     }
     args.extend(config.args.iter().cloned());
     args
@@ -794,6 +826,7 @@ mod tests {
             binary: "__missing_nats__".into(),
             args: vec!["-p".into(), port.to_string()],
             credentials: None,
+            creds_file: None,
         });
 
         let health = service.ensure().await;
@@ -812,6 +845,11 @@ mod tests {
 
     #[tokio::test]
     async fn reports_missing_binary_when_port_closed() {
+        let _guard = super::super::lounge_auth::TestAuthGuard::new();
+        let prev = std::env::var_os(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        unsafe {
+            std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, "false");
+        }
         let mut service = NatsService::with_config(NatsConfig {
             host: "127.0.0.1".into(),
             port: 1,
@@ -824,6 +862,14 @@ mod tests {
         assert!(health.is_not_installed());
         assert!(health.error.is_none());
         assert!(health.detail.as_deref().unwrap_or("").contains("optional"));
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => std::env::remove_var(super::super::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV),
+            }
+        }
     }
 
     #[test]
@@ -1017,6 +1063,8 @@ mod tests {
             binary: "nats-server".into(),
             args: Vec::new(),
             credentials: None,
+            // Pin conf/creds to temp — do not re-read process env after prepare.
+            creds_file: Some(creds_path.clone()),
         });
         let health = service.ensure().await;
         assert!(
@@ -1289,6 +1337,7 @@ mod tests {
             binary: "nats-server".into(),
             args: Vec::new(),
             credentials: None,
+            creds_file: Some(creds_path.clone()),
         });
         let health = service.ensure().await;
         assert!(
