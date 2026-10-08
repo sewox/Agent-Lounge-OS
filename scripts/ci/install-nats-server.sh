@@ -86,8 +86,12 @@ detect_target() {
 }
 
 TARGET="$(detect_target)"
-EXPECTED_SHA="$(nats_sha256_for "$TARGET" || true)"
-if [[ -z "$EXPECTED_SHA" ]]; then
+EXPECTED_SHA=""
+set +e
+EXPECTED_SHA="$(nats_sha256_for "$TARGET")"
+sha_rc=$?
+set -e
+if [[ "$sha_rc" -ne 0 || -z "$EXPECTED_SHA" ]]; then
   echo "FAIL: no pinned sha256 for target $TARGET (version $NATS_VERSION)" >&2
   exit 1
 fi
