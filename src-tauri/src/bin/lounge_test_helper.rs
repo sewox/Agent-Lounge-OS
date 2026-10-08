@@ -3,10 +3,10 @@
 //! Modes (same binary, argv-selected):
 //! - `tcp-hold --port=N` — bind TCP LISTEN on `127.0.0.1:N` and park until killed.
 //! - `tcp-hold --port=0` — bind an ephemeral loopback port (reported in ready line).
-//! - `tcp-hold --listen-fd=N` (Unix) / `--listen-stdin` (Windows) — adopt a pre-bound
-//!   LISTEN socket from the parent (no rebind; kills reserve→free→rebind races).
+//! - `tcp-hold --listen-fd=N` (Unix) / `LOUNGE_TEST_LISTEN_SOCKET` (Windows) — adopt a
+//!   pre-bound LISTEN socket from the parent (no rebind; kills reserve→free→rebind races).
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
-//!   Same listen handoff flags are supported.
+//!   Same listen handoff is supported.
 //!
 //! Built only with `--features test-helpers` (`required-features` on the [[bin]]).
 //! Release / `tauri build` omit this feature, so the helper never ships in installers.
@@ -64,10 +64,6 @@ fn parse_port_flag(args: &[String]) -> Result<Option<u16>, String> {
     Ok(None)
 }
 
-fn has_listen_stdin(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--listen-stdin")
-}
-
 #[cfg(unix)]
 fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
     for arg in args {
@@ -82,12 +78,15 @@ fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
 }
 
 fn has_listen_handoff_request(args: &[String]) -> bool {
-    if has_listen_stdin(args) {
-        return true;
-    }
     #[cfg(unix)]
     {
         if args.iter().any(|a| a.starts_with("--listen-fd=")) {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if env::var_os("LOUNGE_TEST_LISTEN_SOCKET").is_some() {
             return true;
         }
     }
@@ -135,22 +134,14 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
     #[cfg(windows)]
     {
         use std::os::windows::io::{FromRawSocket, RawSocket};
-        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-        use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
-
-        if !has_listen_stdin(args) {
-            return Ok(None);
-        }
-        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-        if handle == INVALID_HANDLE_VALUE || handle as usize == 0 {
-            return Err(format!(
-                "listen-stdin: GetStdHandle(STD_INPUT_HANDLE) failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: parent passed the LISTEN SOCKET as the child's stdin via
-        // STARTF_USESTDHANDLES; we take ownership of that handle.
-        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(handle as RawSocket) };
+        let _ = args;
+        let raw = env::var("LOUNGE_TEST_LISTEN_SOCKET")
+            .map_err(|_| "LOUNGE_TEST_LISTEN_SOCKET missing while handoff requested".to_string())?;
+        let socket: RawSocket = raw
+            .parse()
+            .map_err(|e| format!("bad LOUNGE_TEST_LISTEN_SOCKET: {e}"))?;
+        // SAFETY: parent marked the SOCKET inheritable and kept it alive across spawn.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket) };
         std_listener
             .set_nonblocking(true)
             .map_err(|e| format!("nonblocking: {e}"))?;

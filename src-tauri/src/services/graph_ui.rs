@@ -962,8 +962,9 @@ pub async fn spawn_graph_ui_on_port_with_store(
         .with_context(|| format!("graph UI gate başarısız: {}", binary.display()))?;
     command.stdout(Stdio::null()).stderr(Stdio::null());
     let keep_handoff = if let Some(listener) = handoff {
-        // Windows handoff consumes listener into stdin; Unix keeps until after spawn.
-        // Skip CREATE_NO_WINDOW so stdin SOCKET inheritance works on Windows CI.
+        // Keep listener until after spawn (Unix fd / Windows inheritable SOCKET).
+        // Skip CREATE_NO_WINDOW — it breaks handle inheritance on Windows CI.
+        command.stdin(Stdio::null());
         super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
             .context("attach Graph UI listen handoff")?
     } else {
