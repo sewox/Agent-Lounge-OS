@@ -4,8 +4,8 @@
 //! `#[ignore]`, skip, hollow cfg gates, or soft early returns.
 //!
 //! Port allocation rule: never reserve → free → rebind. Keep the `std`
-//! `TcpListener` alive and hand it over (`from_std` for in-process axum, or
-//! `--listen-fd` / Windows `WSADuplicateSocket` protocol-info for children).
+//! `TcpListener` alive and hand it over (`from_std` for in-process axum,
+//! `--listen-fd` on Unix, or Windows `--reuse-bind` while parent still holds).
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -17,10 +17,11 @@ use app_lib::services::memory_bridge::{
     MemoryBridge, MemoryBridgeConfig, ToolTransport, TransportMode,
 };
 use app_lib::services::{
-    classify_port_status, enable_graph_ui_headless, listen_pids, port_owned_by_lounge,
-    probe_ui_config, spawn_tcp_hold_ephemeral, spawn_tcp_hold_on_std_listener,
-    stage_codebase_memory_mcp_double, std_listener_to_tokio, wait_tcp_hold_ephemeral_ready,
-    wait_tcp_hold_ready, wait_until_port_owned, GraphUiPortMode, GraphUiState,
+    bind_loopback_reuseaddr, classify_port_status, enable_graph_ui_headless, listen_pids,
+    port_owned_by_lounge, probe_ui_config, spawn_tcp_hold_ephemeral,
+    spawn_tcp_hold_on_std_listener, stage_codebase_memory_mcp_double, std_listener_to_tokio,
+    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_owned, GraphUiPortMode,
+    GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -40,7 +41,8 @@ struct HeldBand {
 
 fn reserve_held_band() -> HeldBand {
     for _ in 0..300 {
-        let foreign = match TcpListener::bind("127.0.0.1:0") {
+        // SO_REUSEADDR so Windows children can --reuse-bind while we still hold.
+        let foreign = match bind_loopback_reuseaddr(0) {
             Ok(l) => l,
             Err(_) => continue,
         };
@@ -51,7 +53,7 @@ fn reserve_held_band() -> HeldBand {
         let mut successors = Vec::with_capacity(2);
         let mut ok = true;
         for offset in 1u16..=2 {
-            match TcpListener::bind(("127.0.0.1", foreign_port + offset)) {
+            match bind_loopback_reuseaddr(foreign_port + offset) {
                 Ok(l) => successors.push(l),
                 Err(_) => {
                     ok = false;

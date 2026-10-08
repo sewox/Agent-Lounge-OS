@@ -2,9 +2,9 @@
 //!
 //! Avoids reserve → free → rebind TOCTOU races on macOS ephemeral ports.
 //! Unix: clear FD_CLOEXEC and pass `--listen-fd=N`; drop parent copy after spawn.
-//! Windows: spawn with piped stdin + `--listen-proto-stdin`, then
-//! `WSADuplicateSocketW` → write `WSAPROTOCOL_INFOW` → wait for child's
-//! `listen-adopted` line → drop parent descriptor (so accept/ownership work).
+//! Windows: keep the parent listener alive, spawn the child with
+//! `--reuse-bind --port=N` (SO_REUSEADDR concurrent bind), wait for
+//! `listen-adopted`, then drop the parent descriptor. Never free-then-rebind.
 //! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks piped stdio).
 
 use std::net::TcpListener;
@@ -18,14 +18,27 @@ pub fn std_listener_to_tokio(listener: TcpListener) -> std::io::Result<tokio::ne
     tokio::net::TcpListener::from_std(listener)
 }
 
+/// Bind `127.0.0.1:port` (`0` = ephemeral) with `SO_REUSEADDR` so a Windows child
+/// can `--reuse-bind` the same port while this listener is still held.
+pub fn bind_loopback_reuseaddr(port: u16) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
+}
+
 /// Token returned by [`attach_inherited_listener_owned`]; finish with
 /// [`complete_listen_handoff`] after `Command::spawn`.
 pub struct PendingListenHandoff {
     listener: TcpListener,
+    #[cfg(windows)]
+    port: u16,
 }
 
-/// Kept for API symmetry; Windows handoff now drops the parent socket inside
-/// [`complete_listen_handoff`] after `listen-adopted`, so this is usually empty.
+/// Usually empty after [`complete_listen_handoff`] (parent socket already dropped).
 #[must_use]
 pub struct ListenHandoffGuard {
     _listener: Option<TcpListener>,
@@ -37,10 +50,7 @@ impl ListenHandoffGuard {
     }
 }
 
-/// Prepare `command` so the child can adopt `listener` without rebinding.
-///
-/// On Windows this sets `stdin` to a pipe and adds `--listen-proto-stdin`.
-/// Call [`complete_listen_handoff`] immediately after a successful spawn.
+/// Prepare `command` so the child can adopt `listener` without a free→rebind gap.
 pub fn attach_inherited_listener_owned(
     command: &mut Command,
     listener: TcpListener,
@@ -66,10 +76,12 @@ pub fn attach_inherited_listener_owned(
     #[cfg(windows)]
     {
         use std::process::Stdio;
-        let _ = &listener;
-        command.stdin(Stdio::piped());
-        command.arg("--listen-proto-stdin");
-        Ok(PendingListenHandoff { listener })
+        let port = listener.local_addr()?.port();
+        // Concurrent bind while parent still holds — no free window for thieves.
+        command.arg("--reuse-bind");
+        command.arg(format!("--port={port}"));
+        command.stdin(Stdio::null());
+        Ok(PendingListenHandoff { listener, port })
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -84,9 +96,9 @@ pub fn attach_inherited_listener_owned(
 
 /// Finish handoff after spawn.
 ///
-/// Unix: drops the parent fd immediately (child already inherited it).
-/// Windows: writes protocol info, waits for `listen-adopted` on stderr, then
-/// drops the parent LISTEN socket so the child alone owns accept/PID.
+/// Unix: drop parent fd (child inherited it).
+/// Windows: wait for `listen-adopted`, then drop parent so the child alone owns
+/// the port for accept / `listen_pids`.
 pub fn complete_listen_handoff(
     pending: PendingListenHandoff,
     child: &mut Child,
@@ -100,46 +112,14 @@ pub fn complete_listen_handoff(
 
     #[cfg(windows)]
     {
-        use std::io::{Read, Write};
-        use std::mem::{size_of, MaybeUninit};
-        use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Networking::WinSock::{
-            WSADuplicateSocketW, SOCKET, SOCKET_ERROR, WSAPROTOCOL_INFOW,
-        };
-
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "listen handoff: child stdin pipe missing",
-            )
-        })?;
-        let socket = pending.listener.as_raw_socket() as SOCKET;
-        let pid = child.id();
-        let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
-        let rc = unsafe { WSADuplicateSocketW(socket, pid, info.as_mut_ptr()) };
-        if rc == SOCKET_ERROR {
-            return Err(std::io::Error::last_os_error());
-        }
-        let info = unsafe { info.assume_init() };
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                (&info as *const WSAPROTOCOL_INFOW).cast::<u8>(),
-                size_of::<WSAPROTOCOL_INFOW>(),
-            )
-        };
-        stdin.write_all(bytes)?;
-        stdin.flush()?;
-        drop(stdin);
-
+        let _ = pending.port;
         let stderr = child.stderr.as_mut().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "listen handoff: child stderr pipe missing",
             )
         })?;
-        wait_listen_adopted_line(stderr, pid, Duration::from_secs(5))?;
-        // Child has its own SOCKET descriptor now; release parent so ownership
-        // and accepts attach to the child alone.
+        wait_listen_adopted_line(stderr, child.id(), Duration::from_secs(5))?;
         drop(pending.listener);
         Ok(ListenHandoffGuard::none())
     }
@@ -154,7 +134,7 @@ pub fn complete_listen_handoff(
     }
 }
 
-/// Read stderr one byte at a time until `listen-adopted ... pid=P` (no buffering ahead).
+/// Read stderr one byte at a time until `listen-adopted ... pid=P`.
 #[cfg(windows)]
 fn wait_listen_adopted_line(
     stderr: &mut impl std::io::Read,
@@ -164,24 +144,31 @@ fn wait_listen_adopted_line(
     let start = Instant::now();
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
+    let mut seen = String::new();
     loop {
         if start.elapsed() > timeout {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("timed out waiting for listen-adopted from pid {expected_pid}"),
+                format!(
+                    "timed out waiting for listen-adopted from pid {expected_pid}; stderr={seen}"
+                ),
             ));
         }
         match stderr.read(&mut byte) {
             Ok(0) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "stderr EOF before listen-adopted",
+                    format!("stderr EOF before listen-adopted; stderr={seen}"),
                 ));
             }
             Ok(_) => {
                 if byte[0] == b'\n' {
                     let text = String::from_utf8_lossy(&line);
                     let trimmed = text.trim().trim_end_matches('\r');
+                    if !seen.is_empty() {
+                        seen.push('\n');
+                    }
+                    seen.push_str(trimmed);
                     if trimmed.starts_with("listen-adopted ")
                         && trimmed.contains(&format!("pid={expected_pid}"))
                     {

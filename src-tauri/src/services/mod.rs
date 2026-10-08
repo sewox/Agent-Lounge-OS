@@ -66,8 +66,8 @@ pub use index_queue::{
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use listen_handoff::{
-    attach_inherited_listener_owned, complete_listen_handoff, std_listener_to_tokio,
-    ListenHandoffGuard,
+    attach_inherited_listener_owned, bind_loopback_reuseaddr, complete_listen_handoff,
+    std_listener_to_tokio, ListenHandoffGuard,
 };
 pub use lounge_auth::{
     add_allowed_origin, auth_required, authorize_mcp_headers, connect as nats_connect,

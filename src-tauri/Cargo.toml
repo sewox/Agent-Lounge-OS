@@ -52,6 +52,8 @@ hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
 sha2 = "0.11"
 bcrypt = "0.17"
 libc = "0.2"
+# Test/helpers: reserve loopback with SO_REUSEADDR (Windows concurrent handoff bind).
+socket2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

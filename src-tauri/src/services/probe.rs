@@ -896,17 +896,17 @@ pub fn spawn_tcp_hold_on_std_listener(
         .port();
     let mut command = GuardedCommand::new(binary)
         .arg("tcp-hold")
-        .arg(format!("--port={port}"))
         .internal_daemon()
         .into_std_command()
         .with_context(|| format!("tcp-hold gate: {}", binary.display()))?;
     command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // Unix: stdin null. Windows: attach sets piped stdin for WSAPROTOCOL_INFOW.
+    // Unix: --listen-fd + stdin null. Windows: attach adds --reuse-bind --port=N.
     #[cfg(unix)]
     {
         command.stdin(std::process::Stdio::null());
+        command.arg(format!("--port={port}"));
     }
     // Avoid CREATE_NO_WINDOW on handoff spawns — it breaks piped stdio on Windows CI.
     let pending = super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
