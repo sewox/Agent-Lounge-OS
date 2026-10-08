@@ -50,11 +50,7 @@ pub fn attach_inherited_listener_owned(
 
         let socket = listener.into_raw_socket();
         let ok = unsafe {
-            SetHandleInformation(
-                socket as HANDLE,
-                HANDLE_FLAG_INHERIT,
-                HANDLE_FLAG_INHERIT,
-            )
+            SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
         };
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
