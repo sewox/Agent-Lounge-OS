@@ -2,7 +2,7 @@ import { createElement, type ReactNode } from "react";
 import {
   isEnableGraphUiDisabled,
   type GraphUiButtonStatus,
-} from "./graph-ui-button-state.ts";
+} from "@/lib/graph-ui-button-state";
 
 export type GraphUiButtonViewLabels = {
   enable: string;
