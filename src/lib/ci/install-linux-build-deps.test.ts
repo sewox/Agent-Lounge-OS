@@ -229,7 +229,19 @@ describe("install-linux-build-deps", () => {
     );
     assert.match(
       result.stdout,
+      /ok: package presets linux-bundle \+ tauri-gtk/,
+    );
+    assert.match(
+      result.stdout,
+      /ok: workflow call sites use hardened apt scripts/,
+    );
+    assert.match(
+      result.stdout,
       /ok: EXIT trap preserves non-zero status/,
+    );
+    assert.match(
+      result.stdout,
+      /install-playwright-os-deps self-test: ok/,
     );
     assert.match(
       result.stdout,

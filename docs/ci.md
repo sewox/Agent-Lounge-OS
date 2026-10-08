@@ -29,17 +29,27 @@ Branch protection (owner-managed) can require these **16** check names. They mus
 
 ## apt mirror stalls
 
-**Build AppImage + deb** (`linux-bundle.yml` → job `linux-bundle`) installs GTK/WebKit build deps via apt. Ubuntu mirrors on GitHub-hosted runners can stall mid-`apt-get update` / `install` (seen 2026-10-07: `azure.archive.ubuntu.com` timed out / was ignored, then the run hung ~40 minutes on `https://archive.ubuntu.com` until cancelled).
+Ubuntu mirrors on GitHub-hosted runners can stall mid-`apt-get update` / `install` (seen 2026-10-07: `azure.archive.ubuntu.com` timed out / was ignored, then a run hung ~40 minutes on `https://archive.ubuntu.com` until cancelled; also 2026-10-08: `ci.yml` Rust apt step transferred ~62 MB in ~20 minutes then hit the old 25-minute **job** timeout).
 
-`scripts/ci/install-linux-build-deps.sh` is **Ubuntu/Debian apt only** (the ubuntu-22.04 bundle job). It reads `/etc/os-release` (`ID` / `ID_LIKE`, CRLF-tolerant) and treats a host as apt-based only when those fields contain `debian` or `ubuntu`. On any other distro it refuses immediately with `::error::`, naming the detected ID and package manager (`dnf` / `yum` / `zypper` / `pacman` / `apk` / `unknown`). Self-tests: non-apt hosts (and macOS/Windows) print `skip: apt gate not applicable on <ID> (package manager: …)`; a local Debian/Ubuntu machine missing `apt-config` prints `skip: apt-config missing on <ID> (non-CI); -o opts gate not run …` — never a bare `ok`. On Debian/Ubuntu GitHub Actions, a missing `apt-config` is a broken runner and fails with `::error::`.
+All Linux apt entry points go through `scripts/ci/install-linux-build-deps.sh` (Ubuntu/Debian only):
 
-Mitigations (step name unchanged):
+| Call site | Workflow | Preset / wrapper |
+|-----------|----------|------------------|
+| Build AppImage + deb | `linux-bundle.yml` | `--preset linux-bundle` (default) |
+| Rust (ubuntu) | `ci.yml` | `--preset tauri-gtk` |
+| Prove live_laya_infer filter / Laya live infer | `nightly-laya.yml` | `--preset tauri-gtk` |
+| Playwright e2e OS deps | `qa-e2e.yml` | `install-playwright-os-deps.sh` → hardened `--packages …` |
 
-1. **apt options** via `/etc/apt/apt.conf.d/zzzz-agent-lounge-ci-retries` (must be lexically last; asserted at runtime) plus matching `apt-get -o` flags: `Acquire::Retries "5"`, HTTP/HTTPS/FTP timeouts `30`s, `DPkg::Lock::Timeout "120"`. Effective config is checked with `apt-config -o … dump` (same `-o` set as `apt-get`).
-2. **Step `timeout-minutes: 26`** so a stall fails fast instead of consuming the job’s 90-minute budget, while still allowing 3 full attempts including `timeout -k 15` kill wait and bounded retry cleanup (update 180s+15 + install 240s+15 + cleanup 60s+15 ×2 + backoff 10/30 → worst case 1540s < 1560s).
-3. **Bounded retry** (max 3 attempts, backoff 10s then 30s): `timeout -k 15` around update (180s), install (240s), and retry cleanup (60s, including `dpkg --configure -a`). On retry: `apt-get clean`, clear partial lists, `dpkg --configure -a` (cleanup failures/timeouts emit `::error::`), mirror flip from a pristine sources backup (`mktemp`/`cp`/`sed`/empty-host/backup-read failures also emit `::error::`). Final failure emits `::error::` and exits non-zero — no `|| true`, no `continue-on-error`.
+macOS/Windows jobs (including Playwright smoke) are unchanged — they do not use apt.
+
+The installer reads `/etc/os-release` (`ID` / `ID_LIKE`, CRLF-tolerant, noglob) and treats a host as apt-based only when those fields contain `debian` or `ubuntu`. On any other distro it refuses immediately with `::error::`, naming the detected ID and package manager (`dnf` / `yum` / `zypper` / `pacman` / `apk` / `unknown`). Self-tests: non-apt hosts (and macOS/Windows) print `skip: apt gate not applicable on <ID> (package manager: …)`; a local Debian/Ubuntu machine missing `apt-config` prints `skip: apt-config missing on <ID> (non-CI); -o opts gate not run …` — never a bare `ok`. On Debian/Ubuntu GitHub Actions, a missing `apt-config` is a broken runner and fails with `::error::`.
+
+Mitigations:
+
+1. **apt options** via `/etc/apt/apt.conf.d/zzzz-agent-lounge-ci-retries` (must be lexically last; asserted at runtime) plus matching `apt-get -o` flags: `Acquire::Retries "5"`, HTTP/HTTPS/FTP timeouts `30`s, `DPkg::Lock::Timeout "120"`, and `install --no-install-recommends`. Effective config is checked with `apt-config -o … dump` (same `-o` set as `apt-get`).
+2. **Step `timeout-minutes: 26`** on every apt install step; job timeouts leave headroom above that budget (Rust/nightly filter-proof 60m, laya-live 90m, Playwright e2e 60m, linux-bundle 90m). Worst-case apt wall time including `timeout -k 15` and retry cleanup: update 180s+15 + install 240s+15 + cleanup 60s+15 ×2 + backoff 10/30 → 1540s < 1560s.
+3. **Bounded retry** (max 3 attempts, backoff 10s then 30s): `timeout -k 15` around update (180s), install (240s), and retry cleanup (60s, including `dpkg --configure -a`). On retry: `apt-get clean`, `find …/partial -mindepth 1 -delete` (not an unprivileged `rm …/partial/*` glob), clear incomplete indexes, `dpkg --configure -a` (cleanup failures/timeouts emit `::error::`), mirror flip from a pristine sources backup (`mktemp`/`cp`/`sed`/empty-host/backup-read failures also emit `::error::`). Final failure emits `::error::` and exits non-zero — no swallowed exits, no `continue-on-error`.
 4. **Mirror fallback** on retry: back up apt sources once; attempt 2 switches `azure.archive.ubuntu.com` → `archive.ubuntu.com`; attempt 3 restores the backup (then switches archive → azure only if the backup had no azure — backup read errors fail closed, not as “host absent”). Sed uses escaped dots and a `//` anchor; empty hosts are rejected.
+5. **Playwright:** `install-playwright-os-deps.sh` captures the package list from `playwright install-deps` via a PATH-local fake `sudo`/`apt-get` (no raw apt), then installs through the hardened script. Browser download stays `npx playwright install chromium` with the existing ms-playwright cache.
 
 Prove the drop-in is active in CI logs: drop-in contents + `apt-config` with `-o` opts showing `Acquire::Retries "5"` and Timeout `"30"`, and the drop-in listed as lexically last under `/etc/apt/apt.conf.d`.
-
-**Follow-up (out of scope here):** the same raw `apt-get` pattern still exists in `ci.yml` (Rust job) and `nightly-laya.yml` (two jobs).

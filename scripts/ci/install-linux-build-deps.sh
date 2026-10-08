@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Install Linux Tauri/GTK build dependencies with apt mirror stall resilience.
+# Install Debian/Ubuntu apt packages with mirror stall resilience.
 # Failures always fail the step (no || true / continue-on-error / swallowed exits).
+# Distro-aware: refuses non-Debian/Ubuntu hosts with ::error:: (no silent ok).
 #
 # Usage:
 #   bash scripts/ci/install-linux-build-deps.sh
+#   bash scripts/ci/install-linux-build-deps.sh --preset linux-bundle
+#   bash scripts/ci/install-linux-build-deps.sh --preset tauri-gtk
+#   bash scripts/ci/install-linux-build-deps.sh --packages pkg1 pkg2 …
 #   bash scripts/ci/install-linux-build-deps.sh --self-test
 set -euo pipefail
 
@@ -82,8 +86,10 @@ run_priv() {
   fi
 }
 
-# Package list must stay in sync with linux-bundle.yml (Build AppImage + deb).
-PACKAGES=(
+# Presets (call sites must stay in sync — asserted in --self-test).
+# linux-bundle: linux-bundle.yml (AppImage + deb; includes patchelf/libfuse2).
+# tauri-gtk: ci.yml Rust (ubuntu) + nightly-laya system libraries.
+PRESET_LINUX_BUNDLE=(
   build-essential
   curl
   file
@@ -98,6 +104,44 @@ PACKAGES=(
   patchelf
   libfuse2
 )
+PRESET_TAURI_GTK=(
+  build-essential
+  curl
+  file
+  libayatana-appindicator3-dev
+  libgtk-3-dev
+  libssl-dev
+  libwebkit2gtk-4.1-dev
+  librsvg2-dev
+  libxdo-dev
+  pkg-config
+  wget
+)
+
+# Resolved package list for this invocation (set by resolve_packages).
+PACKAGES=()
+APT_PRESET=""
+APT_INSTALL_EXTRA_OPTS=(--no-install-recommends)
+
+resolve_packages() {
+  if [[ "${#PACKAGES[@]}" -gt 0 ]]; then
+    return 0
+  fi
+  local preset="${APT_PRESET:-linux-bundle}"
+  case "$preset" in
+    linux-bundle) PACKAGES=("${PRESET_LINUX_BUNDLE[@]}") ;;
+    tauri-gtk) PACKAGES=("${PRESET_TAURI_GTK[@]}") ;;
+    *)
+      echo "::error::unknown apt package preset: ${preset} (expected linux-bundle|tauri-gtk)"
+      return 1
+      ;;
+  esac
+  if [[ "${#PACKAGES[@]}" -eq 0 ]]; then
+    echo "::error::apt package list is empty"
+    return 1
+  fi
+  return 0
+}
 
 escape_host_for_sed() {
   # Escape dots so s#//host#…# does not treat '.' as "any char".
@@ -581,18 +625,24 @@ prepare_retry_mirror() {
 run_apt_install_once() {
   local apt_bin="${CI_APT_GET_BIN:-apt-get}"
   local timeout_bin="${CI_APT_TIMEOUT_BIN:-timeout}"
+  if [[ "${#PACKAGES[@]}" -eq 0 ]]; then
+    echo "::error::apt package list is empty"
+    return 1
+  fi
   # Explicit || return so exit codes propagate under both set -e and set +e.
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
     "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$UPDATE_TIMEOUT_SEC" \
       "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
     "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$INSTALL_TIMEOUT_SEC" \
-      "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
+      "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${APT_INSTALL_EXTRA_OPTS[@]}" \
+      "${PACKAGES[@]}" || return $?
     return 0
   fi
   sudo "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$UPDATE_TIMEOUT_SEC" \
     "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
   sudo "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$INSTALL_TIMEOUT_SEC" \
-    "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
+    "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${APT_INSTALL_EXTRA_OPTS[@]}" \
+    "${PACKAGES[@]}" || return $?
   return 0
 }
 
@@ -654,9 +704,13 @@ worst_case_seconds() {
 }
 
 main() {
+  if ! resolve_packages; then
+    exit 1
+  fi
   if ! require_apt_based_host; then
     exit 1
   fi
+  echo "apt packages (${#PACKAGES[@]}): ${PACKAGES[*]}"
   write_apt_ci_conf
   echo "== apt-config (Retries/Timeout) =="
   dump_apt_timeouts
@@ -668,6 +722,11 @@ self_test() {
   local dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-deps.XXXXXX")"
   register_temp_dir "$dir"
+
+  # Default packages for dry-run retry cases (bash 3.2 + set -u rejects empty PACKAGES[@]).
+  APT_PRESET=linux-bundle
+  PACKAGES=()
+  resolve_packages
 
   # 1) drop-in content
   write_apt_ci_conf "$dir/${APT_CONF_BASENAME}"
@@ -1150,23 +1209,103 @@ EOF
     return 1
   fi
 
-  # 5) package list unchanged vs linux-bundle contract
-  local expected=(
+  # 5) package presets match workflow contracts
+  APT_PRESET= PACKAGES=()
+  resolve_packages
+  local expected_bundle=(
     build-essential curl file wget pkg-config libssl-dev libgtk-3-dev
     libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
     libxdo-dev patchelf libfuse2
   )
-  if [[ "${#PACKAGES[@]}" -ne "${#expected[@]}" ]]; then
-    echo "FAIL: package count drift" >&2
+  if [[ "${#PACKAGES[@]}" -ne "${#expected_bundle[@]}" ]]; then
+    echo "FAIL: linux-bundle package count drift" >&2
     return 1
   fi
   local i
-  for i in "${!expected[@]}"; do
-    if [[ "${PACKAGES[$i]}" != "${expected[$i]}" ]]; then
-      echo "FAIL: package drift at $i: ${PACKAGES[$i]} != ${expected[$i]}" >&2
+  for i in "${!expected_bundle[@]}"; do
+    if [[ "${PACKAGES[$i]}" != "${expected_bundle[$i]}" ]]; then
+      echo "FAIL: linux-bundle package drift at $i: ${PACKAGES[$i]} != ${expected_bundle[$i]}" >&2
       return 1
     fi
   done
+  APT_PRESET=tauri-gtk PACKAGES=()
+  resolve_packages
+  local expected_gtk=(
+    build-essential curl file libayatana-appindicator3-dev libgtk-3-dev
+    libssl-dev libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev pkg-config wget
+  )
+  if [[ "${#PACKAGES[@]}" -ne "${#expected_gtk[@]}" ]]; then
+    echo "FAIL: tauri-gtk package count drift" >&2
+    return 1
+  fi
+  for i in "${!expected_gtk[@]}"; do
+    if [[ "${PACKAGES[$i]}" != "${expected_gtk[$i]}" ]]; then
+      echo "FAIL: tauri-gtk package drift at $i: ${PACKAGES[$i]} != ${expected_gtk[$i]}" >&2
+      return 1
+    fi
+  done
+  # Explicit --packages wins over preset.
+  APT_PRESET=linux-bundle PACKAGES=(foo bar)
+  resolve_packages
+  if [[ "${#PACKAGES[@]}" -ne 2 || "${PACKAGES[0]}" != "foo" || "${PACKAGES[1]}" != "bar" ]]; then
+    echo "FAIL: --packages should win over preset, got: ${PACKAGES[*]}" >&2
+    return 1
+  fi
+  echo "ok: package presets linux-bundle + tauri-gtk (+ --packages override)"
+
+  # 5b) call sites must use this script (no raw apt-get in required/nightly apt jobs).
+  local repo_root wf grc
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  for wf in \
+    "$repo_root/.github/workflows/ci.yml" \
+    "$repo_root/.github/workflows/nightly-laya.yml" \
+    "$repo_root/.github/workflows/qa-e2e.yml" \
+    "$repo_root/.github/workflows/linux-bundle.yml"
+  do
+    if [[ ! -f "$wf" ]]; then
+      echo "FAIL: missing workflow $wf" >&2
+      return 1
+    fi
+  done
+  set +e
+  # Ignore YAML comments (grep -n format: path:line:content).
+  grep -nE 'sudo[[:space:]]+apt-get|[[:space:]]apt-get[[:space:]]' \
+    "$repo_root/.github/workflows/ci.yml" \
+    "$repo_root/.github/workflows/nightly-laya.yml" \
+    "$repo_root/.github/workflows/qa-e2e.yml" \
+    "$repo_root/.github/workflows/linux-bundle.yml" \
+    2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' >"$dir/apt-get-hits.txt"
+  grc=$?
+  set -e
+  # grep|grep: 0 = hits, 1 = no hits, >1 = error. We want no hits.
+  if [[ -s "$dir/apt-get-hits.txt" ]]; then
+    echo "FAIL: raw apt-get remains in hardened workflow call sites:" >&2
+    cat "$dir/apt-get-hits.txt" >&2
+    return 1
+  fi
+  if ! grep -Fq 'install-linux-build-deps.sh --preset tauri-gtk' "$repo_root/.github/workflows/ci.yml"; then
+    echo "FAIL: ci.yml Rust must call install-linux-build-deps.sh --preset tauri-gtk" >&2
+    return 1
+  fi
+  if ! grep -Fq 'install-linux-build-deps.sh --preset tauri-gtk' "$repo_root/.github/workflows/nightly-laya.yml"; then
+    echo "FAIL: nightly-laya must call install-linux-build-deps.sh --preset tauri-gtk" >&2
+    return 1
+  fi
+  if ! grep -Fq 'install-playwright-os-deps.sh' "$repo_root/.github/workflows/qa-e2e.yml"; then
+    echo "FAIL: qa-e2e.yml must call install-playwright-os-deps.sh" >&2
+    return 1
+  fi
+  set +e
+  grep -nE 'playwright install --with-deps|npx playwright install-deps' \
+    "$repo_root/.github/workflows/qa-e2e.yml" 2>/dev/null \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' >"$dir/pw-hits.txt"
+  set -e
+  if [[ -s "$dir/pw-hits.txt" ]]; then
+    echo "FAIL: qa-e2e.yml must not call playwright install-deps / --with-deps (apt bypass):" >&2
+    cat "$dir/pw-hits.txt" >&2
+    return 1
+  fi
+  echo "ok: workflow call sites use hardened apt scripts (ci/nightly/qa-e2e/linux-bundle)"
 
   # N2: EXIT trap must preserve a non-zero status (bash 3.2 otherwise → 0).
   local trap_rc=0
@@ -1187,6 +1326,12 @@ EOF
   fi
   echo "ok: EXIT trap preserves non-zero status"
 
+  # Playwright OS-deps wrapper self-test (capture → hardened --packages).
+  if ! bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install-playwright-os-deps.sh" --self-test; then
+    echo "FAIL: install-playwright-os-deps.sh --self-test" >&2
+    return 1
+  fi
+
   echo "install-linux-build-deps self-test: ok"
   return 0
 }
@@ -1204,5 +1349,44 @@ if [[ "${1:-}" == "--classify-os-release" ]]; then
   classify_os_release "$2"
   exit $?
 fi
+
+if [[ "${1:-}" == "--check-host-only" ]]; then
+  # Distro gate only (used by install-playwright-os-deps.sh before capture).
+  if ! require_apt_based_host; then
+    exit 1
+  fi
+  exit 0
+fi
+
+# CLI: --preset NAME | --packages pkg… | (default preset linux-bundle)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --preset)
+      if [[ -z "${2:-}" ]]; then
+        echo "::error::usage: $0 --preset linux-bundle|tauri-gtk" >&2
+        exit 2
+      fi
+      APT_PRESET="$2"
+      shift 2
+      ;;
+    --packages)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "::error::usage: $0 --packages pkg1 pkg2 …" >&2
+        exit 2
+      fi
+      PACKAGES=("$@")
+      break
+      ;;
+    -*)
+      echo "::error::unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      echo "::error::unexpected argument: $1 (use --packages …)" >&2
+      exit 2
+      ;;
+  esac
+done
 
 main
