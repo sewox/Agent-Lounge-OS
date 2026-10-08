@@ -4,8 +4,8 @@ pub mod approval_notify;
 pub mod approval_sound;
 pub mod auto_archive;
 pub mod autodiscover;
-pub mod dead_symbol_actions;
 pub mod cbm_ui_config;
+pub mod dead_symbol_actions;
 pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
@@ -45,12 +45,12 @@ pub use approval_notify::{
 };
 pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;
+pub use cbm_ui_config::{
+    cbm_cache_dir, cbm_ui_config_path, migrate_lounge_cbm_config_pollution, restore_cbm_ui_config,
+    snapshot_cbm_ui_config, CbmUiConfigSnapshot,
+};
 pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
-};
-pub use cbm_ui_config::{
-    cbm_cache_dir, cbm_ui_config_path, migrate_lounge_cbm_config_pollution,
-    restore_cbm_ui_config, snapshot_cbm_ui_config, CbmUiConfigSnapshot,
 };
 pub use graph_ui::{
     classify_port_status, default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless,

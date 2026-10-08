@@ -478,8 +478,13 @@ async fn graph_ui_status_inner(
         };
     }
 
-    let classified =
-        classify_port_status(preferred, child_pid, port_mode, default_graph_ui_port_band()).await;
+    let classified = classify_port_status(
+        preferred,
+        child_pid,
+        port_mode,
+        default_graph_ui_port_band(),
+    )
+    .await;
     let port = classified.port;
     let owned_by_lounge = port_owned_by_lounge(port, child_pid);
     let remap_from_port = classified
@@ -1202,15 +1207,18 @@ mod tests {
             "unexpected info: {info}"
         );
 
-        let user =
-            classify_port_status(preferred, None, GraphUiPortMode::User, band.clone()).await;
+        let user = classify_port_status(preferred, None, GraphUiPortMode::User, band.clone()).await;
         assert!(user.port_conflict);
         assert_eq!(user.port, preferred);
         assert!(user.conflict_message.is_some());
 
-        let exhausted =
-            classify_port_status(preferred, None, GraphUiPortMode::Auto, preferred..=preferred)
-                .await;
+        let exhausted = classify_port_status(
+            preferred,
+            None,
+            GraphUiPortMode::Auto,
+            preferred..=preferred,
+        )
+        .await;
         assert!(exhausted.port_conflict);
         assert!(exhausted
             .conflict_message

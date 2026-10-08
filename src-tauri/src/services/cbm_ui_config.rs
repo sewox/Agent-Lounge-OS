@@ -83,20 +83,16 @@ pub fn port_in_lounge_band(port: u16) -> bool {
 }
 
 pub fn looks_like_lounge_pollution(cfg: &CbmUiConfigFile) -> bool {
-    matches!(cfg.ui_enabled, Some(true))
-        && cfg
-            .ui_port
-            .is_some_and(|p| port_in_lounge_band(p))
+    matches!(cfg.ui_enabled, Some(true)) && cfg.ui_port.is_some_and(|p| port_in_lounge_band(p))
 }
 
 pub fn read_cbm_ui_config(path: &Path) -> Result<Option<(CbmUiConfigFile, String)>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let cfg: CbmUiConfigFile = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let cfg: CbmUiConfigFile =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some((cfg, raw)))
 }
 
@@ -127,8 +123,7 @@ pub fn write_cbm_ui_config_atomic(path: &Path, cfg: &CbmUiConfigFile) -> Result<
     let parent = path
         .parent()
         .context("config.json has no parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("mkdir {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     let json = serde_json::to_string_pretty(cfg).context("serialize CBM UI config")?;
     let tmp_name = format!(
         "{}.lounge-tmp-{}-{}",
@@ -140,8 +135,8 @@ pub fn write_cbm_ui_config_atomic(path: &Path, cfg: &CbmUiConfigFile) -> Result<
     );
     let tmp = parent.join(tmp_name);
     {
-        let mut file = fs::File::create(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         file.write_all(json.as_bytes())
             .with_context(|| format!("write {}", tmp.display()))?;
         file.sync_all().ok();
@@ -170,8 +165,7 @@ pub fn restore_cbm_ui_config_at(path: &Path, snapshot: &CbmUiConfigSnapshot) -> 
                 "cbm ui config restore: removing Lounge-created {} (did not exist before)",
                 path.display()
             );
-            fs::remove_file(path)
-                .with_context(|| format!("remove {}", path.display()))?;
+            fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
         }
         return Ok(());
     }
@@ -255,10 +249,7 @@ pub fn migrate_lounge_cbm_config_pollution_at(
             );
             if snap_clean {
                 let backup = backup_config(path)?;
-                let old = format!(
-                    "ui_enabled={:?} ui_port={:?}",
-                    cfg.ui_enabled, cfg.ui_port
-                );
+                let old = format!("ui_enabled={:?} ui_port={:?}", cfg.ui_enabled, cfg.ui_port);
                 restore_cbm_ui_config_at(path, snap)?;
                 let detail = format!(
                     "migrated via snapshot: {old} → snapshot (backup {})",
@@ -377,7 +368,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("lounge-cbm-cfg-{nanos}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lounge-cbm-cfg-{nanos}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
