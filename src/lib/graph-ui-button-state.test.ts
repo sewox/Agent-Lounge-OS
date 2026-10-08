@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { GraphUiButtonView } from "../components/graph-ui-button.tsx";
 import {
   autoPortInfoPorts,
   isEnableGraphUiDisabled,
   shouldBlockEnableOnConflict,
 } from "./graph-ui-button-state.ts";
+import { GraphUiButtonView } from "./graph-ui-button-view.ts";
 
 const labels = {
   enable: "Enable Graph UI",
