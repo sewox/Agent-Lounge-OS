@@ -3,10 +3,10 @@
 //! Modes (same binary, argv-selected):
 //! - `tcp-hold --port=N` — bind TCP LISTEN on `127.0.0.1:N` and park until killed.
 //! - `tcp-hold --port=0` — bind an ephemeral loopback port (reported in ready line).
-//! - `tcp-hold --listen-fd=N` / `LOUNGE_TEST_LISTEN_SOCKET` — adopt a pre-bound LISTEN
-//!   socket from the parent (no rebind; kills reserve→free→rebind races).
+//! - `tcp-hold --listen-fd=N` (Unix) / `--listen-stdin` (Windows) — adopt a pre-bound
+//!   LISTEN socket from the parent (no rebind; kills reserve→free→rebind races).
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
-//!   Same listen-fd / env handoff is supported.
+//!   Same listen handoff flags are supported.
 //!
 //! Built only with `--features test-helpers` (`required-features` on the [[bin]]).
 //! Release / `tauri build` omit this feature, so the helper never ships in installers.
@@ -64,6 +64,11 @@ fn parse_port_flag(args: &[String]) -> Result<Option<u16>, String> {
     Ok(None)
 }
 
+fn has_listen_stdin(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--listen-stdin")
+}
+
+#[cfg(unix)]
 fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--listen-fd=") {
@@ -76,9 +81,25 @@ fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
     Ok(None)
 }
 
+fn has_listen_handoff_request(args: &[String]) -> bool {
+    if has_listen_stdin(args) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if args.iter().any(|a| a.starts_with("--listen-fd=")) {
+            return true;
+        }
+    }
+    let _ = args;
+    false
+}
+
 /// Adopt a parent-handed LISTEN socket, or bind `127.0.0.1:port` (`port=0` → ephemeral).
 fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u16), String> {
-    if let Some(listener) = adopt_inherited_listener(args)? {
+    if has_listen_handoff_request(args) {
+        let listener = adopt_inherited_listener(args)?
+            .ok_or_else(|| "listen handoff requested but no socket adopted".to_string())?;
         let port = listener
             .local_addr()
             .map_err(|e| format!("local_addr: {e}"))?
@@ -114,21 +135,28 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
     #[cfg(windows)]
     {
         use std::os::windows::io::{FromRawSocket, RawSocket};
-        let _ = args;
-        if let Ok(raw) = env::var("LOUNGE_TEST_LISTEN_SOCKET") {
-            let socket: RawSocket = raw
-                .parse()
-                .map_err(|e| format!("bad LOUNGE_TEST_LISTEN_SOCKET: {e}"))?;
-            // SAFETY: parent marked the SOCKET inheritable and passed the value.
-            let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket) };
-            std_listener
-                .set_nonblocking(true)
-                .map_err(|e| format!("nonblocking: {e}"))?;
-            let listener = tokio::net::TcpListener::from_std(std_listener)
-                .map_err(|e| format!("from_std: {e}"))?;
-            return Ok(Some(listener));
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+
+        if !has_listen_stdin(args) {
+            return Ok(None);
         }
-        Ok(None)
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return Err(format!(
+                "listen-stdin: GetStdHandle(STD_INPUT_HANDLE) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: parent passed the LISTEN SOCKET as the child's stdin via
+        // STARTF_USESTDHANDLES; we take ownership of that handle.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(handle as RawSocket) };
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("nonblocking: {e}"))?;
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| format!("from_std: {e}"))?;
+        Ok(Some(listener))
     }
 
     #[cfg(not(any(unix, windows)))]

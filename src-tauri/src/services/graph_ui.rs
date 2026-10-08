@@ -40,6 +40,19 @@ const STATUS_JOIN_WINDOW: Duration = Duration::from_millis(500);
 pub const GRAPH_UI_MIGRATION_LOG: &str =
     "graph UI port migration: saved 9749 → auto mode (band 18749–18759)";
 
+/// Test-only: ports kept reserved (LISTEN held) but treated as free by
+/// [`classify_port_status`] Auto selection — avoids drop→steal TOCTOU (N11).
+#[cfg(test)]
+static CLASSIFY_HELD_FREE_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn classify_held_free_contains(port: u16) -> bool {
+    CLASSIFY_HELD_FREE_PORTS
+        .lock()
+        .map(|g| g.contains(&port))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphUiPortMode {
@@ -701,6 +714,11 @@ pub async fn classify_port_status(
                 if port_owned_by_lounge(port, child_pid) {
                     return true;
                 }
+                // cfg(test): reserved listeners still held by the test process.
+                #[cfg(test)]
+                if classify_held_free_contains(port) {
+                    return true;
+                }
                 listen_pids(port).is_empty()
             };
             match select_graph_ui_port(mode, preferred, band, is_free) {
@@ -942,23 +960,25 @@ pub async fn spawn_graph_ui_on_port_with_store(
         .internal_daemon()
         .into_std_command()
         .with_context(|| format!("graph UI gate başarısız: {}", binary.display()))?;
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    if let Some(ref listener) = handoff {
-        super::listen_handoff::attach_inherited_listener(&mut command, listener)
-            .context("attach Graph UI listen handoff")?;
-    }
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    let keep_handoff = if let Some(listener) = handoff {
+        // Windows handoff consumes listener into stdin; Unix keeps until after spawn.
+        // Skip CREATE_NO_WINDOW so stdin SOCKET inheritance works on Windows CI.
+        super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
+            .context("attach Graph UI listen handoff")?
+    } else {
+        command.stdin(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        None
+    };
     let child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            drop(handoff);
+            drop(keep_handoff);
             state.restore_cbm_config_best_effort();
             if let Some(store) = store {
                 let _ = clear_snapshot_in_store(store).await;
@@ -967,8 +987,7 @@ pub async fn spawn_graph_ui_on_port_with_store(
                 .with_context(|| format!("graph UI spawn başarısız: {}", binary.display()));
         }
     };
-    // Child has inherited the LISTEN socket; drop the parent copy.
-    drop(handoff);
+    drop(keep_handoff);
     state.store_child(child);
     sync_owned_pid(bridge, state);
 
@@ -1338,8 +1357,9 @@ mod tests {
     }
 
     /// Reserve preferred + two successors; serve foreign UI by handing over the
-    /// reserved preferred listener (no free→rebind). Successors stay bound until
-    /// the caller drops them immediately before classify.
+    /// reserved preferred listener (no free→rebind). Successors stay bound for
+    /// the whole test — registered as held-free so Auto can select them without
+    /// a drop→steal TOCTOU (review nit N11).
     async fn reserve_classify_band() -> (u16, u16, Vec<tokio::net::TcpListener>) {
         for _ in 0..300 {
             let hold_preferred = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -1385,15 +1405,41 @@ mod tests {
         panic!("could not reserve classify band");
     }
 
+    fn held_free_ports_from(holds: &[tokio::net::TcpListener]) -> Vec<u16> {
+        holds
+            .iter()
+            .map(|l| l.local_addr().expect("held addr").port())
+            .collect()
+    }
+
+    async fn with_held_free_ports<F, Fut, R>(ports: Vec<u16>, f: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        {
+            let mut guard = CLASSIFY_HELD_FREE_PORTS.lock().expect("held-free lock");
+            *guard = ports;
+        }
+        let result = f().await;
+        {
+            let mut guard = CLASSIFY_HELD_FREE_PORTS.lock().expect("held-free lock");
+            guard.clear();
+        }
+        result
+    }
+
     #[tokio::test]
     async fn classify_auto_foreign_reports_next_port_without_conflict() {
         let (preferred, band_end, free_holds) = reserve_classify_band().await;
-        // Release successors then classify immediately (no sleep-as-fix wait).
-        drop(free_holds);
+        // Keep successors LISTEN-held so nothing can steal them; mark held-free.
+        let held_ports = held_free_ports_from(&free_holds);
 
         let band = preferred..=band_end;
-        let classified =
-            classify_port_status(preferred, None, GraphUiPortMode::Auto, band.clone()).await;
+        let classified = with_held_free_ports(held_ports.clone(), || async {
+            classify_port_status(preferred, None, GraphUiPortMode::Auto, band.clone()).await
+        })
+        .await;
         assert!(!classified.ui_available);
         assert!(!classified.port_conflict);
         assert!(classified.port > preferred && classified.port <= band_end);
@@ -1417,18 +1463,20 @@ mod tests {
             exhausted.message_key.as_deref(),
             Some("graphMsgBandExhausted")
         );
+        drop(free_holds);
     }
 
     #[tokio::test]
     async fn classify_user_conflict_keeps_preferred_port() {
         let (preferred, _end, free_holds) = reserve_classify_band().await;
-        drop(free_holds);
+        // Keep holds — User mode does not scan successors; no drop→steal window.
         let (available, conflict, msg) =
             classify_port(preferred, None, GraphUiPortMode::User).await;
         assert!(!available);
         assert!(conflict);
         let msg = msg.expect("message key");
         assert_eq!(msg, "graphMsgForeignUiUser");
+        drop(free_holds);
     }
 
     #[tokio::test]
