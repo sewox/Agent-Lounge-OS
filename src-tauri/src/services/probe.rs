@@ -1098,6 +1098,19 @@ pub fn wait_until_port_owned(port: u16, pid: u32, timeout: Duration) -> bool {
     false
 }
 
+/// Wait until `pid` is no longer listed in `listen_pids(port)` (or never was).
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn wait_until_port_not_owned(port: u16, pid: u32, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if !listen_pids(port).contains(&pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

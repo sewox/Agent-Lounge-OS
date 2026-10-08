@@ -217,6 +217,15 @@ async fn classify_auto_owned_successor_reports_ui_available() {
         "test process must own {owned_port}; pids={:?}",
         listen_pids(owned_port)
     );
+    // After SO_REUSEADDR handoff, Windows may briefly still list this process on
+    // preferred until the closed parent descriptor leaves the TCP table.
+    let parent_off_preferred =
+        wait_until_port_not_owned(preferred, child_pid, Duration::from_secs(5));
+    assert!(
+        parent_off_preferred,
+        "parent must leave preferred {preferred} after handoff drop; pids={:?}",
+        listen_pids(preferred)
+    );
     assert!(!port_owned_by_lounge(preferred, Some(child_pid)));
 
     let classified = classify_port_status(

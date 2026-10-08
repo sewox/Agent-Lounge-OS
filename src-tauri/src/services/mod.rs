@@ -100,7 +100,8 @@ pub use probe::{
 pub use probe::{
     spawn_tcp_hold_child, spawn_tcp_hold_ephemeral, spawn_tcp_hold_on_std_listener,
     stage_codebase_memory_mcp_double, tcp_hold_ready_err_is_port_collision,
-    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_owned,
+    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_not_owned,
+    wait_until_port_owned,
 };
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,

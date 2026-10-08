@@ -82,16 +82,9 @@ fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
     Ok(None)
 }
 
+#[cfg(unix)]
 fn has_listen_fd_request(args: &[String]) -> bool {
-    #[cfg(unix)]
-    {
-        args.iter().any(|a| a.starts_with("--listen-fd="))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = args;
-        false
-    }
+    args.iter().any(|a| a.starts_with("--listen-fd="))
 }
 
 fn emit_listen_adopted(port: u16) {
