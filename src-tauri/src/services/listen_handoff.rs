@@ -113,13 +113,14 @@ pub fn complete_listen_handoff(
     #[cfg(windows)]
     {
         let _ = pending.port;
+        let pid = child.id();
         let stderr = child.stderr.as_mut().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "listen handoff: child stderr pipe missing",
             )
         })?;
-        wait_listen_adopted_line(stderr, child.id(), Duration::from_secs(5))?;
+        wait_listen_adopted_line(stderr, pid, Duration::from_secs(5))?;
         drop(pending.listener);
         Ok(ListenHandoffGuard::none())
     }
