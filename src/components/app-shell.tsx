@@ -2,15 +2,20 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BrandMark } from "@/components/brand";
 import { Icon } from "@/components/icons";
 import { LocaleSwitch } from "@/components/locale-switch";
 import { useLounge } from "@/components/lounge-provider";
+import {
+  QuotaHeaderBadge,
+  type QuotaBadgeLinkProps,
+} from "@/components/quota-header-badge";
 import { daemonLabel, daemonTone, Pip } from "@/components/ui";
 import {
+  AMBER_THRESHOLD,
   isSecurityApproval,
   isQuotaApproval,
   isSourceUnverifiedApproval,
@@ -32,6 +37,8 @@ import {
 import { usePlatform } from "@/hooks/use-platform";
 import { paletteShortcutLabel } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
+
+const QuotaBadgeLink = Link as ComponentType<QuotaBadgeLinkProps>;
 
 const BANNER_BTN =
   "min-h-8 rounded px-2.5 py-1.5 font-body text-body pointer-events-auto";
@@ -95,7 +102,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   const headDestructive = destructiveQueue[0] ?? null;
 
   const crumb = t(`titles.${pathname}`, { defaultValue: t("titles.default") });
-  const warnQuota = quotas.find((row) => (row.percent ?? 0) >= 80);
   const onboarding = pathname === "/onboarding";
   const [layaDismissed, setLayaDismissed] = useState(false);
   const [approvalSecsLeft, setApprovalSecsLeft] = useState<number | null>(null);
@@ -838,24 +844,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 />
                 <span>{serviceDegraded ? "DEGRADED" : "NATS"}</span>
               </div>
-              <Link
-                href="/quotas"
-                title={
-                  amberAlert
-                    ? `AMBER ${Math.round(warnQuota?.percent ?? 80)}% ${amberTools[0] ?? warnQuota?.id ?? ""}`.trim()
-                    : "Kota normal"
-                }
-                className={`flex min-w-0 max-w-[7.5rem] items-center gap-1 rounded border px-2 py-0.5 font-mono text-body xl:max-w-[14rem] ${
-                  amberAlert
-                    ? "border-error-container bg-error-container/20 text-error-dim"
-                    : "border-outline-variant bg-surface-container-high text-on-surface-variant"
-                }`}
-              >
-                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${amberAlert ? "animate-pulse bg-error" : "bg-secondary"}`} />
-                <span className="truncate">
-                  {amberAlert ? `AMBER ${Math.round(warnQuota?.percent ?? 80)}%` : "QUOTA OK"}
-                </span>
-              </Link>
+              <QuotaHeaderBadge quotas={quotas} LinkComponent={QuotaBadgeLink} />
               <div className="tnum hidden shrink-0 text-body text-on-surface-variant 2xl:block">{clock} UTC+3</div>
               <button
                 type="button"
@@ -1175,7 +1164,7 @@ function buildCriticalAlerts(input: {
       row.exhausted ||
       row.tone === "amber" ||
       row.tone === "warn" ||
-      (row.percent != null && row.percent >= 80),
+      (row.percent != null && row.percent >= AMBER_THRESHOLD),
   );
   for (const row of criticalQuotas) {
     rows.push({
