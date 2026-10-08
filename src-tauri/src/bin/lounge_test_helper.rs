@@ -5,8 +5,9 @@
 //! - `tcp-hold --port=0` — bind an ephemeral loopback port (reported in ready line).
 //! - `tcp-hold --listen-fd=N` (Unix) — adopt a pre-bound LISTEN fd from the parent
 //!   (CLOEXEC cleared only in the child's `pre_exec`).
-//! - `tcp-hold --listen-socket=HANDLE` (Windows) — adopt an inheritable LISTEN
-//!   SOCKET from the parent (exclusive reserve; no SO_REUSEADDR rebind).
+//! - `tcp-hold --reuse-bind --port=N` (Windows) — SO_REUSEADDR bind while parent
+//!   still holds (parent converted exclusive→reuseaddr immediately before spawn);
+//!   parent drops after `listen-adopted`.
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
 //!   Same listen handoff flags are supported.
 //!
@@ -66,22 +67,8 @@ fn parse_port_flag(args: &[String]) -> Result<Option<u16>, String> {
     Ok(None)
 }
 
-#[cfg(windows)]
-fn parse_listen_socket(args: &[String]) -> Result<Option<u64>, String> {
-    for arg in args {
-        if let Some(rest) = arg.strip_prefix("--listen-socket=") {
-            return rest
-                .parse::<u64>()
-                .map(Some)
-                .map_err(|e| format!("bad --listen-socket=: {e}"));
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(windows)]
-fn has_listen_socket_request(args: &[String]) -> bool {
-    args.iter().any(|a| a.starts_with("--listen-socket="))
+fn has_reuse_bind(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--reuse-bind")
 }
 
 #[cfg(unix)]
@@ -97,21 +84,9 @@ fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
     Ok(None)
 }
 
-fn has_listen_handoff_request(args: &[String]) -> bool {
-    #[cfg(windows)]
-    {
-        if has_listen_socket_request(args) {
-            return true;
-        }
-    }
-    #[cfg(unix)]
-    {
-        if args.iter().any(|a| a.starts_with("--listen-fd=")) {
-            return true;
-        }
-    }
-    let _ = args;
-    false
+#[cfg(unix)]
+fn has_listen_fd_request(args: &[String]) -> bool {
+    args.iter().any(|a| a.starts_with("--listen-fd="))
 }
 
 fn emit_listen_adopted(port: u16) {
@@ -121,14 +96,12 @@ fn emit_listen_adopted(port: u16) {
     let _ = err.flush();
 }
 
-/// Adopt a parent-handed LISTEN socket, or bind `127.0.0.1:port` (`port=0` → ephemeral).
-///
-/// On handoff, emits `listen-adopted port=N pid=P` on stderr **before** returning so
-/// the parent can drop its shared descriptor (required on Windows).
+/// Adopt / reuse-bind / bind. Emits `listen-adopted` when a handoff path is used.
 fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u16), String> {
-    if has_listen_handoff_request(args) {
-        let listener = adopt_inherited_listener(args)?
-            .ok_or_else(|| "listen handoff requested but no socket adopted".to_string())?;
+    #[cfg(unix)]
+    if has_listen_fd_request(args) {
+        let listener = adopt_listen_fd(args)?
+            .ok_or_else(|| "listen-fd requested but not adopted".to_string())?;
         let port = listener
             .local_addr()
             .map_err(|e| format!("local_addr: {e}"))?
@@ -136,68 +109,35 @@ fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u1
         emit_listen_adopted(port);
         return Ok((listener, port));
     }
+
     let port =
         parse_port_flag(args)?.ok_or_else(|| "missing --port (or listen handoff)".to_string())?;
-    let listener = bind_loopback(port)?;
+    let reuse = has_reuse_bind(args);
+    let listener = bind_loopback(port, reuse)?;
     let bound = listener
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?
         .port();
+    if reuse {
+        emit_listen_adopted(bound);
+    }
     Ok((listener, bound))
 }
 
-fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpListener>, String> {
-    #[cfg(unix)]
-    {
-        if let Some(fd) = parse_listen_fd(args)? {
-            // SAFETY: parent passed this live LISTEN fd; CLOEXEC was cleared only
-            // in this child's pre_exec, so concurrent sibling spawns cannot inherit it.
-            let std_listener = unsafe { std::net::TcpListener::from_raw_fd_checked(fd)? };
-            std_listener
-                .set_nonblocking(true)
-                .map_err(|e| format!("nonblocking: {e}"))?;
-            let listener = tokio::net::TcpListener::from_std(std_listener)
-                .map_err(|e| format!("from_std: {e}"))?;
-            return Ok(Some(listener));
-        }
-        Ok(None)
-    }
-
-    #[cfg(windows)]
-    {
-        use std::mem::zeroed;
-        use std::os::windows::io::{FromRawSocket, RawSocket};
-        use windows_sys::Win32::Networking::WinSock::{WSAStartup, WSADATA};
-
-        if !has_listen_socket_request(args) {
-            return Ok(None);
-        }
-        // Winsock must be up before socket ops on a raw HANDLE.
-        {
-            let mut data: WSADATA = unsafe { zeroed() };
-            let rc = unsafe { WSAStartup(0x0202, &mut data) };
-            if rc != 0 {
-                return Err(format!("WSAStartup failed: {rc}"));
-            }
-        }
-        let handle = parse_listen_socket(args)?
-            .ok_or_else(|| "listen-socket requested but missing".to_string())?;
-        // SAFETY: parent marked the SOCKET inheritable; Win32 keeps the same
-        // handle value in the child when bInheritHandles is TRUE.
-        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(handle as RawSocket) };
+#[cfg(unix)]
+fn adopt_listen_fd(args: &[String]) -> Result<Option<tokio::net::TcpListener>, String> {
+    if let Some(fd) = parse_listen_fd(args)? {
+        // SAFETY: parent passed this live LISTEN fd; CLOEXEC was cleared only
+        // in this child's pre_exec, so concurrent sibling spawns cannot inherit it.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd_checked(fd)? };
         std_listener
             .set_nonblocking(true)
             .map_err(|e| format!("nonblocking: {e}"))?;
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .map_err(|e| format!("from_std: {e}"))?;
-        Ok(Some(listener))
+        return Ok(Some(listener));
     }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = args;
-        Ok(None)
-    }
+    Ok(None)
 }
 
 #[cfg(unix)]
@@ -216,18 +156,24 @@ impl FromRawFdChecked for std::net::TcpListener {
     }
 }
 
-/// Bind `127.0.0.1:port` for LISTEN (`port=0` → ephemeral).
+/// Bind `127.0.0.1:port` (`port=0` → ephemeral).
 ///
-/// On Unix, `SO_REUSEADDR` helps after unrelated bind probes. On Windows, leave
-/// the default (SO_REUSEADDR there allows duplicate concurrent binds).
-fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
+/// `reuse_bind` enables SO_REUSEADDR so Windows can bind while the parent still
+/// holds the (reuseaddr-converted) reserved listener.
+fn bind_loopback(port: u16, reuse_bind: bool) -> Result<tokio::net::TcpListener, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let socket = tokio::net::TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
-    #[cfg(not(windows))]
-    {
+    if reuse_bind {
         socket
             .set_reuseaddr(true)
             .map_err(|e| format!("reuseaddr: {e}"))?;
+    } else {
+        #[cfg(not(windows))]
+        {
+            socket
+                .set_reuseaddr(true)
+                .map_err(|e| format!("reuseaddr: {e}"))?;
+        }
     }
     socket.bind(addr).map_err(|e| format!("bind {addr}: {e}"))?;
     socket

@@ -971,8 +971,8 @@ pub async fn spawn_graph_ui_on_port_with_store(
     let pending_handoff = {
         if let Some(listener) = state.take_listen_handoff(port) {
             // Unix: stdin null + --listen-fd (CLOEXEC cleared in child pre_exec).
-            // Windows: attach sets --listen-socket=HANDLE (inheritable); stderr
-            // piped for listen-adopted + bInheritHandles. Skip CREATE_NO_WINDOW.
+            // Windows: attach converts exclusive→SO_REUSEADDR then --reuse-bind;
+            // stderr piped for listen-adopted. Skip CREATE_NO_WINDOW.
 
             #[cfg(unix)]
             {

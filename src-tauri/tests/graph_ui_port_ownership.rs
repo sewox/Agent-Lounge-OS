@@ -5,9 +5,8 @@
 //!
 //! Port allocation rule: never reserve → free → rebind. Keep the `std`
 //! `TcpListener` alive and hand it over (`from_std` for in-process axum,
-//! `--listen-fd` on Unix, or Windows inheritable `--listen-socket=HANDLE`).
-//! Parent reservations use a plain exclusive bind (no SO_REUSEADDR — that
-//! would let parallel tests both "own" the port on Windows).
+//! `--listen-fd` on Unix, or Windows exclusive→SO_REUSEADDR convert +
+//! `--reuse-bind`). Parent reservations use a plain exclusive bind.
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -48,8 +47,8 @@ fn bind_loopback_exclusive(port: u16) -> std::io::Result<TcpListener> {
 
 fn reserve_held_band() -> HeldBand {
     for _ in 0..300 {
-        // Plain exclusive bind in the parent. Windows handoff inherits the
-        // SOCKET handle (no SO_REUSEADDR rebind); never reserve with reuseaddr.
+        // Plain exclusive bind for the reservation lifetime (B1). Windows
+        // handoff converts to SO_REUSEADDR only immediately before spawn.
         let foreign = match bind_loopback_exclusive(0) {
             Ok(l) => l,
             Err(_) => continue,
@@ -245,7 +244,7 @@ async fn classify_auto_owned_successor_reports_ui_available() {
         "test process must own {owned_port}; pids={:?}",
         listen_pids(owned_port)
     );
-    // After inherit handoff, Windows may briefly still list this process on
+    // After SO_REUSEADDR handoff, Windows may briefly still list this process on
     // preferred until the closed parent descriptor leaves the TCP table.
     let parent_off_preferred =
         wait_until_port_not_owned(preferred, child_pid, Duration::from_secs(5));

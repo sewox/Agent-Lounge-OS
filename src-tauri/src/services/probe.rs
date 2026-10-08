@@ -880,7 +880,7 @@ pub fn spawn_tcp_hold_ephemeral(binary: &Path) -> Result<std::process::Child> {
 ///
 /// Returns a [`super::listen_handoff::ListenHandoffGuard`] that must be held
 /// until the child is accept-ready (Windows: parent keeps exclusive LISTEN
-/// until child's `--listen-socket` adopt emits `listen-adopted`).
+/// until child's `--reuse-bind` emits `listen-adopted`).
 #[cfg(feature = "test-helpers")]
 pub fn spawn_tcp_hold_on_std_listener(
     binary: &Path,
@@ -902,7 +902,7 @@ pub fn spawn_tcp_hold_on_std_listener(
     command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // Unix: --listen-fd + stdin null. Windows: attach adds --listen-socket=HANDLE.
+    // Unix: --listen-fd + stdin null. Windows: attach converts + --reuse-bind.
     #[cfg(unix)]
     {
         command.stdin(std::process::Stdio::null());

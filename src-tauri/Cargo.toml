@@ -53,6 +53,8 @@ sha2 = "0.11"
 bcrypt = "0.17"
 # Used by listen_handoff (test-helpers Unix CLOEXEC clear in child pre_exec).
 libc = { version = "0.2", optional = true }
+# Windows exclusive→SO_REUSEADDR convert at handoff (test-helpers only).
+socket2 = { version = "0.6", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -76,4 +78,4 @@ default = []
 laya-live = []
 # Test-only Graph UI ownership helpers + lounge-test-helper bin.
 # Required for `tests/graph_ui_port_ownership.rs`. Never enable for release/tauri builds.
-test-helpers = ["dep:libc"]
+test-helpers = ["dep:libc", "dep:socket2"]

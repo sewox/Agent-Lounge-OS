@@ -5,13 +5,14 @@
 //! Unix: pass `--listen-fd=N`; clear `FD_CLOEXEC` only in the child via
 //! `pre_exec` so concurrent spawns cannot inherit the LISTEN socket.
 //!
-//! Windows: parent keeps an **exclusive** bind; mark the SOCKET inheritable,
-//! pass `--listen-socket=HANDLE` (same handle value in the child per Win32
-//! inheritance), wait for `listen-adopted`, then drop the parent descriptor.
-//! Do **not** use child SO_REUSEADDR over an exclusive parent — that fails
-//! with WSAEACCES (10013). Never free-then-rebind.
-//! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks handle
-//! inheritance / piped stdio). Piped stderr keeps `bInheritHandles=TRUE`.
+//! Windows: reservations use an **exclusive** bind (B1). For child handoff,
+//! convert that listener to SO_REUSEADDR on the same port immediately before
+//! spawn, then child `--reuse-bind` while parent still holds; parent drops
+//! after `listen-adopted`. The convert window is microseconds and parallel
+//! tests also reserve exclusively, so they cannot steal during it.
+//! (Child SO_REUSEADDR over a still-exclusive specific binder is WSAEACCES;
+//! SOCKET inheritance / WSADuplicateSocket timed out on CI.)
+//! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks piped stdio).
 
 use std::net::TcpListener;
 use std::process::{Child, Command};
@@ -40,6 +41,19 @@ impl ListenHandoffGuard {
     fn none() -> Self {
         Self { _listener: None }
     }
+}
+
+/// Windows-only: drop an exclusive listener and immediately re-bind the same
+/// port with `SO_REUSEADDR` so a same-user child can `--reuse-bind`.
+#[cfg(windows)]
+fn rebind_loopback_reuseaddr(port: u16) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
 }
 
 /// Prepare `command` so the child can adopt `listener` without a free→rebind gap.
@@ -74,21 +88,14 @@ pub fn attach_inherited_listener_owned(
 
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawSocket;
         use std::process::Stdio;
-        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
-
-        let socket = listener.as_raw_socket();
-        let ok = unsafe {
-            SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-        };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // Piped stderr ⇒ CreateProcess bInheritHandles=TRUE so the SOCKET is
-        // duplicated into the child at the same handle value.
+        let port = listener.local_addr()?.port();
+        // Exclusive → SO_REUSEADDR convert (see module docs). Drop first.
+        drop(listener);
+        let listener = rebind_loopback_reuseaddr(port)?;
+        command.arg("--reuse-bind");
+        command.arg(format!("--port={port}"));
         command.stdin(Stdio::null());
-        command.arg(format!("--listen-socket={socket}"));
         Ok(PendingListenHandoff { listener })
     }
 
@@ -120,9 +127,6 @@ pub fn complete_listen_handoff(
 
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
-
         let pid = child.id();
         let stderr = child.stderr.take().ok_or_else(|| {
             std::io::Error::new(
@@ -131,9 +135,6 @@ pub fn complete_listen_handoff(
             )
         })?;
         wait_listen_adopted_line(stderr, pid, Duration::from_secs(5))?;
-        // Stop further concurrent spawns from inheriting this HANDLE.
-        let socket = pending.listener.as_raw_socket();
-        let _ = unsafe { SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0) };
         drop(pending.listener);
         Ok(ListenHandoffGuard::none())
     }
