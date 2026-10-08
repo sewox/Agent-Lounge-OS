@@ -4,9 +4,12 @@
 //!
 //! Unix: pass `--listen-fd=N`; clear `FD_CLOEXEC` only in the child via
 //! `pre_exec` so concurrent spawns cannot inherit the LISTEN socket.
-//! Windows: parent keeps an exclusive bind; child uses `--reuse-bind` /
-//! `SO_REUSEADDR` to bind the same port while the parent still holds it, then
-//! parent drops after `listen-adopted`. Never free-then-rebind.
+//!
+//! Windows: parent keeps an **exclusive** bind; hand off via
+//! `WSADuplicateSocketW` + `--listen-proto-stdin` (child `WSASocketW`), then
+//! drop parent after `listen-adopted`. Do **not** use child `--reuse-bind`
+//! over an exclusive parent — same-user specific+specific SO_REUSEADDR fails
+//! with WSAEACCES (10013) on modern Windows. Never free-then-rebind.
 //! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks piped stdio).
 
 use std::net::TcpListener;
@@ -71,11 +74,9 @@ pub fn attach_inherited_listener_owned(
     #[cfg(windows)]
     {
         use std::process::Stdio;
-        let port = listener.local_addr()?.port();
-        // Parent keeps exclusive bind; child SO_REUSEADDR-binds the same port.
-        command.arg("--reuse-bind");
-        command.arg(format!("--port={port}"));
-        command.stdin(Stdio::null());
+        let _ = &listener;
+        command.stdin(Stdio::piped());
+        command.arg("--listen-proto-stdin");
         Ok(PendingListenHandoff { listener })
     }
 
@@ -92,8 +93,8 @@ pub fn attach_inherited_listener_owned(
 /// Finish handoff after spawn.
 ///
 /// Unix: drop parent fd (child inherited it via pre_exec CLOEXEC clear).
-/// Windows: wait for `listen-adopted` (bounded), then drop parent so the child
-/// alone owns the port for accept / `listen_pids`.
+/// Windows: `WSADuplicateSocketW` → write protocol info on stdin → wait for
+/// `listen-adopted` (bounded) → drop parent so the child alone owns the port.
 pub fn complete_listen_handoff(
     pending: PendingListenHandoff,
     child: &mut Child,
@@ -107,7 +108,37 @@ pub fn complete_listen_handoff(
 
     #[cfg(windows)]
     {
+        use std::io::Write;
+        use std::mem::{size_of, MaybeUninit};
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            WSADuplicateSocketW, SOCKET, SOCKET_ERROR, WSAPROTOCOL_INFOW,
+        };
+
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "listen handoff: child stdin pipe missing",
+            )
+        })?;
+        let socket = pending.listener.as_raw_socket() as SOCKET;
         let pid = child.id();
+        let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
+        let rc = unsafe { WSADuplicateSocketW(socket, pid, info.as_mut_ptr()) };
+        if rc == SOCKET_ERROR {
+            return Err(std::io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&info as *const WSAPROTOCOL_INFOW).cast::<u8>(),
+                size_of::<WSAPROTOCOL_INFOW>(),
+            )
+        };
+        stdin.write_all(bytes)?;
+        stdin.flush()?;
+        drop(stdin);
+
         let stderr = child.stderr.take().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -115,6 +146,8 @@ pub fn complete_listen_handoff(
             )
         })?;
         wait_listen_adopted_line(stderr, pid, Duration::from_secs(5))?;
+        // Child has its own SOCKET; release parent so accept / listen_pids
+        // attach to the child alone.
         drop(pending.listener);
         Ok(ListenHandoffGuard::none())
     }
@@ -162,6 +195,15 @@ fn wait_listen_adopted_line(
                         if trimmed.starts_with("listen-adopted ")
                             && trimmed.contains(&format!("pid={expected_pid}"))
                         {
+                            // Drain leftover stderr so the child is not killed by
+                            // a full pipe / ERROR_BROKEN_PIPE on further writes.
+                            let mut buf = [0u8; 512];
+                            loop {
+                                match stderr.read(&mut buf) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(_) => {}
+                                }
+                            }
                             break Ok(());
                         }
                         line.clear();
