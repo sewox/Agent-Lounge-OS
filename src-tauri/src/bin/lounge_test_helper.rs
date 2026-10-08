@@ -96,6 +96,9 @@ fn has_listen_handoff_request(args: &[String]) -> bool {
 }
 
 /// Adopt a parent-handed LISTEN socket, or bind `127.0.0.1:port` (`port=0` → ephemeral).
+///
+/// On handoff, emits `listen-adopted port=N pid=P` on stderr **before** returning so
+/// the parent can drop its shared descriptor (required on Windows).
 fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u16), String> {
     if has_listen_handoff_request(args) {
         let listener = adopt_inherited_listener(args)?
@@ -104,6 +107,10 @@ fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u1
             .local_addr()
             .map_err(|e| format!("local_addr: {e}"))?
             .port();
+        let line = format!("listen-adopted port={port} pid={}", std::process::id());
+        let mut err = std::io::stderr();
+        let _ = writeln!(err, "{line}");
+        let _ = err.flush();
         return Ok((listener, port));
     }
     let port =

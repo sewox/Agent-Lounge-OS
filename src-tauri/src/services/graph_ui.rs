@@ -130,8 +130,6 @@ pub struct GraphUiState {
     /// Test-only: pre-bound LISTEN sockets handed to the next spawn on that port
     /// (avoids reserve→free→rebind races). Empty in production use.
     listen_handoffs: Mutex<HashMap<u16, std::net::TcpListener>>,
-    /// Test-only: parent LISTEN socket retained until child adopts (Windows WSA).
-    listen_handoff_guard: Mutex<Option<super::listen_handoff::ListenHandoffGuard>>,
 }
 
 struct StatusFlight {
@@ -158,7 +156,6 @@ impl GraphUiState {
             cbm_config_snapshot: Mutex::new(None),
             cbm_config_path_override: Mutex::new(None),
             listen_handoffs: Mutex::new(HashMap::new()),
-            listen_handoff_guard: Mutex::new(None),
         }
     }
 
@@ -963,13 +960,19 @@ pub async fn spawn_graph_ui_on_port_with_store(
         .internal_daemon()
         .into_std_command()
         .with_context(|| format!("graph UI gate başarısız: {}", binary.display()))?;
-    command.stdout(Stdio::null()).stderr(Stdio::null());
+    command.stdout(Stdio::null());
     let pending_handoff = if let Some(listener) = handoff {
         // Unix: stdin null + --listen-fd. Windows: piped stdin + protocol info.
         // Skip CREATE_NO_WINDOW — it breaks piped stdio on Windows CI.
+        // stderr must be piped on Windows so we can wait for listen-adopted.
         #[cfg(unix)]
         {
             command.stdin(Stdio::null());
+            command.stderr(Stdio::null());
+        }
+        #[cfg(windows)]
+        {
+            command.stderr(Stdio::piped());
         }
         Some(
             super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
@@ -977,6 +980,7 @@ pub async fn spawn_graph_ui_on_port_with_store(
         )
     } else {
         command.stdin(Stdio::piped());
+        command.stderr(Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -996,19 +1000,13 @@ pub async fn spawn_graph_ui_on_port_with_store(
                 .with_context(|| format!("graph UI spawn başarısız: {}", binary.display()));
         }
     };
-    let handoff_guard = if let Some(pending) = pending_handoff {
-        Some(
-            super::listen_handoff::complete_listen_handoff(pending, &mut child)
-                .context("complete Graph UI listen handoff")?,
-        )
-    } else {
-        None
-    };
-    if let Some(guard) = handoff_guard {
-        if let Ok(mut slot) = state.listen_handoff_guard.lock() {
-            *slot = Some(guard);
-        }
+    if let Some(pending) = pending_handoff {
+        // Drops parent LISTEN after child's listen-adopted (Windows).
+        let _guard = super::listen_handoff::complete_listen_handoff(pending, &mut child)
+            .context("complete Graph UI listen handoff")?;
     }
+    // Drop unused stderr pipe after handoff so the child cannot block on a full pipe.
+    drop(child.stderr.take());
     state.store_child(child);
     sync_owned_pid(bridge, state);
 
@@ -1018,11 +1016,6 @@ pub async fn spawn_graph_ui_on_port_with_store(
         || async { probe_ui_config(port).await },
     )
     .await;
-
-    // Child has adopted; release parent LISTEN descriptor (Windows WSA share).
-    if let Ok(mut slot) = state.listen_handoff_guard.lock() {
-        slot.take();
-    }
 
     if !ready {
         state.kill_spawned_child();
