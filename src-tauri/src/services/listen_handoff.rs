@@ -157,7 +157,7 @@ pub fn complete_listen_handoff(
 /// Read stderr one byte at a time until `listen-adopted ... pid=P` (no buffering ahead).
 #[cfg(windows)]
 fn wait_listen_adopted_line(
-    stderr: &mut impl Read,
+    stderr: &mut impl std::io::Read,
     expected_pid: u32,
     timeout: Duration,
 ) -> std::io::Result<()> {
