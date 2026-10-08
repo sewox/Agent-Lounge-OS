@@ -821,10 +821,15 @@ pub fn stage_codebase_memory_mcp_double(helper_bin: &Path) -> Result<(PathBuf, P
     if std::fs::hard_link(helper_bin, &dest).is_err() {
         std::fs::copy(helper_bin, &dest)
             .with_context(|| format!("copy {} → {}", helper_bin.display(), dest.display()))?;
-        let file = std::fs::File::open(&dest)
-            .with_context(|| format!("open staged {}", dest.display()))?;
-        file.sync_all()
-            .with_context(|| format!("fsync staged {}", dest.display()))?;
+        // fsync after copy only on Unix — Windows denies FlushFileBuffers on a
+        // freshly copied .exe opened read-only (os error 5).
+        #[cfg(unix)]
+        {
+            let file = std::fs::File::open(&dest)
+                .with_context(|| format!("open staged {}", dest.display()))?;
+            file.sync_all()
+                .with_context(|| format!("fsync staged {}", dest.display()))?;
+        }
     }
     #[cfg(unix)]
     {
