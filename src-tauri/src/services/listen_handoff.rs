@@ -4,6 +4,7 @@
 //! Unix: clear FD_CLOEXEC and pass `--listen-fd=N`; drop parent copy after spawn.
 //! Windows: spawn with piped stdin + `--listen-proto-stdin`, then
 //! `WSADuplicateSocketW` → write `WSAPROTOCOL_INFOW` → child `WSASocketW`.
+//! Keep the parent listener alive until the child has adopted (ready), then drop.
 //! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks piped stdio).
 
 use std::net::TcpListener;
@@ -19,6 +20,27 @@ pub fn std_listener_to_tokio(listener: TcpListener) -> std::io::Result<tokio::ne
 /// [`complete_listen_handoff`] after `Command::spawn`.
 pub struct PendingListenHandoff {
     listener: TcpListener,
+}
+
+/// Keeps the parent LISTEN socket alive until dropped (required on Windows so
+/// `WSASocketW` from protocol info can still attach to the underlying socket).
+#[must_use]
+pub struct ListenHandoffGuard {
+    _listener: Option<TcpListener>,
+}
+
+impl ListenHandoffGuard {
+    #[cfg(unix)]
+    fn none() -> Self {
+        Self { _listener: None }
+    }
+
+    #[cfg(windows)]
+    fn some(listener: TcpListener) -> Self {
+        Self {
+            _listener: Some(listener),
+        }
+    }
 }
 
 /// Prepare `command` so the child can adopt `listener` without rebinding.
@@ -66,16 +88,20 @@ pub fn attach_inherited_listener_owned(
     }
 }
 
-/// Finish handoff after spawn: Unix drops the parent fd; Windows duplicates via WSA.
+/// Finish handoff after spawn.
+///
+/// Unix: drops the parent fd immediately (child already inherited it).
+/// Windows: writes `WSAPROTOCOL_INFOW` to the child's stdin and returns a
+/// [`ListenHandoffGuard`] that must be held until the child is accept-ready.
 pub fn complete_listen_handoff(
     pending: PendingListenHandoff,
     child: &mut Child,
-) -> std::io::Result<()> {
+) -> std::io::Result<ListenHandoffGuard> {
     #[cfg(unix)]
     {
         let _ = child;
         drop(pending.listener);
-        Ok(())
+        Ok(ListenHandoffGuard::none())
     }
 
     #[cfg(windows)]
@@ -110,8 +136,9 @@ pub fn complete_listen_handoff(
         stdin.write_all(bytes)?;
         stdin.flush()?;
         drop(stdin);
-        drop(pending.listener);
-        Ok(())
+        // Keep parent descriptor alive until caller drops the guard (child must
+        // WSASocketW first or the underlying socket can disappear).
+        Ok(ListenHandoffGuard::some(pending.listener))
     }
 
     #[cfg(not(any(unix, windows)))]

@@ -184,11 +184,12 @@ async fn classify_auto_owned_successor_reports_ui_available() {
     // Keep the spare successor reserved so nothing steals band_end mid-test.
     let _spare = held.successors;
 
-    let (mut foreign, foreign_port) =
+    let (mut foreign, foreign_port, handoff_guard) =
         spawn_tcp_hold_on_std_listener(&binary, held.foreign).expect("foreign handoff");
     assert_eq!(foreign_port, preferred);
     wait_tcp_hold_ready(&mut foreign, preferred, Duration::from_secs(5))
         .unwrap_or_else(|e| panic!("foreign ready: {e}"));
+    drop(handoff_guard);
     assert_ne!(foreign.id(), std::process::id());
 
     let app = Router::new().route(

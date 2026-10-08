@@ -156,11 +156,13 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
             .read_exact(bytes)
             .map_err(|e| format!("listen-proto-stdin read: {e}"))?;
         let mut info = unsafe { info.assume_init() };
+        // FROM_PROTOCOL_INFO (-1): af/type/protocol taken from lpProtocolInfo.
+        const FROM_PROTOCOL_INFO: i32 = -1;
         let socket = unsafe {
             WSASocketW(
-                info.iAddressFamily,
-                info.iSocketType,
-                info.iProtocol,
+                FROM_PROTOCOL_INFO,
+                FROM_PROTOCOL_INFO,
+                FROM_PROTOCOL_INFO,
                 &mut info,
                 0,
                 WSA_FLAG_OVERLAPPED,

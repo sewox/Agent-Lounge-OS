@@ -878,13 +878,18 @@ pub fn spawn_tcp_hold_ephemeral(binary: &Path) -> Result<std::process::Child> {
 
 /// Hand a reserved `std::net::TcpListener` to a tcp-hold child (no rebind).
 ///
-/// Keeps `listener` alive until after `spawn`, then drops it so only the child
-/// holds the LISTEN socket.
+/// Returns a [`super::listen_handoff::ListenHandoffGuard`] that must be held
+/// until the child is accept-ready (Windows keeps the parent LISTEN socket
+/// alive across `WSASocketW` adoption).
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn spawn_tcp_hold_on_std_listener(
     binary: &Path,
     listener: std::net::TcpListener,
-) -> Result<(std::process::Child, u16)> {
+) -> Result<(
+    std::process::Child,
+    u16,
+    super::listen_handoff::ListenHandoffGuard,
+)> {
     let port = listener
         .local_addr()
         .context("tcp-hold handoff local_addr")?
@@ -909,9 +914,9 @@ pub fn spawn_tcp_hold_on_std_listener(
     let mut child = command
         .spawn()
         .with_context(|| format!("tcp-hold handoff spawn: {}", binary.display()))?;
-    super::listen_handoff::complete_listen_handoff(pending, &mut child)
+    let guard = super::listen_handoff::complete_listen_handoff(pending, &mut child)
         .context("complete listen handoff")?;
-    Ok((child, port))
+    Ok((child, port, guard))
 }
 
 /// Block until the tcp-hold child is accept-ready on `port` and
@@ -957,8 +962,10 @@ fn wait_tcp_hold_ready_inner(
     let expected_pid = child.id();
     let start = std::time::Instant::now();
 
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let line_rx = child.stderr.take().map(|stderr| {
         let (tx, rx) = mpsc::channel::<u16>();
+        let stderr_buf = stderr_buf.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
@@ -968,6 +975,16 @@ fn wait_tcp_hold_ready_inner(
                     Ok(0) => return,
                     Ok(_) => {
                         let trimmed = line.trim();
+                        if let Ok(mut buf) = stderr_buf.lock() {
+                            if !buf.is_empty() {
+                                buf.push('\n');
+                            }
+                            buf.push_str(trimmed);
+                            if buf.len() > 800 {
+                                let drain = buf.len() - 800;
+                                buf.drain(..drain);
+                            }
+                        }
                         if let Some(port) = parse_tcp_hold_ready_port(trimmed, expected_pid) {
                             let port_ok = match expected_port {
                                 None => true,
@@ -990,8 +1007,9 @@ fn wait_tcp_hold_ready_inner(
     let mut saw_accept = false;
     while start.elapsed() < timeout {
         if let Some(status) = child.try_wait().context("tcp-hold try_wait")? {
+            let stderr_tail = stderr_buf.lock().map(|g| g.clone()).unwrap_or_default();
             anyhow::bail!(
-                "tcp-hold exited before accept-ready: status={status:?}; listen_pids={:?}",
+                "tcp-hold exited before accept-ready: status={status:?}; listen_pids={:?}; stderr={stderr_tail}",
                 ready_port.map(listen_pids).unwrap_or_default()
             );
         }
