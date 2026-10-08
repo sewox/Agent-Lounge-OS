@@ -209,7 +209,11 @@ describe("install-linux-build-deps", () => {
       0,
       `self-test failed:\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
-    assert.match(result.stdout, /install-linux-build-deps self-test: ok/);
+    assert.match(
+      result.stdout,
+      /install-linux-build-deps self-test: ok/,
+      `missing self-test ok marker:\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
     assert.match(
       result.stdout,
       /ok: mirror backup\/switch surface cp\/sed\/mktemp\/empty-host\/mention-read failures with ::error::/,

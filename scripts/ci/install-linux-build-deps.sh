@@ -129,19 +129,22 @@ read_os_release_field() {
 is_apt_based_os_release() {
   local file="${1:-$(os_release_path)}"
   local id="" like="" token
-  local -a tokens=()
   id="$(read_os_release_field "$file" ID)"
   like="$(read_os_release_field "$file" ID_LIKE)"
   # Disable globbing: ID=* (or other metacharacters) must not expand to filenames.
+  # Use unquoted $id $like under set -f (not a bash4 array): bash 3.2 + set -u
+  # treats "${empty_array[@]}" as an unbound variable (macOS /bin/bash).
   set -f
-  # shellcheck disable=SC2206
-  tokens=($id $like)
-  set +f
-  for token in "${tokens[@]}"; do
+  # shellcheck disable=SC2086
+  for token in $id $like; do
     case "$token" in
-      debian|ubuntu) return 0 ;;
+      debian|ubuntu)
+        set +f
+        return 0
+        ;;
     esac
   done
+  set +f
   return 1
 }
 
@@ -690,7 +693,7 @@ self_test() {
     "opensuse;ID=\"opensuse-leap\";ID_LIKE=\"suse opensuse\";false"
     "arch;ID=arch;ID_LIKE=archlinux;false"
     "alpine;ID=alpine;;false"
-    "globstar;ID=*;false"
+    "globstar;ID=*;;false"
   )
   local case_spec name id_line like_line expect got
   for case_spec in "${os_cases[@]}"; do
