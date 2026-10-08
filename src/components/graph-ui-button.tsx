@@ -90,6 +90,18 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
   const statusNote = resolveGraphUiStatusMessage(status, (key, params) => t(key, params));
   const infoNote =
     status.port_mode === "auto" && !status.port_conflict ? statusNote : null;
+  const conflictNote = status.port_conflict ? statusNote : null;
+
+  const translateInvokeError = (err: unknown): string => {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (raw.startsWith("graphMsg")) {
+      return t(raw, {
+        port: status.port,
+        ...(status.message_params ?? {}),
+      });
+    }
+    return raw;
+  };
 
   return (
     <GraphUiButtonView
@@ -97,6 +109,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
       busy={busy}
       toast={toast}
       infoNote={infoNote}
+      conflictNote={conflictNote}
       labels={{
         enable: t("graphEnable"),
         enableWithPort: t("graphEnableWithPort", { port: status.port }),
@@ -109,10 +122,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
           return;
         }
         if (shouldBlockEnableOnConflict(status)) {
-          setToast(
-            resolveGraphUiStatusMessage(status, (key, params) => t(key, params)) ||
-              t("graphPortBusy", { port: status.port }),
-          );
+          setToast(statusNote || t("graphPortBusy", { port: status.port }));
           return;
         }
         const confirmed = await ask(t("graphEnableConfirmBody", { port: status.port }), {
@@ -132,7 +142,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
           });
           setStatus(next);
         } catch (err) {
-          setToast(err instanceof Error ? err.message : String(err));
+          setToast(translateInvokeError(err));
           try {
             const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
               projectRoot: resolvedRoot,
@@ -153,7 +163,7 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
         try {
           await invoke("open_graph_ui", { projectRoot: resolvedRoot });
         } catch (err) {
-          setToast(err instanceof Error ? err.message : String(err));
+          setToast(translateInvokeError(err));
         } finally {
           setBusy(false);
         }

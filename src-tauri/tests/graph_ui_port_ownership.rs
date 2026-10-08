@@ -13,8 +13,8 @@ use app_lib::services::memory_bridge::{
     MemoryBridge, MemoryBridgeConfig, ToolTransport, TransportMode,
 };
 use app_lib::services::{
-    enable_graph_ui_headless, listen_pids, port_owned_by_lounge, probe_ui_config,
-    spawn_tcp_hold_child, stage_codebase_memory_mcp_double, tcp_bind_available,
+    classify_port_status, enable_graph_ui_headless, listen_pids, port_owned_by_lounge,
+    probe_ui_config, spawn_tcp_hold_child, stage_codebase_memory_mcp_double, tcp_bind_available,
     tcp_hold_ready_err_is_port_collision, wait_tcp_hold_ready, wait_until_port_owned,
     GraphUiPortMode, GraphUiState,
 };
@@ -210,6 +210,79 @@ async fn port_owned_by_lounge_matches_spawned_child_id() {
         }
     }
     panic!("tcp-hold could not bind an ephemeral port after 8 attempts: {last_err}");
+}
+
+/// S2: Auto remap to a successor already owned by Lounge → ui_available=true.
+/// Preferred must be a distinct PID (tcp-hold child); owned UI is this process.
+#[tokio::test]
+async fn classify_auto_owned_successor_reports_ui_available() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage helper");
+    let held = reserve_held_band();
+    let preferred = held.foreign_port;
+    let owned_port = preferred + 1;
+    let band_end = held.band_end;
+    drop(held.hold_free);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !tcp_bind_available(preferred) || !tcp_bind_available(owned_port) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "band ports must free before spawn"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let mut foreign = spawn_tcp_hold_child(&binary, preferred).expect("foreign tcp-hold");
+    wait_tcp_hold_ready(&mut foreign, preferred, Duration::from_secs(5))
+        .unwrap_or_else(|e| panic!("foreign ready: {e}"));
+    assert_ne!(foreign.id(), std::process::id());
+
+    let app = Router::new().route(
+        "/api/ui-config",
+        get(|| async { Json(serde_json::json!({"lang": "en", "lounge": true})) }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", owned_port))
+        .await
+        .unwrap_or_else(|e| panic!("owned bind :{owned_port}: {e}"));
+    let _owned_task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    for _ in 0..80 {
+        if probe_ui_config(owned_port).await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(probe_ui_config(owned_port).await, "owned ui-config up");
+
+    let child_pid = std::process::id();
+    assert!(
+        wait_until_port_owned(owned_port, child_pid, Duration::from_secs(5)),
+        "test process must own {owned_port}; pids={:?}",
+        listen_pids(owned_port)
+    );
+    assert!(!port_owned_by_lounge(preferred, Some(child_pid)));
+
+    let classified = classify_port_status(
+        preferred,
+        Some(child_pid),
+        GraphUiPortMode::Auto,
+        preferred..=band_end,
+    )
+    .await;
+
+    assert_eq!(classified.port, owned_port);
+    assert!(
+        classified.ui_available,
+        "owned remapped successor must surface ui_available"
+    );
+    assert!(!classified.port_conflict);
+    assert_eq!(classified.remap_from_port, Some(preferred));
+    assert_eq!(classified.message_key.as_deref(), Some("graphAutoPortInfo"));
+
+    let _ = foreign.kill();
+    let _ = foreign.wait();
+    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 /// Acceptance: foreign ui-config on first band port is not adopted; Lounge spawns next.

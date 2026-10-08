@@ -106,7 +106,7 @@
   "graphPortBusy": "Port {{port}} meşgul",
   "graphAutoPortInfo": "{{busy}} başka bir süreç tarafından kullanılıyor; {{next}} kullanılacak",
   "graphEnableConfirmTitle": "Graph UI’yi Etkinleştir",
-  "graphEnableConfirmBody": "Lounge, kendi codebase-memory-mcp Graph UI sürecini {{port}} portunda başlatır.\nPaylaşılan config.json’a geçici yazar; UI hazır olunca önceki değerleri geri yükler — diğer codebase-memory oturumları etkilenmez.\nNasıl durdurulur: Graph penceresini kapatın veya Lounge’dan çıkın (yalnız Lounge’un başlattığı süreç durur).\n\nDevam edilsin mi?",
+  "graphEnableConfirmBody": "Lounge, kendi codebase-memory-mcp Graph UI sürecini {{port}} portunda başlatır.\nPaylaşılan config.json’a geçici olarak yazar; UI hazır olunca önceki değerleri geri yükler — diğer codebase-memory oturumları etkilenmez.\nNasıl durdurulur: Graph penceresini kapatın veya Lounge’dan çıkın (yalnız Lounge’un başlattığı süreç durur).\n\nDevam edilsin mi?",
   "graphMsgForeignUiUser": "Port {{port}} üzerinde başka bir codebase-memory-mcp (ör. Antigravity) çalışıyor — Lounge bunu sahiplenmez. User modunda port otomatik değiştirilmez; Ayarlar’dan başka bir port seçin.",
   "graphMsgPortBusyUser": "Port {{port}} başka bir süreç tarafından kullanılıyor. User modunda port otomatik değiştirilmez; Ayarlar’da Graph UI Port’u değiştirin veya o süreci kontrol edin.",
   "graphMsgBandExhausted": "Graph UI port bandı {{start}}–{{end}} tamamen dolu. Bir portu boşaltın veya Ayarlar’da User modunda sabit bir port seçin.",

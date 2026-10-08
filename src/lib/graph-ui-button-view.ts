@@ -16,7 +16,10 @@ export type GraphUiButtonViewProps = {
   status: GraphUiButtonStatus;
   busy: boolean;
   toast?: string | null;
+  /** Auto remap info (non-error). */
   infoNote?: string | null;
+  /** Translated conflict reason (User busy/foreign, or Auto band exhausted). */
+  conflictNote?: string | null;
   labels: GraphUiButtonViewLabels;
   onEnable: () => void | Promise<void>;
   onOpen: () => void | Promise<void>;
@@ -28,6 +31,7 @@ export function GraphUiButtonView({
   busy,
   toast,
   infoNote,
+  conflictNote,
   labels,
   onEnable,
   onOpen,
@@ -37,10 +41,12 @@ export function GraphUiButtonView({
   const showIndexedHint = status.ui_available && !status.project_indexed;
   const enableDisabled = isEnableGraphUiDisabled(busy, status);
   const showInfo = Boolean(infoNote?.trim());
+  const showConflict = Boolean(status.port_conflict && conflictNote?.trim());
   const enableLabel = showInfo ? labels.enableWithPort : labels.enable;
-  const conflictTitle =
-    status.port_conflict && status.port_mode === "user"
-      ? status.conflict_message || undefined
+  const buttonTitle = showConflict
+    ? conflictNote || undefined
+    : showInfo
+      ? infoNote || undefined
       : undefined;
 
   const children: ReactNode[] = [];
@@ -54,7 +60,7 @@ export function GraphUiButtonView({
           type: "button",
           "data-qa": "graph-ui-enable",
           disabled: enableDisabled,
-          title: conflictTitle || (showInfo ? infoNote || undefined : undefined),
+          title: buttonTitle,
           onClick: () => {
             void onEnable();
           },
@@ -99,6 +105,21 @@ export function GraphUiButtonView({
             "cursor-not-allowed rounded border border-outline-variant/60 bg-surface-container-high/50 px-2.5 py-1 font-body text-meta text-on-surface-variant opacity-70",
         },
         labels.open,
+      ),
+    );
+  }
+
+  if (showConflict) {
+    children.push(
+      createElement(
+        "p",
+        {
+          key: "conflict",
+          className: "max-w-[18rem] text-right font-body text-meta text-error",
+          role: "status",
+          "data-qa": "graph-ui-conflict-note",
+        },
+        conflictNote,
       ),
     );
   }
