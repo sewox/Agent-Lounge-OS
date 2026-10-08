@@ -51,9 +51,8 @@ safetensors = "0.4"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
 sha2 = "0.11"
 bcrypt = "0.17"
-libc = "0.2"
-# Test/helpers: reserve loopback with SO_REUSEADDR (Windows concurrent handoff bind).
-socket2 = "0.6"
+# Used by listen_handoff (test-helpers Unix CLOEXEC clear in child pre_exec).
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -77,4 +76,4 @@ default = []
 laya-live = []
 # Test-only Graph UI ownership helpers + lounge-test-helper bin.
 # Required for `tests/graph_ui_port_ownership.rs`. Never enable for release/tauri builds.
-test-helpers = []
+test-helpers = ["dep:libc"]

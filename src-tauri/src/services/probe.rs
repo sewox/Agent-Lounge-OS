@@ -879,9 +879,9 @@ pub fn spawn_tcp_hold_ephemeral(binary: &Path) -> Result<std::process::Child> {
 /// Hand a reserved `std::net::TcpListener` to a tcp-hold child (no rebind).
 ///
 /// Returns a [`super::listen_handoff::ListenHandoffGuard`] that must be held
-/// until the child is accept-ready (Windows keeps the parent LISTEN socket
-/// alive across `WSASocketW` adoption).
-#[cfg(any(test, feature = "test-helpers"))]
+/// until the child is accept-ready (Windows: parent keeps exclusive LISTEN
+/// until the child's `--reuse-bind` emits `listen-adopted`).
+#[cfg(feature = "test-helpers")]
 pub fn spawn_tcp_hold_on_std_listener(
     binary: &Path,
     listener: std::net::TcpListener,

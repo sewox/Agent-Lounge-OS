@@ -125,7 +125,8 @@ fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u1
 #[cfg(unix)]
 fn adopt_listen_fd(args: &[String]) -> Result<Option<tokio::net::TcpListener>, String> {
     if let Some(fd) = parse_listen_fd(args)? {
-        // SAFETY: parent cleared CLOEXEC and passed this live LISTEN fd.
+        // SAFETY: parent passed this live LISTEN fd; CLOEXEC was cleared only
+        // in this child's pre_exec, so concurrent sibling spawns cannot inherit it.
         let std_listener = unsafe { std::net::TcpListener::from_raw_fd_checked(fd)? };
         std_listener
             .set_nonblocking(true)

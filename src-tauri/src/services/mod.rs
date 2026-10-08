@@ -10,6 +10,7 @@ pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
 pub mod index_queue;
+#[cfg(feature = "test-helpers")]
 pub mod listen_handoff;
 pub mod lmr_runtime;
 pub mod lounge_auth;
@@ -64,10 +65,10 @@ pub use index_queue::{
     IndexJob, IndexJobEvent, IndexJobPhase, IndexProgress, IndexQueue, WorkspaceScanResult,
     INDEX_CONCURRENCY, INDEX_JOB_EVENT,
 };
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 pub use listen_handoff::{
-    attach_inherited_listener_owned, bind_loopback_reuseaddr, complete_listen_handoff,
-    std_listener_to_tokio, ListenHandoffGuard,
+    attach_inherited_listener_owned, complete_listen_handoff, std_listener_to_tokio,
+    ListenHandoffGuard,
 };
 pub use lounge_auth::{
     add_allowed_origin, auth_required, authorize_mcp_headers, connect as nats_connect,
@@ -89,6 +90,8 @@ pub use open_editor::{
     test_editor_open, windows_opener_argv, EditorPreset, EditorSettings,
 };
 pub use plugin::{lounge_workspace, plugin_health, scan_plugin_catalog, PluginCatalog};
+#[cfg(feature = "test-helpers")]
+pub use probe::spawn_tcp_hold_on_std_listener;
 pub use probe::{
     data_root, ensure_data_layout, listen_pids, lounge_laya_dir, lounge_lmr_binary_path,
     lounge_lmr_dir, lounge_nats_dir, lounge_ollama_endpoint, nats_monitor_endpoint,
@@ -98,10 +101,9 @@ pub use probe::{
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use probe::{
-    spawn_tcp_hold_child, spawn_tcp_hold_ephemeral, spawn_tcp_hold_on_std_listener,
-    stage_codebase_memory_mcp_double, tcp_hold_ready_err_is_port_collision,
-    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_not_owned,
-    wait_until_port_owned,
+    spawn_tcp_hold_child, spawn_tcp_hold_ephemeral, stage_codebase_memory_mcp_double,
+    tcp_hold_ready_err_is_port_collision, wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready,
+    wait_until_port_not_owned, wait_until_port_owned,
 };
 pub use quota_manager::{
     api_keys_from_store, collect_quota_state, collect_quota_state_with_keys, evaluate_assignment,

@@ -6,6 +6,7 @@
 //! Port allocation rule: never reserve → free → rebind. Keep the `std`
 //! `TcpListener` alive and hand it over (`from_std` for in-process axum,
 //! `--listen-fd` on Unix, or Windows `--reuse-bind` while parent still holds).
+//! Parent reservations use a plain exclusive bind (no SO_REUSEADDR).
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -17,11 +18,11 @@ use app_lib::services::memory_bridge::{
     MemoryBridge, MemoryBridgeConfig, ToolTransport, TransportMode,
 };
 use app_lib::services::{
-    bind_loopback_reuseaddr, classify_port_status, enable_graph_ui_headless, listen_pids,
-    port_owned_by_lounge, probe_ui_config, spawn_tcp_hold_ephemeral,
-    spawn_tcp_hold_on_std_listener, stage_codebase_memory_mcp_double, std_listener_to_tokio,
-    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_not_owned,
-    wait_until_port_owned, GraphUiPortMode, GraphUiState,
+    classify_port_status, enable_graph_ui_headless, listen_pids, port_owned_by_lounge,
+    probe_ui_config, spawn_tcp_hold_ephemeral, spawn_tcp_hold_on_std_listener,
+    stage_codebase_memory_mcp_double, std_listener_to_tokio, wait_tcp_hold_ephemeral_ready,
+    wait_tcp_hold_ready, wait_until_port_not_owned, wait_until_port_owned, GraphUiPortMode,
+    GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -39,10 +40,16 @@ struct HeldBand {
     successors: Vec<TcpListener>,
 }
 
+/// Exclusive loopback bind — must fail if another socket is already listening.
+fn bind_loopback_exclusive(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port))
+}
+
 fn reserve_held_band() -> HeldBand {
     for _ in 0..300 {
-        // SO_REUSEADDR so Windows children can --reuse-bind while we still hold.
-        let foreign = match bind_loopback_reuseaddr(0) {
+        // Plain exclusive bind in the parent. Child handoff uses SO_REUSEADDR
+        // only on Windows (`--reuse-bind`); never reserve with reuseaddr here.
+        let foreign = match bind_loopback_exclusive(0) {
             Ok(l) => l,
             Err(_) => continue,
         };
@@ -53,7 +60,7 @@ fn reserve_held_band() -> HeldBand {
         let mut successors = Vec::with_capacity(2);
         let mut ok = true;
         for offset in 1u16..=2 {
-            match bind_loopback_reuseaddr(foreign_port + offset) {
+            match bind_loopback_exclusive(foreign_port + offset) {
                 Ok(l) => successors.push(l),
                 Err(_) => {
                     ok = false;
@@ -72,6 +79,26 @@ fn reserve_held_band() -> HeldBand {
         };
     }
     panic!("could not reserve held contiguous port band");
+}
+
+/// B1: exclusive reservation must fail when the port is already listened on
+/// (Linux, macOS, Windows — SO_REUSEADDR parent reserve would wrongly succeed
+/// on Windows and create a new port race).
+#[test]
+fn exclusive_port_reservation_rejects_busy_port() {
+    let held = bind_loopback_exclusive(0).expect("bind ephemeral exclusive listener");
+    let port = held.local_addr().expect("addr").port();
+    let err = bind_loopback_exclusive(port)
+        .expect_err("exclusive TcpListener::bind must fail on a port that is already listening");
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+        ),
+        "expected AddrInUse (or PermissionDenied), got {:?}: {err}",
+        err.kind()
+    );
+    drop(held);
 }
 
 struct ForeignCbm {

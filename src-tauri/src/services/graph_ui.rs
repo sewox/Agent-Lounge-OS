@@ -3,6 +3,7 @@
 //! Port bandı 18749–18759; Antigravity cbm varsayılanı 9749 ile çakışmaz.
 //! Yabancı `/api/ui-config` asla adopt edilmez; HTTP `/rpc` yalnız sahipli portta.
 
+#[cfg(feature = "test-helpers")]
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -128,7 +129,8 @@ pub struct GraphUiState {
     /// Test/prod override for shared CBM `config.json` path (avoids real HOME).
     cbm_config_path_override: Mutex<Option<PathBuf>>,
     /// Test-only: pre-bound LISTEN sockets handed to the next spawn on that port
-    /// (avoids reserve→free→rebind races). Empty in production use.
+    /// (avoids reserve→free→rebind races). Gated behind `test-helpers`.
+    #[cfg(feature = "test-helpers")]
     listen_handoffs: Mutex<HashMap<u16, std::net::TcpListener>>,
 }
 
@@ -155,11 +157,13 @@ impl GraphUiState {
             }),
             cbm_config_snapshot: Mutex::new(None),
             cbm_config_path_override: Mutex::new(None),
+            #[cfg(feature = "test-helpers")]
             listen_handoffs: Mutex::new(HashMap::new()),
         }
     }
 
     /// Stage a reserved listener for the next Graph UI child on this port (tests).
+    #[cfg(feature = "test-helpers")]
     pub fn stage_listen_handoff(&self, listener: std::net::TcpListener) {
         let port = match listener.local_addr() {
             Ok(addr) => addr.port(),
@@ -175,6 +179,7 @@ impl GraphUiState {
         guard.insert(port, listener);
     }
 
+    #[cfg(feature = "test-helpers")]
     fn take_listen_handoff(&self, port: u16) -> Option<std::net::TcpListener> {
         let mut guard = match self.listen_handoffs.lock() {
             Ok(g) => g,
@@ -184,6 +189,7 @@ impl GraphUiState {
     }
 
     /// Ports staged for listen handoff are treated as free for Auto selection.
+    #[cfg(feature = "test-helpers")]
     pub fn has_listen_handoff(&self, port: u16) -> bool {
         let guard = match self.listen_handoffs.lock() {
             Ok(g) => g,
@@ -953,7 +959,6 @@ pub async fn spawn_graph_ui_on_port_with_store(
         }
     };
 
-    let handoff = state.take_listen_handoff(port);
     let mut command = GuardedCommand::new(binary)
         .arg("--ui=true")
         .arg(format!("--port={port}"))
@@ -961,24 +966,39 @@ pub async fn spawn_graph_ui_on_port_with_store(
         .into_std_command()
         .with_context(|| format!("graph UI gate başarısız: {}", binary.display()))?;
     command.stdout(Stdio::null());
-    let pending_handoff = if let Some(listener) = handoff {
-        // Unix: stdin null + --listen-fd. Windows: piped stdin + protocol info.
-        // Skip CREATE_NO_WINDOW — it breaks piped stdio on Windows CI.
-        // stderr must be piped on Windows so we can wait for listen-adopted.
-        #[cfg(unix)]
-        {
-            command.stdin(Stdio::null());
+
+    #[cfg(feature = "test-helpers")]
+    let pending_handoff = {
+        if let Some(listener) = state.take_listen_handoff(port) {
+            // Unix: stdin null + --listen-fd (CLOEXEC cleared in child pre_exec).
+            // Windows: --reuse-bind while parent still holds; stderr piped for
+            // listen-adopted. Skip CREATE_NO_WINDOW — breaks piped stdio on CI.
+            #[cfg(unix)]
+            {
+                command.stdin(Stdio::null());
+                command.stderr(Stdio::null());
+            }
+            #[cfg(windows)]
+            {
+                command.stderr(Stdio::piped());
+            }
+            Some(
+                super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
+                    .context("attach Graph UI listen handoff")?,
+            )
+        } else {
+            command.stdin(Stdio::piped());
             command.stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
+            None
         }
-        #[cfg(windows)]
-        {
-            command.stderr(Stdio::piped());
-        }
-        Some(
-            super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
-                .context("attach Graph UI listen handoff")?,
-        )
-    } else {
+    };
+    #[cfg(not(feature = "test-helpers"))]
+    {
         command.stdin(Stdio::piped());
         command.stderr(Stdio::null());
         #[cfg(windows)]
@@ -986,11 +1006,12 @@ pub async fn spawn_graph_ui_on_port_with_store(
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000);
         }
-        None
-    };
+    }
+
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
+            #[cfg(feature = "test-helpers")]
             drop(pending_handoff);
             state.restore_cbm_config_best_effort();
             if let Some(store) = store {
@@ -1000,10 +1021,18 @@ pub async fn spawn_graph_ui_on_port_with_store(
                 .with_context(|| format!("graph UI spawn başarısız: {}", binary.display()));
         }
     };
+    #[cfg(feature = "test-helpers")]
     if let Some(pending) = pending_handoff {
         // Drops parent LISTEN after child's listen-adopted (Windows).
-        let _guard = super::listen_handoff::complete_listen_handoff(pending, &mut child)
-            .context("complete Graph UI listen handoff")?;
+        if let Err(err) = super::listen_handoff::complete_listen_handoff(pending, &mut child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            state.restore_cbm_config_best_effort();
+            if let Some(store) = store {
+                let _ = clear_snapshot_in_store(store).await;
+            }
+            return Err(err).context("complete Graph UI listen handoff");
+        }
     }
     // Drain leftover stderr (do not close the pipe — Windows helpers die on
     // ERROR_BROKEN_PIPE if the parent drops the read end while they still write).
@@ -1098,6 +1127,7 @@ pub async fn enable_graph_ui_headless(
         }
         // Staged handoff listeners still LISTEN in the parent; treat as free so
         // Auto can select them without a free→rebind race.
+        #[cfg(feature = "test-helpers")]
         if state.has_listen_handoff(port) {
             return true;
         }
@@ -1448,14 +1478,19 @@ mod tests {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = R>,
     {
+        // Per-test add/remove — never overwrite the global list (parallel tests).
         {
             let mut guard = CLASSIFY_HELD_FREE_PORTS.lock().expect("held-free lock");
-            *guard = ports;
+            for p in &ports {
+                if !guard.contains(p) {
+                    guard.push(*p);
+                }
+            }
         }
         let result = f().await;
         {
             let mut guard = CLASSIFY_HELD_FREE_PORTS.lock().expect("held-free lock");
-            guard.clear();
+            guard.retain(|p| !ports.contains(p));
         }
         result
     }
