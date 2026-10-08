@@ -29,14 +29,14 @@ Branch protection (owner-managed) can require these **16** check names. They mus
 
 ## apt mirror stalls
 
-**Build AppImage + deb** (`linux-bundle.yml` → job `linux-bundle`) installs GTK/WebKit build deps via apt. Ubuntu mirrors on GitHub-hosted runners can stall mid-`apt-get update` / `install` (seen 2026-10-07: ~40 minutes hung on `azure.archive.ubuntu.com` until the run was cancelled).
+**Build AppImage + deb** (`linux-bundle.yml` → job `linux-bundle`) installs GTK/WebKit build deps via apt. Ubuntu mirrors on GitHub-hosted runners can stall mid-`apt-get update` / `install` (seen 2026-10-07: `azure.archive.ubuntu.com` timed out / was ignored, then the run hung ~40 minutes on `https://archive.ubuntu.com` until cancelled).
 
 Mitigations in `scripts/ci/install-linux-build-deps.sh` (step name unchanged):
 
 1. **apt options** via `/etc/apt/apt.conf.d/zzzz-agent-lounge-ci-retries` (must be lexically last; asserted at runtime) plus matching `apt-get -o` flags: `Acquire::Retries "5"`, HTTP/HTTPS/FTP timeouts `30`s, `DPkg::Lock::Timeout "120"`. Effective config is checked with `apt-config -o … dump` (same `-o` set as `apt-get`).
-2. **Step `timeout-minutes: 25`** so a stall fails fast instead of consuming the job’s 90-minute budget, while still allowing 3 full attempts (update 180s + install 300s + backoff 10/30 → worst case 1480s < 1500s).
-3. **Bounded retry** (max 3 attempts, backoff 10s then 30s): `timeout` around update (180s) and install (300s). On retry: `apt-get clean`, clear partial lists, `dpkg --configure -a`, mirror flip. Final failure emits `::error::` and exits non-zero — no `|| true`, no `continue-on-error`.
-4. **Mirror fallback** on retry: switch `azure.archive.ubuntu.com` ↔ `archive.ubuntu.com` (sed with escaped dots, `//` anchor).
+2. **Step `timeout-minutes: 25`** so a stall fails fast instead of consuming the job’s 90-minute budget, while still allowing 3 full attempts (update 180s + install 290s + backoff 10/30 → worst case 1450s < 1500s, slack for cleanup).
+3. **Bounded retry** (max 3 attempts, backoff 10s then 30s): `timeout -k 15` around update (180s) and install (290s). On retry: `apt-get clean`, clear partial lists, `dpkg --configure -a` (cleanup failures emit `::error::`), mirror flip from a pristine sources backup. Final failure emits `::error::` and exits non-zero — no `|| true`, no `continue-on-error`.
+4. **Mirror fallback** on retry: back up apt sources once; attempt 2 switches `azure.archive.ubuntu.com` → `archive.ubuntu.com`; attempt 3 restores the backup (then switches archive → azure only if the backup had no azure). Sed uses escaped dots and a `//` anchor.
 
 Prove the drop-in is active in CI logs: drop-in contents + `apt-config` with `-o` opts showing `Acquire::Retries "5"` and Timeout `"30"`, and the drop-in listed as lexically last under `/etc/apt/apt.conf.d`.
 

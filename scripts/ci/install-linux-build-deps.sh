@@ -20,11 +20,16 @@ APT_GET_O_OPTS=(
 )
 MAX_ATTEMPTS=3
 # Per-command budgets fit step timeout-minutes: 25 (1500s):
-# worst case 3×(180+300)+10+30 = 1480s < 1500s.
+# worst case 3×(180+290)+10+30 = 1450s < 1500s (50s slack for cleanup).
 UPDATE_TIMEOUT_SEC=180
-INSTALL_TIMEOUT_SEC=300
+INSTALL_TIMEOUT_SEC=290
 BACKOFFS=(10 30)
 STEP_TIMEOUT_MINUTES=25
+# Force-kill apt-get if it ignores SIGTERM after the duration.
+TIMEOUT_KILL_AFTER_SEC=15
+
+# Set on first mirror mutation; used to restore originals on later attempts.
+APT_SOURCES_BACKUP_DIR=""
 
 # Package list must stay in sync with linux-bundle.yml (Build AppImage + deb).
 PACKAGES=(
@@ -85,7 +90,6 @@ assert_dropin_lexically_last() {
 }
 
 # Dump + assert Retries/Timeout. Uses apt-config args after the optional parts override.
-# Usage: assert_apt_retries_timeout [extra apt-config -o …] 
 # When CI_APT_DUMP_USE_O_OPTS=1 (default in production), appends APT_GET_O_OPTS.
 assert_apt_retries_timeout() {
   local dumped
@@ -143,19 +147,94 @@ clean_apt_partial_state() {
     echo "dry-run: clean apt partial state + dpkg --configure -a"
     return 0
   fi
-  sudo apt-get clean
-  sudo rm -rf /var/lib/apt/lists/partial/*
+  if ! sudo apt-get clean; then
+    echo "::error::apt-get clean failed during retry cleanup"
+    return 1
+  fi
+  if ! sudo rm -rf /var/lib/apt/lists/partial/*; then
+    echo "::error::failed to clear /var/lib/apt/lists/partial during retry cleanup"
+    return 1
+  fi
   # Incomplete index files can leave apt wedged after a stalled fetch.
   if [[ -d /var/lib/apt/lists ]]; then
-    sudo find /var/lib/apt/lists -maxdepth 1 -type f \
-      ! -name 'lock' ! -name 'partial' -delete
+    if ! sudo find /var/lib/apt/lists -maxdepth 1 -type f \
+      ! -name 'lock' ! -name 'partial' -delete; then
+      echo "::error::failed to clear incomplete apt lists during retry cleanup"
+      return 1
+    fi
   fi
   # Finish any half-configured packages before the next install attempt.
-  sudo dpkg --configure -a
+  if ! sudo dpkg --configure -a; then
+    echo "::error::dpkg --configure -a failed during retry cleanup"
+    return 1
+  fi
+}
+
+backup_apt_sources() {
+  if [[ -n "${APT_SOURCES_BACKUP_DIR}" && -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
+    return 0
+  fi
+  if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
+    APT_SOURCES_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources-dry.XXXXXX")"
+    echo "dry-run: backup apt sources -> ${APT_SOURCES_BACKUP_DIR}"
+    return 0
+  fi
+  APT_SOURCES_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources.XXXXXX")"
+  mkdir -p "${APT_SOURCES_BACKUP_DIR}/sources.list.d"
+  if [[ -f /etc/apt/sources.list ]]; then
+    sudo cp -a /etc/apt/sources.list "${APT_SOURCES_BACKUP_DIR}/sources.list"
+  fi
+  local f
+  for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+    if [[ -f "$f" ]]; then
+      sudo cp -a "$f" "${APT_SOURCES_BACKUP_DIR}/sources.list.d/$(basename "$f")"
+    fi
+  done
+  if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+    sudo cp -a /etc/apt/apt-mirrors.txt "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt"
+  fi
+  echo "Backed up apt sources to ${APT_SOURCES_BACKUP_DIR}"
+}
+
+restore_apt_sources() {
+  if [[ -z "${APT_SOURCES_BACKUP_DIR}" || ! -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
+    echo "::error::apt sources backup missing; cannot restore for mirror retry"
+    return 1
+  fi
+  if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
+    echo "dry-run: restore apt sources from ${APT_SOURCES_BACKUP_DIR}"
+    return 0
+  fi
+  if [[ -f "${APT_SOURCES_BACKUP_DIR}/sources.list" ]]; then
+    sudo cp -a "${APT_SOURCES_BACKUP_DIR}/sources.list" /etc/apt/sources.list
+  fi
+  local f
+  for f in "${APT_SOURCES_BACKUP_DIR}/sources.list.d"/*; do
+    if [[ -f "$f" ]]; then
+      sudo cp -a "$f" "/etc/apt/sources.list.d/$(basename "$f")"
+    fi
+  done
+  if [[ -f "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt" ]]; then
+    sudo cp -a "${APT_SOURCES_BACKUP_DIR}/apt-mirrors.txt" /etc/apt/apt-mirrors.txt
+  fi
+  echo "Restored apt sources from ${APT_SOURCES_BACKUP_DIR}"
+}
+
+backup_mentions_host() {
+  local host="$1"
+  if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
+    # Dry-run assumes Azure-style originals (typical GHA ubuntu runner).
+    [[ "$host" == "azure.archive.ubuntu.com" ]]
+    return $?
+  fi
+  if [[ -z "${APT_SOURCES_BACKUP_DIR}" || ! -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
+    return 1
+  fi
+  grep -RFq "$host" "${APT_SOURCES_BACKUP_DIR}" 2>/dev/null
 }
 
 switch_ubuntu_mirror() {
-  # Deterministic fallback: azure ↔ archive on retry after a stall.
+  # Rewrite //from_host → //to_host in live apt source files (dots escaped).
   local from_host="$1"
   local to_host="$2"
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
@@ -178,26 +257,49 @@ switch_ubuntu_mirror() {
 
 prepare_retry_mirror() {
   local attempt="$1"
-  # attempt 2: prefer archive.ubuntu.com (Azure runners often start on azure.*)
-  # attempt 3: flip the other way so either starting mirror gets a second chance.
+  # Always mutate from a pristine backup so attempt 3 cannot erase the only
+  # non-azure fallback left after attempt 2 rewrote everything to archive.
+  # Explicit `if !` checks: this function is often called under `if ! …`, which
+  # disables set -e inside the call tree.
   if [[ "$attempt" -eq 2 ]]; then
-    switch_ubuntu_mirror "azure.archive.ubuntu.com" "archive.ubuntu.com"
+    if ! backup_apt_sources; then
+      return 1
+    fi
+    if ! switch_ubuntu_mirror "azure.archive.ubuntu.com" "archive.ubuntu.com"; then
+      return 1
+    fi
   elif [[ "$attempt" -eq 3 ]]; then
-    switch_ubuntu_mirror "archive.ubuntu.com" "azure.archive.ubuntu.com"
+    if ! restore_apt_sources; then
+      return 1
+    fi
+    if backup_mentions_host "azure.archive.ubuntu.com"; then
+      # Original had azure; restore already put it back (attempt 2 used archive).
+      echo "Attempt 3: restored original sources (azure present in backup)"
+    else
+      # Original was archive-only; try azure as the alternate.
+      if ! switch_ubuntu_mirror "archive.ubuntu.com" "azure.archive.ubuntu.com"; then
+        return 1
+      fi
+    fi
   fi
+  return 0
 }
 
 run_apt_install_once() {
-  local timeout_bin="${CI_APT_TIMEOUT_BIN:-timeout}"
   local apt_bin="${CI_APT_GET_BIN:-apt-get}"
+  local timeout_bin="${CI_APT_TIMEOUT_BIN:-timeout}"
   # Explicit || return so exit codes propagate under both set -e and set +e.
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
-    "$timeout_bin" "$UPDATE_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
-    "$timeout_bin" "$INSTALL_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
+    "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$UPDATE_TIMEOUT_SEC" \
+      "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
+    "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$INSTALL_TIMEOUT_SEC" \
+      "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
     return 0
   fi
-  sudo "$timeout_bin" "$UPDATE_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
-  sudo "$timeout_bin" "$INSTALL_TIMEOUT_SEC" "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
+  sudo "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$UPDATE_TIMEOUT_SEC" \
+    "$apt_bin" "${APT_GET_O_OPTS[@]}" update || return $?
+  sudo "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$INSTALL_TIMEOUT_SEC" \
+    "$apt_bin" "${APT_GET_O_OPTS[@]}" install -y "${PACKAGES[@]}" || return $?
   return 0
 }
 
@@ -207,8 +309,14 @@ install_with_retries() {
   while [[ "$attempt" -le "$MAX_ATTEMPTS" ]]; do
     echo "apt install attempt ${attempt}/${MAX_ATTEMPTS}"
     if [[ "$attempt" -gt 1 ]]; then
-      clean_apt_partial_state
-      prepare_retry_mirror "$attempt"
+      if ! clean_apt_partial_state; then
+        echo "::error::retry cleanup failed before apt install attempt ${attempt}"
+        return 1
+      fi
+      if ! prepare_retry_mirror "$attempt"; then
+        echo "::error::mirror prepare failed before apt install attempt ${attempt}"
+        return 1
+      fi
     fi
     rc=0
     set +e
@@ -275,7 +383,7 @@ self_test() {
     fi
   done
 
-  # 1b) step budget: 3×(180+300)+10+30 = 1480 < 25×60 = 1500
+  # 1b) step budget: 3×(180+290)+10+30 = 1450 < 25×60 = 1500
   local worst budget
   worst="$(worst_case_seconds)"
   budget="$(step_budget_seconds)"
@@ -284,8 +392,8 @@ self_test() {
     rm -rf "$dir"
     return 1
   fi
-  if [[ "$UPDATE_TIMEOUT_SEC" -ne 180 || "$INSTALL_TIMEOUT_SEC" -ne 300 ]]; then
-    echo "FAIL: expected update=180 install=300, got ${UPDATE_TIMEOUT_SEC}/${INSTALL_TIMEOUT_SEC}" >&2
+  if [[ "$UPDATE_TIMEOUT_SEC" -ne 180 || "$INSTALL_TIMEOUT_SEC" -ne 290 ]]; then
+    echo "FAIL: expected update=180 install=290, got ${UPDATE_TIMEOUT_SEC}/${INSTALL_TIMEOUT_SEC}" >&2
     rm -rf "$dir"
     return 1
   fi
@@ -294,16 +402,16 @@ self_test() {
     rm -rf "$dir"
     return 1
   fi
-  if [[ "$worst" -ne 1480 || "$budget" -ne 1500 ]]; then
-    echo "FAIL: expected worst=1480 budget=1500, got ${worst}/${budget}" >&2
+  if [[ "$worst" -ne 1450 || "$budget" -ne 1500 ]]; then
+    echo "FAIL: expected worst=1450 budget=1500, got ${worst}/${budget}" >&2
     rm -rf "$dir"
     return 1
   fi
   echo "ok: step budget ${worst}s < ${budget}s"
 
   # 1c) later-sorted override: file layer loses, -o opts win.
-  # apt-config exists on Linux only; macOS/Windows Frontend matrix still runs
-  # budget + retry self-tests below (override case is covered on Linux CI).
+  # On Linux GitHub Actions, apt-config must exist (FAIL if missing).
+  # Elsewhere without apt-config (macOS/Windows CI, non-Debian Linux dev): skip.
   if command -v apt-config >/dev/null 2>&1; then
     local parts="$dir/apt-parts"
     mkdir -p "$parts"
@@ -356,6 +464,11 @@ EOF
     fi
     echo "ok: -o opts gate passes under later-sorted Retries 1 override"
   else
+    if [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_OS:-}" == "Linux" ]]; then
+      echo "::error::apt-config missing on Linux GitHub Actions runner — cannot verify -o opts gate"
+      rm -rf "$dir"
+      return 1
+    fi
     echo "ok: skipping apt-config override self-test (apt-config not on this OS)"
   fi
 
@@ -368,10 +481,16 @@ EOF
     return 1
   fi
 
-  # timeout shim: discard duration arg, exec the rest (matches `timeout N cmd…`).
+  # timeout shim: accept `timeout [-k SEC] DURATION CMD…`
   cat >"$dir/fake-timeout" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -k) shift 2 ;;
+    *) shift ;;
+  esac
+done
 shift
 exec "$@"
 EOF
@@ -393,7 +512,7 @@ EOF
   CI_APT_DRY_RUN=1 CI_APT_GET_BIN="$dir/apt-ok.sh" CI_APT_TIMEOUT_BIN="$dir/fake-timeout" \
     install_with_retries
 
-  # 3) fail twice, succeed on third (exercises backoff + mirror prep)
+  # 3) fail twice, succeed on third (exercises backoff + mirror prep + restore)
   cat >"$dir/apt-flaky.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -421,6 +540,7 @@ exit 0
 EOF
   chmod +x "$dir/apt-flaky.sh"
   echo 0 >"$dir/flaky-state"
+  APT_SOURCES_BACKUP_DIR=""
   PATH="$dir:$PATH" \
     CI_APT_DRY_RUN=1 \
     CI_APT_GET_BIN="$dir/apt-flaky.sh" \
@@ -443,6 +563,7 @@ echo "fake apt-get always fail: $*"
 exit 7
 EOF
   chmod +x "$dir/apt-fail.sh"
+  APT_SOURCES_BACKUP_DIR=""
   set +e
   err_out="$(
     PATH="$dir:$PATH" \

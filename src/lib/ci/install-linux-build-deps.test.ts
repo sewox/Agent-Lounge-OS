@@ -17,5 +17,21 @@ describe("install-linux-build-deps", () => {
       `self-test failed:\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
     assert.match(result.stdout, /install-linux-build-deps self-test: ok/);
+
+    const onGha = process.env.GITHUB_ACTIONS === "true";
+    const runnerOs = process.env.RUNNER_OS ?? "";
+    if (onGha && runnerOs === "Linux") {
+      assert.match(
+        result.stdout,
+        /ok: -o opts gate passes under later-sorted Retries 1 override/,
+        "Linux CI must run the apt-config -o opts gate (not skip)",
+      );
+    } else if (runnerOs === "macOS" || runnerOs === "Windows") {
+      assert.match(
+        result.stdout,
+        /ok: skipping apt-config override self-test \(apt-config not on this OS\)/,
+        "macOS/Windows CI must emit the explicit apt-config skip line",
+      );
+    }
   });
 });
