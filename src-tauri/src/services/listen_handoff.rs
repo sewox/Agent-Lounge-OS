@@ -1,17 +1,13 @@
 //! Hand a pre-bound listening socket to a child process (test helpers).
 //!
 //! Avoids reserve → free → rebind TOCTOU races on macOS ephemeral ports.
-//! Unix: clear FD_CLOEXEC and pass `--listen-fd=N` (caller drops after spawn).
-//! Windows: mark the SOCKET inheritable, pass `LOUNGE_TEST_LISTEN_SOCKET`, and
-//! keep the parent listener alive until after `Command::spawn` (do **not** use
-//! `CREATE_NO_WINDOW` on handoff spawns — it breaks handle inheritance).
+//! Unix: clear FD_CLOEXEC and pass `--listen-fd=N`; drop parent copy after spawn.
+//! Windows: spawn with piped stdin + `--listen-proto-stdin`, then
+//! `WSADuplicateSocketW` → write `WSAPROTOCOL_INFOW` → child `WSASocketW`.
+//! Do **not** use `CREATE_NO_WINDOW` on handoff spawns (breaks piped stdio).
 
 use std::net::TcpListener;
-use std::process::Command;
-
-/// Env var consumed by `lounge-test-helper` on Windows.
-#[cfg(windows)]
-pub const LISTEN_SOCKET_ENV: &str = "LOUNGE_TEST_LISTEN_SOCKET";
+use std::process::{Child, Command};
 
 /// Convert a reserved `std` listener into a tokio listener without rebinding.
 pub fn std_listener_to_tokio(listener: TcpListener) -> std::io::Result<tokio::net::TcpListener> {
@@ -19,14 +15,20 @@ pub fn std_listener_to_tokio(listener: TcpListener) -> std::io::Result<tokio::ne
     tokio::net::TcpListener::from_std(listener)
 }
 
-/// Attach a reserved listener for child inheritance.
+/// Token returned by [`attach_inherited_listener_owned`]; finish with
+/// [`complete_listen_handoff`] after `Command::spawn`.
+pub struct PendingListenHandoff {
+    listener: TcpListener,
+}
+
+/// Prepare `command` so the child can adopt `listener` without rebinding.
 ///
-/// Returns `Some(listener)` when the caller must keep it alive until after
-/// `Command::spawn`, then drop it so only the child holds the LISTEN socket.
+/// On Windows this sets `stdin` to a pipe and adds `--listen-proto-stdin`.
+/// Call [`complete_listen_handoff`] immediately after a successful spawn.
 pub fn attach_inherited_listener_owned(
     command: &mut Command,
     listener: TcpListener,
-) -> std::io::Result<Option<TcpListener>> {
+) -> std::io::Result<PendingListenHandoff> {
     #[cfg(unix)]
     {
         use std::os::unix::io::AsRawFd;
@@ -42,29 +44,79 @@ pub fn attach_inherited_listener_owned(
             }
         }
         command.arg(format!("--listen-fd={fd}"));
-        Ok(Some(listener))
+        Ok(PendingListenHandoff { listener })
     }
 
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawSocket;
-        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
-
-        let socket = listener.as_raw_socket();
-        let ok = unsafe {
-            SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-        };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        command.env(LISTEN_SOCKET_ENV, socket.to_string());
-        // Keep parent copy until after spawn (child inherits the HANDLE).
-        Ok(Some(listener))
+        use std::process::Stdio;
+        let _ = &listener;
+        command.stdin(Stdio::piped());
+        command.arg("--listen-proto-stdin");
+        Ok(PendingListenHandoff { listener })
     }
 
     #[cfg(not(any(unix, windows)))]
     {
         let _ = (command, listener);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "listen handoff unsupported on this platform",
+        ))
+    }
+}
+
+/// Finish handoff after spawn: Unix drops the parent fd; Windows duplicates via WSA.
+pub fn complete_listen_handoff(
+    pending: PendingListenHandoff,
+    child: &mut Child,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = child;
+        drop(pending.listener);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::mem::{size_of, MaybeUninit};
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            WSADuplicateSocketW, SOCKET_ERROR, WSAPROTOCOL_INFOW,
+        };
+
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "listen handoff: child stdin pipe missing",
+            )
+        })?;
+        let socket = pending.listener.as_raw_socket();
+        let pid = child.id();
+        let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
+        let rc = unsafe { WSADuplicateSocketW(socket, pid, info.as_mut_ptr()) };
+        if rc == SOCKET_ERROR {
+            return Err(std::io::Error::last_os_error());
+        }
+        let info = unsafe { info.assume_init() };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&info as *const WSAPROTOCOL_INFOW).cast::<u8>(),
+                size_of::<WSAPROTOCOL_INFOW>(),
+            )
+        };
+        stdin.write_all(bytes)?;
+        stdin.flush()?;
+        drop(stdin);
+        drop(pending.listener);
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (pending, child);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "listen handoff unsupported on this platform",

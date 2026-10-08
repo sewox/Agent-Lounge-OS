@@ -65,7 +65,9 @@ pub use index_queue::{
     INDEX_CONCURRENCY, INDEX_JOB_EVENT,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-pub use listen_handoff::{attach_inherited_listener_owned, std_listener_to_tokio};
+pub use listen_handoff::{
+    attach_inherited_listener_owned, complete_listen_handoff, std_listener_to_tokio,
+};
 pub use lounge_auth::{
     add_allowed_origin, auth_required, authorize_mcp_headers, connect as nats_connect,
     lounge_token, nats_auth_active, nats_ingress_source_verified, remote_access_info,

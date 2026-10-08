@@ -5,7 +5,7 @@
 //!
 //! Port allocation rule: never reserve → free → rebind. Keep the `std`
 //! `TcpListener` alive and hand it over (`from_std` for in-process axum, or
-//! inherited `--listen-fd` / `LOUNGE_TEST_LISTEN_SOCKET` for child helpers).
+//! `--listen-fd` / Windows `WSADuplicateSocket` protocol-info for children).
 
 use std::net::TcpListener;
 use std::path::PathBuf;

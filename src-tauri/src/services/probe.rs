@@ -896,18 +896,21 @@ pub fn spawn_tcp_hold_on_std_listener(
         .into_std_command()
         .with_context(|| format!("tcp-hold gate: {}", binary.display()))?;
     command
-        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // Avoid CREATE_NO_WINDOW on handoff spawns — it breaks inheritable SOCKET
-    // inheritance on Windows CI. Ephemeral/non-handoff spawns still use it.
-    let keep = super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
+    // Unix: stdin null. Windows: attach sets piped stdin for WSAPROTOCOL_INFOW.
+    #[cfg(unix)]
+    {
+        command.stdin(std::process::Stdio::null());
+    }
+    // Avoid CREATE_NO_WINDOW on handoff spawns — it breaks piped stdio on Windows CI.
+    let pending = super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
         .context("attach inherited listener")?;
-    let child = command
+    let mut child = command
         .spawn()
         .with_context(|| format!("tcp-hold handoff spawn: {}", binary.display()))?;
-    // Child has inherited the LISTEN socket; drop the parent copy.
-    drop(keep);
+    super::listen_handoff::complete_listen_handoff(pending, &mut child)
+        .context("complete listen handoff")?;
     Ok((child, port))
 }
 

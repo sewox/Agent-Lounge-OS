@@ -961,12 +961,17 @@ pub async fn spawn_graph_ui_on_port_with_store(
         .into_std_command()
         .with_context(|| format!("graph UI gate başarısız: {}", binary.display()))?;
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    let keep_handoff = if let Some(listener) = handoff {
-        // Keep listener until after spawn (Unix fd / Windows inheritable SOCKET).
-        // Skip CREATE_NO_WINDOW — it breaks handle inheritance on Windows CI.
-        command.stdin(Stdio::null());
-        super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
-            .context("attach Graph UI listen handoff")?
+    let pending_handoff = if let Some(listener) = handoff {
+        // Unix: stdin null + --listen-fd. Windows: piped stdin + protocol info.
+        // Skip CREATE_NO_WINDOW — it breaks piped stdio on Windows CI.
+        #[cfg(unix)]
+        {
+            command.stdin(Stdio::null());
+        }
+        Some(
+            super::listen_handoff::attach_inherited_listener_owned(&mut command, listener)
+                .context("attach Graph UI listen handoff")?,
+        )
     } else {
         command.stdin(Stdio::piped());
         #[cfg(windows)]
@@ -976,10 +981,10 @@ pub async fn spawn_graph_ui_on_port_with_store(
         }
         None
     };
-    let child = match command.spawn() {
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            drop(keep_handoff);
+            drop(pending_handoff);
             state.restore_cbm_config_best_effort();
             if let Some(store) = store {
                 let _ = clear_snapshot_in_store(store).await;
@@ -988,7 +993,10 @@ pub async fn spawn_graph_ui_on_port_with_store(
                 .with_context(|| format!("graph UI spawn başarısız: {}", binary.display()));
         }
     };
-    drop(keep_handoff);
+    if let Some(pending) = pending_handoff {
+        super::listen_handoff::complete_listen_handoff(pending, &mut child)
+            .context("complete Graph UI listen handoff")?;
+    }
     state.store_child(child);
     sync_owned_pid(bridge, state);
 

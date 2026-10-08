@@ -3,7 +3,7 @@
 //! Modes (same binary, argv-selected):
 //! - `tcp-hold --port=N` — bind TCP LISTEN on `127.0.0.1:N` and park until killed.
 //! - `tcp-hold --port=0` — bind an ephemeral loopback port (reported in ready line).
-//! - `tcp-hold --listen-fd=N` (Unix) / `LOUNGE_TEST_LISTEN_SOCKET` (Windows) — adopt a
+//! - `tcp-hold --listen-fd=N` (Unix) / `--listen-proto-stdin` (Windows) — adopt a
 //!   pre-bound LISTEN socket from the parent (no rebind; kills reserve→free→rebind races).
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
 //!   Same listen handoff is supported.
@@ -64,6 +64,10 @@ fn parse_port_flag(args: &[String]) -> Result<Option<u16>, String> {
     Ok(None)
 }
 
+fn has_listen_proto_stdin(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--listen-proto-stdin")
+}
+
 #[cfg(unix)]
 fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
     for arg in args {
@@ -78,15 +82,12 @@ fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
 }
 
 fn has_listen_handoff_request(args: &[String]) -> bool {
+    if has_listen_proto_stdin(args) {
+        return true;
+    }
     #[cfg(unix)]
     {
         if args.iter().any(|a| a.starts_with("--listen-fd=")) {
-            return true;
-        }
-    }
-    #[cfg(windows)]
-    {
-        if env::var_os("LOUNGE_TEST_LISTEN_SOCKET").is_some() {
             return true;
         }
     }
@@ -133,15 +134,46 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
 
     #[cfg(windows)]
     {
+        use std::io::Read;
+        use std::mem::{size_of, MaybeUninit};
         use std::os::windows::io::{FromRawSocket, RawSocket};
-        let _ = args;
-        let raw = env::var("LOUNGE_TEST_LISTEN_SOCKET")
-            .map_err(|_| "LOUNGE_TEST_LISTEN_SOCKET missing while handoff requested".to_string())?;
-        let socket: RawSocket = raw
-            .parse()
-            .map_err(|e| format!("bad LOUNGE_TEST_LISTEN_SOCKET: {e}"))?;
-        // SAFETY: parent marked the SOCKET inheritable and kept it alive across spawn.
-        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket) };
+        use windows_sys::Win32::Networking::WinSock::{
+            WSASocketW, INVALID_SOCKET, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
+        };
+
+        if !has_listen_proto_stdin(args) {
+            return Ok(None);
+        }
+        let mut stdin = std::io::stdin().lock();
+        let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                info.as_mut_ptr().cast::<u8>(),
+                size_of::<WSAPROTOCOL_INFOW>(),
+            )
+        };
+        stdin
+            .read_exact(bytes)
+            .map_err(|e| format!("listen-proto-stdin read: {e}"))?;
+        let mut info = unsafe { info.assume_init() };
+        let socket = unsafe {
+            WSASocketW(
+                info.iAddressFamily,
+                info.iSocketType,
+                info.iProtocol,
+                &mut info,
+                0,
+                WSA_FLAG_OVERLAPPED,
+            )
+        };
+        if socket == INVALID_SOCKET {
+            return Err(format!(
+                "WSASocketW from protocol info failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: WSASocketW returned a live SOCKET we now own.
+        let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket as RawSocket) };
         std_listener
             .set_nonblocking(true)
             .map_err(|e| format!("nonblocking: {e}"))?;
@@ -199,7 +231,11 @@ fn run_tcp_hold(args: &[String]) -> Result<(), String> {
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
-    let (listener, port) = rt.block_on(async { take_or_bind_listener(args) })?;
+    // Blocking stdin protocol-info read must not sit inside an async task.
+    let (listener, port) = {
+        let _enter = rt.enter();
+        take_or_bind_listener(args)?
+    };
 
     let line = format!("tcp-hold-ready port={port} pid={}", std::process::id());
     let mut err = std::io::stderr();
@@ -227,7 +263,10 @@ fn run_fake_cbm(args: &[String]) -> Result<(), String> {
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
-    let (listener, port) = rt.block_on(async { take_or_bind_listener(args) })?;
+    let (listener, port) = {
+        let _enter = rt.enter();
+        take_or_bind_listener(args)?
+    };
 
     use axum::routing::{get, post};
     use axum::{Json, Router};
