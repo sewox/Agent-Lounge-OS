@@ -20,8 +20,8 @@ use app_lib::services::{
     bind_loopback_reuseaddr, classify_port_status, enable_graph_ui_headless, listen_pids,
     port_owned_by_lounge, probe_ui_config, spawn_tcp_hold_ephemeral,
     spawn_tcp_hold_on_std_listener, stage_codebase_memory_mcp_double, std_listener_to_tokio,
-    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_owned, GraphUiPortMode,
-    GraphUiState,
+    wait_tcp_hold_ephemeral_ready, wait_tcp_hold_ready, wait_until_port_not_owned,
+    wait_until_port_owned, GraphUiPortMode, GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
