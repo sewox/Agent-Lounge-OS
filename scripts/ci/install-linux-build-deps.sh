@@ -301,62 +301,63 @@ self_test() {
   fi
   echo "ok: step budget ${worst}s < ${budget}s"
 
-  # 1c) later-sorted override: file layer loses, -o opts win
-  if ! command -v apt-config >/dev/null 2>&1; then
-    echo "FAIL: apt-config required for override self-test" >&2
-    rm -rf "$dir"
-    return 1
-  fi
-  local parts="$dir/apt-parts"
-  mkdir -p "$parts"
-  write_apt_ci_conf "$parts/${APT_CONF_BASENAME}"
-  cat >"$parts/zzzzz-runner-override" <<'EOF'
+  # 1c) later-sorted override: file layer loses, -o opts win.
+  # apt-config exists on Linux only; macOS/Windows Frontend matrix still runs
+  # budget + retry self-tests below (override case is covered on Linux CI).
+  if command -v apt-config >/dev/null 2>&1; then
+    local parts="$dir/apt-parts"
+    mkdir -p "$parts"
+    write_apt_ci_conf "$parts/${APT_CONF_BASENAME}"
+    cat >"$parts/zzzzz-runner-override" <<'EOF'
 Acquire::Retries "1";
 Acquire::http::Timeout "15";
 Acquire::https::Timeout "15";
 EOF
-  local last
-  last="$(LC_ALL=C ls "$parts" | tail -1)"
-  if [[ "$last" == "$APT_CONF_BASENAME" ]]; then
-    echo "FAIL: expected override file to sort after drop-in, last=${last}" >&2
-    rm -rf "$dir"
-    return 1
-  fi
-  # APT_CONFIG + Dir::Etc::parts isolates parts (plain -o Dir::Etc::parts is a no-op on jammy).
-  cat >"$dir/apt.conf" <<EOF
+    local last
+    last="$(LC_ALL=C ls "$parts" | tail -1)"
+    if [[ "$last" == "$APT_CONF_BASENAME" ]]; then
+      echo "FAIL: expected override file to sort after drop-in, last=${last}" >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    # APT_CONFIG + Dir::Etc::parts isolates parts (plain -o Dir::Etc::parts is a no-op on jammy).
+    cat >"$dir/apt.conf" <<EOF
 Dir::Etc::parts "${parts}";
 EOF
-  local file_dump o_dump
-  set +e
-  file_dump="$(APT_CONFIG="$dir/apt.conf" apt-config dump | grep -E 'Acquire::(Retries|http::Timeout|https::Timeout)')"
-  o_dump="$(APT_CONFIG="$dir/apt.conf" apt-config "${APT_GET_O_OPTS[@]}" dump | grep -E 'Acquire::(Retries|http::Timeout|https::Timeout)')"
-  set -e
-  if printf '%s\n' "$file_dump" | grep -Fq 'Acquire::Retries "5"'; then
-    echo "FAIL: file-layer dump should show Retries 1 under later-sorted override" >&2
-    echo "$file_dump" >&2
-    rm -rf "$dir"
-    return 1
+    local file_dump o_dump
+    set +e
+    file_dump="$(APT_CONFIG="$dir/apt.conf" apt-config dump | grep -E 'Acquire::(Retries|http::Timeout|https::Timeout)')"
+    o_dump="$(APT_CONFIG="$dir/apt.conf" apt-config "${APT_GET_O_OPTS[@]}" dump | grep -E 'Acquire::(Retries|http::Timeout|https::Timeout)')"
+    set -e
+    if printf '%s\n' "$file_dump" | grep -Fq 'Acquire::Retries "5"'; then
+      echo "FAIL: file-layer dump should show Retries 1 under later-sorted override" >&2
+      echo "$file_dump" >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    if ! printf '%s\n' "$file_dump" | grep -Fq 'Acquire::Retries "1"'; then
+      echo "FAIL: file-layer dump missing Retries 1" >&2
+      echo "$file_dump" >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    echo "ok: file-layer gate would fail under later-sorted Retries 1 override"
+    if ! printf '%s\n' "$o_dump" | grep -Fq 'Acquire::Retries "5"'; then
+      echo "FAIL: -o opts dump should show Retries 5" >&2
+      echo "$o_dump" >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    if ! printf '%s\n' "$o_dump" | grep -Fq 'Acquire::http::Timeout "30"'; then
+      echo "FAIL: -o opts dump should show http Timeout 30" >&2
+      echo "$o_dump" >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    echo "ok: -o opts gate passes under later-sorted Retries 1 override"
+  else
+    echo "ok: skipping apt-config override self-test (apt-config not on this OS)"
   fi
-  if ! printf '%s\n' "$file_dump" | grep -Fq 'Acquire::Retries "1"'; then
-    echo "FAIL: file-layer dump missing Retries 1" >&2
-    echo "$file_dump" >&2
-    rm -rf "$dir"
-    return 1
-  fi
-  echo "ok: file-layer gate would fail under later-sorted Retries 1 override"
-  if ! printf '%s\n' "$o_dump" | grep -Fq 'Acquire::Retries "5"'; then
-    echo "FAIL: -o opts dump should show Retries 5" >&2
-    echo "$o_dump" >&2
-    rm -rf "$dir"
-    return 1
-  fi
-  if ! printf '%s\n' "$o_dump" | grep -Fq 'Acquire::http::Timeout "30"'; then
-    echo "FAIL: -o opts dump should show http Timeout 30" >&2
-    echo "$o_dump" >&2
-    rm -rf "$dir"
-    return 1
-  fi
-  echo "ok: -o opts gate passes under later-sorted Retries 1 override"
 
   # 1d) sed host escaping
   local esc
