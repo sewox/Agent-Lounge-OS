@@ -139,10 +139,15 @@ describe("install-linux-build-deps non-apt refusal", () => {
           `#!/usr/bin/env bash\nprintf '%s\\n' "sudo $*" >>${JSON.stringify(sudoLog)}\nexit 0\n`,
           "utf8",
         );
-        try {
+        if (process.platform === "win32") {
+          try {
+            fs.chmodSync(sudoStub, 0o755);
+          } catch {
+            // Windows may ignore mode bits; PATH sudo stubs are N/A there anyway.
+          }
+        } else {
+          // Linux/macOS: chmod must succeed so the sudo stub is executable.
           fs.chmodSync(sudoStub, 0o755);
-        } catch {
-          // Windows may ignore mode bits; stub still present for Unix CI.
         }
 
         const result = spawnSync("bash", [script], {
@@ -217,6 +222,14 @@ describe("install-linux-build-deps", () => {
     assert.match(
       result.stdout,
       /ok: mirror backup\/switch surface cp\/sed\/mktemp\/empty-host\/mention-read failures with ::error::/,
+    );
+    assert.match(
+      result.stdout,
+      /ok: clear_apt_lists_state clears partial contents without unprivileged glob/,
+    );
+    assert.match(
+      result.stdout,
+      /ok: EXIT trap preserves non-zero status/,
     );
     assert.match(
       result.stdout,

@@ -47,14 +47,29 @@ cleanup_temp_dirs() {
   done
   _CI_APT_TEMP_DIRS=()
 }
-trap cleanup_temp_dirs EXIT
+# bash 3.2: a successful EXIT trap can rewrite a fatal exit status to 0.
+# Capture $? first, clean up, then re-exit with the original status.
+_ci_apt_on_exit() {
+  local ret=$?
+  cleanup_temp_dirs
+  exit "$ret"
+}
+trap _ci_apt_on_exit EXIT
 
-# Optional fake root for mirror self-tests (no sudo; paths under $CI_APT_TEST_MIRROR_ROOT/etc/apt).
+# Optional fake root for mirror / lists self-tests (no sudo).
 apt_etc_dir() {
   if [[ -n "${CI_APT_TEST_MIRROR_ROOT:-}" ]]; then
     printf '%s/etc/apt' "${CI_APT_TEST_MIRROR_ROOT}"
   else
     printf '/etc/apt'
+  fi
+}
+
+apt_lists_dir() {
+  if [[ -n "${CI_APT_TEST_MIRROR_ROOT:-}" ]]; then
+    printf '%s/var/lib/apt/lists' "${CI_APT_TEST_MIRROR_ROOT}"
+  else
+    printf '/var/lib/apt/lists'
   fi
 }
 
@@ -317,23 +332,37 @@ EOF
   CI_APT_DUMP_USE_O_OPTS=0 assert_apt_retries_timeout
 }
 
+# Clear partial/ contents + top-level incomplete indexes.
+# Must not expand globs in the unprivileged shell before sudo/run_priv
+# (e.g. `sudo rm -rf …/partial/*` leaves files owned by root untouched).
+clear_apt_lists_state() {
+  local lists partial
+  lists="$(apt_lists_dir)"
+  partial="${lists}/partial"
+  if [[ -d "$partial" ]]; then
+    if ! run_priv find "$partial" -mindepth 1 -delete; then
+      echo "::error::failed to clear ${partial} during retry cleanup"
+      return 1
+    fi
+  fi
+  if [[ -d "$lists" ]]; then
+    if ! run_priv find "$lists" -maxdepth 1 -type f \
+      ! -name 'lock' ! -name 'partial' -delete; then
+      echo "::error::failed to clear incomplete apt lists during retry cleanup"
+      return 1
+    fi
+  fi
+  return 0
+}
+
 # Inner cleanup body (runs under `timeout` from clean_apt_partial_state).
 _clean_apt_partial_state_body() {
   if ! sudo apt-get clean; then
     echo "::error::apt-get clean failed during retry cleanup"
     return 1
   fi
-  if ! sudo rm -rf /var/lib/apt/lists/partial/*; then
-    echo "::error::failed to clear /var/lib/apt/lists/partial during retry cleanup"
+  if ! clear_apt_lists_state; then
     return 1
-  fi
-  # Incomplete index files can leave apt wedged after a stalled fetch.
-  if [[ -d /var/lib/apt/lists ]]; then
-    if ! sudo find /var/lib/apt/lists -maxdepth 1 -type f \
-      ! -name 'lock' ! -name 'partial' -delete; then
-      echo "::error::failed to clear incomplete apt lists during retry cleanup"
-      return 1
-    fi
   fi
   # Finish any half-configured packages before the next install attempt.
   if ! sudo dpkg --configure -a; then
@@ -352,9 +381,10 @@ clean_apt_partial_state() {
   local rc=0
   # Whole cleanup (including dpkg --configure -a) is bounded. Explicit status
   # check: this function is often called under `if !`, which disables set -e.
+  # Re-declare helpers inside the timed child (declare -f copies function text).
   set +e
   "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$CLEANUP_TIMEOUT_SEC" \
-    bash -c "$(declare -f _clean_apt_partial_state_body); _clean_apt_partial_state_body"
+    bash -c "$(declare -f apt_lists_dir run_priv clear_apt_lists_state _clean_apt_partial_state_body); _clean_apt_partial_state_body"
   rc=$?
   set -e
   if [[ "$rc" -ne 0 ]]; then
@@ -982,6 +1012,31 @@ EOF
   rm -f "$stubbin/grep"
   echo "ok: mirror backup/switch surface cp/sed/mktemp/empty-host/mention-read failures with ::error::"
 
+  # P1: clear partial/ via find -mindepth 1 (not unprivileged `rm …/partial/*` glob).
+  local lists_root="$dir/lists-root"
+  mkdir -p "$lists_root/var/lib/apt/lists/partial"
+  printf 'stuck\n' >"$lists_root/var/lib/apt/lists/partial/pkg.lz4"
+  printf 'index\n' >"$lists_root/var/lib/apt/lists/archive_InRelease"
+  printf 'keep\n' >"$lists_root/var/lib/apt/lists/lock"
+  CI_APT_TEST_MIRROR_ROOT="$lists_root" clear_apt_lists_state
+  if [[ -e "$lists_root/var/lib/apt/lists/partial/pkg.lz4" ]]; then
+    echo "FAIL: partial file not cleared by clear_apt_lists_state" >&2
+    return 1
+  fi
+  if [[ ! -d "$lists_root/var/lib/apt/lists/partial" ]]; then
+    echo "FAIL: partial directory itself must remain" >&2
+    return 1
+  fi
+  if [[ -e "$lists_root/var/lib/apt/lists/archive_InRelease" ]]; then
+    echo "FAIL: incomplete index not cleared" >&2
+    return 1
+  fi
+  if [[ ! -f "$lists_root/var/lib/apt/lists/lock" ]]; then
+    echo "FAIL: lock file must be preserved" >&2
+    return 1
+  fi
+  echo "ok: clear_apt_lists_state clears partial contents without unprivileged glob"
+
   # timeout shim: accept `timeout [-k SEC] DURATION CMD…`
   cat >"$dir/fake-timeout" <<'EOF'
 #!/usr/bin/env bash
@@ -1112,6 +1167,25 @@ EOF
       return 1
     fi
   done
+
+  # N2: EXIT trap must preserve a non-zero status (bash 3.2 otherwise → 0).
+  local trap_rc=0
+  set +e
+  bash -c '
+    set -euo pipefail
+    _CI_APT_TEMP_DIRS=()
+    cleanup_temp_dirs() { _CI_APT_TEMP_DIRS=(); }
+    _ci_apt_on_exit() { local ret=$?; cleanup_temp_dirs; exit "$ret"; }
+    trap _ci_apt_on_exit EXIT
+    false
+  '
+  trap_rc=$?
+  set -e
+  if [[ "$trap_rc" -eq 0 ]]; then
+    echo "FAIL: EXIT trap masked non-zero status (got 0 after false)" >&2
+    return 1
+  fi
+  echo "ok: EXIT trap preserves non-zero status"
 
   echo "install-linux-build-deps self-test: ok"
   return 0
