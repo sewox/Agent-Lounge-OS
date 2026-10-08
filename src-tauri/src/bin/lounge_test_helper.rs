@@ -149,15 +149,26 @@ fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpLis
     #[cfg(windows)]
     {
         use std::io::Read;
-        use std::mem::{size_of, MaybeUninit};
+        use std::mem::{size_of, zeroed, MaybeUninit};
         use std::os::windows::io::{FromRawSocket, RawSocket};
         use windows_sys::Win32::Networking::WinSock::{
-            WSASocketW, INVALID_SOCKET, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
+            WSASocketW, WSAStartup, INVALID_SOCKET, WSADATA, WSAPROTOCOL_INFOW, WSA_FLAG_OVERLAPPED,
         };
 
         if !has_listen_proto_stdin(args) {
             return Ok(None);
         }
+        // Fresh helper process: WSASocketW requires WSAStartup (os error 10093
+        // otherwise). std/tokio only init Winsock lazily on their first bind.
+        // WSAStartup is refcounted — safe to call more than once.
+        {
+            let mut data: WSADATA = unsafe { zeroed() };
+            let rc = unsafe { WSAStartup(0x0202, &mut data) }; // MAKEWORD(2, 2)
+            if rc != 0 {
+                return Err(format!("WSAStartup failed: {rc}"));
+            }
+        }
+
         let mut stdin = std::io::stdin().lock();
         let mut info = MaybeUninit::<WSAPROTOCOL_INFOW>::uninit();
         let bytes = unsafe {
