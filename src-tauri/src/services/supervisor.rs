@@ -471,6 +471,14 @@ mod tests {
 
     #[tokio::test]
     async fn missing_optional_nats_is_not_installed() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        let prev = std::env::var_os(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        unsafe {
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
+                "false",
+            );
+        }
         let mut manager = ServiceManager::for_test(
             ollama_stub_missing(),
             nats_stub_missing(),
@@ -486,6 +494,16 @@ mod tests {
         assert_eq!(nats.attempts(), 0);
         assert_eq!(lmr.attempts(), 0);
         assert_eq!(report.optional_missing_names(), vec!["LMR", "NATS"]);
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => {
+                    std::env::remove_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV)
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -563,6 +581,14 @@ mod tests {
 
     #[tokio::test]
     async fn installed_but_unstartable_nats_hits_restart_limit_via_supervise_once() {
+        let _guard = crate::services::lounge_auth::TestAuthGuard::new();
+        let prev = std::env::var_os(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV);
+        unsafe {
+            std::env::set_var(
+                crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV,
+                "false",
+            );
+        }
         let stub = opaque_daemon_stub("nats-server");
         let mut manager = ServiceManager::for_test(
             ollama_stub_missing(),
@@ -573,6 +599,7 @@ mod tests {
                 binary: stub.display().to_string(),
                 args: vec![],
                 credentials: None,
+                creds_file: None,
             }),
             MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
         );
@@ -595,6 +622,16 @@ mod tests {
             final_report.nats.code.as_deref(),
             Some(crate::models::CODE_RESTART_EXHAUSTED)
         );
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV, v)
+                }
+                None => {
+                    std::env::remove_var(crate::services::lounge_auth::LOUNGE_AUTH_REQUIRED_ENV)
+                }
+            }
+        }
     }
 
     fn ollama_stub_missing() -> OllamaService {
@@ -628,6 +665,7 @@ mod tests {
             binary: "__missing_nats__".into(),
             args: vec![],
             credentials: None,
+            creds_file: None,
         })
     }
 
@@ -639,6 +677,7 @@ mod tests {
             binary: "__missing_nats__".into(),
             args: vec![],
             credentials: None,
+            creds_file: None,
         })
     }
 
