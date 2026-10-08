@@ -19,12 +19,14 @@ APT_GET_O_OPTS=(
   -o DPkg::Lock::Timeout=120
 )
 MAX_ATTEMPTS=3
-# Force-kill apt-get if it ignores SIGTERM after the duration (`timeout -k`).
+# Force-kill apt-get / cleanup if they ignore SIGTERM after the duration (`timeout -k`).
 TIMEOUT_KILL_AFTER_SEC=15
-# Per-command budgets fit step timeout-minutes: 26 (1560s), including -k kill wait:
-# worst case 3×((180+15)+(290+15))+10+30 = 1540s < 1560s.
+# Per-command budgets fit step timeout-minutes: 26 (1560s), including -k kill wait
+# and retry cleanup (attempts 2..MAX). Install shaved so cleanup fits the step:
+# 3×((180+15)+(240+15))+2×(60+15)+10+30 = 1540s < 1560s.
 UPDATE_TIMEOUT_SEC=180
-INSTALL_TIMEOUT_SEC=290
+INSTALL_TIMEOUT_SEC=240
+CLEANUP_TIMEOUT_SEC=60
 BACKOFFS=(10 30)
 STEP_TIMEOUT_MINUTES=26
 
@@ -84,7 +86,9 @@ PACKAGES=(
 
 escape_host_for_sed() {
   # Escape dots so s#//host#…# does not treat '.' as "any char".
-  printf '%s' "$1" | sed 's/\./\\./g'
+  # Pure bash (no sed): PATH may contain test stubs that shadow sed.
+  local s="$1"
+  printf '%s' "${s//./\\.}"
 }
 
 # --- Distro / package-manager detection (testable via --classify-os-release) ---
@@ -125,10 +129,15 @@ read_os_release_field() {
 is_apt_based_os_release() {
   local file="${1:-$(os_release_path)}"
   local id="" like="" token
+  local -a tokens=()
   id="$(read_os_release_field "$file" ID)"
   like="$(read_os_release_field "$file" ID_LIKE)"
-  # shellcheck disable=SC2086
-  for token in $id $like; do
+  # Disable globbing: ID=* (or other metacharacters) must not expand to filenames.
+  set -f
+  # shellcheck disable=SC2206
+  tokens=($id $like)
+  set +f
+  for token in "${tokens[@]}"; do
     case "$token" in
       debian|ubuntu) return 0 ;;
     esac
@@ -305,11 +314,8 @@ EOF
   CI_APT_DUMP_USE_O_OPTS=0 assert_apt_retries_timeout
 }
 
-clean_apt_partial_state() {
-  if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
-    echo "dry-run: clean apt partial state + dpkg --configure -a"
-    return 0
-  fi
+# Inner cleanup body (runs under `timeout` from clean_apt_partial_state).
+_clean_apt_partial_state_body() {
   if ! sudo apt-get clean; then
     echo "::error::apt-get clean failed during retry cleanup"
     return 1
@@ -331,22 +337,51 @@ clean_apt_partial_state() {
     echo "::error::dpkg --configure -a failed during retry cleanup"
     return 1
   fi
+  return 0
+}
+
+clean_apt_partial_state() {
+  if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
+    echo "dry-run: clean apt partial state + dpkg --configure -a"
+    return 0
+  fi
+  local timeout_bin="${CI_APT_TIMEOUT_BIN:-timeout}"
+  local rc=0
+  # Whole cleanup (including dpkg --configure -a) is bounded. Explicit status
+  # check: this function is often called under `if !`, which disables set -e.
+  set +e
+  "$timeout_bin" -k "$TIMEOUT_KILL_AFTER_SEC" "$CLEANUP_TIMEOUT_SEC" \
+    bash -c "$(declare -f _clean_apt_partial_state_body); _clean_apt_partial_state_body"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+      echo "::error::retry cleanup timed out after ${CLEANUP_TIMEOUT_SEC}s (including dpkg --configure -a)"
+    fi
+    return 1
+  fi
+  return 0
 }
 
 backup_apt_sources() {
   if [[ -n "${APT_SOURCES_BACKUP_DIR}" && -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
     return 0
   fi
+  local tmp=""
+  # Explicit mktemp check: often called under `if !`, which disables set -e.
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources.XXXXXX")" || tmp=""
+  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
+    echo "::error::failed to create apt sources backup directory (mktemp)"
+    return 1
+  fi
+  APT_SOURCES_BACKUP_DIR="$tmp"
+  register_temp_dir "${APT_SOURCES_BACKUP_DIR}"
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
-    APT_SOURCES_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources-dry.XXXXXX")"
-    register_temp_dir "${APT_SOURCES_BACKUP_DIR}"
     echo "dry-run: backup apt sources -> ${APT_SOURCES_BACKUP_DIR}"
     return 0
   fi
   local etc
   etc="$(apt_etc_dir)"
-  APT_SOURCES_BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-sources.XXXXXX")"
-  register_temp_dir "${APT_SOURCES_BACKUP_DIR}"
   if ! mkdir -p "${APT_SOURCES_BACKUP_DIR}/sources.list.d"; then
     echo "::error::failed to create apt sources backup directory"
     return 1
@@ -410,20 +445,29 @@ restore_apt_sources() {
   echo "Restored apt sources from ${APT_SOURCES_BACKUP_DIR}"
 }
 
+# Returns 0 if host is present, 1 if absent, 2 on read/lookup error.
 backup_mentions_host() {
   local host="$1"
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
     # Dry-run assumes Azure-style originals (typical GHA ubuntu runner).
-    [[ "$host" == "azure.archive.ubuntu.com" ]]
-    return $?
-  fi
-  if [[ -z "${APT_SOURCES_BACKUP_DIR}" || ! -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
+    if [[ "$host" == "azure.archive.ubuntu.com" ]]; then
+      return 0
+    fi
     return 1
   fi
+  if [[ -z "${APT_SOURCES_BACKUP_DIR}" || ! -d "${APT_SOURCES_BACKUP_DIR}" ]]; then
+    echo "::error::apt sources backup missing; cannot check mirror host ${host}"
+    return 2
+  fi
+  local grc=0
   set +e
   grep -RFq "$host" "${APT_SOURCES_BACKUP_DIR}"
-  local grc=$?
+  grc=$?
   set -e
+  if [[ "$grc" -ge 2 ]]; then
+    echo "::error::failed to read apt sources backup while checking for ${host}"
+    return 2
+  fi
   return "$grc"
 }
 
@@ -431,12 +475,23 @@ switch_ubuntu_mirror() {
   # Rewrite //from_host → //to_host in live apt source files (dots escaped).
   local from_host="$1"
   local to_host="$2"
+  local from_esc=""
+  # Empty from_host would make sed rewrite every `//` — reject explicitly
+  # (also under `if !`, where set -e is disabled).
+  if [[ -z "$from_host" || -z "$to_host" ]]; then
+    echo "::error::mirror switch requires non-empty from/to hosts (from='${from_host}' to='${to_host}')"
+    return 1
+  fi
+  from_esc="$(escape_host_for_sed "$from_host")" || from_esc=""
+  if [[ -z "$from_esc" ]]; then
+    echo "::error::failed to escape mirror host for sed (from='${from_host}')"
+    return 1
+  fi
   if [[ "${CI_APT_DRY_RUN:-0}" == "1" ]]; then
     echo "dry-run: switch mirror ${from_host} -> ${to_host}"
     return 0
   fi
-  local from_esc etc f
-  from_esc="$(escape_host_for_sed "$from_host")"
+  local etc f
   etc="$(apt_etc_dir)"
   for f in "${etc}/sources.list" "${etc}/sources.list.d"/*.list "${etc}/sources.list.d"/*.sources; do
     if [[ -f "$f" ]]; then
@@ -472,14 +527,19 @@ prepare_retry_mirror() {
     if ! restore_apt_sources; then
       return 1
     fi
-    if backup_mentions_host "azure.archive.ubuntu.com"; then
+    local mention_rc=0
+    backup_mentions_host "azure.archive.ubuntu.com" || mention_rc=$?
+    if [[ "$mention_rc" -eq 0 ]]; then
       # Original had azure; restore already put it back (attempt 2 used archive).
       echo "Attempt 3: restored original sources (azure present in backup)"
-    else
+    elif [[ "$mention_rc" -eq 1 ]]; then
       # Original was archive-only; try azure as the alternate.
       if ! switch_ubuntu_mirror "archive.ubuntu.com" "azure.archive.ubuntu.com"; then
         return 1
       fi
+    else
+      # Read/lookup error already emitted ::error:: — do not treat as "absent".
+      return 1
     fi
   fi
   return 0
@@ -549,12 +609,15 @@ worst_case_seconds() {
   local backoff_sum=0
   local b
   local per_attempt
+  local cleanup_total
   for b in "${BACKOFFS[@]}"; do
     backoff_sum=$((backoff_sum + b))
   done
   # Each timed command may wait TIMEOUT_KILL_AFTER_SEC after SIGTERM (-k).
   per_attempt=$((UPDATE_TIMEOUT_SEC + TIMEOUT_KILL_AFTER_SEC + INSTALL_TIMEOUT_SEC + TIMEOUT_KILL_AFTER_SEC ))
-  echo $((MAX_ATTEMPTS * per_attempt + backoff_sum))
+  # Cleanup runs before attempts 2..MAX (MAX_ATTEMPTS-1 times), each with -k wait.
+  cleanup_total=$(( (MAX_ATTEMPTS - 1) * (CLEANUP_TIMEOUT_SEC + TIMEOUT_KILL_AFTER_SEC) ))
+  echo $((MAX_ATTEMPTS * per_attempt + cleanup_total + backoff_sum))
 }
 
 main() {
@@ -587,8 +650,8 @@ self_test() {
     fi
   done
 
-  # 1b) step budget includes timeout -k kill wait:
-  # 3×((180+15)+(290+15))+10+30 = 1540 < 26×60 = 1560
+  # 1b) step budget includes timeout -k kill wait + retry cleanup:
+  # 3×((180+15)+(240+15))+2×(60+15)+10+30 = 1540 < 26×60 = 1560
   local worst budget
   worst="$(worst_case_seconds)"
   budget="$(step_budget_seconds)"
@@ -596,8 +659,12 @@ self_test() {
     echo "FAIL: worst-case ${worst}s >= step budget ${budget}s" >&2
     return 1
   fi
-  if [[ "$UPDATE_TIMEOUT_SEC" -ne 180 || "$INSTALL_TIMEOUT_SEC" -ne 290 ]]; then
-    echo "FAIL: expected update=180 install=290, got ${UPDATE_TIMEOUT_SEC}/${INSTALL_TIMEOUT_SEC}" >&2
+  if [[ "$UPDATE_TIMEOUT_SEC" -ne 180 || "$INSTALL_TIMEOUT_SEC" -ne 240 ]]; then
+    echo "FAIL: expected update=180 install=240, got ${UPDATE_TIMEOUT_SEC}/${INSTALL_TIMEOUT_SEC}" >&2
+    return 1
+  fi
+  if [[ "$CLEANUP_TIMEOUT_SEC" -ne 60 ]]; then
+    echo "FAIL: expected CLEANUP_TIMEOUT_SEC=60, got ${CLEANUP_TIMEOUT_SEC}" >&2
     return 1
   fi
   if [[ "$TIMEOUT_KILL_AFTER_SEC" -ne 15 ]]; then
@@ -612,7 +679,7 @@ self_test() {
     echo "FAIL: expected worst=1540 budget=1560, got ${worst}/${budget}" >&2
     return 1
   fi
-  echo "ok: step budget ${worst}s < ${budget}s (includes -k ${TIMEOUT_KILL_AFTER_SEC}s)"
+  echo "ok: step budget ${worst}s < ${budget}s (includes -k ${TIMEOUT_KILL_AFTER_SEC}s + cleanup ${CLEANUP_TIMEOUT_SEC}s)"
 
   # 1b2) os-release classification (fake files; no real distros required).
   # Fields separated by ';' (avoid '||' which trips ci-hiding-ban scanners).
@@ -623,6 +690,7 @@ self_test() {
     "opensuse;ID=\"opensuse-leap\";ID_LIKE=\"suse opensuse\";false"
     "arch;ID=arch;ID_LIKE=archlinux;false"
     "alpine;ID=alpine;;false"
+    "globstar;ID=*;false"
   )
   local case_spec name id_line like_line expect got
   for case_spec in "${os_cases[@]}"; do
@@ -657,7 +725,23 @@ self_test() {
     echo "FAIL: CRLF os-release id not stripped: $got" >&2
     return 1
   fi
-  echo "ok: os-release classification cases (ubuntu/debian/fedora/opensuse/arch/alpine + CRLF)"
+  # ID=* must not pathname-expand while classifying (noglob).
+  printf 'ID=*\n' >"$dir/os-release-glob"
+  # Create a decoy "debian" file so a buggy unquoted expand would misclassify.
+  : >"$dir/debian"
+  (
+    cd "$dir" || exit 1
+    got="$(classify_os_release "$dir/os-release-glob")"
+    if ! printf '%s' "$got" | grep -Fq 'apt_based=false'; then
+      echo "FAIL: ID=* must not glob into apt_based=true: $got" >&2
+      exit 1
+    fi
+    if ! printf '%s' "$got" | grep -Fq 'id=*'; then
+      echo "FAIL: ID=* id field lost: $got" >&2
+      exit 1
+    fi
+  ) || return 1
+  echo "ok: os-release classification cases (ubuntu/debian/fedora/opensuse/arch/alpine + CRLF + ID=*)"
 
   # 1c) later-sorted override: file layer loses, -o opts win.
   # Distro-aware: only Debian/Ubuntu-family runs the apt-config gate.
@@ -803,7 +887,97 @@ EOF
     echo "FAIL: switch under if ! should still return non-zero when sed fails" >&2
     return 1
   fi
-  echo "ok: mirror backup/switch surface cp/sed failures with ::error::"
+  # Empty from_host must fail (would otherwise sed-rewrite every `//`).
+  set +e
+  if ! CI_APT_DRY_RUN=0 CI_APT_TEST_MIRROR_ROOT="$mroot" \
+      switch_ubuntu_mirror "" "archive.ubuntu.com" \
+      >"$dir/empty-host.log" 2>&1; then
+    switch_rc=1
+  else
+    switch_rc=0
+  fi
+  set -e
+  if [[ "$switch_rc" -eq 0 ]]; then
+    echo "FAIL: empty from_host should fail" >&2
+    return 1
+  fi
+  if ! grep -Fq '::error::mirror switch requires non-empty' "$dir/empty-host.log"; then
+    echo "FAIL: missing ::error:: on empty mirror host" >&2
+    cat "$dir/empty-host.log" >&2
+    return 1
+  fi
+  # mktemp failure must surface under `if !`.
+  cat >"$stubbin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+echo "stub mktemp failing" >&2
+exit 1
+EOF
+  chmod +x "$stubbin/mktemp"
+  APT_SOURCES_BACKUP_DIR=""
+  set +e
+  if ! CI_APT_DRY_RUN=0 PATH="$stubbin:$PATH" \
+      backup_apt_sources >"$dir/mktemp-fail.log" 2>&1; then
+    switch_rc=1
+  else
+    switch_rc=0
+  fi
+  set -e
+  if [[ "$switch_rc" -eq 0 ]]; then
+    echo "FAIL: backup_apt_sources should fail when mktemp fails" >&2
+    return 1
+  fi
+  if ! grep -Fq '::error::failed to create apt sources backup directory (mktemp)' "$dir/mktemp-fail.log"; then
+    echo "FAIL: missing ::error:: on mktemp failure" >&2
+    cat "$dir/mktemp-fail.log" >&2
+    return 1
+  fi
+  rm -f "$stubbin/mktemp" "$stubbin/cp" "$stubbin/sed"
+  # grep read errors must not be treated as "host absent".
+  mkdir -p "$dir/mention-backup"
+  printf 'deb http://archive.ubuntu.com/ubuntu jammy main\n' >"$dir/mention-backup/sources.list"
+  cat >"$stubbin/grep" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+  chmod +x "$stubbin/grep"
+  APT_SOURCES_BACKUP_DIR="$dir/mention-backup"
+  local mention_rc=0
+  # Invoke with `||` so a non-zero return under set -e does not abort self-test.
+  set +e
+  CI_APT_DRY_RUN=0 PATH="$stubbin:$PATH" \
+    backup_mentions_host "azure.archive.ubuntu.com" \
+    >"$dir/mention-fail.log" 2>&1 || mention_rc=$?
+  set -e
+  if [[ "$mention_rc" -ne 2 ]]; then
+    echo "FAIL: backup_mentions_host should return 2 on grep read error, got ${mention_rc}" >&2
+    cat "$dir/mention-fail.log" >&2
+    return 1
+  fi
+  if ! grep -Fq '::error::failed to read apt sources backup' "$dir/mention-fail.log"; then
+    echo "FAIL: missing ::error:: on backup_mentions_host read failure" >&2
+    cat "$dir/mention-fail.log" >&2
+    return 1
+  fi
+  # prepare_retry_mirror attempt 3 must fail closed on mention read errors
+  # (not treat them as "host absent" and switch mirrors).
+  APT_SOURCES_BACKUP_DIR="$dir/mention-backup"
+  mention_rc=0
+  set +e
+  CI_APT_DRY_RUN=0 CI_APT_TEST_MIRROR_ROOT="$mroot" PATH="$stubbin:$PATH" \
+    prepare_retry_mirror 3 >"$dir/mention-prep.log" 2>&1 || mention_rc=$?
+  set -e
+  if [[ "$mention_rc" -eq 0 ]]; then
+    echo "FAIL: prepare_retry_mirror 3 should fail when backup_mentions_host cannot read" >&2
+    cat "$dir/mention-prep.log" >&2
+    return 1
+  fi
+  if ! grep -Fq '::error::failed to read apt sources backup' "$dir/mention-prep.log"; then
+    echo "FAIL: prepare_retry_mirror 3 missing mention-read ::error::" >&2
+    cat "$dir/mention-prep.log" >&2
+    return 1
+  fi
+  rm -f "$stubbin/grep"
+  echo "ok: mirror backup/switch surface cp/sed/mktemp/empty-host/mention-read failures with ::error::"
 
   # timeout shim: accept `timeout [-k SEC] DURATION CMD…`
   cat >"$dir/fake-timeout" <<'EOF'
@@ -879,6 +1053,8 @@ EOF
   fi
 
   # 4) hard fail after 3 attempts must surface non-zero + ::error::
+  # Redirect to a file (not $(…)): dry-run backup registers temps in this shell
+  # so the EXIT trap can clean them; a subshell would leak those dirs.
   cat >"$dir/apt-fail.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -887,23 +1063,32 @@ exit 7
 EOF
   chmod +x "$dir/apt-fail.sh"
   APT_SOURCES_BACKUP_DIR=""
+  local temps_before="${#_CI_APT_TEMP_DIRS[@]}"
+  local rc=0
+  # `|| rc=$?` keeps set -e from aborting when install_with_retries returns 7.
   set +e
-  err_out="$(
-    PATH="$dir:$PATH" \
-      CI_APT_DRY_RUN=1 \
-      CI_APT_GET_BIN="$dir/apt-fail.sh" \
-      CI_APT_TIMEOUT_BIN="$dir/fake-timeout" \
-      install_with_retries 2>&1
-  )"
-  rc=$?
+  PATH="$dir:$PATH" \
+    CI_APT_DRY_RUN=1 \
+    CI_APT_GET_BIN="$dir/apt-fail.sh" \
+    CI_APT_TIMEOUT_BIN="$dir/fake-timeout" \
+    install_with_retries >"$dir/fail-out.log" 2>&1 || rc=$?
   set -e
   if [[ "$rc" -eq 0 ]]; then
     echo "FAIL: expected non-zero from exhausted retries" >&2
     return 1
   fi
-  if ! printf '%s' "$err_out" | grep -Fq '::error::Install Linux build dependencies failed'; then
+  if ! grep -Fq '::error::Install Linux build dependencies failed' "$dir/fail-out.log"; then
     echo "FAIL: missing ::error:: on final failure" >&2
-    echo "$err_out" >&2
+    cat "$dir/fail-out.log" >&2
+    return 1
+  fi
+  if [[ "${#_CI_APT_TEMP_DIRS[@]}" -le "$temps_before" ]]; then
+    echo "FAIL: dry-run retry should register a backup temp dir for EXIT cleanup" >&2
+    return 1
+  fi
+  local registered="${_CI_APT_TEMP_DIRS[$((${#_CI_APT_TEMP_DIRS[@]} - 1))]}"
+  if [[ ! -d "$registered" ]]; then
+    echo "FAIL: registered dry-run backup temp missing: $registered" >&2
     return 1
   fi
 
