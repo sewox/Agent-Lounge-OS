@@ -2,9 +2,9 @@
 
 import {
   createElement,
-  Fragment,
   type AnchorHTMLAttributes,
   type ComponentType,
+  type CSSProperties,
   type FocusEventHandler,
   type MouseEventHandler,
   type ReactNode,
@@ -109,6 +109,21 @@ function buildTooltip(
   return `${t("quotaBadgeTooltipHeader")}\n${lines.join("\n")}`;
 }
 
+function rowLabelNodes(row: ToolQuota, t: (key: string, opts?: Record<string, unknown>) => string) {
+  return [
+    createElement(
+      "span",
+      { lang: "en", className: "min-w-0 truncate normal-case" },
+      quotaBadgeName(row),
+    ),
+    createElement(
+      "span",
+      { className: "tnum shrink-0" },
+      t("quotaBadgePercent", { percent: quotaBadgePercent(row) }),
+    ),
+  ];
+}
+
 export type QuotaHeaderBadgeProps = {
   quotas: ToolQuota[];
   /** Navigation element (next/link in app, plain <a> in unit tests). */
@@ -154,20 +169,13 @@ export function QuotaHeaderBadge({ quotas, LinkComponent }: QuotaHeaderBadgeProp
   }, [rotate, amberRows.length, signature]);
 
   const tooltip = useMemo(() => buildTooltip(amberRows, t), [amberRows, t]);
+  // Stable list for a11y — only changes when amber set / levels change, not on rotate.
   const listForAria = amberRows.map((row) => formatListItem(row, t)).join(", ");
   const ariaLabel =
     amberRows.length === 0
       ? t("quotaBadgeAriaOk")
       : t("quotaBadgeAria", { count: amberRows.length, list: listForAria });
-
-  // aria-live announces when this string changes; unchanged ticks do not re-announce.
-  const liveText =
-    amberRows.length === 0
-      ? t("quotaOk")
-      : t("quotaBadge", {
-          tool: quotaBadgeName(active!),
-          percent: quotaBadgePercent(active!),
-        });
+  const liveSummary = amberRows.length === 0 ? t("quotaOk") : listForAria;
 
   const tone: QuotaBadgeTone = active ? quotaBadgeTone(active) : "ok";
   const moreCount = Math.max(0, amberRows.length - 1);
@@ -187,37 +195,55 @@ export function QuotaHeaderBadge({ quotas, LinkComponent }: QuotaHeaderBadgeProp
   const onFocus: FocusEventHandler<HTMLAnchorElement> = pause;
   const onBlur: FocusEventHandler<HTMLAnchorElement> = resume;
 
-  const body =
+  // Stack all amber labels in one grid cell so width = longest label (no jump on rotate).
+  const rotatingLabels =
     amberRows.length === 0
-      ? createElement("span", { className: "truncate" }, t("quotaOk"))
+      ? createElement("span", { className: "truncate", "data-active": "1" }, t("quotaOk"))
       : createElement(
-          Fragment,
-          null,
-          createElement(
-            "span",
-            { className: "flex min-w-0 flex-1 items-baseline gap-1 overflow-hidden" },
-            createElement(
+          "span",
+          {
+            className: "grid min-w-0 flex-1 overflow-hidden",
+            "data-testid": "quota-badge-labels",
+            "data-reserve-count": String(amberRows.length),
+          },
+          ...amberRows.map((row, i) => {
+            const style: CSSProperties = {
+              visibility: i === safeIndex ? "visible" : "hidden",
+            };
+            return createElement(
               "span",
-              { lang: "en", className: "min-w-0 truncate normal-case" },
-              quotaBadgeName(active!),
-            ),
-            createElement(
-              "span",
-              { className: "tnum shrink-0" },
-              t("quotaBadgePercent", { percent: quotaBadgePercent(active!) }),
-            ),
-          ),
-          reducedMotion && moreCount > 0
-            ? createElement(
-                "span",
-                {
-                  "data-testid": "quota-badge-more",
-                  className: "tnum shrink-0 rounded border border-current/30 px-1 text-meta",
-                },
-                t("quotaBadgeMore", { count: moreCount }),
-              )
-            : null,
+              {
+                key: row.id,
+                className:
+                  "col-start-1 row-start-1 flex min-w-0 items-baseline gap-1 overflow-hidden",
+                style,
+                "data-active": i === safeIndex ? "1" : "0",
+                "data-quota-id": row.id,
+              },
+              ...rowLabelNodes(row, t),
+            );
+          }),
         );
+
+  const visual = createElement(
+    "span",
+    {
+      className: "flex min-w-0 flex-1 items-center gap-1 overflow-hidden",
+      "aria-hidden": true,
+      "data-testid": "quota-badge-visual",
+    },
+    rotatingLabels,
+    reducedMotion && moreCount > 0
+      ? createElement(
+          "span",
+          {
+            "data-testid": "quota-badge-more",
+            className: "tnum shrink-0 rounded border border-current/30 px-1 text-meta",
+          },
+          t("quotaBadgeMore", { count: moreCount }),
+        )
+      : null,
+  );
 
   return createElement(
     LinkComponent,
@@ -239,12 +265,17 @@ export function QuotaHeaderBadge({ quotas, LinkComponent }: QuotaHeaderBadgeProp
     },
     createElement("span", {
       className: `h-1.5 w-1.5 shrink-0 rounded-full ${toneDotClass(tone)}`,
+      "aria-hidden": true,
     }),
+    visual,
     createElement(
       "span",
-      { className: "flex min-w-0 flex-1 items-center gap-1 overflow-hidden" },
-      body,
+      {
+        className: "sr-only",
+        "aria-live": "polite",
+        "data-testid": "quota-badge-live",
+      },
+      liveSummary,
     ),
-    createElement("span", { className: "sr-only", "aria-live": "polite" }, liveText),
   );
 }

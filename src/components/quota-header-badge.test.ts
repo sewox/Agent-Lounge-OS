@@ -201,9 +201,19 @@ function badgeEl(): Element {
 }
 
 function visibleLabel(el: Element): string {
-  const clone = el.cloneNode(true) as Element;
-  clone.querySelector("[aria-live='polite']")?.remove();
-  return (clone.textContent || "").replace(/\s+/g, " ").trim();
+  const active = el.querySelector('[data-active="1"]');
+  const more = el.querySelector("[data-testid='quota-badge-more']");
+  const parts = [
+    (active?.textContent || "").replace(/\s+/g, " ").trim(),
+    (more?.textContent || "").replace(/\s+/g, " ").trim(),
+  ].filter(Boolean);
+  return parts.join(" ");
+}
+
+function liveRegion(el: Element): Element {
+  const live = el.querySelector("[data-testid='quota-badge-live']");
+  assert.ok(live);
+  return live;
 }
 
 describe("QuotaHeaderBadge", () => {
@@ -364,9 +374,73 @@ describe("QuotaHeaderBadge", () => {
 
   it("marks tool name with lang=en and no uppercase class", async () => {
     await renderBadge([quota({ id: "c", tool: "Claude", percent: 98 })], "tr");
-    const name = badgeEl().querySelector("[lang='en']");
+    const name = badgeEl().querySelector('[data-active="1"] [lang="en"]');
     assert.ok(name);
     assert.equal(name.textContent, "Claude");
     assert.ok(!/\buppercase\b/.test(name.className));
+  });
+
+  it("B1: aria-live stays on a stable summary; rotating visual is aria-hidden", async () => {
+    const rows = [
+      quota({ id: "c", tool: "Claude", percent: 98 }),
+      quota({ id: "u", tool: "Cursor", percent: 85 }),
+    ];
+    await renderBadge(rows, "en");
+    const el = badgeEl();
+    const visual = el.querySelector("[data-testid='quota-badge-visual']");
+    assert.ok(visual);
+    assert.equal(visual.getAttribute("aria-hidden"), "true");
+
+    const live = liveRegion(el);
+    const before = (live.textContent || "").replace(/\s+/g, " ").trim();
+    assert.match(before, /Claude/);
+    assert.match(before, /Cursor/);
+    assert.match(before, /98%/);
+    assert.match(before, /85%/);
+
+    await act(async () => {
+      mock.timers.tick(QUOTA_BADGE_ROTATE_MS);
+    });
+    assert.equal(badgeEl().getAttribute("data-badge-index"), "1");
+    assert.match(visibleLabel(badgeEl()), /Cursor/);
+    const after = (liveRegion(badgeEl()).textContent || "").replace(/\s+/g, " ").trim();
+    assert.equal(after, before, "aria-live must not change when the rotating row advances");
+  });
+
+  it("B2: stacks all amber labels to reserve width across rotation", async () => {
+    const rows = [
+      quota({ id: "c", tool: "Claude", percent: 98 }),
+      quota({ id: "u", tool: "Antigravity", percent: 85 }),
+    ];
+    await renderBadge(rows, "en");
+    const labels = badgeEl().querySelector("[data-testid='quota-badge-labels']");
+    assert.ok(labels);
+    assert.equal(labels.getAttribute("data-reserve-count"), "2");
+    assert.match(labels.className, /\bgrid\b/);
+
+    const stacked = labels.querySelectorAll("[data-quota-id]");
+    assert.equal(stacked.length, 2);
+    for (const node of stacked) {
+      assert.match(node.className, /col-start-1/);
+      assert.match(node.className, /row-start-1/);
+    }
+
+    const claude = labels.querySelector('[data-quota-id="c"]') as HTMLElement;
+    const antigravity = labels.querySelector('[data-quota-id="u"]') as HTMLElement;
+    assert.ok(claude && antigravity);
+    assert.equal(claude.getAttribute("data-active"), "1");
+    assert.equal(antigravity.getAttribute("data-active"), "0");
+    assert.equal(claude.style.visibility, "visible");
+    assert.equal(antigravity.style.visibility, "hidden");
+
+    await act(async () => {
+      mock.timers.tick(QUOTA_BADGE_ROTATE_MS);
+    });
+    assert.equal(claude.getAttribute("data-active"), "0");
+    assert.equal(antigravity.getAttribute("data-active"), "1");
+    assert.equal(claude.style.visibility, "hidden");
+    assert.equal(antigravity.style.visibility, "visible");
+    // Both labels remain mounted so the grid cell keeps the longest width.
+    assert.equal(labels.querySelectorAll("[data-quota-id]").length, 2);
   });
 });
