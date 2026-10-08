@@ -23,10 +23,15 @@ TESTS=(
 # Prefer already-built lib test binary; fall back to cargo test per iteration.
 find_lib_test_bin() {
   local bin
-  # Newest app_lib test executable (exclude .d dependency files).
-  # Prefer ls -t: portable across Linux/macOS/Windows (Git Bash); handles .exe.
+  # Newest app_lib test executable. Prefer ls -t (portable Linux/macOS/Windows Git Bash).
+  # Windows also emits .pdb/.d/.rlib next to the .exe — never pick those.
+  if bin="$(ls -t src-tauri/target/debug/deps/app_lib-*.exe 2>/dev/null | head -1 || true)" \
+    && [[ -n "${bin}" && -f "${bin}" ]]; then
+    printf '%s' "${bin}"
+    return 0
+  fi
   bin="$(ls -t src-tauri/target/debug/deps/app_lib-* 2>/dev/null \
-    | grep -vE '\.(d|rlib|rmeta)$' \
+    | grep -vE '\.(d|rlib|rmeta|pdb|exe)$' \
     | head -1 || true)"
   if [[ -n "${bin}" && -f "${bin}" ]]; then
     printf '%s' "${bin}"
