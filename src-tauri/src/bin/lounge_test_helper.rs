@@ -2,7 +2,11 @@
 //!
 //! Modes (same binary, argv-selected):
 //! - `tcp-hold --port=N` — bind TCP LISTEN on `127.0.0.1:N` and park until killed.
+//! - `tcp-hold --port=0` — bind an ephemeral loopback port (reported in ready line).
+//! - `tcp-hold --listen-fd=N` / `LOUNGE_TEST_LISTEN_SOCKET` — adopt a pre-bound LISTEN
+//!   socket from the parent (no rebind; kills reserve→free→rebind races).
 //! - `--ui=true --port=N` — fake codebase-memory-mcp Graph UI (`/api/ui-config`, `/rpc`).
+//!   Same listen-fd / env handoff is supported.
 //!
 //! Built only with `--features test-helpers` (`required-features` on the [[bin]]).
 //! Release / `tauri build` omit this feature, so the helper never ships in installers.
@@ -37,19 +41,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_port_flag(args: &[String]) -> Result<u16, String> {
+fn parse_port_flag(args: &[String]) -> Result<Option<u16>, String> {
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--port=") {
             return rest
                 .parse::<u16>()
-                .map_err(|e| format!("bad --port=: {e}"))
-                .and_then(|p| {
-                    if p == 0 {
-                        Err("port 0 invalid".into())
-                    } else {
-                        Ok(p)
-                    }
-                });
+                .map(Some)
+                .map_err(|e| format!("bad --port=: {e}"));
         }
     }
     for i in 0..args.len() {
@@ -59,25 +57,107 @@ fn parse_port_flag(args: &[String]) -> Result<u16, String> {
                 .ok_or_else(|| "--port missing value".to_string())?;
             return v
                 .parse::<u16>()
-                .map_err(|e| format!("bad --port: {e}"))
-                .and_then(|p| {
-                    if p == 0 {
-                        Err("port 0 invalid".into())
-                    } else {
-                        Ok(p)
-                    }
-                });
+                .map(Some)
+                .map_err(|e| format!("bad --port: {e}"));
         }
     }
-    Err("missing --port".into())
+    Ok(None)
 }
 
-/// Bind `127.0.0.1:port` for LISTEN.
+fn parse_listen_fd(args: &[String]) -> Result<Option<i32>, String> {
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("--listen-fd=") {
+            return rest
+                .parse::<i32>()
+                .map(Some)
+                .map_err(|e| format!("bad --listen-fd=: {e}"));
+        }
+    }
+    Ok(None)
+}
+
+/// Adopt a parent-handed LISTEN socket, or bind `127.0.0.1:port` (`port=0` → ephemeral).
+fn take_or_bind_listener(args: &[String]) -> Result<(tokio::net::TcpListener, u16), String> {
+    if let Some(listener) = adopt_inherited_listener(args)? {
+        let port = listener
+            .local_addr()
+            .map_err(|e| format!("local_addr: {e}"))?
+            .port();
+        return Ok((listener, port));
+    }
+    let port =
+        parse_port_flag(args)?.ok_or_else(|| "missing --port (or listen handoff)".to_string())?;
+    let listener = bind_loopback(port)?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| format!("local_addr: {e}"))?
+        .port();
+    Ok((listener, bound))
+}
+
+fn adopt_inherited_listener(args: &[String]) -> Result<Option<tokio::net::TcpListener>, String> {
+    #[cfg(unix)]
+    {
+        if let Some(fd) = parse_listen_fd(args)? {
+            // SAFETY: parent cleared CLOEXEC and passed this live LISTEN fd.
+            let std_listener = unsafe { std::net::TcpListener::from_raw_fd_checked(fd)? };
+            std_listener
+                .set_nonblocking(true)
+                .map_err(|e| format!("nonblocking: {e}"))?;
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .map_err(|e| format!("from_std: {e}"))?;
+            return Ok(Some(listener));
+        }
+        Ok(None)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{FromRawSocket, RawSocket};
+        let _ = args;
+        if let Ok(raw) = env::var("LOUNGE_TEST_LISTEN_SOCKET") {
+            let socket: RawSocket = raw
+                .parse()
+                .map_err(|e| format!("bad LOUNGE_TEST_LISTEN_SOCKET: {e}"))?;
+            // SAFETY: parent marked the SOCKET inheritable and passed the value.
+            let std_listener = unsafe { std::net::TcpListener::from_raw_socket(socket) };
+            std_listener
+                .set_nonblocking(true)
+                .map_err(|e| format!("nonblocking: {e}"))?;
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .map_err(|e| format!("from_std: {e}"))?;
+            return Ok(Some(listener));
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = args;
+        Ok(None)
+    }
+}
+
+#[cfg(unix)]
+trait FromRawFdChecked: Sized {
+    unsafe fn from_raw_fd_checked(fd: i32) -> Result<Self, String>;
+}
+
+#[cfg(unix)]
+impl FromRawFdChecked for std::net::TcpListener {
+    unsafe fn from_raw_fd_checked(fd: i32) -> Result<Self, String> {
+        use std::os::unix::io::FromRawFd;
+        if fd < 0 {
+            return Err(format!("listen-fd {fd} invalid"));
+        }
+        Ok(unsafe { std::net::TcpListener::from_raw_fd(fd) })
+    }
+}
+
+/// Bind `127.0.0.1:port` for LISTEN (`port=0` → ephemeral).
 ///
-/// On Unix, `SO_REUSEADDR` lets the helper re-bind after the parent’s
-/// `tcp_bind_available` probe (bind+drop) which can leave the port briefly
-/// unusable on macOS. On Windows, leave the default (SO_REUSEADDR there allows
-/// duplicate concurrent binds).
+/// On Unix, `SO_REUSEADDR` helps after unrelated bind probes. On Windows, leave
+/// the default (SO_REUSEADDR there allows duplicate concurrent binds).
 fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let socket = tokio::net::TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
@@ -94,23 +174,14 @@ fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
 }
 
 fn run_tcp_hold(args: &[String]) -> Result<(), String> {
-    let port = parse_port_flag(args)?;
-    // Multi-thread runtime: same rationale as `run_fake_cbm` — current_thread +
-    // CREATE_NO_WINDOW on Windows CI has been observed to leave the LISTEN socket
-    // invisible to GetExtendedTcpTable / netstat for the full ownership wait
-    // (flake: port_owned_by_lounge_matches_spawned_child_id saw []).
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
-    let listener = rt.block_on(async { bind_loopback(port) })?;
+    let (listener, port) = rt.block_on(async { take_or_bind_listener(args) })?;
 
-    // Printed only after bind+listen succeed. Prefer stderr: on Windows,
-    // CREATE_NO_WINDOW + piped stdout has been observed to EOF before the
-    // ready line while the process is still alive. Parent waits on connect
-    // and/or this line — never on a fixed sleep alone.
     let line = format!("tcp-hold-ready port={port} pid={}", std::process::id());
     let mut err = std::io::stderr();
     let _ = writeln!(err, "{line}");
@@ -128,19 +199,16 @@ fn run_tcp_hold(args: &[String]) -> Result<(), String> {
 }
 
 fn run_fake_cbm(args: &[String]) -> Result<(), String> {
-    let port = parse_port_flag(args)?;
     let rpc_hits = Arc::new(AtomicU64::new(0));
     let hits = rpc_hits.clone();
 
-    // Multi-thread runtime: reliable on Windows with CREATE_NO_WINDOW + piped stdin
-    // (no dependency on stdin EOF to keep the process alive).
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
 
-    let listener = rt.block_on(async { bind_loopback(port) })?;
+    let (listener, port) = rt.block_on(async { take_or_bind_listener(args) })?;
 
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -171,7 +239,6 @@ fn run_fake_cbm(args: &[String]) -> Result<(), String> {
         let _ = axum::serve(listener, app).await;
     });
 
-    // Self-probe: do not park until the socket actually accepts HTTP.
     let ready = rt.block_on(async {
         let url = format!("http://127.0.0.1:{port}/api/ui-config");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -196,7 +263,6 @@ fn run_fake_cbm(args: &[String]) -> Result<(), String> {
     eprintln!("fake-cbm-ready port={port} pid={}", std::process::id());
     let _ = std::io::stderr().flush();
 
-    // Stay alive until parent kills us (stdin may be piped or null — ignore it).
     loop {
         std::thread::sleep(Duration::from_secs(60));
     }

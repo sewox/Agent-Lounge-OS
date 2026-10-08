@@ -21,6 +21,7 @@ dependencies = [
  "candle-transformers",
  "chrono",
  "hf-hub",
+ "libc",
  "log",
  "lounge_protocol",
  "nats",

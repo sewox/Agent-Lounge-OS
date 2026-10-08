@@ -3,6 +3,7 @@
 //! Port bandı 18749–18759; Antigravity cbm varsayılanı 9749 ile çakışmaz.
 //! Yabancı `/api/ui-config` asla adopt edilmez; HTTP `/rpc` yalnız sahipli portta.
 
+use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -113,6 +114,9 @@ pub struct GraphUiState {
     cbm_config_snapshot: Mutex<Option<CbmUiConfigSnapshot>>,
     /// Test/prod override for shared CBM `config.json` path (avoids real HOME).
     cbm_config_path_override: Mutex<Option<PathBuf>>,
+    /// Test-only: pre-bound LISTEN sockets handed to the next spawn on that port
+    /// (avoids reserve→free→rebind races). Empty in production use.
+    listen_handoffs: Mutex<HashMap<u16, std::net::TcpListener>>,
 }
 
 struct StatusFlight {
@@ -138,7 +142,41 @@ impl GraphUiState {
             }),
             cbm_config_snapshot: Mutex::new(None),
             cbm_config_path_override: Mutex::new(None),
+            listen_handoffs: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Stage a reserved listener for the next Graph UI child on this port (tests).
+    pub fn stage_listen_handoff(&self, listener: std::net::TcpListener) {
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => {
+                log::warn!("stage_listen_handoff: local_addr failed: {err}");
+                return;
+            }
+        };
+        let mut guard = match self.listen_handoffs.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(port, listener);
+    }
+
+    fn take_listen_handoff(&self, port: u16) -> Option<std::net::TcpListener> {
+        let mut guard = match self.listen_handoffs.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.remove(&port)
+    }
+
+    /// Ports staged for listen handoff are treated as free for Auto selection.
+    pub fn has_listen_handoff(&self, port: u16) -> bool {
+        let guard = match self.listen_handoffs.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.contains_key(&port)
     }
 
     pub fn set_cbm_config_path_override(&self, path: Option<PathBuf>) {
@@ -897,6 +935,7 @@ pub async fn spawn_graph_ui_on_port_with_store(
         }
     };
 
+    let handoff = state.take_listen_handoff(port);
     let mut command = GuardedCommand::new(binary)
         .arg("--ui=true")
         .arg(format!("--port={port}"))
@@ -912,9 +951,14 @@ pub async fn spawn_graph_ui_on_port_with_store(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
+    if let Some(ref listener) = handoff {
+        super::listen_handoff::attach_inherited_listener(&mut command, listener)
+            .context("attach Graph UI listen handoff")?;
+    }
     let child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
+            drop(handoff);
             state.restore_cbm_config_best_effort();
             if let Some(store) = store {
                 let _ = clear_snapshot_in_store(store).await;
@@ -923,6 +967,8 @@ pub async fn spawn_graph_ui_on_port_with_store(
                 .with_context(|| format!("graph UI spawn başarısız: {}", binary.display()));
         }
     };
+    // Child has inherited the LISTEN socket; drop the parent copy.
+    drop(handoff);
     state.store_child(child);
     sync_owned_pid(bridge, state);
 
@@ -998,6 +1044,11 @@ pub async fn enable_graph_ui_headless(
     // child (TIME_WAIT), causing a false "port free → spawn failed" race.
     let is_free = |port: u16| {
         if port_owned_by_lounge(port, state.spawned_child_pid()) {
+            return true;
+        }
+        // Staged handoff listeners still LISTEN in the parent; treat as free so
+        // Auto can select them without a free→rebind race.
+        if state.has_listen_handoff(port) {
             return true;
         }
         listen_pids(port).is_empty()
@@ -1286,7 +1337,9 @@ mod tests {
         assert!(paths_equal(Path::new("/tmp/foo"), Path::new("/tmp/foo/")));
     }
 
-    /// Reserve preferred + two free successors; serve foreign UI on preferred.
+    /// Reserve preferred + two successors; serve foreign UI by handing over the
+    /// reserved preferred listener (no free→rebind). Successors stay bound until
+    /// the caller drops them immediately before classify.
     async fn reserve_classify_band() -> (u16, u16, Vec<tokio::net::TcpListener>) {
         for _ in 0..300 {
             let hold_preferred = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
@@ -1311,23 +1364,14 @@ mod tests {
             if !ok {
                 continue;
             }
-            drop(hold_preferred);
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !crate::services::probe::tcp_bind_available(preferred) {
-                assert!(Instant::now() < deadline, "preferred must free");
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
             let app = axum::Router::new().route(
                 "/api/ui-config",
                 axum::routing::get(|| async {
                     axum::Json(serde_json::json!({"lang": "en", "foreign": true}))
                 }),
             );
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", preferred))
-                .await
-                .unwrap();
             tokio::spawn(async move {
-                let _ = axum::serve(listener, app).await;
+                let _ = axum::serve(hold_preferred, app).await;
             });
             for _ in 0..40 {
                 if probe_ui_config(preferred).await {
@@ -1344,12 +1388,8 @@ mod tests {
     #[tokio::test]
     async fn classify_auto_foreign_reports_next_port_without_conflict() {
         let (preferred, band_end, free_holds) = reserve_classify_band().await;
+        // Release successors then classify immediately (no sleep-as-fix wait).
         drop(free_holds);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !(preferred + 1..=band_end).any(crate::services::probe::tcp_bind_available) {
-            assert!(Instant::now() < deadline, "successor must free");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
 
         let band = preferred..=band_end;
         let classified =

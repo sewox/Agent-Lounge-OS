@@ -51,6 +51,7 @@ safetensors = "0.4"
 hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
 sha2 = "0.11"
 bcrypt = "0.17"
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
