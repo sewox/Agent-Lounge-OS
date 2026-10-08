@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { resolveGraphUiStatusMessage } from "@/lib/graph-ui-button-state";
 import { isTauri } from "@/lib/lounge";
 
 const DEFAULT_PORT = 18749;
@@ -20,6 +21,8 @@ type GraphUiLiveStatus = {
   conflict_message: string | null;
   info_message?: string | null;
   remap_from_port?: number | null;
+  message_key?: string | null;
+  message_params?: Record<string, string | number> | null;
   port_mode: GraphUiPortMode;
   owned_by_lounge: boolean;
 };
@@ -172,21 +175,24 @@ export function GraphUiSettings() {
             <p className="font-body text-body text-on-surface" data-qa="graph-ui-ownership">
               {ownershipLabel}
             </p>
-            {live?.conflict_message ? (
-              <p className="font-body text-meta text-error" role="status">
-                {live.conflict_message}
-              </p>
-            ) : null}
-            {live?.info_message && !live.port_conflict ? (
-              <p className="font-body text-meta text-on-surface-variant" role="status">
-                {live.remap_from_port != null
-                  ? t("graphAutoPortInfo", {
-                      busy: live.remap_from_port,
-                      next: live.port,
-                    })
-                  : live.info_message}
-              </p>
-            ) : null}
+            {live
+              ? (() => {
+                  const note = resolveGraphUiStatusMessage(live, (key, params) => t(key, params));
+                  if (!note) {
+                    return null;
+                  }
+                  return (
+                    <p
+                      className={`font-body text-meta ${
+                        live.port_conflict ? "text-error" : "text-on-surface-variant"
+                      }`}
+                      role="status"
+                    >
+                      {note}
+                    </p>
+                  );
+                })()
+              : null}
           </div>
           <div className="space-y-2 rounded border border-outline-variant bg-surface-container-high p-3">
             <p className="font-body text-meta font-semibold uppercase tracking-label text-outline">

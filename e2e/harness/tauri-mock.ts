@@ -762,6 +762,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             conflict_message: null,
             info_message: null,
             remap_from_port: null,
+            message_key: null,
+            message_params: null,
             port_mode: f.graphUiPortMode ?? "auto",
             owned_by_lounge: Boolean(f.graphUiStatus?.enabled),
             ...f.graphUiStatus,

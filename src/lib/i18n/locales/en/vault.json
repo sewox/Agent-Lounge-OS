@@ -106,7 +106,10 @@
   "graphPortBusy": "Port {{port}} is busy",
   "graphAutoPortInfo": "{{busy}} is in use by another process; {{next}} will be used",
   "graphEnableConfirmTitle": "Enable Graph UI",
-  "graphEnableConfirmBody": "What starts: codebase-memory-mcp Graph UI (--ui=true).\nPort: {{port}} (change in Settings → Graph UI if busy).\nHow to stop: close the Graph window, or quit Lounge (stops only the process Lounge started).\nDisable: the persistent enable flag is not auto-reverted — re-run enable flow / MCP settings to turn UI off.\n\nThis setting applies to ALL codebase-memory sessions (Claude, Cursor, etc.).\n\nContinue?",
+  "graphEnableConfirmBody": "Lounge starts its own codebase-memory-mcp Graph UI process on port {{port}}.\nIt temporarily writes the shared config.json, then restores the previous values once the UI is up — other codebase-memory sessions are not affected.\nHow to stop: close the Graph window, or quit Lounge (stops only the process Lounge started).\n\nContinue?",
+  "graphMsgForeignUiUser": "Port {{port}} is serving another codebase-memory-mcp (for example Antigravity). Lounge will not adopt it. In User mode the port is not changed automatically — pick another port in Settings.",
+  "graphMsgPortBusyUser": "Port {{port}} is in use by another process. In User mode the port is not changed automatically — change Graph UI Port in Settings or stop that process.",
+  "graphMsgBandExhausted": "Graph UI port band {{start}}–{{end}} is full. Free a port or choose a fixed port in User mode in Settings.",
   "graphEnableConfirmOk": "Enable",
   "graphEnableConfirmCancel": "Cancel"
 }

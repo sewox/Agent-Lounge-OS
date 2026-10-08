@@ -46,8 +46,8 @@ pub use approval_notify::{
 pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;
 pub use cbm_ui_config::{
-    cbm_cache_dir, cbm_ui_config_path, migrate_lounge_cbm_config_pollution, restore_cbm_ui_config,
-    snapshot_cbm_ui_config, CbmUiConfigSnapshot,
+    cbm_cache_dir, cbm_cache_dir_from, cbm_ui_config_path, migrate_lounge_cbm_config_pollution,
+    restore_cbm_ui_config, snapshot_cbm_ui_config_at, CbmUiConfigSnapshot, RestoreOutcome,
 };
 pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,

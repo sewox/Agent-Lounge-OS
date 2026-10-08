@@ -15,7 +15,8 @@ use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::cbm_ui_config::{
-    persist_snapshot_to_store, restore_cbm_ui_config, snapshot_cbm_ui_config, CbmUiConfigSnapshot,
+    clear_snapshot_in_store, persist_snapshot_to_store, restore_cbm_ui_config,
+    snapshot_cbm_ui_config_at, CbmUiConfigSnapshot, RestoreOutcome,
 };
 use super::memory_bridge::{
     probe_ui_config, MemoryBridge, DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END,
@@ -108,8 +109,10 @@ pub struct GraphUiState {
     window_port: Mutex<Option<u16>>,
     port_mode: Mutex<GraphUiPortMode>,
     status_flight: AsyncMutex<StatusFlight>,
-    /// Pre-spawn shared CBM `config.json` snapshot (restore on ready/stop/exit).
+    /// Pre-spawn shared CBM `config.json` snapshot (cleared after guarded restore).
     cbm_config_snapshot: Mutex<Option<CbmUiConfigSnapshot>>,
+    /// Test/prod override for shared CBM `config.json` path (avoids real HOME).
+    cbm_config_path_override: Mutex<Option<PathBuf>>,
 }
 
 struct StatusFlight {
@@ -134,7 +137,28 @@ impl GraphUiState {
                 finished_at: None,
             }),
             cbm_config_snapshot: Mutex::new(None),
+            cbm_config_path_override: Mutex::new(None),
         }
+    }
+
+    pub fn set_cbm_config_path_override(&self, path: Option<PathBuf>) {
+        let mut guard = match self.cbm_config_path_override.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = path;
+    }
+
+    pub fn cbm_config_path_override(&self) -> Option<PathBuf> {
+        match self.cbm_config_path_override.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    fn resolve_cbm_config_path(&self) -> Option<PathBuf> {
+        self.cbm_config_path_override()
+            .or_else(super::cbm_ui_config::cbm_ui_config_path)
     }
 
     pub fn set_cbm_config_snapshot(&self, snapshot: Option<CbmUiConfigSnapshot>) {
@@ -152,12 +176,28 @@ impl GraphUiState {
         }
     }
 
-    /// Restore shared CBM UI config from the in-memory snapshot (best-effort).
+    pub fn take_cbm_config_snapshot(&self) -> Option<CbmUiConfigSnapshot> {
+        let mut guard = match self.cbm_config_snapshot.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.take()
+    }
+
+    /// Guarded restore + clear. No-op when snapshot already cleared after ready.
     pub fn restore_cbm_config_best_effort(&self) {
-        let snap = self.cbm_config_snapshot();
-        if let Some(snapshot) = snap.as_ref() {
-            if let Err(err) = restore_cbm_ui_config(snapshot) {
-                log::warn!("cbm ui config restore failed: {err}");
+        let Some(snapshot) = self.take_cbm_config_snapshot() else {
+            return;
+        };
+        match restore_cbm_ui_config(&snapshot) {
+            Ok(RestoreOutcome::Restored) => {
+                log::warn!("cbm ui config: guarded restore applied; snapshot cleared");
+            }
+            Ok(RestoreOutcome::Skipped) => {
+                log::warn!("cbm ui config: guarded restore skipped; snapshot cleared");
+            }
+            Err(err) => {
+                log::warn!("cbm ui config restore failed (snapshot cleared): {err}");
             }
         }
     }
@@ -272,6 +312,12 @@ pub struct GraphUiStatus {
     /// When Auto remaps away from a busy preferred port, the port that was skipped.
     #[serde(default)]
     pub remap_from_port: Option<u16>,
+    /// i18n key for conflict/info (frontend translates; backend must not be TR-only).
+    #[serde(default)]
+    pub message_key: Option<String>,
+    /// Params for `message_key` (`port`, `busy`, `next`, `start`, `end`).
+    #[serde(default)]
+    pub message_params: Option<serde_json::Map<String, serde_json::Value>>,
     pub port_mode: GraphUiPortMode,
     pub owned_by_lounge: bool,
 }
@@ -473,6 +519,8 @@ async fn graph_ui_status_inner(
             conflict_message: None,
             info_message: None,
             remap_from_port: None,
+            message_key: None,
+            message_params: None,
             port_mode,
             owned_by_lounge: port_owned_by_lounge(preferred, child_pid),
         };
@@ -487,11 +535,7 @@ async fn graph_ui_status_inner(
     .await;
     let port = classified.port;
     let owned_by_lounge = port_owned_by_lounge(port, child_pid);
-    let remap_from_port = classified
-        .info_message
-        .as_ref()
-        .filter(|_| port != preferred)
-        .map(|_| preferred);
+    let remap_from_port = classified.remap_from_port;
 
     let cbm_project_name = if classified.ui_available {
         if let Some(root) = project_root.filter(|s| !s.trim().is_empty()) {
@@ -520,9 +564,18 @@ async fn graph_ui_status_inner(
         conflict_message: classified.conflict_message,
         info_message: classified.info_message,
         remap_from_port,
+        message_key: classified.message_key,
+        message_params: classified.message_params,
         port_mode,
         owned_by_lounge,
     }
+}
+
+fn msg_params(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), v.clone()))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -532,10 +585,14 @@ pub struct PortClassification {
     pub port_conflict: bool,
     pub conflict_message: Option<String>,
     pub info_message: Option<String>,
+    pub remap_from_port: Option<u16>,
+    pub message_key: Option<String>,
+    pub message_params: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Status classification: Auto never surfaces `port_conflict` for a foreign preferred
 /// port when a free band successor exists — it reports that port + an info note.
+/// When the selected next port is already owned by Lounge, probe and report availability.
 pub async fn classify_port_status(
     preferred: u16,
     child_pid: Option<u32>,
@@ -551,6 +608,9 @@ pub async fn classify_port_status(
                 port_conflict: false,
                 conflict_message: None,
                 info_message: None,
+                remap_from_port: None,
+                message_key: None,
+                message_params: None,
             };
         }
         return PortClassification {
@@ -559,6 +619,9 @@ pub async fn classify_port_status(
             port_conflict: false,
             conflict_message: None,
             info_message: None,
+            remap_from_port: None,
+            message_key: None,
+            message_params: None,
         };
     }
 
@@ -571,30 +634,28 @@ pub async fn classify_port_status(
             port_conflict: false,
             conflict_message: None,
             info_message: None,
+            remap_from_port: None,
+            message_key: None,
+            message_params: None,
         };
     }
 
-    let busy_reason = if foreign_ui {
-        format!(
-            "Port {preferred} üzerinde başka bir codebase-memory-mcp (ör. Antigravity) çalışıyor — Lounge bunu sahiplenmez."
-        )
-    } else {
-        format!("Port {preferred} başka bir süreç tarafından kullanılıyor.")
-    };
-
     match mode {
         GraphUiPortMode::User => {
-            let suffix = if foreign_ui {
-                " User modunda port otomatik değiştirilmez; Settings'ten değiştirin."
+            let key = if foreign_ui {
+                "graphMsgForeignUiUser"
             } else {
-                " Settings'te Graph UI Port'u değiştirin veya o süreci kontrol edin."
+                "graphMsgPortBusyUser"
             };
             PortClassification {
                 ui_available: false,
                 port: preferred,
                 port_conflict: true,
-                conflict_message: Some(format!("{busy_reason}{suffix}")),
+                conflict_message: None,
                 info_message: None,
+                remap_from_port: None,
+                message_key: Some(key.into()),
+                message_params: Some(msg_params(&[("port", preferred.into())])),
             }
         }
         GraphUiPortMode::Auto => {
@@ -606,36 +667,56 @@ pub async fn classify_port_status(
             };
             match select_graph_ui_port(mode, preferred, band, is_free) {
                 Ok(next) => {
-                    let info = if next == preferred {
-                        None
+                    let remapped = next != preferred;
+                    let owned_next = port_owned_by_lounge(next, child_pid);
+                    let ui_available = if owned_next {
+                        probe_ui_config(next).await
                     } else {
-                        Some(format!(
-                            "{preferred} başka bir süreç tarafından kullanılıyor; {next} kullanılacak"
-                        ))
+                        false
                     };
                     PortClassification {
-                        ui_available: false,
+                        ui_available,
                         port: next,
                         port_conflict: false,
                         conflict_message: None,
-                        info_message: info,
+                        info_message: None,
+                        remap_from_port: remapped.then_some(preferred),
+                        message_key: remapped.then(|| "graphAutoPortInfo".into()),
+                        message_params: remapped.then(|| {
+                            msg_params(&[("busy", preferred.into()), ("next", next.into())])
+                        }),
                     }
                 }
                 Err(PortSelectError::BandExhausted { start, end }) => PortClassification {
                     ui_available: false,
                     port: preferred,
                     port_conflict: true,
-                    conflict_message: Some(format!(
-                        "Graph UI port bandı {start}–{end} tamamen dolu — bir portu boşaltın veya Settings'te user modunda başka bir port seçin."
-                    )),
+                    conflict_message: None,
                     info_message: None,
+                    remap_from_port: None,
+                    message_key: Some("graphMsgBandExhausted".into()),
+                    message_params: Some(msg_params(&[
+                        ("start", start.into()),
+                        ("end", end.into()),
+                        ("port", preferred.into()),
+                    ])),
                 },
                 Err(PortSelectError::UserConflict { port }) => PortClassification {
                     ui_available: false,
                     port,
                     port_conflict: true,
-                    conflict_message: Some(busy_reason),
+                    conflict_message: None,
                     info_message: None,
+                    remap_from_port: None,
+                    message_key: Some(
+                        if foreign_ui {
+                            "graphMsgForeignUiUser"
+                        } else {
+                            "graphMsgPortBusyUser"
+                        }
+                        .into(),
+                    ),
+                    message_params: Some(msg_params(&[("port", port.into())])),
                 },
             }
         }
@@ -650,7 +731,11 @@ pub async fn classify_port(
     mode: GraphUiPortMode,
 ) -> (bool, bool, Option<String>) {
     let c = classify_port_status(port, child_pid, mode, default_graph_ui_port_band()).await;
-    let msg = c.conflict_message.or(c.info_message);
+    let msg = c
+        .message_key
+        .clone()
+        .or(c.conflict_message)
+        .or(c.info_message);
     (c.ui_available, c.port_conflict, msg)
 }
 
@@ -752,8 +837,8 @@ pub fn on_main_window_closed(app: &AppHandle, state: &GraphUiState, bridge: Opti
         let _ = window.destroy();
     }
     state.set_window_port(None);
+    // kill_spawned_child performs guarded restore + clear when a snapshot remains.
     state.kill_spawned_child();
-    state.restore_cbm_config_best_effort();
     if let Some(bridge) = bridge {
         bridge.set_owned_ui_pid(None);
     }
@@ -769,20 +854,46 @@ pub async fn spawn_graph_ui_on_port(
     bridge: &MemoryBridge,
     port: u16,
 ) -> Result<()> {
+    spawn_graph_ui_on_port_with_store(state, bridge, port, None).await
+}
+
+pub async fn spawn_graph_ui_on_port_with_store(
+    state: &GraphUiState,
+    bridge: &MemoryBridge,
+    port: u16,
+    store: Option<&crate::db::ExperienceStore>,
+) -> Result<()> {
     let binary = bridge.binary_path();
     if !binary.is_file() {
         bail!("codebase-memory-mcp bulunamadı");
     }
 
-    // Snapshot shared config before CBM persists --ui/--port into it.
-    let snapshot = match snapshot_cbm_ui_config() {
-        Ok(s) => {
-            state.set_cbm_config_snapshot(Some(s.clone()));
-            Some(s)
-        }
-        Err(err) => {
-            log::warn!("cbm ui config snapshot failed (continuing spawn): {err}");
-            None
+    // Keep a pending older snapshot (pre-pollution) when re-spawning; only update lounge_port.
+    let snapshot = if let Some(mut existing) = state.cbm_config_snapshot() {
+        existing.lounge_port = Some(port);
+        state.set_cbm_config_snapshot(Some(existing.clone()));
+        Some(existing)
+    } else {
+        match state.resolve_cbm_config_path() {
+            Some(path) => match snapshot_cbm_ui_config_at(&path, Some(port)) {
+                Ok(s) => {
+                    state.set_cbm_config_snapshot(Some(s.clone()));
+                    if let Some(store) = store {
+                        if let Err(err) = persist_snapshot_to_store(store, &s).await {
+                            log::warn!("persist cbm config snapshot: {err}");
+                        }
+                    }
+                    Some(s)
+                }
+                Err(err) => {
+                    log::warn!("cbm ui config snapshot failed (continuing spawn): {err}");
+                    None
+                }
+            },
+            None => {
+                log::warn!("cbm ui config path unresolved — skipping snapshot");
+                None
+            }
         }
     };
 
@@ -805,6 +916,9 @@ pub async fn spawn_graph_ui_on_port(
         Ok(child) => child,
         Err(err) => {
             state.restore_cbm_config_best_effort();
+            if let Some(store) = store {
+                let _ = clear_snapshot_in_store(store).await;
+            }
             return Err(err)
                 .with_context(|| format!("graph UI spawn başarısız: {}", binary.display()));
         }
@@ -821,6 +935,9 @@ pub async fn spawn_graph_ui_on_port(
 
     if !ready {
         state.kill_spawned_child();
+        if let Some(store) = store {
+            let _ = clear_snapshot_in_store(store).await;
+        }
         sync_owned_pid(bridge, state);
         bail!("Graph UI {ENABLE_READY_DEADLINE:?} içinde hazır olmadı — SemanticMap'e düşülüyor");
     }
@@ -838,14 +955,20 @@ pub async fn spawn_graph_ui_on_port(
         let pid = state.spawned_child_pid();
         let pids = listen_pids(port);
         state.kill_spawned_child();
+        if let Some(store) = store {
+            let _ = clear_snapshot_in_store(store).await;
+        }
         sync_owned_pid(bridge, state);
         bail!("Graph UI port {port} sahiplik doğrulaması başarısız (child={pid:?}, listen_pids={pids:?})");
     }
 
-    // Ownership verified — restore shared config so other CBM sessions are not polluted.
-    if let Some(snapshot) = snapshot.as_ref() {
-        if let Err(err) = restore_cbm_ui_config(snapshot) {
-            log::warn!("cbm ui config restore after ready failed: {err}");
+    // Ownership verified — guarded restore once, then clear so stop/exit cannot clobber.
+    if snapshot.is_some() {
+        state.restore_cbm_config_best_effort();
+        if let Some(store) = store {
+            if let Err(err) = clear_snapshot_in_store(store).await {
+                log::warn!("clear cbm config snapshot: {err}");
+            }
         }
     }
 
@@ -891,7 +1014,7 @@ pub async fn enable_graph_ui_headless(
         return Ok(selected);
     }
 
-    match spawn_graph_ui_on_port(state, bridge, selected).await {
+    match spawn_graph_ui_on_port_with_store(state, bridge, selected, store).await {
         Ok(()) => {}
         Err(first_err) => {
             if mode == GraphUiPortMode::Auto {
@@ -904,7 +1027,7 @@ pub async fn enable_graph_ui_headless(
                         log::warn!(
                             "graph UI bind race on {selected}, retrying on {next}: {first_err}"
                         );
-                        spawn_graph_ui_on_port(state, bridge, next).await?;
+                        spawn_graph_ui_on_port_with_store(state, bridge, next, store).await?;
                     }
                     Ok(_) | Err(PortSelectError::BandExhausted { .. }) => {
                         bail!("{first_err}; ayrıca port bandı tükendi veya retry yok")
@@ -925,10 +1048,9 @@ pub async fn enable_graph_ui_headless(
         let _ = store
             .set_setting(SETTINGS_KEY_MODE.into(), mode.as_str().into())
             .await;
-        if let Some(snapshot) = state.cbm_config_snapshot() {
-            if let Err(err) = persist_snapshot_to_store(store, &snapshot).await {
-                log::warn!("persist cbm config snapshot: {err}");
-            }
+        // Snapshot is cleared after post-ready restore; ensure store is clean too.
+        if state.cbm_config_snapshot().is_none() {
+            let _ = clear_snapshot_in_store(store).await;
         }
     }
     Ok(live_port)
@@ -958,6 +1080,42 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn restore_best_effort_clears_snapshot() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lounge-snap-clear-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let snap =
+            crate::services::cbm_ui_config::snapshot_cbm_ui_config_at(&path, Some(18749)).unwrap();
+        let state = GraphUiState::new();
+        state.set_cbm_config_path_override(Some(path.clone()));
+        state.set_cbm_config_snapshot(Some(snap));
+        // Write Lounge footprint then restore+clear.
+        crate::services::cbm_ui_config::write_cbm_ui_config_atomic(
+            &path,
+            &crate::services::cbm_ui_config::CbmUiConfigFile {
+                ui_enabled: Some(true),
+                ui_port: Some(18749),
+                extra: Default::default(),
+            },
+        )
+        .unwrap();
+        state.restore_cbm_config_best_effort();
+        assert!(state.cbm_config_snapshot().is_none());
+        // Second call is a no-op (snapshot already cleared).
+        state.restore_cbm_config_best_effort();
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn parses_port_setting_variants() {
@@ -1199,18 +1357,13 @@ mod tests {
         assert!(!classified.ui_available);
         assert!(!classified.port_conflict);
         assert!(classified.port > preferred && classified.port <= band_end);
-        let info = classified.info_message.expect("info note");
-        assert!(
-            info.contains(&preferred.to_string())
-                && info.contains(&classified.port.to_string())
-                && info.contains("kullanılacak"),
-            "unexpected info: {info}"
-        );
+        assert_eq!(classified.remap_from_port, Some(preferred));
+        assert_eq!(classified.message_key.as_deref(), Some("graphAutoPortInfo"));
 
         let user = classify_port_status(preferred, None, GraphUiPortMode::User, band.clone()).await;
         assert!(user.port_conflict);
         assert_eq!(user.port, preferred);
-        assert!(user.conflict_message.is_some());
+        assert_eq!(user.message_key.as_deref(), Some("graphMsgForeignUiUser"));
 
         let exhausted = classify_port_status(
             preferred,
@@ -1220,11 +1373,10 @@ mod tests {
         )
         .await;
         assert!(exhausted.port_conflict);
-        assert!(exhausted
-            .conflict_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("bandı"));
+        assert_eq!(
+            exhausted.message_key.as_deref(),
+            Some("graphMsgBandExhausted")
+        );
     }
 
     #[tokio::test]
@@ -1235,14 +1387,8 @@ mod tests {
             classify_port(preferred, None, GraphUiPortMode::User).await;
         assert!(!available);
         assert!(conflict);
-        let msg = msg.expect("conflict message");
-        assert!(
-            msg.contains("Antigravity")
-                || msg.contains("codebase-memory-mcp")
-                || msg.contains("sahiplenmez")
-                || msg.contains("kullanılıyor"),
-            "unexpected msg: {msg}"
-        );
+        let msg = msg.expect("message key");
+        assert_eq!(msg, "graphMsgForeignUiUser");
     }
 
     #[tokio::test]
@@ -1268,6 +1414,8 @@ mod tests {
                                 conflict_message: None,
                                 info_message: None,
                                 remap_from_port: None,
+                                message_key: None,
+                                message_params: None,
                                 port_mode: GraphUiPortMode::Auto,
                                 owned_by_lounge: false,
                             }

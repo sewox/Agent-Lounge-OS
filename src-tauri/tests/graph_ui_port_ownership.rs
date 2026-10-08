@@ -249,6 +249,10 @@ async fn enable_graph_ui_skips_foreign_band_port_owns_child() {
     );
     let state = GraphUiState::new();
     state.set_port_mode(GraphUiPortMode::Auto);
+    // Isolate shared CBM config.json away from the real user cache (S1).
+    let cbm_cfg = scratch.join("cbm-cache").join("config.json");
+    std::fs::create_dir_all(cbm_cfg.parent().unwrap()).expect("cbm cache dir");
+    state.set_cbm_config_path_override(Some(cbm_cfg));
 
     let live = enable_graph_ui_headless(&state, &bridge, None, band_start..=band_end)
         .await

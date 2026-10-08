@@ -473,8 +473,8 @@ pub fn run_with_start_route(start_route: &'static str) {
                 // Cmd+Q / Dock Quit may skip CloseRequested — flush cached geometry.
                 flush_session(app_handle);
                 if let Some(state) = app_handle.try_state::<GraphUiState>() {
+                    // kill includes guarded restore+clear when a snapshot remains.
                     state.kill_spawned_child();
-                    state.restore_cbm_config_best_effort();
                 }
             }
             _ => {}
@@ -1614,9 +1614,12 @@ async fn enable_graph_ui_cmd(
     }
     // User modunda çakışma engeller; auto modda enable sonraki boş porta geçer.
     if status.port_conflict && status.port_mode == GraphUiPortMode::User {
-        return Err(status
-            .conflict_message
-            .unwrap_or_else(|| format!("Port {} meşgul", status.port)));
+        // Prefer i18n key so the UI can translate; fall back to English.
+        return Err(status.message_key.unwrap_or_else(|| {
+            status
+                .conflict_message
+                .unwrap_or_else(|| format!("Port {} is busy", status.port))
+        }));
     }
     enable_graph_ui(
         &app,

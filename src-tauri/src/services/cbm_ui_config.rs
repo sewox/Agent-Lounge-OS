@@ -11,6 +11,10 @@
 //! Therefore Lounge uses snapshot/restore around its child, plus a one-time
 //! migration that reverts Lounge band pollution (`ui_enabled=true` +
 //! `ui_port` in 18749–18759).
+//!
+//! Restores are **compare-and-restore**: only when the live file still shows
+//! exactly Lounge's footprint (`ui_enabled=true` + `ui_port=N`). After restore
+//! (or skip), the snapshot is cleared so stop/exit cannot clobber later edits.
 
 use std::fs;
 use std::io::Write;
@@ -49,6 +53,18 @@ pub struct CbmUiConfigSnapshot {
     /// Full original JSON text when the file existed (best-effort restore).
     #[serde(default)]
     pub raw: Option<String>,
+    /// Absolute path of `config.json` at snapshot time.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Port Lounge passed via `--port=N` (footprint for guarded restore).
+    #[serde(default)]
+    pub lounge_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    Restored,
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,20 +74,25 @@ pub struct MigrationOutcome {
     pub detail: String,
 }
 
-/// Resolve CBM UI config directory — mirrors upstream `cbm_resolve_cache_dir`
-/// (v0.11.0): `CBM_CACHE_DIR` if set, else `$HOME/.cache/codebase-memory-mcp`
-/// (`USERPROFILE` on Windows when `HOME` is unset). Not `%LOCALAPPDATA%`.
-pub fn cbm_cache_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("CBM_CACHE_DIR") {
+/// Pure cache-dir resolver (testable without mutating process env).
+pub fn cbm_cache_dir_from(mut getenv: impl FnMut(&str) -> Option<String>) -> Option<PathBuf> {
+    if let Some(dir) = getenv("CBM_CACHE_DIR") {
         let trimmed = dir.trim();
         if !trimmed.is_empty() {
             return Some(PathBuf::from(trimmed));
         }
     }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    let home = getenv("HOME")
+        .or_else(|| getenv("USERPROFILE"))
         .map(PathBuf::from)?;
     Some(home.join(".cache").join("codebase-memory-mcp"))
+}
+
+/// Resolve CBM UI config directory — mirrors upstream `cbm_resolve_cache_dir`
+/// (v0.11.0): `CBM_CACHE_DIR` if set, else `$HOME/.cache/codebase-memory-mcp`
+/// (`USERPROFILE` on Windows when `HOME` is unset). Not `%LOCALAPPDATA%`.
+pub fn cbm_cache_dir() -> Option<PathBuf> {
+    cbm_cache_dir_from(|k| std::env::var(k).ok())
 }
 
 pub fn cbm_ui_config_path() -> Option<PathBuf> {
@@ -86,6 +107,11 @@ pub fn looks_like_lounge_pollution(cfg: &CbmUiConfigFile) -> bool {
     matches!(cfg.ui_enabled, Some(true)) && cfg.ui_port.is_some_and(port_in_lounge_band)
 }
 
+/// Live file still shows exactly what Lounge wrote (`--ui=true --port=N`).
+pub fn matches_lounge_footprint(cfg: &CbmUiConfigFile, lounge_port: u16) -> bool {
+    cfg.ui_enabled == Some(true) && cfg.ui_port == Some(lounge_port)
+}
+
 pub fn read_cbm_ui_config(path: &Path) -> Result<Option<(CbmUiConfigFile, String)>> {
     if !path.is_file() {
         return Ok(None);
@@ -96,26 +122,33 @@ pub fn read_cbm_ui_config(path: &Path) -> Result<Option<(CbmUiConfigFile, String
     Ok(Some((cfg, raw)))
 }
 
-pub fn snapshot_cbm_ui_config_at(path: &Path) -> Result<CbmUiConfigSnapshot> {
+pub fn snapshot_cbm_ui_config_at(
+    path: &Path,
+    lounge_port: Option<u16>,
+) -> Result<CbmUiConfigSnapshot> {
     match read_cbm_ui_config(path)? {
         None => Ok(CbmUiConfigSnapshot {
             existed: false,
             ui_enabled: None,
             ui_port: None,
             raw: None,
+            path: Some(path.to_path_buf()),
+            lounge_port,
         }),
         Some((cfg, raw)) => Ok(CbmUiConfigSnapshot {
             existed: true,
             ui_enabled: cfg.ui_enabled,
             ui_port: cfg.ui_port,
             raw: Some(raw),
+            path: Some(path.to_path_buf()),
+            lounge_port,
         }),
     }
 }
 
-pub fn snapshot_cbm_ui_config() -> Result<CbmUiConfigSnapshot> {
+pub fn snapshot_cbm_ui_config(lounge_port: Option<u16>) -> Result<CbmUiConfigSnapshot> {
     let path = cbm_ui_config_path().context("CBM cache dir unresolved")?;
-    snapshot_cbm_ui_config_at(&path)
+    snapshot_cbm_ui_config_at(&path, lounge_port)
 }
 
 /// Atomic write: temp in same directory → rename.
@@ -148,6 +181,34 @@ pub fn write_cbm_ui_config_atomic(path: &Path, cfg: &CbmUiConfigFile) -> Result<
     Ok(())
 }
 
+fn write_raw_atomic(path: &Path, raw: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("config.json has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    let tmp_name = format!(
+        "{}.lounge-restore-tmp-{}-{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("config.json"),
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let tmp = parent.join(tmp_name);
+    {
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        file.write_all(raw.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
+        file.sync_all().ok();
+    }
+    fs::rename(&tmp, path).with_context(|| {
+        let _ = fs::remove_file(&tmp);
+        format!("restore rename {} → {}", tmp.display(), path.display())
+    })?;
+    Ok(())
+}
+
 fn backup_config(path: &Path) -> Result<PathBuf> {
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let backup = path.with_file_name(format!("config.json.lounge-backup-{stamp}"));
@@ -156,46 +217,109 @@ fn backup_config(path: &Path) -> Result<PathBuf> {
     Ok(backup)
 }
 
-/// Restore pre-spawn values. Idempotent when already matching the snapshot.
-pub fn restore_cbm_ui_config_at(path: &Path, snapshot: &CbmUiConfigSnapshot) -> Result<()> {
+fn resolve_snapshot_path(snapshot: &CbmUiConfigSnapshot) -> Result<PathBuf> {
+    if let Some(path) = snapshot.path.as_ref() {
+        return Ok(path.clone());
+    }
+    cbm_ui_config_path().context("CBM cache dir unresolved")
+}
+
+/// Guarded restore: only when the live file still matches Lounge's footprint.
+pub fn restore_cbm_ui_config_at(
+    path: &Path,
+    snapshot: &CbmUiConfigSnapshot,
+) -> Result<RestoreOutcome> {
+    let Some(lounge_port) = snapshot.lounge_port else {
+        log::warn!(
+            "cbm ui config restore skipped: {} has no lounge_port footprint",
+            path.display()
+        );
+        return Ok(RestoreOutcome::Skipped);
+    };
+
+    let Some((cfg, _)) = read_cbm_ui_config(path)? else {
+        log::warn!(
+            "cbm ui config restore skipped: {} absent (nothing to undo)",
+            path.display()
+        );
+        return Ok(RestoreOutcome::Skipped);
+    };
+
+    if !matches_lounge_footprint(&cfg, lounge_port) {
+        log::warn!(
+            "cbm ui config restore skipped: {} no longer matches Lounge footprint ui_enabled=true ui_port={} (live ui_enabled={:?} ui_port={:?})",
+            path.display(),
+            lounge_port,
+            cfg.ui_enabled,
+            cfg.ui_port
+        );
+        return Ok(RestoreOutcome::Skipped);
+    }
+
     if !snapshot.existed {
-        if path.is_file() {
-            // File was created by Lounge's child — remove it to restore absence.
-            log::warn!(
-                "cbm ui config restore: removing Lounge-created {} (did not exist before)",
-                path.display()
-            );
-            fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
-        }
-        return Ok(());
+        // Delete only when content is still Lounge's footprint (checked above).
+        log::warn!(
+            "cbm ui config restore: removing Lounge footprint from {} (file did not exist before; ui_port={lounge_port})",
+            path.display()
+        );
+        fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+        return Ok(RestoreOutcome::Restored);
     }
 
     if let Some(raw) = snapshot.raw.as_deref() {
         let current = fs::read_to_string(path).ok();
         if current.as_deref() == Some(raw) {
-            return Ok(());
+            log::warn!(
+                "cbm ui config restore: {} already matches snapshot (no-op)",
+                path.display()
+            );
+            return Ok(RestoreOutcome::Restored);
         }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.lounge-restore-tmp");
-        {
-            let mut file = fs::File::create(&tmp)?;
-            file.write_all(raw.as_bytes())?;
-            file.sync_all().ok();
-        }
-        fs::rename(&tmp, path).with_context(|| {
-            let _ = fs::remove_file(&tmp);
-            format!("restore rename → {}", path.display())
-        })?;
+        write_raw_atomic(path, raw)?;
         log::warn!(
-            "cbm ui config restore: {} restored from snapshot (raw)",
+            "cbm ui config restore: {} restored from snapshot raw (lounge_port={lounge_port})",
+            path.display()
+        );
+        return Ok(RestoreOutcome::Restored);
+    }
+
+    let mut next = cfg;
+    let old_enabled = next.ui_enabled;
+    let old_port = next.ui_port;
+    next.ui_enabled = snapshot.ui_enabled;
+    next.ui_port = snapshot.ui_port;
+    write_cbm_ui_config_atomic(path, &next)?;
+    log::warn!(
+        "cbm ui config restore: {} ui_enabled {:?}→{:?} ui_port {:?}→{:?}",
+        path.display(),
+        old_enabled,
+        next.ui_enabled,
+        old_port,
+        next.ui_port
+    );
+    Ok(RestoreOutcome::Restored)
+}
+
+/// Unconditional restore used by one-time migration (backup already taken).
+pub fn force_restore_cbm_ui_config_at(path: &Path, snapshot: &CbmUiConfigSnapshot) -> Result<()> {
+    if !snapshot.existed {
+        if path.is_file() {
+            fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+            log::warn!(
+                "cbm ui config migration: removed {} (snapshot said absent)",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    if let Some(raw) = snapshot.raw.as_deref() {
+        write_raw_atomic(path, raw)?;
+        log::warn!(
+            "cbm ui config migration: {} force-restored from snapshot raw",
             path.display()
         );
         return Ok(());
     }
-
-    // Field-level restore when raw is missing.
     let mut cfg = read_cbm_ui_config(path)?
         .map(|(c, _)| c)
         .unwrap_or(CbmUiConfigFile {
@@ -203,27 +327,20 @@ pub fn restore_cbm_ui_config_at(path: &Path, snapshot: &CbmUiConfigSnapshot) -> 
             ui_port: None,
             extra: serde_json::Map::new(),
         });
-    let old_enabled = cfg.ui_enabled;
-    let old_port = cfg.ui_port;
     cfg.ui_enabled = snapshot.ui_enabled;
     cfg.ui_port = snapshot.ui_port;
-    if old_enabled == cfg.ui_enabled && old_port == cfg.ui_port {
-        return Ok(());
-    }
     write_cbm_ui_config_atomic(path, &cfg)?;
     log::warn!(
-        "cbm ui config restore: {} ui_enabled {:?}→{:?} ui_port {:?}→{:?}",
+        "cbm ui config migration: {} force-restored fields ui_enabled={:?} ui_port={:?}",
         path.display(),
-        old_enabled,
         cfg.ui_enabled,
-        old_port,
         cfg.ui_port
     );
     Ok(())
 }
 
-pub fn restore_cbm_ui_config(snapshot: &CbmUiConfigSnapshot) -> Result<()> {
-    let path = cbm_ui_config_path().context("CBM cache dir unresolved")?;
+pub fn restore_cbm_ui_config(snapshot: &CbmUiConfigSnapshot) -> Result<RestoreOutcome> {
+    let path = resolve_snapshot_path(snapshot)?;
     restore_cbm_ui_config_at(&path, snapshot)
 }
 
@@ -240,7 +357,6 @@ pub fn migrate_lounge_cbm_config_pollution_at(
         });
     };
 
-    // Prefer explicit Lounge snapshot when present and the live file looks polluted.
     if let Some(snap) = snapshot {
         if snap.existed && looks_like_lounge_pollution(&cfg) {
             let snap_clean = !matches!(
@@ -250,7 +366,7 @@ pub fn migrate_lounge_cbm_config_pollution_at(
             if snap_clean {
                 let backup = backup_config(path)?;
                 let old = format!("ui_enabled={:?} ui_port={:?}", cfg.ui_enabled, cfg.ui_port);
-                restore_cbm_ui_config_at(path, snap)?;
+                force_restore_cbm_ui_config_at(path, snap)?;
                 let detail = format!(
                     "migrated via snapshot: {old} → snapshot (backup {})",
                     backup.display()
@@ -276,7 +392,6 @@ pub fn migrate_lounge_cbm_config_pollution_at(
     let backup = backup_config(path)?;
     let old_enabled = cfg.ui_enabled;
     let old_port = cfg.ui_port;
-    // Revert only Lounge footprint to upstream defaults.
     cfg.ui_enabled = Some(false);
     cfg.ui_port = Some(CBM_DEFAULT_UI_PORT);
     write_cbm_ui_config_atomic(path, &cfg)?;
@@ -300,7 +415,10 @@ pub fn migrate_lounge_cbm_config_pollution_at(
 pub fn migrate_lounge_cbm_config_pollution(
     snapshot: Option<&CbmUiConfigSnapshot>,
 ) -> Result<MigrationOutcome> {
-    let path = match cbm_ui_config_path() {
+    let path = match snapshot
+        .and_then(|s| s.path.clone())
+        .or_else(cbm_ui_config_path)
+    {
         Some(p) => p,
         None => {
             return Ok(MigrationOutcome {
@@ -321,6 +439,9 @@ pub async fn load_snapshot_from_store(
         .await
         .ok()
         .flatten()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
     serde_json::from_str(&raw).ok()
 }
 
@@ -344,9 +465,48 @@ pub async fn clear_snapshot_in_store(store: &crate::db::ExperienceStore) -> Resu
     Ok(())
 }
 
+pub async fn migration_marker_set(store: &crate::db::ExperienceStore) -> bool {
+    matches!(
+        store
+            .get_setting(SETTINGS_KEY_CBM_CONFIG_MIGRATED.into())
+            .await
+            .ok()
+            .flatten()
+            .as_deref(),
+        Some("1")
+    )
+}
+
+/// Startup hygiene:
+/// - If migration marker is set: crash-recovery only (guarded restore of stored snapshot).
+/// - Otherwise: one-time band-rule / snapshot migration, then set the marker.
 pub async fn run_startup_cbm_config_migration(store: &crate::db::ExperienceStore) -> Result<()> {
     let snapshot = load_snapshot_from_store(store).await;
-    // Always re-check the live file: second run is a no-op when clean.
+
+    if migration_marker_set(store).await {
+        if let Some(snap) = snapshot.as_ref() {
+            if snap.lounge_port.is_some() {
+                match restore_cbm_ui_config(snap) {
+                    Ok(RestoreOutcome::Restored) => {
+                        log::warn!(
+                            "cbm ui config startup: crash-recovery restore applied; clearing snapshot"
+                        );
+                    }
+                    Ok(RestoreOutcome::Skipped) => {
+                        log::warn!(
+                            "cbm ui config startup: crash-recovery restore skipped; clearing snapshot"
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!("cbm ui config startup crash-recovery failed: {err}");
+                    }
+                }
+                let _ = clear_snapshot_in_store(store).await;
+            }
+        }
+        return Ok(());
+    }
+
     let outcome = migrate_lounge_cbm_config_pollution(snapshot.as_ref())?;
     store
         .set_setting(SETTINGS_KEY_CBM_CONFIG_MIGRATED.into(), "1".into())
@@ -354,6 +514,9 @@ pub async fn run_startup_cbm_config_migration(store: &crate::db::ExperienceStore
         .context("mark cbm config migrated")?;
     if outcome.changed {
         log::warn!("cbm ui config startup migration: {}", outcome.detail);
+    }
+    if snapshot.is_some() {
+        let _ = clear_snapshot_in_store(store).await;
     }
     Ok(())
 }
@@ -375,31 +538,41 @@ mod tests {
     }
 
     #[test]
-    fn cache_dir_prefers_cbm_cache_dir_env() {
-        let dir = temp_dir();
-        let prev = std::env::var_os("CBM_CACHE_DIR");
-        std::env::set_var("CBM_CACHE_DIR", &dir);
-        let resolved = cbm_cache_dir().unwrap();
-        assert_eq!(resolved, dir);
-        match prev {
-            Some(v) => std::env::set_var("CBM_CACHE_DIR", v),
-            None => std::env::remove_var("CBM_CACHE_DIR"),
-        }
-        let _ = fs::remove_dir_all(dir);
+    fn cache_dir_prefers_cbm_cache_dir_env_pure() {
+        let resolved = cbm_cache_dir_from(|k| match k {
+            "CBM_CACHE_DIR" => Some("/tmp/cbm-test-cache".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/cbm-test-cache"));
+    }
+
+    #[test]
+    fn cache_dir_falls_back_to_home_cache() {
+        let resolved = cbm_cache_dir_from(|k| match k {
+            "HOME" => Some("/Users/demo".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/Users/demo/.cache/codebase-memory-mcp")
+        );
     }
 
     #[test]
     fn snapshot_absent_file() {
         let dir = temp_dir();
         let path = dir.join("config.json");
-        let snap = snapshot_cbm_ui_config_at(&path).unwrap();
+        let snap = snapshot_cbm_ui_config_at(&path, Some(18750)).unwrap();
         assert!(!snap.existed);
-        assert!(snap.ui_enabled.is_none());
+        assert_eq!(snap.lounge_port, Some(18750));
+        assert_eq!(snap.path.as_deref(), Some(path.as_path()));
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn snapshot_and_restore_user_values() {
+    fn snapshot_and_restore_user_values_when_footprint_matches() {
         let dir = temp_dir();
         let path = dir.join("config.json");
         let original = CbmUiConfigFile {
@@ -408,30 +581,101 @@ mod tests {
             extra: serde_json::Map::new(),
         };
         write_cbm_ui_config_atomic(&path, &original).unwrap();
-        let snap = snapshot_cbm_ui_config_at(&path).unwrap();
-        assert!(snap.existed);
-        assert_eq!(snap.ui_port, Some(9749));
+        let snap = snapshot_cbm_ui_config_at(&path, Some(18749)).unwrap();
 
-        // Lounge pollution.
         let polluted = CbmUiConfigFile {
             ui_enabled: Some(true),
             ui_port: Some(18749),
             extra: serde_json::Map::new(),
         };
         write_cbm_ui_config_atomic(&path, &polluted).unwrap();
-        restore_cbm_ui_config_at(&path, &snap).unwrap();
+        assert_eq!(
+            restore_cbm_ui_config_at(&path, &snap).unwrap(),
+            RestoreOutcome::Restored
+        );
         let (restored, _) = read_cbm_ui_config(&path).unwrap().unwrap();
         assert_eq!(restored.ui_enabled, Some(false));
         assert_eq!(restored.ui_port, Some(9749));
-        // Idempotent.
-        restore_cbm_ui_config_at(&path, &snap).unwrap();
-        let (again, _) = read_cbm_ui_config(&path).unwrap().unwrap();
-        assert_eq!(again.ui_port, Some(9749));
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn restore_absent_removes_lounge_created_file() {
+    fn restore_skips_when_third_party_changed_after_lounge() {
+        let dir = temp_dir();
+        let path = dir.join("config.json");
+        let snap = snapshot_cbm_ui_config_at(&path, Some(18749)).unwrap();
+        assert!(!snap.existed);
+
+        // Lounge wrote footprint, then a third party rewrote to Antigravity defaults.
+        write_cbm_ui_config_atomic(
+            &path,
+            &CbmUiConfigFile {
+                ui_enabled: Some(true),
+                ui_port: Some(18749),
+                extra: serde_json::Map::new(),
+            },
+        )
+        .unwrap();
+        // Simulate post-ready restore first.
+        assert_eq!(
+            restore_cbm_ui_config_at(&path, &snap).unwrap(),
+            RestoreOutcome::Restored
+        );
+        assert!(!path.exists());
+
+        // Third party creates a new config.
+        write_cbm_ui_config_atomic(
+            &path,
+            &CbmUiConfigFile {
+                ui_enabled: Some(true),
+                ui_port: Some(9749),
+                extra: serde_json::Map::new(),
+            },
+        )
+        .unwrap();
+        // Stale kill/exit restore must leave it untouched.
+        assert_eq!(
+            restore_cbm_ui_config_at(&path, &snap).unwrap(),
+            RestoreOutcome::Skipped
+        );
+        let (cfg, _) = read_cbm_ui_config(&path).unwrap().unwrap();
+        assert_eq!(cfg.ui_port, Some(9749));
+        assert_eq!(cfg.ui_enabled, Some(true));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_absent_does_not_delete_third_party_file() {
+        let dir = temp_dir();
+        let path = dir.join("config.json");
+        let snap = CbmUiConfigSnapshot {
+            existed: false,
+            ui_enabled: None,
+            ui_port: None,
+            raw: None,
+            path: Some(path.clone()),
+            lounge_port: Some(18750),
+        };
+        // Third party created a file that is NOT Lounge's footprint.
+        write_cbm_ui_config_atomic(
+            &path,
+            &CbmUiConfigFile {
+                ui_enabled: Some(true),
+                ui_port: Some(9749),
+                extra: serde_json::Map::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restore_cbm_ui_config_at(&path, &snap).unwrap(),
+            RestoreOutcome::Skipped
+        );
+        assert!(path.is_file());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restore_absent_removes_only_lounge_footprint() {
         let dir = temp_dir();
         let path = dir.join("config.json");
         write_cbm_ui_config_atomic(
@@ -448,8 +692,13 @@ mod tests {
             ui_enabled: None,
             ui_port: None,
             raw: None,
+            path: Some(path.clone()),
+            lounge_port: Some(18750),
         };
-        restore_cbm_ui_config_at(&path, &snap).unwrap();
+        assert_eq!(
+            restore_cbm_ui_config_at(&path, &snap).unwrap(),
+            RestoreOutcome::Restored
+        );
         assert!(!path.exists());
         let _ = fs::remove_dir_all(dir);
     }
@@ -476,6 +725,66 @@ mod tests {
 
         let second = migrate_lounge_cbm_config_pollution_at(&path, None).unwrap();
         assert!(!second.changed);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn startup_migration_marker_skips_second_band_rewrite() {
+        let dir = temp_dir();
+        let path = dir.join("config.json");
+        write_cbm_ui_config_atomic(
+            &path,
+            &CbmUiConfigFile {
+                ui_enabled: Some(true),
+                ui_port: Some(18749),
+                extra: serde_json::Map::new(),
+            },
+        )
+        .unwrap();
+
+        let store = crate::db::ExperienceStore::memory().unwrap();
+        // First run: migrate via path injection through snapshot.path.
+        let snap = CbmUiConfigSnapshot {
+            existed: false,
+            ui_enabled: None,
+            ui_port: None,
+            raw: None,
+            path: Some(path.clone()),
+            lounge_port: None,
+        };
+        // Use migrate directly then mark — mirrors first startup without HOME pollution.
+        let first = migrate_lounge_cbm_config_pollution_at(&path, None).unwrap();
+        assert!(first.changed);
+        store
+            .set_setting(SETTINGS_KEY_CBM_CONFIG_MIGRATED.into(), "1".into())
+            .await
+            .unwrap();
+
+        // Third party deliberately picks an in-band port after migration.
+        write_cbm_ui_config_atomic(
+            &path,
+            &CbmUiConfigFile {
+                ui_enabled: Some(true),
+                ui_port: Some(18755),
+                extra: serde_json::Map::new(),
+            },
+        )
+        .unwrap();
+
+        // Second startup: marker set → must not rewrite.
+        assert!(migration_marker_set(&store).await);
+        // Simulate run_startup with marker: only crash-recovery (no snap lounge_port).
+        store
+            .set_setting(
+                SETTINGS_KEY_CBM_CONFIG_SNAPSHOT.into(),
+                serde_json::to_string(&snap).unwrap(),
+            )
+            .await
+            .unwrap();
+        run_startup_cbm_config_migration(&store).await.unwrap();
+        let (cfg, _) = read_cbm_ui_config(&path).unwrap().unwrap();
+        assert_eq!(cfg.ui_port, Some(18755));
+        assert_eq!(cfg.ui_enabled, Some(true));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -509,6 +818,8 @@ mod tests {
             ui_enabled: Some(false),
             ui_port: Some(9800),
             raw: Some(r#"{"ui_enabled":false,"ui_port":9800}"#.into()),
+            path: Some(path.clone()),
+            lounge_port: Some(18751),
         };
         write_cbm_ui_config_atomic(
             &path,

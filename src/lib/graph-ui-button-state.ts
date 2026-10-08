@@ -2,6 +2,8 @@
 
 export type GraphUiPortMode = "auto" | "user";
 
+export type GraphUiMessageParams = Record<string, string | number>;
+
 export type GraphUiButtonStatus = {
   port: number;
   port_conflict: boolean;
@@ -9,6 +11,9 @@ export type GraphUiButtonStatus = {
   info_message?: string | null;
   /** Preferred port skipped in Auto mode (busy/foreign). */
   remap_from_port?: number | null;
+  /** i18n key for conflict/info (frontend translates). */
+  message_key?: string | null;
+  message_params?: GraphUiMessageParams | null;
   port_mode: GraphUiPortMode;
   ui_available: boolean;
   project_indexed: boolean;
@@ -39,4 +44,29 @@ export function autoPortInfoPorts(
     return { busy: status.remap_from_port, next: status.port };
   }
   return null;
+}
+
+/** Resolve a localisable Graph UI status note from backend codes + params. */
+export function resolveGraphUiStatusMessage(
+  status: Pick<
+    GraphUiButtonStatus,
+    "message_key" | "message_params" | "conflict_message" | "info_message" | "remap_from_port" | "port"
+  >,
+  translate: (key: string, params?: GraphUiMessageParams) => string,
+): string | null {
+  if (status.message_key) {
+    const params: GraphUiMessageParams = { ...(status.message_params ?? {}) };
+    if (status.remap_from_port != null && params.busy == null) {
+      params.busy = status.remap_from_port;
+    }
+    if (params.next == null) {
+      params.next = status.port;
+    }
+    if (params.port == null) {
+      params.port = status.port;
+    }
+    return translate(status.message_key, params);
+  }
+  const fallback = status.conflict_message || status.info_message;
+  return fallback?.trim() || null;
 }

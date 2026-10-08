@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLounge } from "@/components/lounge-provider";
 import {
-  autoPortInfoPorts,
+  resolveGraphUiStatusMessage,
   shouldBlockEnableOnConflict,
   type GraphUiButtonStatus,
 } from "@/lib/graph-ui-button-state";
@@ -87,10 +87,9 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
     return null;
   }
 
-  const remap = autoPortInfoPorts(status);
-  const infoNote = remap
-    ? t("graphAutoPortInfo", { busy: remap.busy, next: remap.next })
-    : status.info_message?.trim() || null;
+  const statusNote = resolveGraphUiStatusMessage(status, (key, params) => t(key, params));
+  const infoNote =
+    status.port_mode === "auto" && !status.port_conflict ? statusNote : null;
 
   return (
     <GraphUiButtonView
@@ -110,7 +109,10 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
           return;
         }
         if (shouldBlockEnableOnConflict(status)) {
-          setToast(status.conflict_message || t("graphPortBusy", { port: status.port }));
+          setToast(
+            resolveGraphUiStatusMessage(status, (key, params) => t(key, params)) ||
+              t("graphPortBusy", { port: status.port }),
+          );
           return;
         }
         const confirmed = await ask(t("graphEnableConfirmBody", { port: status.port }), {
