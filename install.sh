@@ -35,6 +35,8 @@ DO_UNINSTALL=0
 APP_ID="agent-lounge-os"
 APP_NAME="Agent Lounge OS"
 CLI_NAME="agent-lounge-os"
+ICON_ASSET="Agent-Lounge-OS-icon-128.png"
+INSTALL_SELF_HINT="https://raw.githubusercontent.com/${REPO}/main/install.sh"
 
 fail() {
   printf 'agent-lounge-os install: %s\n' "$1" >&2
@@ -99,25 +101,67 @@ case "$arch_raw" in
   *) fail "unsupported architecture: $arch_raw" ;;
 esac
 
+INTEL_MAC=0
 # Rosetta: x86_64 shell on Apple silicon → prefer native aarch64 build.
 if [ "$os" = darwin ] && [ "$arch" = x86_64 ]; then
-  if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
+  translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+  if [ "$translated" = 1 ]; then
     arch=aarch64
+  else
+    INTEL_MAC=1
+    printf 'Intel Mac (x86_64) detected; requiring Agent-Lounge-OS-macos-x86_64.app.tar.gz\n'
   fi
 fi
 
-# --- /etc/os-release + package manager (never assume apt) ---
+# --- /etc/os-release + package manager (ID/ID_LIKE first; command -v fallback) ---
 OS_RELEASE_ID=""
 OS_RELEASE_ID_LIKE=""
-OS_RELEASE_NAME=""
 if [ -f /etc/os-release ]; then
-  # shellcheck disable=SC1091
   OS_RELEASE_ID=$(sed -n 's/^ID=//p' /etc/os-release | head -n1 | tr -d '"' | tr -d "'")
   OS_RELEASE_ID_LIKE=$(sed -n 's/^ID_LIKE=//p' /etc/os-release | head -n1 | tr -d '"' | tr -d "'")
-  OS_RELEASE_NAME=$(sed -n 's/^NAME=//p' /etc/os-release | head -n1 | tr -d '"' | tr -d "'")
 fi
 
+pm_from_id() {
+  id="$1"
+  like="$2"
+  case "$id" in
+    debian|ubuntu|linuxmint|pop|elementary|raspbian|neon)
+      printf 'apt'; return 0 ;;
+    fedora|rhel|centos|rocky|almalinux|ol|amzn|nobara)
+      if command -v dnf >/dev/null 2>&1; then printf 'dnf'; else printf 'yum'; fi
+      return 0
+      ;;
+    opensuse*|sles|suse*)
+      printf 'zypper'; return 0 ;;
+    arch|manjaro|endeavouros|garuda|artix)
+      printf 'pacman'; return 0 ;;
+    alpine|postmarketos)
+      printf 'apk'; return 0 ;;
+  esac
+  like_lc=$(printf '%s' "$like" | tr '[:upper:]' '[:lower:]')
+  case " $like_lc " in
+    *" debian "*|*" ubuntu "*)
+      printf 'apt'; return 0 ;;
+    *" fedora "*|*" rhel "*|*" centos "*)
+      if command -v dnf >/dev/null 2>&1; then printf 'dnf'; else printf 'yum'; fi
+      return 0
+      ;;
+    *" suse "*)
+      printf 'zypper'; return 0 ;;
+    *" arch "*)
+      printf 'pacman'; return 0 ;;
+    *" alpine "*)
+      printf 'apk'; return 0 ;;
+  esac
+  return 1
+}
+
 detect_package_manager() {
+  if pm=$(pm_from_id "$OS_RELEASE_ID" "$OS_RELEASE_ID_LIKE"); then
+    printf '%s' "$pm"
+    return 0
+  fi
+  # Fallback: binary presence only when os-release did not map.
   if command -v apt-get >/dev/null 2>&1; then
     printf 'apt'
   elif command -v dnf >/dev/null 2>&1; then
@@ -150,51 +194,50 @@ is_musl() {
   return 1
 }
 
-# Alpine / musl: AppImage cannot run — fail loudly (required).
 if [ "$os" = linux ] && is_musl; then
   fail "unsupported platform: musl/Alpine (ID=${OS_RELEASE_ID:-unknown}). AppImage requires glibc. Use a glibc distro (Debian/Ubuntu/Fedora/openSUSE/Arch) or a packaged build when available."
 fi
 
-# Paths under prefix
 BIN_DIR="${PREFIX}/bin"
 SHARE_DIR="${PREFIX}/share/${APP_ID}"
 APP_DIR="${PREFIX}/share/applications"
 ICON_DIR="${PREFIX}/share/icons/hicolor/128x128/apps"
-# Rootless macOS target: ~/Applications + CLI shim in prefix/bin (override for CI).
+ICON_PATH="${ICON_DIR}/${APP_ID}.png"
 MAC_APP_DIR="${LOUNGE_MAC_APP_DIR:-${HOME}/Applications}"
-if [ "$os" = darwin ]; then
-  SHARE_DIR="${PREFIX}/share/${APP_ID}"
-fi
 
 manifest_path() {
   printf '%s/install-manifest.txt' "$SHARE_DIR"
 }
 
+remove_path_loud() {
+  path="$1"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+  rm -rf "$path" || fail "failed to remove $path"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    fail "still present after remove: $path"
+  fi
+}
+
 uninstall() {
   man="$(manifest_path)"
   if [ ! -f "$man" ]; then
-    # Best-effort cleanup of known paths when manifest is missing.
-    rm -f "${BIN_DIR}/${CLI_NAME}"
-    rm -f "${APP_DIR}/${APP_ID}.desktop"
-    rm -f "${ICON_DIR}/${APP_ID}.png"
-    rm -rf "$SHARE_DIR"
-    if [ "$os" = darwin ]; then
-      rm -rf "${MAC_APP_DIR}/${APP_NAME}.app"
-    fi
-    printf 'Removed Agent Lounge OS install (best-effort; no manifest at %s).\n' "$man"
-    exit 0
+    fail "uninstall failed: no install manifest at $man (nothing this installer recorded). Refusing best-effort wipe."
   fi
   while IFS= read -r path || [ -n "$path" ]; do
     [ -n "$path" ] || continue
-    # Never delete the manifest mid-loop; remove it after.
     [ "$path" = "$man" ] && continue
-    rm -rf "$path"
+    remove_path_loud "$path"
   done <"$man"
-  rm -f "$man"
+  remove_path_loud "$man"
   if [ -d "$SHARE_DIR" ]; then
     set +e
     rmdir "$SHARE_DIR" 2>/dev/null
     set -e
+    if [ -d "$SHARE_DIR" ]; then
+      fail "uninstall incomplete: $SHARE_DIR still exists"
+    fi
   fi
   printf 'Uninstalled Agent Lounge OS from %s\n' "$PREFIX"
   exit 0
@@ -204,7 +247,6 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
   uninstall
 fi
 
-# --- asset names (stable release names; spaces avoided for GitHub Releases) ---
 asset_for_platform() {
   case "$os-$arch" in
     linux-x86_64) printf 'Agent-Lounge-OS-linux-x86_64.AppImage' ;;
@@ -231,7 +273,6 @@ fi
 if [ -n "$DOWNLOAD_DIR" ]; then
   [ -d "$DOWNLOAD_DIR" ] || fail "LOUNGE_DOWNLOAD_DIR is not a directory: $DOWNLOAD_DIR"
   fetch() {
-    # $1 is URL form (unused for local fixtures); copy by basename into $2.
     name=$(basename "$2")
     src="${DOWNLOAD_DIR}/${name}"
     [ -f "$src" ] || fail "local asset missing: $src"
@@ -263,23 +304,36 @@ printf 'Downloading %s from %s ...\n' "$ASSET" "$BASE"
 
 fetch "$BASE/SHA256SUMS" "$tmp/SHA256SUMS" || fail "download failed: ${BASE}/SHA256SUMS (checksums are mandatory)"
 
-# Resolve expected hash; missing entry → clear arch/platform message.
-if ! expected=$(awk -v name="$ASSET" '
-  $2 == name || $2 == "*"name { count++; hash=$1 }
-  END { if (count == 1) print hash; else exit 1 }
-' "$tmp/SHA256SUMS"); then
-  # Distinguish "empty/corrupt sums" vs "arch not published".
+lookup_hash() {
+  name="$1"
+  awk -v n="$name" '
+    $2 == n || $2 == "*"n { count++; hash=$1 }
+    END { if (count == 1) print hash; else exit 1 }
+  ' "$tmp/SHA256SUMS"
+}
+
+if ! expected=$(lookup_hash "$ASSET"); then
   if ! grep -q '[0-9a-fA-F]' "$tmp/SHA256SUMS" 2>/dev/null; then
     fail "SHA256SUMS is missing or empty"
   fi
-  fail "no release artifact for ${os}/${arch} (expected ${ASSET} in SHA256SUMS). Available entries listed above may omit this arch — arm64/macOS builds are published when CI produces them."
+  if [ "$INTEL_MAC" -eq 1 ]; then
+    fail "no Intel Mac (x86_64) release artifact (expected ${ASSET} in SHA256SUMS). This release may only publish Apple silicon (aarch64). Build or obtain Agent-Lounge-OS-macos-x86_64.app.tar.gz for Intel Macs."
+  fi
+  fail "no release artifact for ${os}/${arch} (expected ${ASSET} in SHA256SUMS)."
 fi
 
 fetch "$BASE/$ASSET" "$tmp/$ASSET" || fail "download failed: $BASE/$ASSET"
 actual=$(sha256_of "$tmp/$ASSET")
 [ "$expected" = "$actual" ] || fail "checksum mismatch for $ASSET (expected $expected, got $actual)"
 
-# --- optional fuse/libfuse for AppImage (prompt; never silent apt-only) ---
+# Icon is a mandatory checksummed release asset (also listed in SHA256SUMS).
+if ! icon_expected=$(lookup_hash "$ICON_ASSET"); then
+  fail "SHA256SUMS must contain ${ICON_ASSET} (checksummed icon asset is required)"
+fi
+fetch "$BASE/$ICON_ASSET" "$tmp/$ICON_ASSET" || fail "download failed: $BASE/$ICON_ASSET"
+icon_actual=$(sha256_of "$tmp/$ICON_ASSET")
+[ "$icon_expected" = "$icon_actual" ] || fail "checksum mismatch for $ICON_ASSET"
+
 prompt_yes_no() {
   msg="$1"
   default_yes="$2"
@@ -287,7 +341,6 @@ prompt_yes_no() {
     return 0
   fi
   if [ ! -t 0 ] && [ ! -t 1 ]; then
-    # Non-interactive: skip optional deps unless ASSUME_YES.
     return 1
   fi
   if [ "$default_yes" = 1 ]; then
@@ -311,15 +364,27 @@ prompt_yes_no() {
 }
 
 install_fuse_hint_packages() {
-  # Package names differ per family — never assume apt.
   case "$PKG_MANAGER" in
     apt) printf 'libfuse2' ;;
     dnf|yum) printf 'fuse fuse-libs' ;;
     zypper) printf 'fuse libfuse2' ;;
     pacman) printf 'fuse2' ;;
-    apk) printf 'fuse' ;; # unreachable for musl AppImage path, but keep explicit
+    apk) printf 'fuse' ;;
     *) printf '' ;;
   esac
+}
+
+run_as_root() {
+  # Root users: run directly. Otherwise require sudo, with a clear message.
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return $?
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+    return $?
+  fi
+  fail "optional package install needs root or sudo (package manager: ${PKG_MANAGER}). Re-run as root, install sudo, or install manually: $*"
 }
 
 maybe_install_optional_fuse() {
@@ -330,7 +395,6 @@ maybe_install_optional_fuse() {
     printf 'Optional FUSE packages: unknown package manager (%s); install libfuse2/fuse manually if the AppImage fails to mount.\n' "$PKG_MANAGER"
     return 0
   }
-  # Skip prompt if fusermount already present.
   if command -v fusermount >/dev/null 2>&1 || command -v fusermount3 >/dev/null 2>&1; then
     return 0
   fi
@@ -339,40 +403,15 @@ maybe_install_optional_fuse() {
     printf 'Skipping optional deps. If launch fails, install: %s\n' "$pkgs"
     return 0
   fi
+  # shellcheck disable=SC2086
   case "$PKG_MANAGER" in
-    apt)
-      need sudo
-      # shellcheck disable=SC2086
-      sudo apt-get update && sudo apt-get install -y $pkgs
-      ;;
-    dnf)
-      need sudo
-      # shellcheck disable=SC2086
-      sudo dnf install -y $pkgs
-      ;;
-    yum)
-      need sudo
-      # shellcheck disable=SC2086
-      sudo yum install -y $pkgs
-      ;;
-    zypper)
-      need sudo
-      # shellcheck disable=SC2086
-      sudo zypper --non-interactive install $pkgs
-      ;;
-    pacman)
-      need sudo
-      # shellcheck disable=SC2086
-      sudo pacman -Sy --noconfirm $pkgs
-      ;;
-    apk)
-      need sudo
-      # shellcheck disable=SC2086
-      sudo apk add $pkgs
-      ;;
-    *)
-      fail "package manager '${PKG_MANAGER}' cannot install optional deps automatically; install manually: $pkgs"
-      ;;
+    apt) run_as_root apt-get update && run_as_root apt-get install -y $pkgs ;;
+    dnf) run_as_root dnf install -y $pkgs ;;
+    yum) run_as_root yum install -y $pkgs ;;
+    zypper) run_as_root zypper --non-interactive install $pkgs ;;
+    pacman) run_as_root pacman -Sy --noconfirm $pkgs ;;
+    apk) run_as_root apk add $pkgs ;;
+    *) fail "package manager '${PKG_MANAGER}' cannot install optional deps automatically; install manually: $pkgs" ;;
   esac
 }
 
@@ -385,6 +424,12 @@ record_manifest() {
   done
 }
 
+install_icon() {
+  mkdir -p "$ICON_DIR"
+  cp "$tmp/$ICON_ASSET" "$ICON_PATH"
+  [ -f "$ICON_PATH" ] || fail "icon install failed: $ICON_PATH missing"
+}
+
 install_linux_appimage() {
   maybe_install_optional_fuse
   mkdir -p "$BIN_DIR" "$SHARE_DIR" "$APP_DIR" "$ICON_DIR"
@@ -392,7 +437,6 @@ install_linux_appimage() {
   chmod 755 "$tmp/$ASSET"
   mv -f "$tmp/$ASSET" "$target"
 
-  # CLI shim — forwards args; supports --version via AppImage when capable.
   shim="${BIN_DIR}/${CLI_NAME}"
   cat >"$shim" <<EOF
 #!/bin/sh
@@ -400,39 +444,36 @@ exec "$target" "\$@"
 EOF
   chmod 755 "$shim"
 
-  # Icon: prefer embedded; fall back to a tiny placeholder path note in desktop.
-  icon_src=""
-  if [ -f "${SHARE_DIR}/icon.png" ]; then
-    icon_src="${SHARE_DIR}/icon.png"
-  fi
-  # Desktop entry
+  install_icon
+
   desktop="${APP_DIR}/${APP_ID}.desktop"
+  # Absolute Icon= path so it resolves without relying on icon theme lookup alone.
   cat >"$desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=${APP_NAME}
 Comment=Local multi-agent orchestration layer
 Exec=${target}
-Icon=${APP_ID}
+Icon=${ICON_PATH}
 Terminal=false
 Categories=Development;
 EOF
-  if [ -n "$icon_src" ]; then
-    cp "$icon_src" "${ICON_DIR}/${APP_ID}.png"
-  fi
 
-  if [ -f "${ICON_DIR}/${APP_ID}.png" ]; then
-    record_manifest "$target" "$shim" "$desktop" "${ICON_DIR}/${APP_ID}.png"
-  else
-    record_manifest "$target" "$shim" "$desktop"
-  fi
+  [ -f "$ICON_PATH" ] || fail "icon file missing after install: $ICON_PATH"
+  icon_field=$(sed -n 's/^Icon=//p' "$desktop" | head -n1)
+  [ "$icon_field" = "$ICON_PATH" ] || fail "desktop Icon= mismatch: got '$icon_field'"
+  [ -f "$icon_field" ] || fail "desktop Icon= path does not resolve: $icon_field"
+
+  record_manifest "$target" "$shim" "$desktop" "$ICON_PATH"
   printf 'Installed AppImage → %s\n' "$target"
+  printf 'Icon → %s\n' "$ICON_PATH"
   printf 'CLI shim → %s\n' "$shim"
 }
 
 install_macos_app() {
   need tar
-  mkdir -p "$BIN_DIR" "$SHARE_DIR" "$MAC_APP_DIR"
+  need find
+  mkdir -p "$BIN_DIR" "$SHARE_DIR" "$MAC_APP_DIR" "$ICON_DIR"
   tar -xzf "$tmp/$ASSET" -C "$tmp"
   app_src=$(find "$tmp" -maxdepth 3 -type d -name '*.app' | head -n1)
   [ -n "$app_src" ] || fail "archive did not contain a .app bundle"
@@ -443,12 +484,17 @@ install_macos_app() {
 
   if command -v xattr >/dev/null 2>&1; then
     set +e
-    xattr -dr com.apple.quarantine "$dest" 2>/dev/null
+    xattr -dr com.apple.quarantine "$dest" 2>"$tmp/xattr.err"
+    xattr_rc=$?
     set -e
+    if [ "$xattr_rc" -ne 0 ]; then
+      printf 'agent-lounge-os install: WARNING: failed to clear macOS quarantine on %s (exit %s): %s\n' \
+        "$dest" "$xattr_rc" "$(tr '\n' ' ' <"$tmp/xattr.err")" >&2
+    fi
+  else
+    printf 'agent-lounge-os install: WARNING: xattr not found; quarantine flag not cleared on %s\n' "$dest" >&2
   fi
 
-  # Find main executable inside Contents/MacOS
-  need find
   macos_bin=$(find "$dest/Contents/MacOS" -type f -perm -111 2>/dev/null | head -n1)
   [ -n "$macos_bin" ] || fail "no executable found in ${dest}/Contents/MacOS"
   shim="${BIN_DIR}/${CLI_NAME}"
@@ -458,7 +504,8 @@ exec "$macos_bin" "\$@"
 EOF
   chmod 755 "$shim"
 
-  record_manifest "$dest" "$shim"
+  install_icon
+  record_manifest "$dest" "$shim" "$ICON_PATH"
   printf 'Installed %s → %s\n' "$app_base" "$dest"
   printf 'CLI shim → %s\n' "$shim"
 }
@@ -469,7 +516,6 @@ else
   install_macos_app
 fi
 
-# PATH hint per shell
 case ":${PATH}:" in
   *":${BIN_DIR}:"*) ;;
   *)
@@ -490,5 +536,13 @@ case ":${PATH}:" in
 esac
 
 printf '\nVerify: %s --version\n' "${BIN_DIR}/${CLI_NAME}"
-printf 'Uninstall: %s --uninstall --prefix %s\n' "$0" "$PREFIX"
+# Correct hint when invoked via curl|sh (stdin / sh -s).
+case "$0" in
+  sh|bash|dash|*/sh|*/bash|*/dash|-|"")
+    printf 'Uninstall: curl -fsSL %s | sh -s -- --uninstall --prefix %s\n' "$INSTALL_SELF_HINT" "$PREFIX"
+    ;;
+  *)
+    printf 'Uninstall: %s --uninstall --prefix %s\n' "$0" "$PREFIX"
+    ;;
+esac
 printf 'Roadmap: Minisign signing; update subcommand (not in this installer).\n'

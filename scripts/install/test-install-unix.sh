@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Local/CI installer smoke: install → verify → --version → --uninstall against a fixture release.
-# Also rejects checksum mismatch. On Alpine/musl, asserts a clear unsupported failure.
+# Local/CI installer smoke: install → verify icon/desktop → --version → --uninstall
+# against a fixture release. Also rejects checksum mismatch. Alpine/musl → unsupported.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -34,7 +34,36 @@ detect_os_id() {
   fi
 }
 
+# Mirror install.sh: ID/ID_LIKE first.
 detect_pkg() {
+  local id like
+  id="$(detect_os_id)"
+  like=""
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    like="${ID_LIKE:-}"
+  fi
+  case "$id" in
+    debian|ubuntu|linuxmint|pop|elementary|raspbian|neon) printf 'apt'; return ;;
+    fedora|rhel|centos|rocky|almalinux|ol|amzn|nobara)
+      if command -v dnf >/dev/null 2>&1; then printf 'dnf'; else printf 'yum'; fi
+      return
+      ;;
+    opensuse*|sles|suse*) printf 'zypper'; return ;;
+    arch|manjaro|endeavouros|garuda|artix) printf 'pacman'; return ;;
+    alpine|postmarketos) printf 'apk'; return ;;
+  esac
+  case " $(printf '%s' "$like" | tr '[:upper:]' '[:lower:]') " in
+    *" debian "*|*" ubuntu "*) printf 'apt'; return ;;
+    *" fedora "*|*" rhel "*|*" centos "*)
+      if command -v dnf >/dev/null 2>&1; then printf 'dnf'; else printf 'yum'; fi
+      return
+      ;;
+    *" suse "*) printf 'zypper'; return ;;
+    *" arch "*) printf 'pacman'; return ;;
+    *" alpine "*) printf 'apk'; return ;;
+  esac
   if command -v apt-get >/dev/null 2>&1; then printf 'apt'
   elif command -v dnf >/dev/null 2>&1; then printf 'dnf'
   elif command -v yum >/dev/null 2>&1; then printf 'yum'
@@ -62,7 +91,6 @@ OS_ID=$(detect_os_id)
 PKG=$(detect_pkg)
 echo "== fixture dir: $FIXTURE_DIR (os-release ID=${OS_ID} pkg=${PKG}) =="
 
-# Never assume apt: on Linux containers we require an explicit known manager.
 if [[ "$(uname -s)" = Linux ]]; then
   case "$PKG" in
     apt|dnf|yum|zypper|pacman|apk) ;;
@@ -73,11 +101,15 @@ if [[ "$(uname -s)" = Linux ]]; then
   esac
 fi
 
+[[ -f "$FIXTURE_DIR/Agent-Lounge-OS-icon-128.png" ]] \
+  || { echo "FAIL: fixture missing checksummed icon asset" >&2; exit 1; }
+grep -q 'Agent-Lounge-OS-icon-128.png' "$FIXTURE_DIR/SHA256SUMS" \
+  || { echo "FAIL: icon not listed in SHA256SUMS" >&2; exit 1; }
+
 export LOUNGE_DOWNLOAD_DIR="$FIXTURE_DIR"
 export LOUNGE_NO_DEPS=1
 export LOUNGE_MAC_APP_DIR="${PREFIX}/Applications"
 
-# --- Alpine / musl: must fail with unsupported message ---
 if is_musl_host; then
   echo "== musl/Alpine: expect unsupported =="
   set +e
@@ -98,18 +130,46 @@ if is_musl_host; then
   exit 0
 fi
 
-# --- Happy path ---
 echo "== install =="
-sh "$ROOT/install.sh" --prefix "$PREFIX" --version 0.0.0-fixture
+# Invoke with argv0 basename "sh" so the curl|sh uninstall hint is exercised.
+HINT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/lounge-hint.XXXXXX")
+cp "$ROOT/install.sh" "$HINT_DIR/sh"
+chmod +x "$HINT_DIR/sh"
+install_out=$(
+  LOUNGE_DOWNLOAD_DIR="$FIXTURE_DIR" LOUNGE_NO_DEPS=1 LOUNGE_MAC_APP_DIR="${PREFIX}/Applications" \
+    "$HINT_DIR/sh" --prefix "$PREFIX" --version 0.0.0-fixture 2>&1
+)
+rm -rf "$HINT_DIR"
+printf '%s\n' "$install_out"
+if ! printf '%s\n' "$install_out" | grep -Eq 'Uninstall: curl -fsSL .*\| sh -s -- --uninstall'; then
+  echo "FAIL: curl|sh uninstall hint missing when argv0 is sh" >&2
+  exit 1
+fi
 
 CLI="$PREFIX/bin/agent-lounge-os"
+ICON="$PREFIX/share/icons/hicolor/128x128/apps/agent-lounge-os.png"
+DESKTOP="$PREFIX/share/applications/agent-lounge-os.desktop"
+APPIMAGE="$PREFIX/share/agent-lounge-os/agent-lounge-os.AppImage"
+MANIFEST="$PREFIX/share/agent-lounge-os/install-manifest.txt"
+
 [[ -x "$CLI" ]] || { echo "FAIL: missing CLI shim $CLI" >&2; exit 1; }
+[[ -f "$ICON" ]] || { echo "FAIL: icon file missing: $ICON" >&2; exit 1; }
+[[ -f "$MANIFEST" ]] || { echo "FAIL: manifest missing" >&2; exit 1; }
+
+INSTALLED_FILES=()
+while IFS= read -r p || [[ -n "$p" ]]; do
+  [[ -n "$p" ]] || continue
+  INSTALLED_FILES+=("$p")
+  [[ -e "$p" || -L "$p" ]] || { echo "FAIL: manifest path missing after install: $p" >&2; exit 1; }
+done <"$MANIFEST"
 
 if [[ "$(uname -s)" = Linux ]]; then
-  [[ -f "$PREFIX/share/agent-lounge-os/agent-lounge-os.AppImage" ]] \
-    || { echo "FAIL: AppImage not installed" >&2; exit 1; }
-  [[ -f "$PREFIX/share/applications/agent-lounge-os.desktop" ]] \
-    || { echo "FAIL: .desktop missing" >&2; exit 1; }
+  [[ -f "$APPIMAGE" ]] || { echo "FAIL: AppImage not installed" >&2; exit 1; }
+  [[ -f "$DESKTOP" ]] || { echo "FAIL: .desktop missing" >&2; exit 1; }
+  icon_field=$(sed -n 's/^Icon=//p' "$DESKTOP" | head -n1)
+  [[ -n "$icon_field" ]] || { echo "FAIL: desktop has no Icon=" >&2; exit 1; }
+  [[ -f "$icon_field" ]] || { echo "FAIL: desktop Icon= path does not resolve: $icon_field" >&2; exit 1; }
+  [[ "$icon_field" = "$ICON" ]] || { echo "FAIL: Icon= ($icon_field) != $ICON" >&2; exit 1; }
 elif [[ "$(uname -s)" = Darwin ]]; then
   [[ -d "$PREFIX/Applications/Agent Lounge OS.app" ]] \
     || { echo "FAIL: macOS .app missing under LOUNGE_MAC_APP_DIR" >&2; exit 1; }
@@ -141,10 +201,16 @@ printf '%s' "$bad_out" | grep -Eqi 'checksum mismatch' \
   || { echo "FAIL: expected checksum mismatch message" >&2; echo "$bad_out" >&2; exit 1; }
 echo "ok: checksum mismatch rejected"
 
-echo "== uninstall =="
+echo "== uninstall (every installed file) =="
 sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX"
-if [[ -e "$CLI" ]]; then
-  echo "FAIL: CLI still present after uninstall" >&2
+for p in "${INSTALLED_FILES[@]}"; do
+  if [[ -e "$p" || -L "$p" ]]; then
+    echo "FAIL: still present after uninstall: $p" >&2
+    exit 1
+  fi
+done
+if [[ -e "$CLI" || -e "$ICON" || -e "$DESKTOP" || -e "$APPIMAGE" || -e "$MANIFEST" ]]; then
+  echo "FAIL: known install paths remain after uninstall" >&2
   exit 1
 fi
 

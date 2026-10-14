@@ -8,6 +8,7 @@ DIR="${1:?usage: generate-sha256sums.sh <asset-dir> [out-file]}"
 OUT="${2:-$DIR/SHA256SUMS}"
 
 CANONICAL=(
+  Agent-Lounge-OS-icon-128.png
   Agent-Lounge-OS-linux-x86_64.AppImage
   Agent-Lounge-OS-linux-aarch64.AppImage
   Agent-Lounge-OS-macos-x86_64.app.tar.gz

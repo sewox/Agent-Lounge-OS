@@ -145,8 +145,8 @@ irm https://raw.githubusercontent.com/sewox/Agent-Lounge-OS/main/install.ps1 | i
 
 | | Linux | macOS | Windows |
 |---|--------|--------|---------|
-| Artifact | `Agent-Lounge-OS-linux-<arch>.AppImage` | `Agent-Lounge-OS-macos-<arch>.app.tar.gz` | `Agent-Lounge-OS-windows-<arch>-setup.exe` |
-| Hedef | `~/.local` (bin + `.desktop` + icon) | `~/Applications/*.app` + `~/.local/bin` shim | `%LOCALAPPDATA%\AgentLounge` |
+| Artifact | `Agent-Lounge-OS-linux-<arch>.AppImage` + `Agent-Lounge-OS-icon-128.png` | `Agent-Lounge-OS-macos-<arch>.app.tar.gz` + icon | `Agent-Lounge-OS-windows-<arch>-setup.exe` |
+| Hedef | `~/.local` (bin + `.desktop` + icon; `Icon=` absolute) | `~/Applications/*.app` + `~/.local/bin` shim | `%LOCALAPPDATA%\AgentLounge\app\agent-lounge-os.exe` (NSIS) |
 | Bayraklar | `--uninstall` · `--version <v>` · `--prefix <dir>` | aynı | `-Uninstall` · `-Version` · `-Prefix` |
 
 Ortam: `LOUNGE_VERSION`, `LOUNGE_INSTALL_PREFIX`, `LOUNGE_DOWNLOAD_BASE` (ayna). İsteğe bağlı FUSE gibi bağımlılıklar için installer `/etc/os-release` + paket yöneticisini (apt / dnf / yum / zypper / pacman / apk) tespit eder ve **yalnızca açık yes/no** sonrası kurar — apt varsayılmaz. Alpine/musl AppImage desteklenmez (net hata). Yol haritası: **Minisign** imza, `update` alt komutu (henüz yok).

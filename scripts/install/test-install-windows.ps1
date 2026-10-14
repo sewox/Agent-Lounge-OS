@@ -1,58 +1,51 @@
-# Windows installer smoke against a local fixture release (no network).
-# Builds fixtures in PowerShell (avoids Git Bash tar "C:" host traps).
-# install → verify → --version → --uninstall + checksum-mismatch rejection.
+# Windows installer smoke: real NSIS path (no LOUNGE_FIXTURE_SKIP_NSIS).
+# install → exact agent-lounge-os.exe → --version → registry/shortcuts →
+# uninstall (NSIS) → assert cleanup + checksum-mismatch rejection.
 $ErrorActionPreference = 'Stop'
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $FixtureDir = Join-Path ([System.IO.Path]::GetTempPath()) ("lounge-fixture-" + [guid]::NewGuid())
 $Prefix = Join-Path ([System.IO.Path]::GetTempPath()) ("lounge-prefix-" + [guid]::NewGuid())
 $Version = '0.0.0-fixture'
-
-function New-WindowsStub([string]$Path, [string]$Ver) {
-  $content = @"
-@echo off
-if "%~1"=="--version" (
-  echo Agent Lounge OS $Ver
-  exit /b 0
-)
-echo Agent Lounge OS fixture Windows payload
-exit /b 0
-"@
-  Set-Content -Path $Path -Value $content -Encoding Ascii
-}
-
-function Write-Sha256Sums([string]$Dir) {
-  $names = @(
-    'Agent-Lounge-OS-windows-x64-setup.exe',
-    'Agent-Lounge-OS-windows-arm64-setup.exe'
-  )
-  $lines = foreach ($name in $names) {
-    $p = Join-Path $Dir $name
-    if (-not (Test-Path -LiteralPath $p)) { continue }
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLower()
-    "{0}  {1}" -f $hash, $name
-  }
-  $sums = Join-Path $Dir 'SHA256SUMS'
-  Set-Content -Path $sums -Value $lines -Encoding Ascii
-  $bad = foreach ($line in $lines) {
-    $line -replace '^[0-9a-fA-F]{64}', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
-  }
-  Set-Content -Path (Join-Path $Dir 'SHA256SUMS.bad') -Value $bad -Encoding Ascii
-}
+$ProductName = 'Agent Lounge OS'
+$MainExeName = 'agent-lounge-os.exe'
+$UninstallRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
+$StartMenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) "Programs\$ProductName"
+$StartMenuShortcut = Join-Path $StartMenuDir "$ProductName.lnk"
 
 try {
-  New-Item -ItemType Directory -Force -Path $FixtureDir | Out-Null
-  New-WindowsStub -Path (Join-Path $FixtureDir 'Agent-Lounge-OS-windows-x64-setup.exe') -Ver $Version
-  New-WindowsStub -Path (Join-Path $FixtureDir 'Agent-Lounge-OS-windows-arm64-setup.exe') -Ver $Version
-  Set-Content -Path (Join-Path $FixtureDir 'VERSION') -Value $Version -Encoding Ascii
-  Write-Sha256Sums -Dir $FixtureDir
+  & "$Root\scripts\install\fixture-nsis\build-fixture-nsis.ps1" -OutDir $FixtureDir -Version $Version
 
+  # Must NOT set LOUNGE_FIXTURE_SKIP_NSIS — exercise the real NSIS path.
   $env:LOUNGE_DOWNLOAD_DIR = $FixtureDir
-  $env:LOUNGE_FIXTURE_SKIP_NSIS = '1'
   $env:LOUNGE_NO_MODIFY_PATH = '1'
+  Remove-Item Env:LOUNGE_FIXTURE_SKIP_NSIS -ErrorAction SilentlyContinue
 
-  Write-Host "== install =="
-  & "$Root/install.ps1" -Prefix $Prefix -Version $Version
+  Write-Host "== install (real NSIS) =="
+  & "$Root\install.ps1" -Prefix $Prefix -Version $Version
+
+  $MainExe = Join-Path $Prefix "app\$MainExeName"
+  if (-not (Test-Path -LiteralPath $MainExe)) {
+    throw "missing exact main exe $MainExe"
+  }
+  # Guard against accidental *.exe fallback: only the named binary counts.
+  $foreign = Get-ChildItem -Path (Join-Path $Prefix 'app') -Filter '*.exe' |
+    Where-Object { $_.Name -ne $MainExeName -and $_.Name -ne 'uninstall.exe' }
+  if ($foreign) {
+    throw ("unexpected extra exe(s) (installer must not rely on first *.exe): " + ($foreign.Name -join ', '))
+  }
+
+  if (-not (Test-Path -LiteralPath $UninstallRegPath)) {
+    throw "HKCU uninstall entry missing: $UninstallRegPath"
+  }
+  $display = (Get-ItemProperty -LiteralPath $UninstallRegPath).DisplayName
+  if ($display -ne $ProductName) {
+    throw "DisplayName mismatch: $display"
+  }
+  if (-not (Test-Path -LiteralPath $StartMenuShortcut)) {
+    throw "Start Menu shortcut missing: $StartMenuShortcut"
+  }
+
   $Cli = Join-Path $Prefix 'bin\agent-lounge-os.cmd'
   if (-not (Test-Path -LiteralPath $Cli)) { throw "missing CLI shim $Cli" }
 
@@ -60,6 +53,14 @@ try {
   $ver = & cmd.exe /c "`"$Cli`" --version"
   Write-Host $ver
   if ("$ver" -notmatch 'Agent Lounge OS') { throw "unexpected --version: $ver" }
+
+  $InstalledPaths = @(
+    $MainExe,
+    (Join-Path $Prefix 'app\uninstall.exe'),
+    $Cli,
+    (Join-Path $Prefix "share\agent-lounge-os\Agent-Lounge-OS-windows-x64-setup.exe"),
+    $StartMenuShortcut
+  )
 
   Write-Host "== checksum mismatch rejection =="
   $BadDir = Join-Path ([System.IO.Path]::GetTempPath()) ("lounge-bad-" + [guid]::NewGuid())
@@ -70,7 +71,7 @@ try {
   $env:LOUNGE_DOWNLOAD_DIR = $BadDir
   $failed = $false
   try {
-    & "$Root/install.ps1" -Prefix $BadPrefix
+    & "$Root\install.ps1" -Prefix $BadPrefix
     $failed = $true
   } catch {
     if ("$($_.Exception.Message)$($_)" -notmatch 'checksum mismatch') {
@@ -79,17 +80,28 @@ try {
     Write-Host "ok: checksum mismatch rejected"
   }
   if ($failed) { throw 'install succeeded with bad SHA256SUMS' }
-  Remove-Item -Recurse -Force $BadDir, $BadPrefix -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force $BadDir, $BadPrefix -ErrorAction Stop
 
-  Write-Host "== uninstall =="
+  Write-Host "== uninstall (NSIS) =="
   $env:LOUNGE_DOWNLOAD_DIR = $FixtureDir
-  & "$Root/install.ps1" -Uninstall -Prefix $Prefix
-  if (Test-Path -LiteralPath $Cli) { throw 'CLI still present after uninstall' }
+  & "$Root\install.ps1" -Uninstall -Prefix $Prefix
 
-  Write-Host 'ALL OK (windows installer fixture)'
+  foreach ($p in $InstalledPaths) {
+    if (Test-Path -LiteralPath $p) {
+      throw "still present after uninstall: $p"
+    }
+  }
+  if (Test-Path -LiteralPath $UninstallRegPath) {
+    throw "HKCU uninstall key still present after uninstall"
+  }
+  if (Test-Path -LiteralPath $StartMenuDir) {
+    throw "Start Menu folder still present after uninstall"
+  }
+
+  Write-Host 'ALL OK (windows real NSIS installer fixture)'
 } finally {
   Remove-Item -Recurse -Force $FixtureDir, $Prefix -ErrorAction SilentlyContinue
   Remove-Item Env:LOUNGE_DOWNLOAD_DIR -ErrorAction SilentlyContinue
-  Remove-Item Env:LOUNGE_FIXTURE_SKIP_NSIS -ErrorAction SilentlyContinue
   Remove-Item Env:LOUNGE_NO_MODIFY_PATH -ErrorAction SilentlyContinue
+  Remove-Item Env:LOUNGE_FIXTURE_SKIP_NSIS -ErrorAction SilentlyContinue
 }

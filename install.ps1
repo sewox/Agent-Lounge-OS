@@ -11,12 +11,13 @@
 #   LOUNGE_NO_MODIFY_PATH=1  leave the user PATH untouched
 #
 # Parameters:
-#   -Uninstall               remove files this installer placed under the prefix
+#   -Uninstall               remove via NSIS uninstaller + our shim/registry/shortcuts
 #   -Version <v>             install a specific release
-#   -Prefix <dir>            install root
+#   -Prefix <dir>            install root (NSIS /D= target under <prefix>\app)
 #
-# Downloads the Windows setup/portable asset, verifies SHA256 against SHA256SUMS
-# (mandatory), and installs per-user (no admin). Roadmap: Minisign; update.
+# Tauri v2 main binary name (Cargo package): agent-lounge-os.exe
+# Product / Start Menu / HKCU Uninstall DisplayName: "Agent Lounge OS"
+# Never falls back to "first *.exe".
 
 [CmdletBinding()]
 param(
@@ -34,10 +35,16 @@ if (-not $Prefix) {
 }
 $BinDir = Join-Path $Prefix 'bin'
 $ShareDir = Join-Path $Prefix 'share\agent-lounge-os'
+$NsisDir = Join-Path $Prefix 'app'
 $CliName = 'agent-lounge-os.cmd'
 $Manifest = Join-Path $ShareDir 'install-manifest.txt'
+# Exact Tauri v2 / Cargo main binary name — do not guess via *.exe.
+$MainExeName = 'agent-lounge-os.exe'
+$ProductName = 'Agent Lounge OS'
+$UninstallRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
+$StartMenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) "Programs\$ProductName"
+$StartMenuShortcut = Join-Path $StartMenuDir "$ProductName.lnk"
 
-# PROCESSOR_ARCHITEW6432 is set when this shell is an x64 process on ARM.
 $ArchRaw = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 $AssetCandidates = if ($ArchRaw -eq 'ARM64') {
   @('Agent-Lounge-OS-windows-arm64-setup.exe', 'Agent-Lounge-OS-windows-x64-setup.exe')
@@ -90,20 +97,95 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wP
   return $true
 }
 
+function Remove-PathLoud([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  try {
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+  } catch {
+    throw "failed to remove $Path : $($_.Exception.Message)"
+  }
+  if (Test-Path -LiteralPath $Path) {
+    throw "still present after remove: $Path"
+  }
+}
+
 function Uninstall-Lounge {
+  $errors = [System.Collections.Generic.List[string]]::new()
+
+  # Prefer NSIS uninstaller when present.
+  $Uninstaller = Join-Path $NsisDir 'uninstall.exe'
+  if (Test-Path -LiteralPath $Uninstaller) {
+    Write-Host "Running NSIS uninstaller: $Uninstaller /S"
+    $p = Start-Process -FilePath $Uninstaller -ArgumentList @('/S') -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+      $errors.Add("NSIS uninstaller exited $($p.ExitCode)")
+    }
+  } elseif (Test-Path -LiteralPath $UninstallRegPath) {
+    $regUninstall = (Get-ItemProperty -LiteralPath $UninstallRegPath -ErrorAction SilentlyContinue).UninstallString
+    if ($regUninstall) {
+      # UninstallString may be quoted: "C:\...\uninstall.exe"
+      $exe = ($regUninstall.Trim() -replace '^"(.*)"$', '$1')
+      if (Test-Path -LiteralPath $exe) {
+        Write-Host "Running registry UninstallString: $exe /S"
+        $p = Start-Process -FilePath $exe -ArgumentList @('/S') -Wait -PassThru
+        if ($p.ExitCode -ne 0) {
+          $errors.Add("registry uninstaller exited $($p.ExitCode)")
+        }
+      } else {
+        $errors.Add("UninstallString path missing: $exe")
+      }
+    }
+  }
+
+  # Remove HKCU uninstall entry if still present.
+  if (Test-Path -LiteralPath $UninstallRegPath) {
+    try {
+      Remove-Item -LiteralPath $UninstallRegPath -Recurse -Force -ErrorAction Stop
+    } catch {
+      $errors.Add("failed to remove HKCU uninstall key: $($_.Exception.Message)")
+    }
+  }
+  if (Test-Path -LiteralPath $UninstallRegPath) {
+    $errors.Add("HKCU uninstall key still present: $UninstallRegPath")
+  }
+
+  # Start Menu shortcuts / folder.
+  if (Test-Path -LiteralPath $StartMenuShortcut) {
+    try { Remove-PathLoud $StartMenuShortcut } catch { $errors.Add("$_") }
+  }
+  if (Test-Path -LiteralPath $StartMenuDir) {
+    try { Remove-PathLoud $StartMenuDir } catch { $errors.Add("$_") }
+  }
+  if (Test-Path -LiteralPath $StartMenuShortcut) {
+    $errors.Add("Start Menu shortcut still present: $StartMenuShortcut")
+  }
+  if (Test-Path -LiteralPath $StartMenuDir) {
+    $errors.Add("Start Menu folder still present: $StartMenuDir")
+  }
+
+  # Manifest-recorded paths (setup copy, CLI shim, app dir leftovers).
   if (Test-Path -LiteralPath $Manifest) {
     Get-Content -LiteralPath $Manifest | ForEach-Object {
       $p = $_.Trim()
       if (-not $p) { return }
       if ($p -eq $Manifest) { return }
       if (Test-Path -LiteralPath $p) {
-        Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+        try { Remove-PathLoud $p } catch { $errors.Add("$_") }
       }
     }
-    Remove-Item -LiteralPath $Manifest -Force -ErrorAction SilentlyContinue
-  } else {
-    Remove-Item -LiteralPath (Join-Path $BinDir $CliName) -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $ShareDir -Recurse -Force -ErrorAction SilentlyContinue
+    try { Remove-PathLoud $Manifest } catch { $errors.Add("$_") }
+  }
+
+  $MainExe = Join-Path $NsisDir $MainExeName
+  if (Test-Path -LiteralPath $MainExe) {
+    $errors.Add("main exe still present after uninstall: $MainExe")
+  }
+  if (Test-Path -LiteralPath (Join-Path $NsisDir 'uninstall.exe')) {
+    $errors.Add("NSIS uninstall.exe still present under $NsisDir")
+  }
+
+  if ($errors.Count -gt 0) {
+    throw ("uninstall incomplete:`n - " + ($errors -join "`n - "))
   }
   Write-Host "Uninstalled Agent Lounge OS from $Prefix"
 }
@@ -119,8 +201,8 @@ try {
   $Sums = Join-Path $Tmp 'SHA256SUMS'
   Write-Host "Fetching SHA256SUMS from $Base ..."
   Get-ReleaseAsset -Name 'SHA256SUMS' -OutFile $Sums
-  $SumLines = Get-Content $Sums
-  if (-not $SumLines -or $SumLines.Count -eq 0) {
+  $SumLines = @(Get-Content $Sums)
+  if ($SumLines.Count -eq 0) {
     throw 'SHA256SUMS is missing or empty (checksums are mandatory)'
   }
 
@@ -154,50 +236,42 @@ try {
 
   New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
   New-Item -ItemType Directory -Force -Path $ShareDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $NsisDir | Out-Null
 
   $Target = Join-Path $ShareDir $Asset
   if (Test-Path -LiteralPath $Target) {
-    $Aside = "$Target.old"
-    Remove-Item -Force $Aside -ErrorAction SilentlyContinue
-    Move-Item -Force $Target $Aside
+    Remove-PathLoud $Target
   }
   Move-Item -Force $Exe $Target
 
-  # Per-user silent NSIS when asset is a setup.exe; fixtures may be a stub .exe.
-  $IsNsis = $Asset -like '*-setup.exe'
-  $manifestLines = [System.Collections.Generic.List[string]]::new()
-  [void]$manifestLines.Add($Target)
-  if ($IsNsis -and -not $env:LOUNGE_FIXTURE_SKIP_NSIS) {
-    $NsisDir = Join-Path $Prefix 'app'
-    New-Item -ItemType Directory -Force -Path $NsisDir | Out-Null
-    $p = Start-Process -FilePath $Target -ArgumentList @('/S', "/D=$NsisDir") -Wait -PassThru
-    if ($p.ExitCode -ne 0) {
-      throw "NSIS installer exited $($p.ExitCode)"
-    }
-    $Launch = Get-ChildItem -Path $NsisDir -Recurse -Filter 'agent-lounge-os.exe' -ErrorAction SilentlyContinue |
-      Select-Object -First 1
-    if (-not $Launch) {
-      $Launch = Get-ChildItem -Path $NsisDir -Recurse -Filter '*.exe' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    }
-    if ($Launch) {
-      $CmdTarget = $Launch.FullName
-    } else {
-      $CmdTarget = $Target
-    }
-    [void]$manifestLines.Add($NsisDir)
-  } else {
-    # Fixture / portable: treat the downloaded file as the payload.
-    # Fixtures may ship a batch stub under a .exe name — copy to .cmd so the shim can run it.
-    $PayloadCmd = Join-Path $ShareDir 'agent-lounge-os-payload.cmd'
-    Copy-Item -Force -LiteralPath $Target -Destination $PayloadCmd
-    $CmdTarget = $PayloadCmd
-    [void]$manifestLines.Add($PayloadCmd)
+  # Always run the real NSIS install path for *-setup.exe (no skip flag).
+  if ($Asset -notlike '*-setup.exe') {
+    throw "expected a *-setup.exe NSIS asset, got $Asset"
+  }
+
+  Write-Host "Running NSIS installer: $Target /S /D=$NsisDir"
+  $p = Start-Process -FilePath $Target -ArgumentList @('/S', "/D=$NsisDir") -Wait -PassThru
+  if ($p.ExitCode -ne 0) {
+    throw "NSIS installer exited $($p.ExitCode)"
+  }
+
+  $MainExe = Join-Path $NsisDir $MainExeName
+  if (-not (Test-Path -LiteralPath $MainExe)) {
+    throw "NSIS install did not produce exact main exe '$MainExeName' at $MainExe (refusing *.exe fallback)"
   }
 
   $CliPath = Join-Path $BinDir $CliName
-  Set-Content -Path $CliPath -Value "@`"$CmdTarget`" %*" -Encoding Ascii
-  [void]$manifestLines.Add($CliPath)
+  Set-Content -Path $CliPath -Value "@`"$MainExe`" %*" -Encoding Ascii
+
+  $manifestLines = @(
+    $Target,
+    $CliPath,
+    $NsisDir,
+    $MainExe,
+    (Join-Path $NsisDir 'uninstall.exe'),
+    $StartMenuShortcut,
+    $StartMenuDir
+  )
   Set-Content -Path $Manifest -Value ($manifestLines -join "`n") -Encoding Ascii
 
   if (-not $env:LOUNGE_NO_MODIFY_PATH -and (Update-UserPath -Dir $BinDir)) {
@@ -211,11 +285,13 @@ try {
   }
 
   Write-Host ""
-  Write-Host "Installed Agent Lounge OS → $Target"
+  Write-Host "Installed Agent Lounge OS → $MainExe"
   Write-Host "CLI shim → $CliPath"
   Write-Host "Verify: $CliName --version"
-  Write-Host "Uninstall: irm .../install.ps1 | iex  with -Uninstall  (or: .\install.ps1 -Uninstall -Prefix '$Prefix')"
+  Write-Host "Uninstall: .\install.ps1 -Uninstall -Prefix '$Prefix'"
   Write-Host "Roadmap: Minisign signing; update subcommand (not in this installer)."
 } finally {
-  Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $Tmp) {
+    Remove-Item -Recurse -Force $Tmp -ErrorAction Stop
+  }
 }
