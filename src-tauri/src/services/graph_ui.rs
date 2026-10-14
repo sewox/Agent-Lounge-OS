@@ -623,7 +623,8 @@ async fn graph_ui_status_inner(
     }
 
     if daemon.is_daemon_mode() {
-        return graph_ui_status_daemon_mode(bridge, project_root, port_mode, preferred, daemon).await;
+        return graph_ui_status_daemon_mode(bridge, project_root, port_mode, preferred, daemon)
+            .await;
     }
 
     let classified = classify_port_status(
@@ -1311,14 +1312,9 @@ async fn enable_graph_ui_daemon_mode(
     bridge: &MemoryBridge,
     daemon: &CbmDaemonStatus,
 ) -> Result<u16> {
-    let port = daemon
-        .ui_port
-        .unwrap_or_else(|| bridge.http_port())
-        .max(1);
+    let port = daemon.ui_port.unwrap_or_else(|| bridge.http_port()).max(1);
     if daemon.ui_disabled || daemon.ui_port.is_none() {
-        bail!(
-            "graphDaemonSharedNoUi"
-        );
+        bail!("graphDaemonSharedNoUi");
     }
     if !probe_ui_config(port).await {
         bail!("graphDaemonSharedNoUi");

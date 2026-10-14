@@ -88,10 +88,7 @@ pub fn parse_daemon_status_output(stdout: &str) -> CbmDaemonStatus {
         }
         if let Some(idx) = trimmed.find("http://127.0.0.1:") {
             let after = &trimmed[idx + "http://127.0.0.1:".len()..];
-            let port_str: String = after
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
+            let port_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(port) = port_str.parse::<u16>() {
                 if port > 0 {
                     status.ui_port = Some(port);
@@ -265,8 +262,7 @@ daemon: active (session-managed)
         .unwrap();
         assert!(got.active);
         assert_eq!(got.ui_port, Some(9749));
-        let inactive =
-            probe_daemon_status(Path::new("/nonexistent/codebase-memory-mcp")).unwrap();
+        let inactive = probe_daemon_status(Path::new("/nonexistent/codebase-memory-mcp")).unwrap();
         assert!(!inactive.active);
     }
 }

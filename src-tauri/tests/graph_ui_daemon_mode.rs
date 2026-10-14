@@ -44,9 +44,11 @@ async fn serve_shared_ui(listener: std::net::TcpListener) -> u16 {
     tokio::spawn(async move {
         let _ = axum::serve(tokio_listener, app).await;
     });
-    let up = wait_until(Duration::from_secs(5), Duration::from_millis(25), || async {
-        probe_ui_config(port).await
-    })
+    let up = wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(25),
+        || async { probe_ui_config(port).await },
+    )
     .await;
     assert!(up, "shared UI must answer /api/ui-config on {port}");
     port
@@ -91,7 +93,10 @@ async fn daemon_mode_enable_opens_existing_without_touching_config() {
     assert!(status.daemon_mode, "status must report daemon_mode");
     assert!(status.ui_available, "shared UI must be available");
     assert!(!status.owned_by_lounge);
-    assert!(!status.port_conflict, "daemon mode must not be an error state");
+    assert!(
+        !status.port_conflict,
+        "daemon mode must not be an error state"
+    );
     assert_eq!(status.port, shared_port);
     assert_eq!(
         status.message_key.as_deref(),
@@ -155,10 +160,7 @@ async fn daemon_mode_without_ui_does_not_spawn_or_mutate() {
     assert!(status.daemon_mode);
     assert!(!status.ui_available);
     assert!(!status.port_conflict);
-    assert_eq!(
-        status.message_key.as_deref(),
-        Some("graphDaemonSharedNoUi")
-    );
+    assert_eq!(status.message_key.as_deref(), Some("graphDaemonSharedNoUi"));
 
     let err = enable_graph_ui_headless(&state, &bridge, None, 18749..=18759)
         .await
