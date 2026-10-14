@@ -400,7 +400,8 @@ pub struct LoungeExperience {
     pub title: String,
     #[serde(default)]
     pub title_source: TitleSource,
-    /// Provenance metadata (`mcp`, `external`, …) — not tags.
+    /// Provenance metadata — comma-separated lowercase tokens, no spaces
+    /// (e.g. `mcp,external`). Not tags; `mcp`/`external` are extracted from tags.
     #[serde(default)]
     pub source: String,
 }
@@ -510,7 +511,8 @@ pub struct ExperienceRecord {
     pub title: String,
     #[serde(default)]
     pub title_source: TitleSource,
-    /// Provenance metadata (`mcp`, `external`, …) — not tags.
+    /// Provenance metadata — comma-separated lowercase tokens, no spaces
+    /// (e.g. `mcp,external`). Not tags; `mcp`/`external` are extracted from tags.
     #[serde(default)]
     pub source: String,
 }

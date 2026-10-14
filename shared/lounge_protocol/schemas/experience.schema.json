@@ -93,7 +93,7 @@
     },
     "source": {
       "type": "string",
-      "description": "Provenance metadata (mcp/external), not tags."
+      "description": "Provenance metadata as comma-separated lowercase tokens with no spaces (e.g. mcp,external). Not tags; mcp/external are extracted from tags into this field."
     }
   }
 }

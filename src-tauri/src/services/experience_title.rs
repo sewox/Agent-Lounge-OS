@@ -15,10 +15,13 @@
 //! Retry state is persisted on the experience row (`title_attempts`,
 //! `title_next_retry_at`, `title_give_up`) so the backlog shrinks when LMR is down.
 //! Upgrade backfill enqueue runs once (`migrations.title_backfill_enqueue_v1`).
+//!
+//! The worker is **restartable per Tokio runtime**: when the worker task ends
+//! (runtime shutdown), the started flag clears so the next runtime can spawn again.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -43,13 +46,6 @@ pub const TITLE_MODEL_DEFAULT: &str = "gemma-2-2b-it";
 pub const TITLE_CONCURRENCY: usize = 1;
 
 const TITLE_SYSTEM_PROMPT: &str = "You write short experience titles. Reply with ONLY the title text — no quotes, no markdown, no prefix. Same language as the content. Max 80 characters.";
-
-static TITLE_BACKLOG: AtomicU64 = AtomicU64::new(0);
-
-/// Expose in-memory queue backlog for Health-1.
-pub fn title_backlog_count() -> u64 {
-    TITLE_BACKLOG.load(Ordering::Relaxed)
-}
 
 fn title_model() -> String {
     std::env::var("LOUNGE_TITLE_MODEL").unwrap_or_else(|_| TITLE_MODEL_DEFAULT.into())
@@ -76,9 +72,14 @@ pub fn set_test_backoff_ms(ms: Option<u64>) {
     TEST_BACKOFF_MS.with(|c| c.set(ms));
 }
 
-fn global_queue() -> &'static TitleQueue {
-    static Q: OnceLock<TitleQueue> = OnceLock::new();
-    Q.get_or_init(TitleQueue::new)
+fn global_queue() -> &'static Arc<TitleQueue> {
+    static Q: OnceLock<Arc<TitleQueue>> = OnceLock::new();
+    Q.get_or_init(|| Arc::new(TitleQueue::new()))
+}
+
+/// Expose in-memory queue backlog for Health-1 (global worker only).
+pub fn title_backlog_count() -> u64 {
+    global_queue().backlog.load(Ordering::Relaxed)
 }
 
 #[derive(Clone)]
@@ -92,9 +93,20 @@ struct TitleQueue {
     endpoint: Mutex<Option<String>>,
     pending: Mutex<VecDeque<TitleJob>>,
     notify: Notify,
-    started: Mutex<bool>,
+    /// Cleared when the worker task ends so a new runtime can restart it.
+    started: AtomicBool,
     /// Ensures concurrency == 1 across the worker.
     gate: Semaphore,
+    backlog: AtomicU64,
+}
+
+/// Clears [`TitleQueue::started`] when the worker task is dropped (runtime exit).
+struct ClearStartedOnDrop(Arc<TitleQueue>);
+
+impl Drop for ClearStartedOnDrop {
+    fn drop(&mut self) {
+        self.0.started.store(false, Ordering::SeqCst);
+    }
 }
 
 impl TitleQueue {
@@ -104,39 +116,72 @@ impl TitleQueue {
             endpoint: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
-            started: Mutex::new(false),
+            started: AtomicBool::new(false),
             gate: Semaphore::new(TITLE_CONCURRENCY),
+            backlog: AtomicU64::new(0),
         }
     }
 
-    fn set_backlog(pending_len: usize) {
-        TITLE_BACKLOG.store(pending_len as u64, Ordering::Relaxed);
+    fn set_backlog(&self, pending_len: usize) {
+        self.backlog.store(pending_len as u64, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    async fn pending_len(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+
+    async fn attach_store(&self, store: ExperienceStore) {
+        *self.store.lock().await = Some(store);
+    }
+
+    async fn set_endpoint(&self, endpoint: Option<String>) {
+        *self.endpoint.lock().await = endpoint;
+    }
+
+    /// Start the concurrency-1 worker if not already running on this queue.
+    /// Restartable: after the task ends, `started` is cleared.
+    async fn ensure_worker(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let q = Arc::clone(self);
+        tokio::spawn(async move {
+            let _clear = ClearStartedOnDrop(Arc::clone(&q));
+            // Re-enqueue persisted retries (including future next_retry_at) after restart.
+            if let Some(store) = q.store.lock().await.clone() {
+                resume_pending_retries(&q, &store).await;
+            }
+            worker_loop(q).await;
+        });
+    }
+
+    async fn enqueue_job(self: &Arc<Self>, id: &str, content: &str) {
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.iter().any(|j| j.id == id) {
+                return;
+            }
+            pending.push_back(TitleJob {
+                id: id.to_string(),
+                content: content.to_string(),
+            });
+            self.set_backlog(pending.len());
+        }
+        self.notify.notify_one();
     }
 }
 
-/// Attach the experience store and start the concurrency-1 worker (idempotent).
+/// Attach the experience store and start the concurrency-1 worker (restartable).
 pub async fn ensure_title_worker(store: ExperienceStore) {
     let q = global_queue();
-    {
-        let mut slot = q.store.lock().await;
-        *slot = Some(store.clone());
-    }
-    let mut started = q.started.lock().await;
-    if *started {
-        return;
-    }
-    *started = true;
-    drop(started);
-    let q_worker = global_queue();
-    tokio::spawn(async move {
-        worker_loop(q_worker).await;
-    });
+    q.attach_store(store).await;
+    q.ensure_worker().await;
 }
 
 /// Test helper: override LMR endpoint used by the global worker.
 pub async fn set_title_endpoint_override_for_tests(endpoint: Option<String>) {
-    let q = global_queue();
-    *q.endpoint.lock().await = endpoint;
+    global_queue().set_endpoint(endpoint).await;
 }
 
 /// Enqueue title generation. No-op if title_source is agent|user (never overwrite).
@@ -145,24 +190,16 @@ pub async fn enqueue_title(store: &ExperienceStore, id: &str, content: &str, sou
         return;
     }
     ensure_title_worker(store.clone()).await;
-    let q = global_queue();
-    {
-        let mut pending = q.pending.lock().await;
-        if pending.iter().any(|j| j.id == id) {
-            return;
-        }
-        pending.push_back(TitleJob {
-            id: id.to_string(),
-            content: content.to_string(),
-        });
-        TitleQueue::set_backlog(pending.len());
-    }
-    q.notify.notify_one();
+    global_queue().enqueue_job(id, content).await;
 }
 
 /// On first start after this version only: enqueue title generation for rows lacking a title.
 pub async fn backfill_missing_titles(store: &ExperienceStore) {
     ensure_title_worker(store.clone()).await;
+    backfill_on_queue(store, global_queue()).await;
+}
+
+async fn backfill_on_queue(store: &ExperienceStore, q: &Arc<TitleQueue>) {
     match store
         .settings_flag_done(MIGRATION_TITLE_BACKFILL_ENQUEUE_V1.into())
         .await
@@ -182,7 +219,7 @@ pub async fn backfill_missing_titles(store: &ExperienceStore) {
         }
     };
     for (id, content) in ids {
-        enqueue_title(store, &id, &content, TitleSource::Fallback).await;
+        q.enqueue_job(&id, &content).await;
     }
     if let Err(err) = store
         .set_settings_flag(MIGRATION_TITLE_BACKFILL_ENQUEUE_V1.into())
@@ -192,12 +229,27 @@ pub async fn backfill_missing_titles(store: &ExperienceStore) {
     }
 }
 
-async fn worker_loop(q: &'static TitleQueue) {
+/// After restart: enqueue rows still needing a title, including those whose
+/// `title_next_retry_at` is still in the future (persisted mid-backoff).
+async fn resume_pending_retries(q: &Arc<TitleQueue>, store: &ExperienceStore) {
+    let ids = match store.list_ids_needing_title().await {
+        Ok(v) => v,
+        Err(err) => {
+            log::error!("title resume list failed: {err}");
+            return;
+        }
+    };
+    for (id, content) in ids {
+        q.enqueue_job(&id, &content).await;
+    }
+}
+
+async fn worker_loop(q: Arc<TitleQueue>) {
     loop {
         let job = {
             let mut pending = q.pending.lock().await;
             let job = pending.pop_front();
-            TitleQueue::set_backlog(pending.len());
+            q.set_backlog(pending.len());
             job
         };
         let Some(job) = job else {
@@ -269,9 +321,15 @@ async fn generate_and_apply(store: &ExperienceStore, endpoint: &str, job: &Title
                         .unwrap_or_else(|_| chrono::Duration::seconds(15));
                 let next_s = next.to_rfc3339();
                 let attempts = attempt + 1;
-                let _ = store
+                if let Err(persist_err) = store
                     .record_title_retry(job.id.clone(), attempts, next_s)
-                    .await;
+                    .await
+                {
+                    log::error!(
+                        "title retry persist failed for {} (attempt {attempts}): {persist_err}",
+                        job.id
+                    );
+                }
                 last_err = Some(err);
                 tokio::time::sleep(next_retry_delay(attempt)).await;
             }
@@ -420,6 +478,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -467,6 +526,29 @@ mod tests {
             title: title.into(),
             title_source: source,
             ..Default::default()
+        }
+    }
+
+    /// Local queue + worker for tests (no shared global worker / backlog races).
+    async fn local_queue_with_store(store: ExperienceStore) -> Arc<TitleQueue> {
+        let q = Arc::new(TitleQueue::new());
+        q.attach_store(store).await;
+        q
+    }
+
+    async fn wait_pending_drain(q: &TitleQueue, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if q.pending_len().await == 0 {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "title backlog did not drain within {timeout:?} (pending={})",
+                    q.pending_len().await
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
@@ -636,10 +718,11 @@ mod tests {
 
     #[tokio::test]
     async fn retry_backoff_persists_and_gives_up() {
-        set_test_backoff_ms(Some(5));
+        const BACKOFF_MS: u64 = 40;
+        set_test_backoff_ms(Some(BACKOFF_MS));
         // Override must affect the same helper the worker sleeps on.
-        assert_eq!(next_retry_delay(0), Duration::from_millis(5));
-        assert_eq!(next_retry_delay(2), Duration::from_millis(5));
+        assert_eq!(next_retry_delay(0), Duration::from_millis(BACKOFF_MS));
+        assert_eq!(next_retry_delay(2), Duration::from_millis(BACKOFF_MS));
         assert_eq!(TITLE_BACKOFF_SECS, [2, 5, 15]);
 
         let store = ExperienceStore::memory().unwrap();
@@ -656,9 +739,12 @@ mod tests {
         // can take ~2s/attempt and blow a wall-clock budget under parallel CI.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_c = requests.clone();
         tokio::spawn(async move {
-            for _ in 0..TITLE_MAX_RETRIES as usize + 1 {
+            for _ in 0..TITLE_MAX_RETRIES as usize + 2 {
                 if let Ok((mut stream, _)) = listener.accept().await {
+                    requests_c.fetch_add(1, Ordering::SeqCst);
                     let mut buf = vec![0u8; 512];
                     let _ = stream.read(&mut buf).await;
                     let body = "{\"error\":\"boom\"}";
@@ -672,13 +758,23 @@ mod tests {
         });
         let endpoint = format!("http://127.0.0.1:{port}");
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let _ =
             generate_and_apply_for_tests(&store, &endpoint, &id, "needs title eventually").await;
         let elapsed = started.elapsed();
         set_test_backoff_ms(None);
 
-        // 3 × 5ms backoff ≪ production 2+5+15s sleeps.
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            TITLE_MAX_RETRIES as usize,
+            "stub must receive exactly {TITLE_MAX_RETRIES} requests"
+        );
+        // 3 backoff sleeps of BACKOFF_MS each (after each failed attempt).
+        let min_sleep = Duration::from_millis(BACKOFF_MS * TITLE_MAX_RETRIES as u64);
+        assert!(
+            elapsed >= min_sleep,
+            "expected ≥{min_sleep:?} of backoff sleeps, got {elapsed:?}"
+        );
         assert!(
             elapsed < Duration::from_secs(5),
             "expected fast overridden backoff, got {elapsed:?}"
@@ -704,25 +800,31 @@ mod tests {
         );
         store.insert_record(rec).await.unwrap();
 
+        // Local queue, no worker — avoid racing the process-global backlog counter.
+        let q = local_queue_with_store(store.clone()).await;
         assert!(!store
             .settings_flag_done(MIGRATION_TITLE_BACKFILL_ENQUEUE_V1.into())
             .await
             .unwrap());
-        backfill_missing_titles(&store).await;
+        backfill_on_queue(&store, &q).await;
         assert!(store
             .settings_flag_done(MIGRATION_TITLE_BACKFILL_ENQUEUE_V1.into())
             .await
             .unwrap());
-        let backlog_after_first = title_backlog_count();
+        assert_eq!(q.pending_len().await, 1, "first backfill enqueues the row");
         // Second boot must not re-enqueue.
-        backfill_missing_titles(&store).await;
-        assert_eq!(title_backlog_count(), backlog_after_first);
+        backfill_on_queue(&store, &q).await;
+        assert_eq!(
+            q.pending_len().await,
+            1,
+            "second backfill must not grow the local queue"
+        );
     }
 
     #[tokio::test]
     async fn concurrency_gate_permits_only_one() {
         assert_eq!(TITLE_CONCURRENCY, 1);
-        let q = global_queue();
+        let q = TitleQueue::new();
         let first = q.gate.acquire().await.expect("first permit");
         assert!(
             q.gate.try_acquire().is_err(),
@@ -737,56 +839,167 @@ mod tests {
     async fn worker_processes_with_single_flight_stub() {
         let current = Arc::new(AtomicUsize::new(0));
         let max = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let body = chat_ok_body("ok");
+        let body = chat_ok_body("LLM title ok");
         let current_c = current.clone();
         let max_c = max.clone();
+        let requests_c = requests.clone();
         tokio::spawn(async move {
-            for _ in 0..3 {
-                if let Ok((mut stream, _)) = listener.accept().await {
-                    let cur = current_c.clone();
-                    let mx = max_c.clone();
-                    let body = body.clone();
-                    tokio::spawn(async move {
-                        let n = cur.fetch_add(1, Ordering::SeqCst) + 1;
-                        mx.fetch_max(n, Ordering::SeqCst);
-                        let mut buf = vec![0u8; 4096];
-                        let _ = stream.read(&mut buf).await;
-                        tokio::time::sleep(Duration::from_millis(150)).await;
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        cur.fetch_sub(1, Ordering::SeqCst);
-                    });
-                }
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                requests_c.fetch_add(1, Ordering::SeqCst);
+                let cur = current_c.clone();
+                let mx = max_c.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let n = cur.fetch_add(1, Ordering::SeqCst) + 1;
+                    mx.fetch_max(n, Ordering::SeqCst);
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    cur.fetch_sub(1, Ordering::SeqCst);
+                });
             }
         });
 
         let store = ExperienceStore::memory().unwrap();
-        ensure_title_worker(store.clone()).await;
-        set_title_endpoint_override_for_tests(Some(format!("http://127.0.0.1:{port}"))).await;
+        let q = local_queue_with_store(store.clone()).await;
+        q.set_endpoint(Some(format!("http://127.0.0.1:{port}")))
+            .await;
+        q.ensure_worker().await;
 
-        for i in 0..3 {
+        let ids: Vec<String> = (0..3).map(|i| format!("cf-{i}")).collect();
+        for (i, id) in ids.iter().enumerate() {
             let body = format!("single flight {i}");
-            let rec = sample_record(format!("cf-{i}"), &body, &body, TitleSource::Fallback);
+            let rec = sample_record(id.clone(), &body, &body, TitleSource::Fallback);
             store.insert_record(rec).await.unwrap();
-            enqueue_title(&store, &format!("cf-{i}"), &body, TitleSource::Fallback).await;
+            q.enqueue_job(id, &body).await;
         }
 
-        for _ in 0..80 {
-            if title_backlog_count() == 0 {
+        wait_pending_drain(&q, Duration::from_secs(10)).await;
+
+        // Give in-flight apply a moment after queue drain.
+        let apply_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut done = true;
+            for id in &ids {
+                let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+                if loaded.title_source != TitleSource::Llm {
+                    done = false;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+            if Instant::now() >= apply_deadline {
+                panic!("rows did not all reach title_source=llm within timeout");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            3,
+            "stub must receive exactly 3 requests (vacuous pass forbidden)"
+        );
+        assert_eq!(
+            max.load(Ordering::SeqCst),
+            TITLE_CONCURRENCY,
+            "max concurrent LMR calls must be exactly 1, got {}",
+            max.load(Ordering::SeqCst)
+        );
+        for id in &ids {
+            let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+            assert_eq!(
+                loaded.title_source,
+                TitleSource::Llm,
+                "row {id} must end as llm"
+            );
+            assert!(!loaded.title.trim().is_empty());
+        }
+        assert_eq!(q.pending_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn resume_picks_up_future_next_retry_at() {
+        let store = ExperienceStore::memory().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let body = "retry after restart content";
+        let rec = sample_record(id.clone(), body, body, TitleSource::Fallback);
+        store.insert_record(rec).await.unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        store
+            .record_title_retry(id.clone(), 1, future)
+            .await
+            .unwrap();
+
+        // Due-time filter must NOT hide this row after restart.
+        let listed = store.list_ids_needing_title().await.unwrap();
+        assert!(
+            listed.iter().any(|(row_id, _)| row_id == &id),
+            "future next_retry_at must still be listed for resume"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ok_body = chat_ok_body("Resumed title");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_c = requests.clone();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                requests_c.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{ok_body}",
+                    ok_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let q = local_queue_with_store(store.clone()).await;
+        q.set_endpoint(Some(format!("http://127.0.0.1:{port}")))
+            .await;
+        // ensure_worker resumes pending retries (including future next_retry_at).
+        q.ensure_worker().await;
+        wait_pending_drain(&q, Duration::from_secs(8)).await;
+
+        for _ in 0..40 {
+            let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+            if loaded.title_source == TitleSource::Llm {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        set_title_endpoint_override_for_tests(None).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let loaded = store.get_record(id).await.unwrap().unwrap();
+        assert_eq!(loaded.title_source, TitleSource::Llm);
+        assert_eq!(loaded.title, "Resumed title");
+    }
+
+    #[tokio::test]
+    async fn worker_restarts_when_started_flag_cleared() {
+        let q = Arc::new(TitleQueue::new());
+        assert!(!q.started.load(Ordering::SeqCst));
+        q.ensure_worker().await;
+        assert!(q.started.load(Ordering::SeqCst));
+        // Simulate runtime teardown of the worker task.
+        q.started.store(false, Ordering::SeqCst);
+        q.ensure_worker().await;
         assert!(
-            max.load(Ordering::SeqCst) <= TITLE_CONCURRENCY,
-            "max concurrent LMR calls was {}",
-            max.load(Ordering::SeqCst)
+            q.started.load(Ordering::SeqCst),
+            "cleared flag must allow a new worker spawn"
         );
     }
 

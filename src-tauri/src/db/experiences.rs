@@ -801,7 +801,8 @@ fn set_title_blocking(
 }
 
 fn list_needing_title_blocking(conn: &Connection) -> Result<Vec<(String, String)>> {
-    let now = now_rfc3339();
+    // Include rows whose `title_next_retry_at` is still in the future so a process
+    // restart can resume mid-backoff retries (not only due-now rows).
     let mut stmt = conn.prepare(
         r#"
         SELECT id, COALESCE(NULLIF(trim(solution_summary), ''), topic)
@@ -813,13 +814,9 @@ fn list_needing_title_blocking(conn: &Connection) -> Result<Vec<(String, String)
             title IS NULL OR trim(title) = ''
             OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
           )
-          AND (
-            title_next_retry_at IS NULL OR title_next_retry_at = ''
-            OR title_next_retry_at <= ?1
-          )
         "#,
     )?;
-    let rows = stmt.query_map(params![now], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -857,7 +854,7 @@ fn clear_title_retry_blocking(conn: &Connection, id: &str) -> Result<()> {
 }
 
 fn count_title_backlog_blocking(conn: &Connection) -> Result<u64> {
-    let now = now_rfc3339();
+    // Same membership as `list_needing_title_blocking` (includes future next_retry_at).
     let n: i64 = conn.query_row(
         r#"
         SELECT COUNT(*) FROM experiences
@@ -868,12 +865,8 @@ fn count_title_backlog_blocking(conn: &Connection) -> Result<u64> {
             title IS NULL OR trim(title) = ''
             OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
           )
-          AND (
-            title_next_retry_at IS NULL OR title_next_retry_at = ''
-            OR title_next_retry_at <= ?1
-          )
         "#,
-        params![now],
+        [],
         |row| row.get(0),
     )?;
     Ok(n.max(0) as u64)
