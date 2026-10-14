@@ -6,8 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::experiences::{column_names, has_col};
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, ExperienceRecord, ARCHIVED_BY_TTL, ARCHIVED_BY_USER, EXPERIENCE_STATUS_ACTIVE,
-    EXPERIENCE_STATUS_ARCHIVED,
+    now_rfc3339, ExperienceRecord, TitleSource, ARCHIVED_BY_TTL, ARCHIVED_BY_USER,
+    EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
 };
 
 /// Settings key for auto-archive TTL in days (default 90).
@@ -18,6 +18,8 @@ pub const SETTING_EXPERIENCE_USE_COUNT_THRESHOLD: &str = "experience_use_count_t
 pub const DEFAULT_EXPERIENCE_USE_COUNT_THRESHOLD: u64 = 0;
 /// One-time soft-hide of empty placeholder project_index rows.
 pub const MIGRATION_PLACEHOLDER_CLEANUP_V1: &str = "migrations.placeholder_cleanup_v1";
+/// One-time: clear adr_record where it was wrongly copied from solution_summary.
+pub const MIGRATION_ADR_DECOUPLE_V1: &str = "migrations.adr_decouple_v1";
 
 const PLACEHOLDER_NAMES: &[&str] = &["backend-legacy", "frontend-new"];
 
@@ -28,6 +30,7 @@ pub struct ExperienceUpdate {
     pub outcome: Option<crate::models::ExperienceOutcome>,
     pub project_id: Option<String>,
     pub topic: Option<String>,
+    pub title: Option<String>,
 }
 
 /// Injectable clock for TTL tests (seconds since UNIX epoch as RFC3339 helper).
@@ -256,8 +259,8 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
         });
     }
     if let Some(adr) = &patch.adr_summary {
+        // User edits ADR only — do not re-copy into solution_summary.
         record.adr_record = adr.clone();
-        record.solution_summary = adr.clone();
     }
     if let Some(tags) = &patch.tags {
         record.tags = tags.clone();
@@ -270,6 +273,11 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
     }
     if let Some(topic) = &patch.topic {
         record.topic = topic.clone();
+    }
+    if let Some(title) = &patch.title {
+        let clipped: String = title.chars().take(crate::models::TITLE_MAX_CHARS).collect();
+        record.title = clipped;
+        record.title_source = TitleSource::User;
     }
     let now = now_rfc3339();
     record.updated_at = Some(now.clone());
@@ -290,8 +298,10 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
             tags_json = ?6,
             updated_at = ?7,
             original_content = COALESCE(original_content, ?8),
-            payload_json = ?9
-        WHERE id = ?10
+            payload_json = ?9,
+            title = ?10,
+            title_source = ?11
+        WHERE id = ?12
         "#,
         params![
             record.project_id,
@@ -303,6 +313,8 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
             now,
             record.original_content,
             payload,
+            record.title,
+            record.title_source.as_str(),
             id,
         ],
     )?;
@@ -332,7 +344,7 @@ fn get_full_record(conn: &Connection, id: &str) -> Result<Option<ExperienceRecor
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                    outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                    status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                   updated_at, original_content, archived_by
+                   updated_at, original_content, archived_by, title, title_source, source
             FROM experiences WHERE id = ?1
             "#,
             params![id],
@@ -349,6 +361,9 @@ fn map_full_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExperienceRecord
     let reviewed: i64 = row.get(13)?;
     let use_count: i64 = row.get(14)?;
     let is_pinned: i64 = row.get(17)?;
+    let title = row.get::<_, Option<String>>(21)?.unwrap_or_default();
+    let title_source = row.get::<_, Option<String>>(22)?.unwrap_or_default();
+    let source = row.get::<_, Option<String>>(23)?.unwrap_or_default();
     Ok(ExperienceRecord {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -376,6 +391,9 @@ fn map_full_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExperienceRecord
         updated_at: row.get(18)?,
         original_content: row.get(19)?,
         archived_by: row.get(20)?,
+        title,
+        title_source: TitleSource::parse(&title_source),
+        source,
     })
 }
 
@@ -396,9 +414,9 @@ fn search_filtered_blocking(
         SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-               updated_at, original_content, archived_by
+               updated_at, original_content, archived_by, title, title_source, source
         FROM experiences
-        WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
+        WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || COALESCE(title,'') || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
           {status_clause}
         ORDER BY is_pinned DESC, created_at DESC
         LIMIT ?{limit_idx}
@@ -494,14 +512,19 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
         ("updated_at", "TEXT"),
         ("original_content", "TEXT"),
         ("archived_by", "TEXT"),
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("title_source", "TEXT NOT NULL DEFAULT 'fallback'"),
+        ("source", "TEXT NOT NULL DEFAULT ''"),
     ];
     let mut added_reviewed = false;
+    let mut cols = cols;
     for (name, decl) in additions {
         if !has_col(&cols, name) {
             conn.execute(
                 &format!("ALTER TABLE experiences ADD COLUMN {name} {decl}"),
                 [],
             )?;
+            cols.push((*name).to_string());
             if *name == "reviewed" {
                 added_reviewed = true;
             }
@@ -522,19 +545,64 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
         params![now],
     )?;
     conn.execute(
-        "UPDATE experiences SET original_content = COALESCE(original_content, adr_record, solution_summary) WHERE original_content IS NULL OR original_content = ''",
+        "UPDATE experiences SET original_content = COALESCE(original_content, solution_summary, adr_record) WHERE original_content IS NULL OR original_content = ''",
         [],
     )?;
     conn.execute(
         "UPDATE experiences SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL OR updated_at = ''",
         [],
     )?;
+    // Backfill empty titles from solution/topic (fallback source).
+    conn.execute(
+        r#"
+        UPDATE experiences
+        SET title = substr(COALESCE(NULLIF(trim(solution_summary), ''), topic), 1, 80),
+            title_source = 'fallback'
+        WHERE trim(COALESCE(title, '')) = ''
+        "#,
+        [],
+    )?;
+    migrate_adr_decouple(conn)?;
     conn.execute_batch(
         r#"
         CREATE INDEX IF NOT EXISTS idx_experiences_status ON experiences(status);
         CREATE INDEX IF NOT EXISTS idx_experiences_reviewed ON experiences(reviewed);
         CREATE INDEX IF NOT EXISTS idx_experiences_pinned ON experiences(is_pinned);
         "#,
+    )?;
+    Ok(())
+}
+
+/// Approved migration: clear adr_record where it was a duplicate of solution_summary.
+/// Does NOT redact other fields. Existing content hygiene is out of scope without approval.
+fn migrate_adr_decouple(conn: &Connection) -> Result<()> {
+    // Unit tests may call migrate without a settings table — create if needed.
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL
+        );
+        "#,
+    )?;
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![MIGRATION_ADR_DECOUPLE_V1],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(done.as_deref(), Some("1") | Some("true") | Some("\"1\"")) {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE experiences SET adr_record = '' WHERE adr_record = solution_summary",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO settings(key, value_json) VALUES(?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        params![MIGRATION_ADR_DECOUPLE_V1],
     )?;
     Ok(())
 }

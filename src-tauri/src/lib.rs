@@ -308,6 +308,13 @@ pub fn run_with_start_route(start_route: &'static str) {
                 spawn_quota_pump(quota_handle, quota_services, quota_store);
                 spawn_supervisor(supervisor_handle, supervisor_services);
                 spawn_auto_archive(auto_archive_store);
+                // PR-MCP-Quality-1: async title worker + upgrade backfill (concurrency 1).
+                let title_store = store.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::services::experience_title::ensure_title_worker(title_store.clone())
+                        .await;
+                    crate::services::experience_title::backfill_missing_titles(&title_store).await;
+                });
                 spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 let workflow_listen = workflow.clone();

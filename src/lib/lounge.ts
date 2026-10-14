@@ -260,11 +260,14 @@ export type LayaEngineStatus = {
 
 export type ExperienceOutcome = "success" | "failure" | "partial";
 
+export type TitleSource = "agent" | "llm" | "fallback" | "user";
+
 export type LoungeExperience = {
   id: string;
   type: string;
   agent: string;
   project_id: string;
+  /** Empty string → No ADR in UI. */
   adr_summary: string;
   outcome: ExperienceOutcome;
   related_task_id?: string | null;
@@ -281,6 +284,11 @@ export type LoungeExperience = {
   is_pinned?: boolean;
   updated_at?: string | null;
   original_content?: string | null;
+  /** Card heading (≤80). */
+  title?: string;
+  title_source?: TitleSource;
+  /** Provenance metadata (mcp/external), not tags. */
+  source?: string;
 };
 
 export type NatsEvent = {

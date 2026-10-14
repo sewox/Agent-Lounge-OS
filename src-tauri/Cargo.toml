@@ -55,6 +55,7 @@ bcrypt = "0.17"
 libc = { version = "0.2", optional = true }
 # Windows exclusive→SO_REUSEADDR convert at handoff (test-helpers only).
 socket2 = { version = "0.6", optional = true }
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

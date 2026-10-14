@@ -780,15 +780,84 @@ impl McpServer {
             .map(str::to_string)
             .unwrap_or_else(|| client.name.clone());
 
-        let topic = if context.is_empty() {
+        let topic_raw = if context.is_empty() {
             decision.clone()
         } else {
             context.clone()
         };
-        let solution = if decision.is_empty() {
+        let solution_raw = if decision.is_empty() {
             context.clone()
         } else {
             decision.clone()
+        };
+
+        // Structured ADR (optional). Absent → adr_record stays empty (UI: No ADR).
+        let adr_raw = args
+            .get("adr")
+            .and_then(|v| {
+                super::hygiene::format_adr(
+                    v.get("context").and_then(|x| x.as_str()),
+                    v.get("decision").and_then(|x| x.as_str()),
+                    v.get("consequences").and_then(|x| x.as_str()),
+                    v.get("alternatives").and_then(|x| x.as_str()),
+                )
+            })
+            .unwrap_or_default();
+
+        // Hygiene before persist (mask, do not reject).
+        let topic_h = super::hygiene::scrub(&topic_raw);
+        let solution_h = super::hygiene::scrub(&solution_raw);
+        let adr_h = super::hygiene::scrub(&adr_raw);
+        let mut warnings = Vec::new();
+        let mut hygiene_masked = false;
+        for part in [&topic_h, &solution_h, &adr_h] {
+            if part.masked {
+                hygiene_masked = true;
+                for w in &part.warnings {
+                    if !warnings.iter().any(|x| x == w) {
+                        warnings.push(w.clone());
+                    }
+                }
+            }
+        }
+
+        // Agent tags only + normalization; mcp/external → source metadata.
+        let raw_tags: Vec<String> = args
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (tags, mut source_parts) = super::hygiene::normalize_tags(&raw_tags);
+        if source_parts.is_empty() {
+            source_parts = vec!["mcp".into(), "external".into()];
+        } else if !source_parts.iter().any(|s| s == "mcp") {
+            source_parts.insert(0, "mcp".into());
+        }
+        let source = source_parts.join(",");
+
+        let agent_title = arg_str(args, "title").map(str::to_string);
+        let (title, title_source) = if let Some(t) = agent_title {
+            let cleaned = super::hygiene::scrub(&t);
+            if cleaned.masked {
+                hygiene_masked = true;
+                for w in &cleaned.warnings {
+                    if !warnings.iter().any(|x| x == w) {
+                        warnings.push(w.clone());
+                    }
+                }
+            }
+            let title =
+                super::hygiene::fallback_title(&cleaned.text, crate::models::TITLE_MAX_CHARS);
+            (title, crate::models::TitleSource::Agent)
+        } else {
+            (
+                super::hygiene::fallback_title(&solution_h.text, crate::models::TITLE_MAX_CHARS),
+                crate::models::TitleSource::Fallback,
+            )
         };
 
         let experience = LoungeExperience {
@@ -796,39 +865,66 @@ impl McpServer {
             msg_type: "experience".into(),
             agent: agent.clone(),
             project_id: project.clone(),
-            adr_summary: solution.clone(),
+            adr_summary: adr_h.text.clone(),
             outcome: outcome.clone(),
             related_task_id: None,
-            tags: vec!["mcp".into(), "external".into()],
+            tags: tags.clone(),
             created_at: now_rfc3339(),
             reviewed: false,
+            title: title.clone(),
+            title_source,
+            source: source.clone(),
+            original_content: Some(solution_h.text.clone()),
             ..Default::default()
         };
         let experience_json = serde_json::to_value(&experience)?;
         validate_schema(SchemaKind::Experience, &experience_json).map_err(|e| anyhow!(e))?;
 
-        let record = ExperienceRecord::from_lounge(&experience, topic.clone());
+        let mut record = ExperienceRecord::from_lounge(
+            &experience,
+            topic_h.text.clone(),
+            solution_h.text.clone(),
+        );
         // O6: MCP rows are auto-approved (active) but unreviewed.
-        let mut record = record;
+        // Hygiene mask → stay in reviewed=0 queue (already false).
         record.status = crate::models::EXPERIENCE_STATUS_ACTIVE.into();
         record.reviewed = false;
         let id = record.id.clone();
+        let enqueue_content = record.solution_summary.clone();
+        let enqueue_source = record.title_source;
         self.store.insert_record_atomic(record).await?;
+
+        // Async title generation (never overwrites agent titles).
+        crate::services::experience_title::enqueue_title(
+            &self.store,
+            &id,
+            &enqueue_content,
+            enqueue_source,
+        )
+        .await;
 
         // Dashboard sayacı / event pump: lounge.experience.reported
         if let Err(err) = self.publish_experience_reported(&experience).await {
             eprintln!("[lounge-mcp] experience.reported yayınlanamadı: {err}");
         }
 
-        Ok(json!({
+        let mut out = json!({
             "id": id,
             "project_id": project,
             "agent": agent,
-            "topic": topic,
+            "topic": topic_h.text,
+            "title": title,
+            "title_source": title_source.as_str(),
+            "source": source,
             "recorded": true,
             "atomic": true,
             "event": EXPERIENCE_REPORTED,
-        }))
+            "hygiene_masked": hygiene_masked,
+        });
+        if !warnings.is_empty() {
+            out["hygiene_warnings"] = json!(warnings);
+        }
+        Ok(out)
     }
 
     async fn publish_experience_reported(&self, experience: &LoungeExperience) -> Result<()> {
@@ -1282,12 +1378,15 @@ Kota aşımında -32029. Ayrıntı: resources/read {A2A_GUIDE_URI}.",
         ),
         tool_def(
             "lounge_record_experience",
-            "Tecrübe kaydı (SQLite + vektör atomik). Kota/politika değiştirmez; dosya yazmaz.",
+            "Tecrübe kaydı (SQLite + vektör atomik). Kota/politika değiştirmez; dosya yazmaz. \
+Mimari kararlar için isteğe bağlı `adr` {context,decision,consequences,alternatives} doldurun; \
+yoksa ADR boş kalır (UI: No ADR). `tags` ajan etiketleridir (normalize edilir; mcp/external → source). \
+İsteğe bağlı `title` (≤80) LLM tarafından ezilmez.",
             include_schema("mcp_record_experience.schema.json"),
         ),
         tool_def(
             "lounge_record_decision",
-            "lounge_record_experience alias — ADR kaydı.",
+            "lounge_record_experience alias — ADR kaydı. Mimari kararlar için `adr` alanını doldurun.",
             include_schema("mcp_record_experience.schema.json"),
         ),
         tool_def(
@@ -2213,6 +2312,93 @@ mod tests {
         assert_eq!(latest.len(), 1);
         assert!(!latest[0].reviewed, "MCP rows land unreviewed");
         assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
+        // No structured adr → empty ADR (No ADR), solution kept separately.
+        let rec = store
+            .get_record(latest[0].id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rec.adr_record.trim().is_empty(),
+            "adr_record must stay empty without adr: {:?}",
+            rec.adr_record
+        );
+        assert_eq!(rec.solution_summary, "6380");
+        assert!(rec.source.contains("mcp"));
+        assert!(!rec.tags.iter().any(|t| t == "mcp" || t == "external"));
+    }
+
+    #[tokio::test]
+    async fn tool_record_adr_tags_hygiene_and_agent_title() {
+        let store = ExperienceStore::memory().expect("db");
+        let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "project_id": "proj-q",
+                    "context": "connect 192.168.1.20:5555 from /Users/dev/app",
+                    "decision": "use adb over wifi",
+                    "tags": ["MCP", "Redis", "redis", "external"],
+                    "title": "ADB wifi setup",
+                    "adr": {
+                        "context": "device debugging",
+                        "decision": "wifi adb",
+                        "consequences": "no usb cable",
+                        "alternatives": "usb only"
+                    }
+                }
+            }
+        })
+        .to_string();
+        let resp = server.handle_line(&line).await.unwrap().unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true);
+        let body = &val["result"]["structuredContent"];
+        assert_eq!(body["hygiene_masked"], true);
+        assert_eq!(body["title_source"], "agent");
+        assert_eq!(body["title"], "ADB wifi setup");
+
+        let latest = store.latest(1).await.unwrap();
+        let rec = store
+            .get_record(latest[0].id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rec.adr_record.contains("Decision: wifi adb"));
+        assert!(!rec.adr_record.contains("192.168"));
+        assert!(
+            rec.topic.contains("<device-ip>:5555"),
+            "topic should mask IP: {}",
+            rec.topic
+        );
+        assert!(
+            rec.topic.contains("<home>"),
+            "topic should mask home: {}",
+            rec.topic
+        );
+        assert_eq!(rec.tags, vec!["redis"]);
+        assert!(rec.source.contains("mcp"));
+        assert!(rec.source.contains("external"));
+        assert_eq!(rec.title_source, crate::models::TitleSource::Agent);
+        assert_eq!(rec.title, "ADB wifi setup");
+        assert!(!rec.reviewed);
+
+        store
+            .set_experience_title(
+                rec.id.clone(),
+                "LLM should not win".into(),
+                crate::models::TitleSource::Llm,
+                false,
+            )
+            .await
+            .unwrap();
+        let again = store.get_record(rec.id.clone()).await.unwrap().unwrap();
+        assert_eq!(again.title, "ADB wifi setup");
+        assert_eq!(again.title_source, crate::models::TitleSource::Agent);
     }
 
     #[test]

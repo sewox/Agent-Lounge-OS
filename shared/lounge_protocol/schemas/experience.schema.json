@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/experience.schema.json",
   "title": "LoungeExperience",
-  "description": "Tamamlanan işin çözüm yolu ve mimari karar özeti. Global Memory'ye yazılır.",
+  "description": "Tamamlanan işin çözüm yolu ve mimari karar özeti. Global Memory'ye yazılır. adr_summary boş olabilir (No ADR).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -32,7 +32,7 @@
     },
     "adr_summary": {
       "type": "string",
-      "minLength": 1
+      "description": "Structured ADR body; empty string means No ADR."
     },
     "outcome": {
       "type": "string",
@@ -82,6 +82,18 @@
     },
     "original_content": {
       "type": ["string", "null"]
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "title_source": {
+      "type": "string",
+      "enum": ["agent", "llm", "fallback", "user"]
+    },
+    "source": {
+      "type": "string",
+      "description": "Provenance metadata (mcp/external), not tags."
     }
   }
 }

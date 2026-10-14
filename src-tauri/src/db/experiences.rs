@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::embedding::{cosine_similarity, decode_embedding, encode_embedding, lexical_embedding};
-use crate::models::{ExperienceHit, ExperienceRecord, LoungeExperience, RoutingPolicy};
+use crate::models::{
+    now_rfc3339, ExperienceHit, ExperienceRecord, LoungeExperience, RoutingPolicy,
+};
 
 const DEFAULT_SIMILAR_LIMIT: usize = 3;
 const MIN_COSINE: f32 = 0.22;
@@ -71,8 +73,58 @@ impl ExperienceStore {
     }
 
     pub async fn insert(&self, experience: &LoungeExperience) -> Result<()> {
-        let record = ExperienceRecord::from_lounge(experience, experience.adr_summary.clone());
+        let solution = if experience
+            .original_content
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
+            if experience.adr_summary.trim().is_empty() {
+                experience.title.clone()
+            } else {
+                experience.adr_summary.clone()
+            }
+        } else {
+            experience
+                .original_content
+                .clone()
+                .unwrap_or_else(|| experience.adr_summary.clone())
+        };
+        let topic = if experience.title.trim().is_empty() {
+            solution.clone()
+        } else {
+            experience.title.clone()
+        };
+        let record = ExperienceRecord::from_lounge(experience, topic, solution);
         self.insert_record(record).await
+    }
+
+    /// Persist a title when allowed (never overwrites agent/user unless `force`).
+    pub async fn set_experience_title(
+        &self,
+        id: String,
+        title: String,
+        source: crate::models::TitleSource,
+        force: bool,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            set_title_blocking(&conn, &id, &title, source, force)
+        })
+        .await
+        .context("set_experience_title join")?
+    }
+
+    /// Rows with empty title or fallback source — for upgrade backfill enqueue.
+    pub async fn list_ids_needing_title(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_needing_title_blocking(&conn)
+        })
+        .await
+        .context("list_ids_needing_title join")?
     }
 
     pub async fn insert_record(&self, record: ExperienceRecord) -> Result<()> {
@@ -375,7 +427,10 @@ fn create_experiences_sql() -> &'static str {
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT,
                 original_content TEXT,
-                archived_by TEXT
+                archived_by TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                title_source TEXT NOT NULL DEFAULT 'fallback',
+                source TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_experiences_project ON experiences(project_id);
             CREATE INDEX IF NOT EXISTS idx_experiences_agent ON experiences(agent_id);
@@ -506,12 +561,22 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
         .clone()
         .unwrap_or_else(|| record.created_at.clone());
     let original = record.original_content.clone().unwrap_or_else(|| {
-        if record.adr_record.trim().is_empty() {
-            record.solution_summary.clone()
+        if record.solution_summary.trim().is_empty() {
+            record.topic.clone()
         } else {
-            record.adr_record.clone()
+            record.solution_summary.clone()
         }
     });
+    let title = if record.title.trim().is_empty() {
+        crate::models::protocol::truncate_title_for_db(
+            &record.solution_summary,
+            crate::models::TITLE_MAX_CHARS,
+        )
+    } else {
+        record.title.clone()
+    };
+    let title_source = record.title_source.as_str();
+    let source = record.source.clone();
 
     let exists: bool = conn
         .query_row(
@@ -539,8 +604,17 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 embedding = ?9,
                 payload_json = ?10,
                 updated_at = ?11,
-                original_content = COALESCE(original_content, ?12)
-            WHERE id = ?13
+                original_content = COALESCE(original_content, ?12),
+                title = CASE
+                    WHEN title_source IN ('agent','user') AND length(trim(title)) > 0 THEN title
+                    ELSE ?13
+                END,
+                title_source = CASE
+                    WHEN title_source IN ('agent','user') AND length(trim(title)) > 0 THEN title_source
+                    ELSE ?14
+                END,
+                source = CASE WHEN length(trim(source)) > 0 THEN source ELSE ?15 END
+            WHERE id = ?16
             "#,
             params![
                 record.project_id,
@@ -555,6 +629,9 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 payload,
                 updated_at,
                 original,
+                title,
+                title_source,
+                source,
                 record.id,
             ],
         )?;
@@ -565,9 +642,9 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 id, project_id, agent_id, topic, solution_summary, adr_record,
                 outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                 status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                updated_at, original_content, archived_by
+                updated_at, original_content, archived_by, title, title_source, source
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
             "#,
             params![
                 record.id,
@@ -591,17 +668,75 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 updated_at,
                 original,
                 record.archived_by,
+                title,
+                title_source,
+                source,
             ],
         )?;
     }
     Ok(())
 }
 
+fn set_title_blocking(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    source: crate::models::TitleSource,
+    force: bool,
+) -> Result<()> {
+    let existing: Option<(String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(title_source,''), COALESCE(title,'') FROM experiences WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((cur_source, cur_title)) = existing else {
+        anyhow::bail!("not found: {id}");
+    };
+    let cur = crate::models::TitleSource::parse(&cur_source);
+    if !force
+        && matches!(
+            cur,
+            crate::models::TitleSource::Agent | crate::models::TitleSource::User
+        )
+        && !cur_title.trim().is_empty()
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE experiences SET title = ?1, title_source = ?2, updated_at = ?3 WHERE id = ?4",
+        params![title, source.as_str(), now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn list_needing_title_blocking(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, COALESCE(NULLIF(trim(solution_summary), ''), topic)
+        FROM experiences
+        WHERE COALESCE(status, 'active') = 'active'
+          AND (
+            title IS NULL OR trim(title) = ''
+            OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
+          )
+          AND lower(COALESCE(title_source, 'fallback')) NOT IN ('agent', 'user')
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 const RECORD_SELECT_COLS: &str = r#"
     id, project_id, agent_id, topic, solution_summary, adr_record,
     outcome, related_task_id, tags_json, created_at, embedding, payload_json,
     status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-    updated_at, original_content, archived_by
+    updated_at, original_content, archived_by, title, title_source, source
 "#;
 
 fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceRecord>> {
@@ -779,6 +914,15 @@ fn map_record_from_parts(
     let updated_at = row.get::<_, Option<String>>(offset + 18)?;
     let original_content = row.get::<_, Option<String>>(offset + 19)?;
     let archived_by = row.get::<_, Option<String>>(offset + 20).unwrap_or(None);
+    let title = row
+        .get::<_, Option<String>>(offset + 21)?
+        .unwrap_or_default();
+    let title_source = row
+        .get::<_, Option<String>>(offset + 22)?
+        .unwrap_or_default();
+    let source = row
+        .get::<_, Option<String>>(offset + 23)?
+        .unwrap_or_default();
     Ok(ExperienceRecord {
         id: row.get(offset)?,
         project_id: row.get(offset + 1)?,
@@ -804,6 +948,9 @@ fn map_record_from_parts(
         is_pinned: is_pinned != 0,
         updated_at,
         original_content,
+        title,
+        title_source: crate::models::TitleSource::parse(&title_source),
+        source,
     })
 }
 
@@ -861,6 +1008,9 @@ mod tests {
             "topic",
             "solution_summary",
             "adr_record",
+            "title",
+            "title_source",
+            "source",
         ] {
             assert!(cols.iter().any(|col| col == name), "missing {name}");
         }

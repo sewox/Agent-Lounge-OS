@@ -988,7 +988,11 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                 const isWhisper = whispered.has(item.id);
                 const alreadyUseful = markedUseful.has(item.id);
                 const archived = isExperienceArchived(item);
-                const summary = formatExperienceLogSummary(item.adr_summary);
+                const heading =
+                  (item.title && item.title.trim()) ||
+                  formatExperienceLogSummary(item.adr_summary || item.original_content || "", 80);
+                const autoHint =
+                  item.title_source === "llm" || item.title_source === "fallback";
                 return (
                   <button
                     key={item.id}
@@ -1003,11 +1007,14 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                           : "border-outline-variant/40 bg-surface-container-high/60 hover:bg-surface-container-high"
                     }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="tnum font-mono text-meta text-on-surface-variant">
-                        {formatExperienceTime(item.created_at)}
-                      </span>
-                      <span className="flex items-center gap-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          data-qa="experience-project-chip"
+                          className="shrink-0 rounded border border-outline-variant/50 px-1 font-mono text-meta text-on-surface-variant"
+                        >
+                          {item.project_id}
+                        </span>
                         {item.is_pinned ? (
                           <span className="rounded border border-primary/40 px-1 text-meta text-primary">
                             PIN
@@ -1028,21 +1035,45 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                             {tv("whisper")}
                           </span>
                         ) : null}
-                        <span
-                          className={`rounded border px-1 text-meta ${outcomeClass(item.outcome)}`}
-                        >
-                          {item.outcome === "success"
-                            ? "Success"
-                            : item.outcome === "partial"
-                              ? "Partial"
-                              : "Failed"}
-                        </span>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded border px-1 text-meta ${outcomeClass(item.outcome)}`}
+                      >
+                        {item.outcome === "success"
+                          ? "Success"
+                          : item.outcome === "partial"
+                            ? "Partial"
+                            : "Failed"}
                       </span>
                     </div>
-                    <div className="break-words font-mono text-body font-medium text-on-surface">
-                      {item.project_id}
+                    <div className="flex items-start gap-1">
+                      <div
+                        data-qa="experience-title"
+                        className="min-w-0 flex-1 break-words font-body text-body font-medium text-on-surface"
+                      >
+                        {heading}
+                      </div>
+                      {autoHint ? (
+                        <span
+                          data-qa="experience-title-auto"
+                          className="shrink-0 font-mono text-meta lowercase text-outline"
+                          title={tv("autoTitle")}
+                        >
+                          {tv("autoTitle")}
+                        </span>
+                      ) : null}
                     </div>
-                    <div className="font-body text-body leading-normal text-outline">{summary}</div>
+                    <div className="flex items-center justify-between font-mono text-meta text-on-surface-variant">
+                      <span data-qa="experience-last-used">
+                        {tv("lastUsed")}:{" "}
+                        {item.last_used_at
+                          ? formatExperienceTime(item.last_used_at)
+                          : "—"}
+                      </span>
+                      <span data-qa="experience-use-count" className="tnum">
+                        {tv("useCount")}: {item.use_count ?? 0}
+                      </span>
+                    </div>
                     {isWhisper ? (
                       <div className="flex justify-end pt-0.5">
                         <button
