@@ -21,8 +21,8 @@ use app_lib::services::{
     classify_port_status, enable_graph_ui_headless, listen_pids, port_owned_by_lounge,
     probe_ui_config, spawn_tcp_hold_ephemeral, spawn_tcp_hold_on_std_listener,
     stage_codebase_memory_mcp_double, std_listener_to_tokio, wait_tcp_hold_ephemeral_ready,
-    wait_tcp_hold_ready, wait_until_port_not_owned, wait_until_port_owned, GraphUiPortMode,
-    GraphUiState,
+    wait_tcp_hold_ready, wait_until_port_not_owned, wait_until_port_owned, CbmDaemonStatus,
+    GraphUiPortMode, GraphUiState,
 };
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -301,6 +301,8 @@ async fn enable_graph_ui_skips_foreign_band_port_owns_child() {
     let cbm_cfg = scratch.join("cbm-cache").join("config.json");
     std::fs::create_dir_all(cbm_cfg.parent().unwrap()).expect("cbm cache dir");
     state.set_cbm_config_path_override(Some(cbm_cfg));
+    // Pin per-session mode so parallel daemon-mode tests cannot flip this via env.
+    state.set_daemon_status_override(Some(CbmDaemonStatus::inactive()));
 
     for successor in held.successors {
         state.stage_listen_handoff(successor);
