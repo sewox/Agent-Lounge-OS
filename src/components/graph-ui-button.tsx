@@ -89,8 +89,10 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
 
   const statusNote = resolveGraphUiStatusMessage(status, (key, params) => t(key, params));
   const infoNote =
-    status.port_mode === "auto" && !status.port_conflict ? statusNote : null;
-  const conflictNote = status.port_conflict ? statusNote : null;
+    status.daemon_mode || (status.port_mode === "auto" && !status.port_conflict)
+      ? statusNote
+      : null;
+  const conflictNote = status.port_conflict && !status.daemon_mode ? statusNote : null;
 
   const translateInvokeError = (err: unknown): string => {
     const raw = err instanceof Error ? err.message : String(err);
@@ -114,11 +116,17 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
         enable: t("graphEnable"),
         enableWithPort: t("graphEnableWithPort", { port: status.port }),
         open: t("graphOpen"),
+        openExisting: t("graphOpenExisting"),
         indexFirst: t("graphIndexFirst"),
         busyEllipsis: "…",
       }}
       onEnable={async () => {
         if (busy) {
+          return;
+        }
+        if (status.daemon_mode) {
+          // Enable is hidden in daemon mode; Open existing is the only path.
+          setToast(statusNote || t("graphDaemonSharedNoUi", { port: status.port }));
           return;
         }
         if (shouldBlockEnableOnConflict(status)) {
