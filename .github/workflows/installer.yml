@@ -27,21 +27,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # e2fsprogs: chattr +i for root-proof undeletable-path uninstall tests.
           - distro: debian
             image: debian:bookworm-slim
-            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl coreutils findutils
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl coreutils findutils e2fsprogs
           - distro: ubuntu
             image: ubuntu:24.04
-            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl coreutils findutils
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl coreutils findutils e2fsprogs
           - distro: fedora
             image: fedora:41
-            setup: dnf install -y bash ca-certificates curl findutils
+            setup: dnf install -y bash ca-certificates curl findutils e2fsprogs
           - distro: opensuse
             image: opensuse/leap:15.6
-            setup: zypper --non-interactive install -y bash curl findutils gzip tar
+            setup: zypper --non-interactive install -y bash curl findutils gzip tar e2fsprogs
           - distro: arch
             image: archlinux:latest
-            setup: pacman -Sy --noconfirm bash curl findutils tar gzip
+            setup: pacman -Sy --noconfirm bash curl findutils tar gzip e2fsprogs
           - distro: alpine
             image: alpine:3.20
             setup: apk add --no-cache bash curl coreutils findutils tar gzip
@@ -54,7 +55,9 @@ jobs:
           chmod +x install.sh scripts/install/*.sh
           WT="${RUNNER_TEMP}/lounge-${{ matrix.distro }}"
           mkdir -p "$WT"
+          # LINUX_IMMUTABLE: allow chattr +i inside the container (not in Docker's default cap set).
           docker run --rm \
+            --cap-add=LINUX_IMMUTABLE \
             -v "$PWD:/src:ro" \
             -v "$WT:/work" \
             -w /work \

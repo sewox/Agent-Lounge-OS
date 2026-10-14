@@ -111,6 +111,9 @@ function Remove-PathLoud([string]$Path) {
 
 function Uninstall-Lounge {
   $errors = [System.Collections.Generic.List[string]]::new()
+  $MainExe = Join-Path $NsisDir $MainExeName
+  $CliPath = Join-Path $BinDir $CliName
+  $NsisUninstaller = Join-Path $NsisDir 'uninstall.exe'
 
   # Prefer NSIS uninstaller when present.
   # Note (PS 5.1 / NSIS): some uninstallers copy themselves to %TEMP% and
@@ -118,10 +121,9 @@ function Uninstall-Lounge {
   # invoke; that wait is sufficient for our fixture and Tauri NSIS layout
   # (no extra TEMP-child polling). Failures still surface via exit code and
   # the post-checks below (exe/registry/shortcuts still present).
-  $Uninstaller = Join-Path $NsisDir 'uninstall.exe'
-  if (Test-Path -LiteralPath $Uninstaller) {
-    Write-Host "Running NSIS uninstaller: $Uninstaller /S"
-    $p = Start-Process -FilePath $Uninstaller -ArgumentList @('/S') -Wait -PassThru
+  if (Test-Path -LiteralPath $NsisUninstaller) {
+    Write-Host "Running NSIS uninstaller: $NsisUninstaller /S"
+    $p = Start-Process -FilePath $NsisUninstaller -ArgumentList @('/S') -Wait -PassThru
     if ($null -eq $p -or $p.ExitCode -ne 0) {
       $errors.Add("NSIS uninstaller exited $(if ($null -eq $p) { 'null' } else { $p.ExitCode })")
     }
@@ -168,29 +170,69 @@ function Uninstall-Lounge {
     $errors.Add("Start Menu folder still present: $StartMenuDir")
   }
 
-  # Manifest-recorded paths (setup copy, CLI shim, app dir leftovers).
+  # Known install paths — always attempt, even if a prior partial uninstall
+  # deleted the manifest or NSIS uninstaller (e.g. locked main exe).
+  $knownPaths = [System.Collections.Generic.List[string]]::new()
+  foreach ($p in @(
+      $MainExe,
+      $NsisUninstaller,
+      $CliPath,
+      $StartMenuShortcut,
+      $StartMenuDir
+    )) {
+    if ($p) { [void]$knownPaths.Add($p) }
+  }
+  if (Test-Path -LiteralPath $ShareDir) {
+    Get-ChildItem -LiteralPath $ShareDir -File | ForEach-Object {
+      if ($_.FullName -ne $Manifest) { [void]$knownPaths.Add($_.FullName) }
+    }
+  }
   if (Test-Path -LiteralPath $Manifest) {
     Get-Content -LiteralPath $Manifest | ForEach-Object {
       $p = $_.Trim()
       if (-not $p) { return }
       if ($p -eq $Manifest) { return }
-      if (Test-Path -LiteralPath $p) {
-        try { Remove-PathLoud $p } catch { $errors.Add("$_") }
-      }
+      [void]$knownPaths.Add($p)
     }
-    try { Remove-PathLoud $Manifest } catch { $errors.Add("$_") }
+  }
+  $seen = @{}
+  foreach ($p in $knownPaths) {
+    if ($seen.ContainsKey($p)) { continue }
+    $seen[$p] = $true
+    if (Test-Path -LiteralPath $p) {
+      try { Remove-PathLoud $p } catch { $errors.Add("$_") }
+    }
   }
 
-  $MainExe = Join-Path $NsisDir $MainExeName
+  # Remove empty app/share dirs only (non-empty leftovers are reported below).
+  foreach ($dir in @($NsisDir, $ShareDir)) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    $remaining = @(Get-ChildItem -LiteralPath $dir -Force)
+    if ($remaining.Count -eq 0) {
+      try { Remove-PathLoud $dir } catch { $errors.Add("$_") }
+    }
+  }
+
   if (Test-Path -LiteralPath $MainExe) {
     $errors.Add("main exe still present after uninstall: $MainExe")
   }
-  if (Test-Path -LiteralPath (Join-Path $NsisDir 'uninstall.exe')) {
+  if (Test-Path -LiteralPath $NsisUninstaller) {
     $errors.Add("NSIS uninstall.exe still present under $NsisDir")
   }
 
+  # Defer manifest deletion until everything else is gone so a retry can
+  # still see recorded paths after a partial (e.g. file-locked) uninstall.
   if ($errors.Count -gt 0) {
     throw ("uninstall incomplete:`n - " + ($errors -join "`n - "))
+  }
+  if (Test-Path -LiteralPath $Manifest) {
+    Remove-PathLoud $Manifest
+  }
+  if (Test-Path -LiteralPath $ShareDir) {
+    $shareLeft = @(Get-ChildItem -LiteralPath $ShareDir -Force)
+    if ($shareLeft.Count -eq 0) {
+      Remove-PathLoud $ShareDir
+    }
   }
   Write-Host "Uninstalled Agent Lounge OS from $Prefix"
 }

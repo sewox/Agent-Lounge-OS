@@ -221,14 +221,95 @@ fi
 echo "ok: missing manifest → non-zero uninstall"
 
 echo "== uninstall fails loudly: undeletable path =="
-# Make the share directory non-writable so rm of installed files fails.
+# Root bypasses directory write bits, so chmod a-w alone is not enough in the
+# docker matrix (uid 0). Prefer chattr/chflags when they actually stick; else
+# chmod a-w on the share dir and run uninstall as nobody/non-root.
 SHARE_DIR="$PREFIX/share/agent-lounge-os"
-chmod a-w "$SHARE_DIR"
+[[ -d "$SHARE_DIR" ]] || { echo "FAIL: SHARE_DIR missing before lock test: $SHARE_DIR" >&2; exit 1; }
+[[ -f "$MANIFEST" ]] || { echo "FAIL: manifest missing before lock test: $MANIFEST" >&2; exit 1; }
+
+LOCK_TARGET=""
+while IFS= read -r p || [[ -n "$p" ]]; do
+  [[ -n "$p" ]] || continue
+  [[ "$p" = "$MANIFEST" ]] && continue
+  if [[ -e "$p" || -L "$p" ]]; then
+    LOCK_TARGET="$p"
+    break
+  fi
+done <"$MANIFEST"
+[[ -n "$LOCK_TARGET" ]] || LOCK_TARGET="$MANIFEST"
+[[ -e "$LOCK_TARGET" || -L "$LOCK_TARGET" ]] \
+  || { echo "FAIL: lock target missing: $LOCK_TARGET" >&2; exit 1; }
+
+LOCK_MODE=""
+if [[ "$(uname -s)" = Linux ]] && command -v chattr >/dev/null 2>&1; then
+  if chattr +i "$LOCK_TARGET" 2>/dev/null; then
+    # Confirm the immutable bit stuck (needs CAP_LINUX_IMMUTABLE in docker).
+    if lsattr "$LOCK_TARGET" 2>/dev/null | awk '{print $1}' | grep -q i; then
+      LOCK_MODE=chattr
+    else
+      # +i did not stick (missing CAP_LINUX_IMMUTABLE); clear any partial state.
+      set +e
+      chattr -i "$LOCK_TARGET"
+      set -e
+      LOCK_MODE=""
+    fi
+  fi
+fi
+if [[ -z "$LOCK_MODE" && "$(uname -s)" = Darwin ]] && command -v chflags >/dev/null 2>&1; then
+  if chflags uchg "$LOCK_TARGET" 2>/dev/null; then
+    LOCK_MODE=chflags
+  fi
+fi
+if [[ -z "$LOCK_MODE" ]]; then
+  chmod a-w "$SHARE_DIR"
+  LOCK_MODE=chmod
+fi
+
+# When root + chmod lock: drop privileges so directory write bits are honored.
+# Probe helpers once (setpriv numeric ids first — works without a passwd entry).
+DROP_USER_CMD=""
+if [[ "$LOCK_MODE" = chmod && "$(id -u)" -eq 0 ]]; then
+  if command -v setpriv >/dev/null 2>&1 \
+    && setpriv --reuid=65534 --regid=65534 --clear-groups -- true 2>/dev/null; then
+    DROP_USER_CMD='setpriv --reuid=65534 --regid=65534 --clear-groups --'
+  elif command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1 \
+    && runuser -u nobody -- true 2>/dev/null; then
+    DROP_USER_CMD='runuser -u nobody --'
+  elif command -v su >/dev/null 2>&1 && id nobody >/dev/null 2>&1 \
+    && su nobody -s /bin/sh -c true 2>/dev/null; then
+    DROP_USER_CMD='su-nobody'
+  else
+    echo "FAIL: root host needs chattr/chflags, or setpriv/runuser/su nobody for undeletable-path test" >&2
+    exit 1
+  fi
+fi
+
+run_locked_uninstall() {
+  if [[ -n "$DROP_USER_CMD" ]]; then
+    if [[ "$DROP_USER_CMD" = 'su-nobody' ]]; then
+      su nobody -s /bin/sh -c "sh $(printf '%q' "$ROOT/install.sh") --uninstall --prefix $(printf '%q' "$PREFIX")" 2>&1
+      return $?
+    fi
+    # shellcheck disable=SC2086
+    $DROP_USER_CMD sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX" 2>&1
+    return $?
+  fi
+  sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX" 2>&1
+}
+
 set +e
-lock_out=$(sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX" 2>&1)
+lock_out=$(run_locked_uninstall)
 lock_rc=$?
 set -e
-chmod u+w "$SHARE_DIR"
+
+case "$LOCK_MODE" in
+  chattr) chattr -i "$LOCK_TARGET" ;;
+  chflags) chflags nouchg "$LOCK_TARGET" ;;
+  chmod) chmod u+w "$SHARE_DIR" ;;
+  *) echo "FAIL: unknown LOCK_MODE=$LOCK_MODE" >&2; exit 1 ;;
+esac
+
 if [[ "$lock_rc" -eq 0 ]]; then
   echo "FAIL: uninstall with undeletable paths exited 0" >&2
   echo "$lock_out" >&2
@@ -239,11 +320,12 @@ if ! printf '%s' "$lock_out" | grep -Eqi 'failed to remove|still present|uninsta
   echo "$lock_out" >&2
   exit 1
 fi
-echo "ok: undeletable path → non-zero uninstall"
+# Ensure the failed uninstall did not wipe the tree (retry path still valid).
+[[ -f "$MANIFEST" ]] || { echo "FAIL: manifest disappeared during lock test" >&2; exit 1; }
+echo "ok: undeletable path → non-zero uninstall (mode=$LOCK_MODE)"
 
 echo "== uninstall (every installed file) =="
-# Re-assert share dir is writable before the success-path uninstall.
-chmod u+w "$SHARE_DIR" 2>/dev/null || chmod u+w "$(dirname "$SHARE_DIR")"
+chmod u+w "$SHARE_DIR"
 sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX"
 for p in "${INSTALLED_FILES[@]}"; do
   if [[ -e "$p" || -L "$p" ]]; then
