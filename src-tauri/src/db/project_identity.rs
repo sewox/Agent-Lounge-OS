@@ -124,7 +124,11 @@ impl ProjectBind {
     }
 }
 
-/// Create identity tables (idempotent). Rebuilds legacy single-alias PK if needed.
+/// Create identity tables (idempotent).
+///
+/// Legacy `project_aliases` (single-column `alias` PK) is **not** rebuilt here —
+/// that upgrade runs inside [`migrate_project_ids_to_canonical`]'s transaction
+/// so a failed copy cannot DROP the old table after swallowing a SELECT error.
 pub fn migrate_project_identity(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -136,39 +140,58 @@ pub fn migrate_project_identity(conn: &Connection) -> Result<()> {
         );
         "#,
     )?;
-    ensure_alias_table(conn)?;
-    ensure_sentinel_projects(conn)?;
+    ensure_alias_table_present(conn)?;
+    if !alias_table_is_legacy(conn)? {
+        ensure_sentinel_projects(conn)?;
+    }
     Ok(())
 }
 
-fn ensure_alias_table(conn: &Connection) -> Result<()> {
-    let sql: Option<String> = conn
+fn alias_table_sql(conn: &Connection) -> Result<Option<String>> {
+    Ok(conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='project_aliases'",
             [],
             |row| row.get(0),
         )
-        .optional()?;
-    let Some(create_sql) = sql else {
-        conn.execute_batch(
-            r#"
-            CREATE TABLE project_aliases (
-              alias_key TEXT NOT NULL,
-              canonical_id TEXT NOT NULL,
-              alias_display TEXT NOT NULL,
-              PRIMARY KEY (alias_key, canonical_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_project_aliases_canonical
-              ON project_aliases(canonical_id);
-            "#,
-        )?;
-        return Ok(());
-    };
-    // Legacy: PRIMARY KEY (alias) with optional COLLATE NOCASE, no alias_key.
-    if create_sql.to_ascii_lowercase().contains("alias_key") {
+        .optional()?)
+}
+
+fn alias_table_is_legacy(conn: &Connection) -> Result<bool> {
+    match alias_table_sql(conn)? {
+        None => Ok(false),
+        Some(sql) => Ok(!sql.to_ascii_lowercase().contains("alias_key")),
+    }
+}
+
+/// Create modern `project_aliases` when missing; leave legacy tables for the
+/// transactional upgrade in [`upgrade_legacy_alias_table`].
+fn ensure_alias_table_present(conn: &Connection) -> Result<()> {
+    if alias_table_sql(conn)?.is_some() {
         return Ok(());
     }
-    // Preserve existing rows into the composite-key schema.
+    conn.execute_batch(
+        r#"
+        CREATE TABLE project_aliases (
+          alias_key TEXT NOT NULL,
+          canonical_id TEXT NOT NULL,
+          alias_display TEXT NOT NULL,
+          PRIMARY KEY (alias_key, canonical_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_aliases_canonical
+          ON project_aliases(canonical_id);
+        "#,
+    )?;
+    Ok(())
+}
+
+/// Rebuild legacy `PRIMARY KEY (alias)` → composite `(alias_key, canonical_id)`.
+/// Must run inside an open transaction (caller owns BEGIN/COMMIT/ROLLBACK).
+/// SELECT/copy errors propagate — the old table is not dropped on failure.
+fn upgrade_legacy_alias_table(conn: &Connection) -> Result<()> {
+    if !alias_table_is_legacy(conn)? {
+        return Ok(());
+    }
     conn.execute_batch(
         r#"
         CREATE TABLE project_aliases_new (
@@ -178,24 +201,27 @@ fn ensure_alias_table(conn: &Connection) -> Result<()> {
           PRIMARY KEY (alias_key, canonical_id)
         );
         "#,
-    )?;
-    let mut stmt = conn.prepare("SELECT alias, canonical_id FROM project_aliases")?;
-    // Legacy column might be `alias` only.
-    let legacy = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    });
-    if let Ok(rows) = legacy {
-        for row in rows {
-            let (alias, canonical) = row?;
-            let key = alias_key(&alias);
-            conn.execute(
-                r#"
-                INSERT OR IGNORE INTO project_aliases_new(alias_key, canonical_id, alias_display)
-                VALUES (?1, ?2, ?3)
-                "#,
-                params![key, canonical, alias],
-            )?;
-        }
+    )
+    .context("create project_aliases_new for legacy upgrade")?;
+    let mut stmt = conn
+        .prepare("SELECT alias, canonical_id FROM project_aliases")
+        .context("prepare legacy project_aliases SELECT")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("query legacy project_aliases rows")?;
+    for row in rows {
+        let (alias, canonical) = row.context("read legacy project_aliases row")?;
+        let key = alias_key(&alias);
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO project_aliases_new(alias_key, canonical_id, alias_display)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![key, canonical, alias],
+        )
+        .context("insert into project_aliases_new")?;
     }
     conn.execute_batch(
         r#"
@@ -204,7 +230,8 @@ fn ensure_alias_table(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_project_aliases_canonical
           ON project_aliases(canonical_id);
         "#,
-    )?;
+    )
+    .context("swap legacy project_aliases to modern schema")?;
     Ok(())
 }
 
@@ -271,6 +298,11 @@ pub fn canonicalize_repo_path(raw: &str) -> String {
     let unc = is_unc_path(trimmed);
     // Keep UNC server/share structure; still unify separators for identity.
     let unified = trimmed.replace('\\', "/");
+    if !unc && super::project_index::path_has_windows_drive(trimmed) {
+        // Windows drive paths: full Windows identity pipeline (slash unify + fold).
+        // Applies on every OS so `C:\Foo` and `c:/foo` share a key in tests/CI.
+        return windows_identity_key(trimmed);
+    }
     let resolved = if unc {
         // Do not call std canonicalize on UNC in tests / mixed hosts — lexical only.
         trim_trailing_slashes(&lexical_normalize_unc(&unified))
@@ -285,7 +317,16 @@ pub fn canonicalize_repo_path(raw: &str) -> String {
         };
         trim_trailing_slashes(&body)
     };
-    fold_identity_case(&resolved)
+    // UNC is case-insensitive on Windows; fold when building Win/mac identity.
+    if unc {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            unicode_case_fold_key(&resolved)
+        } else {
+            resolved
+        }
+    } else {
+        fold_identity_case(&resolved)
+    }
 }
 
 fn trim_trailing_slashes(path: &str) -> String {
@@ -338,16 +379,35 @@ fn lexical_normalize_unc(unified: &str) -> String {
     format!("//{}", stack.join("/"))
 }
 
-/// Unicode-aware case fold on macOS/Windows; preserve case on Linux.
-pub fn fold_identity_case(path: &str) -> String {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        // Rust `to_lowercase` is Unicode default case conversion (İ, ş, ß, …),
-        // not ASCII-only.
-        path.to_lowercase()
+/// Unicode case fold for identity keys (macOS/Windows).
+///
+/// `str::to_lowercase` is **not** case folding: U+0130 `İ` becomes `i` + U+0307
+/// (combining dot), so `İstanbul` would not equal `istanbul`. We map U+0130 → `i`
+/// and drop U+0307 so folded forms compare equal.
+pub fn unicode_case_fold_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\u{0130}' => out.push('i'), // LATIN CAPITAL LETTER I WITH DOT ABOVE
+            '\u{0307}' => {}             // COMBINING DOT ABOVE (from İ case maps)
+            c => {
+                for lower in c.to_lowercase() {
+                    if lower != '\u{0307}' {
+                        out.push(lower);
+                    }
+                }
+            }
+        }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
+    out
+}
+
+/// Case fold on macOS/Windows; preserve case on Linux.
+pub fn fold_identity_case(path: &str) -> String {
+    // `cfg!` keeps `unicode_case_fold_key` referenced on every OS (no dead_code).
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        unicode_case_fold_key(path)
+    } else {
         path.to_string()
     }
 }
@@ -355,14 +415,20 @@ pub fn fold_identity_case(path: &str) -> String {
 /// Alias lookup key — platform case policy.
 pub fn alias_key(alias: &str) -> String {
     let t = alias.trim();
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        t.to_lowercase()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        unicode_case_fold_key(t)
+    } else {
         t.to_string()
     }
+}
+
+/// Windows identity key pipeline (slash unify + lexical + Unicode fold).
+/// Used by tests and as the case-insensitive half of path identity on Win/macOS.
+pub fn windows_identity_key(raw: &str) -> String {
+    let stripped = strip_windows_extended_prefix(raw);
+    let unified = stripped.trim().replace('\\', "/");
+    let lex = trim_trailing_slashes(&lexical_normalize(&unified));
+    unicode_case_fold_key(&lex)
 }
 
 fn path_basename(path: &str) -> String {
@@ -696,6 +762,10 @@ pub fn migrate_project_ids_to_canonical(conn: &Connection) -> Result<u64> {
 }
 
 fn migrate_project_ids_to_canonical_inner(conn: &Connection) -> Result<u64> {
+    // Legacy alias rebuild must run inside this transaction (propagate errors;
+    // never DROP the old table after a swallowed SELECT failure).
+    upgrade_legacy_alias_table(conn)?;
+    ensure_sentinel_projects(conn)?;
     ensure_backup_tables(conn)?;
 
     let mut stmt = conn.prepare(
@@ -975,40 +1045,53 @@ mod tests {
     }
 
     #[test]
-    fn drive_letter_normalization_exercises_canonicalize() {
-        let n = canonicalize_repo_path(r"C:\Users\sercan\dev\..\Agent-Lounge-OS\");
-        assert!(
-            n.contains("Agent-Lounge-OS") || n.contains("agent-lounge-os"),
-            "{n}"
+    fn drive_letter_windows_rules_exact_keys() {
+        // Windows identity rules: slash unify + case fold — exact equality.
+        assert_eq!(windows_identity_key(r"C:\Foo"), "c:/foo");
+        assert_eq!(windows_identity_key(r"c:/foo"), "c:/foo");
+        assert_eq!(
+            windows_identity_key(r"C:\Foo"),
+            windows_identity_key(r"c:/foo")
         );
-        assert!(!n.contains('\\'), "{n}");
-        assert!(!n.starts_with(r"\\?\"), "{n}");
-        assert!(!n.ends_with('/'), "{n}");
-        // Drive letter retained as `C:` / `c:` prefix form after slash unify.
-        let lower = n.to_ascii_lowercase();
-        assert!(
-            lower.starts_with("c:/") || lower.contains("agent-lounge-os"),
-            "drive or folded path expected: {n}"
+        assert_ne!(
+            windows_identity_key(r"C:\Foo"),
+            windows_identity_key(r"D:\Foo"),
+            "different drives must not collide"
+        );
+        assert_eq!(windows_identity_key(r"D:\Foo"), "d:/foo");
+        // Trailing slash / dots under Windows rules.
+        assert_eq!(
+            windows_identity_key(r"C:\Users\dev\..\Foo\"),
+            "c:/users/foo"
         );
     }
 
     #[test]
-    fn unicode_case_fold_on_case_insensitive_platforms() {
-        let sample = "İstanbul/şŞ";
-        let folded = fold_identity_case(sample);
+    fn unicode_case_fold_istanbul_matches_istanbul() {
+        // Real case folding: İ (U+0130) must match ascii i — to_lowercase alone fails.
+        assert_eq!(
+            unicode_case_fold_key("İstanbul"),
+            unicode_case_fold_key("istanbul")
+        );
+        assert_eq!(unicode_case_fold_key("İstanbul"), "istanbul");
+        assert_ne!(
+            "İstanbul".to_lowercase(),
+            "istanbul",
+            "sanity: to_lowercase is NOT sufficient case folding"
+        );
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            assert_ne!(
-                folded,
-                sample.to_ascii_lowercase(),
-                "must not be ASCII-only"
+            assert_eq!(
+                fold_identity_case("İstanbul"),
+                fold_identity_case("istanbul")
             );
-            assert_eq!(folded, sample.to_lowercase());
-            assert!(folded.contains('ş') || folded.contains('i'), "{folded}");
+            assert_eq!(fold_identity_case("İstanbul"), "istanbul");
+            assert_eq!(alias_key("İstanbul"), alias_key("istanbul"));
         }
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(folded, sample, "Linux preserves case");
+            assert_eq!(fold_identity_case("İstanbul"), "İstanbul");
+            assert_ne!(alias_key("İstanbul"), alias_key("istanbul"));
         }
     }
 
@@ -1031,13 +1114,96 @@ mod tests {
         let mixed = canonicalize_repo_path("/tmp/Agent-Lounge-OS-Case");
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            assert_eq!(mixed, mixed.to_lowercase());
+            assert_eq!(mixed, unicode_case_fold_key("/tmp/Agent-Lounge-OS-Case"));
         }
         #[cfg(target_os = "linux")]
         {
             assert!(
                 mixed.contains("Agent-Lounge-OS-Case") || mixed.ends_with("Agent-Lounge-OS-Case")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_alias_table_upgrades_inside_migration_transaction() {
+        let store = ExperienceStore::memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // Force legacy schema.
+            conn.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS project_aliases;
+                CREATE TABLE project_aliases (
+                  alias TEXT PRIMARY KEY COLLATE NOCASE,
+                  canonical_id TEXT NOT NULL
+                );
+                INSERT INTO project_aliases(alias, canonical_id)
+                  VALUES ('Photo-Culling', '/tmp/photo');
+                DELETE FROM settings WHERE key LIKE 'migrations.project_id_canonical_v1%';
+                "#,
+            )
+            .unwrap();
+            assert!(alias_table_is_legacy(&conn).unwrap());
+            migrate_project_ids_to_canonical(&conn).unwrap();
+            assert!(!alias_table_is_legacy(&conn).unwrap());
+            let key = alias_key("Photo-Culling");
+            let canon: String = conn
+                .query_row(
+                    "SELECT canonical_id FROM project_aliases WHERE alias_key = ?1",
+                    params![key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(canon, "/tmp/photo");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_alias_upgrade_select_error_rolls_back() {
+        let store = ExperienceStore::memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // Legacy-shaped name but missing `alias` column → SELECT fails.
+            conn.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS project_aliases;
+                CREATE TABLE project_aliases (
+                  id TEXT PRIMARY KEY,
+                  canonical_id TEXT NOT NULL
+                );
+                INSERT INTO project_aliases(id, canonical_id) VALUES ('x', '/tmp/x');
+                DELETE FROM settings WHERE key LIKE 'migrations.project_id_canonical_v1%';
+                "#,
+            )
+            .unwrap();
+            assert!(alias_table_is_legacy(&conn).unwrap());
+            let err = migrate_project_ids_to_canonical(&conn).unwrap_err();
+            assert!(
+                err.to_string().contains("legacy")
+                    || err
+                        .chain()
+                        .any(|e| e.to_string().to_ascii_lowercase().contains("alias")),
+                "expected propagated SELECT error, got: {err:#}"
+            );
+            // Rolled back: legacy table still present, modern swap did not stick.
+            assert!(alias_table_is_legacy(&conn).unwrap());
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name='project_aliases_new'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "project_aliases_new must not survive rollback");
+            let done: Option<String> = conn
+                .query_row(
+                    "SELECT value_json FROM settings WHERE key = ?1",
+                    params![MIGRATION_PROJECT_ID_CANONICAL_V1],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert!(done.is_none());
         }
     }
 

@@ -28,8 +28,8 @@ Cursor / Claude Desktop
 
 | Kavram | Anlam |
 |--------|--------|
-| **Canonical ID** | Dunce-tarzı canonicalize edilmiş `repo_path` (symlink çözülür; Windows local’de `\\?\` yok; UNC korunur; trailing `/` silinir; macOS/Windows’ta **Unicode** case-fold; Linux’ta case korunur) |
-| **`project_aliases`** | Experience / CBM slug’ları → canonical id. Aynı slug iki repo’ya bağlanırsa **ambiguous** olur (sessiz overwrite yok). Alias case: Linux = case-sensitive; macOS/Windows = Unicode fold |
+| **Canonical ID** | Dunce-tarzı canonicalize edilmiş `repo_path` (symlink çözülür; Windows local’de `\\?\` yok; UNC korunur; trailing `/` silinir; macOS/Windows’ta **Unicode case fold** — `İ`/`istanbul` eşleşir, `to_lowercase` değil; Linux’ta case korunur) |
+| **`project_aliases`** | Experience / CBM slug’ları → canonical id. Aynı slug iki repo’ya bağlanırsa **ambiguous** olur (sessiz overwrite yok). Alias case: Linux = case-sensitive; macOS/Windows = Unicode fold. Legacy tablo upgrade’i canonical migrasyon transaction’ı içinde |
 | **displayName** | Lounge proje adı → `repo_path` basename → slug |
 | **`unclassified`** | Bilinmeyen slug; ambiguous alias; **veya** explicit `project_id` ile `active_file` / session `workspace_path` farklı indexed canonical’lara çözülürse (çatışma). Path-wins yok — uyarı görünür kalsın diye bilinçli seçim |
 | **`unindexed_placeholder`** | Path ipucu var ama indekslenmiş/keşfedilmiş `repo_path` yoksa |
