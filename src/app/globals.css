@@ -121,3 +121,35 @@ main [data-qa="panel"] {
   max-width: 100%;
   box-sizing: border-box;
 }
+
+/* Halted visual language (PR-DS-0): deliberately stopped ≠ error. */
+.ds-halted-hatch {
+  background-color: #3a1a1a;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 6px,
+    rgba(238, 125, 119, 0.28) 6px,
+    rgba(238, 125, 119, 0.28) 12px
+  );
+  background-size: 16.97px 16.97px;
+}
+
+@keyframes ds-halted-hatch-shift {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 16.97px 0;
+  }
+}
+
+.ds-halted-hatch-animate {
+  animation: ds-halted-hatch-shift 2.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ds-halted-hatch-animate {
+    animation: none;
+  }
+}
