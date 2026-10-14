@@ -58,6 +58,7 @@
   "pageCountMeta": "{{pages}} sayfa · {{experiences}} tecrübe",
   "lastUpdated": "Güncellendi {{value}}",
   "openProject": "Aç",
+  "identityWarning": "Proje kimliği uyarısı — kayıtlar sınıflandırılmamış veya indekssiz olabilir",
   "backToProjects": "Tüm projeler",
   "breadcrumbProjects": "Projeler",
   "searchPages": "Sayfalarda ara (başlık veya içerik)…",
