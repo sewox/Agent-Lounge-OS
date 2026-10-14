@@ -766,6 +766,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             message_params: null,
             port_mode: f.graphUiPortMode ?? "auto",
             owned_by_lounge: Boolean(f.graphUiStatus?.enabled),
+            daemon_mode: Boolean(f.graphUiStatus?.daemon_mode),
             ...f.graphUiStatus,
           };
         case "enable_graph_ui_cmd":

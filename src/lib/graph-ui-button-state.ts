@@ -17,14 +17,30 @@ export type GraphUiButtonStatus = {
   port_mode: GraphUiPortMode;
   ui_available: boolean;
   project_indexed: boolean;
+  /** Upstream shared coordination daemon is active — do not Enable/spawn. */
+  daemon_mode?: boolean;
 };
 
 /** Disable Enable only while busy, or when User mode has a real conflict. */
 export function isEnableGraphUiDisabled(
   busy: boolean,
-  status: Pick<GraphUiButtonStatus, "port_conflict" | "port_mode">,
+  status: Pick<GraphUiButtonStatus, "port_conflict" | "port_mode" | "daemon_mode">,
 ): boolean {
+  if (status.daemon_mode) {
+    // Daemon mode never offers Enable (Open existing only).
+    return true;
+  }
   return busy || (status.port_conflict && status.port_mode === "user");
+}
+
+/** Shared-daemon UI: hide Enable; surface Open / info instead. */
+export function shouldShowEnableGraphUi(
+  status: Pick<GraphUiButtonStatus, "ui_available" | "daemon_mode">,
+): boolean {
+  if (status.daemon_mode) {
+    return false;
+  }
+  return !status.ui_available;
 }
 
 /** Auto-mode early-return on conflict must not apply — only User mode blocks. */

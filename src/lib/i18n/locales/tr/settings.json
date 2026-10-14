@@ -66,6 +66,8 @@
   "graphStateDisabled": "Durum: kapalı · etkinleştirilince {{port}} portu kullanılır",
   "graphStateConflict": "Durum: {{port}} çakışması — yabancı dinleyici; Auto atlar, User değiştirmez",
   "graphAutoPortInfo": "{{busy}} başka bir süreç tarafından kullanılıyor; {{next}} kullanılacak",
+  "graphDaemonOpenExisting": "Paylaşılan codebase-memory-mcp daemon Graph UI’yi {{port}} portunda sunuyor. Lounge paylaşılan portu veya config’i değiştirmeden bunu açar.",
+  "graphDaemonSharedNoUi": "Paylaşılan codebase-memory-mcp daemon aktif. Lounge onun UI’sini başlatmaz veya yeniden yapılandırmaz (Antigravity ve diğer oturumların portunu değiştirirdi). UI’yi daemon üzerinden etkinleştirin, sonra buradan açın.",
   "graphMsgForeignUiUser": "Port {{port}} üzerinde başka bir codebase-memory-mcp (ör. Antigravity) çalışıyor — Lounge bunu sahiplenmez. User modunda port otomatik değiştirilmez; Ayarlar’dan başka bir port seçin.",
   "graphMsgPortBusyUser": "Port {{port}} başka bir süreç tarafından kullanılıyor. User modunda port otomatik değiştirilmez; Ayarlar’da Graph UI Port’u değiştirin veya o süreci kontrol edin.",
   "graphMsgBandExhausted": "Graph UI port bandı {{start}}–{{end}} tamamen dolu. Bir portu boşaltın veya Ayarlar’da User modunda sabit bir port seçin.",

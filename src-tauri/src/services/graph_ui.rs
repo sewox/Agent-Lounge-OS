@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex as AsyncMutex;
 
+use super::cbm_daemon::{probe_daemon_status_with_override, CbmDaemonStatus};
 use super::cbm_ui_config::{
     clear_snapshot_in_store, persist_snapshot_to_store, restore_cbm_ui_config,
     snapshot_cbm_ui_config_at, CbmUiConfigSnapshot, RestoreOutcome,
@@ -128,6 +129,9 @@ pub struct GraphUiState {
     cbm_config_snapshot: Mutex<Option<CbmUiConfigSnapshot>>,
     /// Test/prod override for shared CBM `config.json` path (avoids real HOME).
     cbm_config_path_override: Mutex<Option<PathBuf>>,
+    /// Test-only: inject a fake `daemon status` result (avoids process-global races).
+    #[cfg(any(test, feature = "test-helpers"))]
+    daemon_status_override: Mutex<Option<CbmDaemonStatus>>,
     /// Test-only: pre-bound LISTEN sockets handed to the next spawn on that port
     /// (avoids reserve→free→rebind races). Gated behind `test-helpers`.
     #[cfg(feature = "test-helpers")]
@@ -157,9 +161,38 @@ impl GraphUiState {
             }),
             cbm_config_snapshot: Mutex::new(None),
             cbm_config_path_override: Mutex::new(None),
+            #[cfg(any(test, feature = "test-helpers"))]
+            daemon_status_override: Mutex::new(None),
             #[cfg(feature = "test-helpers")]
             listen_handoffs: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Inject a fake `daemon status` for tests (per GraphUiState — no global races).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_daemon_status_override(&self, status: Option<CbmDaemonStatus>) {
+        let mut guard = match self.daemon_status_override.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = status;
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    fn daemon_status_override(&self) -> Option<CbmDaemonStatus> {
+        match self.daemon_status_override.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    fn probe_cbm_daemon(&self, binary: &Path) -> CbmDaemonStatus {
+        #[cfg(any(test, feature = "test-helpers"))]
+        let override_status = self.daemon_status_override();
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        let override_status: Option<CbmDaemonStatus> = None;
+        probe_daemon_status_with_override(binary, override_status.as_ref())
+            .unwrap_or_else(|_| CbmDaemonStatus::inactive())
     }
 
     /// Stage a reserved listener for the next Graph UI child on this port (tests).
@@ -377,6 +410,9 @@ pub struct GraphUiStatus {
     pub message_params: Option<serde_json::Map<String, serde_json::Value>>,
     pub port_mode: GraphUiPortMode,
     pub owned_by_lounge: bool,
+    /// Upstream v0.11.0+ shared coordination daemon is active (`daemon status`).
+    #[serde(default)]
+    pub daemon_mode: bool,
 }
 
 /// Saf tercih çözümleyici — store I/O yok (test edilebilir).
@@ -550,9 +586,10 @@ pub async fn graph_ui_status(
     let root = project_root.map(str::to_string);
     let mode = state.port_mode();
     let child_pid = state.spawned_child_pid();
+    let daemon = state.probe_cbm_daemon(bridge.binary_path());
     state
         .status_single_flight(|| async move {
-            graph_ui_status_inner(&bridge, root.as_deref(), mode, child_pid).await
+            graph_ui_status_inner(&bridge, root.as_deref(), mode, child_pid, daemon).await
         })
         .await
 }
@@ -562,6 +599,7 @@ async fn graph_ui_status_inner(
     project_root: Option<&str>,
     port_mode: GraphUiPortMode,
     child_pid: Option<u32>,
+    daemon: CbmDaemonStatus,
 ) -> GraphUiStatus {
     let preferred = bridge.http_port();
     let binary_found = bridge.binary_path().is_file();
@@ -580,7 +618,12 @@ async fn graph_ui_status_inner(
             message_params: None,
             port_mode,
             owned_by_lounge: port_owned_by_lounge(preferred, child_pid),
+            daemon_mode: false,
         };
+    }
+
+    if daemon.is_daemon_mode() {
+        return graph_ui_status_daemon_mode(bridge, project_root, port_mode, preferred, daemon).await;
     }
 
     let classified = classify_port_status(
@@ -625,6 +668,72 @@ async fn graph_ui_status_inner(
         message_params: classified.message_params,
         port_mode,
         owned_by_lounge,
+        daemon_mode: false,
+    }
+}
+
+/// Daemon mode: report shared UI availability; never claim ownership or remap ports.
+async fn graph_ui_status_daemon_mode(
+    bridge: &MemoryBridge,
+    project_root: Option<&str>,
+    port_mode: GraphUiPortMode,
+    preferred: u16,
+    daemon: CbmDaemonStatus,
+) -> GraphUiStatus {
+    let port = daemon.ui_port.unwrap_or(preferred);
+    let ui_available = if daemon.ui_disabled {
+        false
+    } else if daemon.ui_port.is_some() {
+        probe_ui_config(port).await
+    } else {
+        // Active daemon without a configured UI line — still do not spawn.
+        false
+    };
+
+    let (message_key, message_params) = if ui_available {
+        (
+            Some("graphDaemonOpenExisting".into()),
+            Some(msg_params(&[("port", port.into())])),
+        )
+    } else {
+        (
+            Some("graphDaemonSharedNoUi".into()),
+            Some(msg_params(&[("port", port.into())])),
+        )
+    };
+
+    let cbm_project_name = if ui_available {
+        if let Some(root) = project_root.filter(|s| !s.trim().is_empty()) {
+            match resolve_cbm_project_name(bridge, Path::new(root)).await {
+                Ok(name) => name,
+                Err(err) => {
+                    log::debug!("cbm project eşlemesi (daemon): {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    GraphUiStatus {
+        binary_found: true,
+        ui_available,
+        project_indexed: cbm_project_name.is_some(),
+        cbm_project_name,
+        port,
+        // Not an error — shared daemon must not be remapped by Lounge.
+        port_conflict: false,
+        conflict_message: None,
+        info_message: None,
+        remap_from_port: None,
+        message_key,
+        message_params,
+        port_mode,
+        owned_by_lounge: false,
+        daemon_mode: true,
     }
 }
 
@@ -1104,6 +1213,10 @@ pub async fn spawn_graph_ui_on_port_with_store(
 
 /// Graph UI'yi pencere açmadan başlatır (test + enable_graph_ui çekirdeği).
 /// `band` enjekte edilebilir — CI'da 18749 meşgul olsa da ardışık boş port çifti kullanılır.
+///
+/// When a shared coordination daemon is active (v0.11.0+ `daemon status`), this
+/// **never** spawns `--ui=true --port=N` and **never** mutates shared config —
+/// it only returns the existing daemon UI port when `/api/ui-config` is up.
 pub async fn enable_graph_ui_headless(
     state: &GraphUiState,
     bridge: &MemoryBridge,
@@ -1114,6 +1227,11 @@ pub async fn enable_graph_ui_headless(
     let preferred = bridge.http_port();
     let child_pid = state.spawned_child_pid();
     let band_start = *band.start();
+
+    let daemon = state.probe_cbm_daemon(bridge.binary_path());
+    if daemon.is_daemon_mode() {
+        return enable_graph_ui_daemon_mode(bridge, &daemon).await;
+    }
 
     if port_owned_by_lounge(preferred, child_pid) && probe_ui_config(preferred).await {
         return Ok(preferred);
@@ -1188,8 +1306,32 @@ pub async fn enable_graph_ui_headless(
     Ok(live_port)
 }
 
+/// Shared-daemon path: never spawn, never write config.json / change UI port.
+async fn enable_graph_ui_daemon_mode(
+    bridge: &MemoryBridge,
+    daemon: &CbmDaemonStatus,
+) -> Result<u16> {
+    let port = daemon
+        .ui_port
+        .unwrap_or_else(|| bridge.http_port())
+        .max(1);
+    if daemon.ui_disabled || daemon.ui_port.is_none() {
+        bail!(
+            "graphDaemonSharedNoUi"
+        );
+    }
+    if !probe_ui_config(port).await {
+        bail!("graphDaemonSharedNoUi");
+    }
+    // Point the bridge at the existing shared UI for subsequent opens — do not
+    // persist into CBM config.json (daemon already owns that file).
+    bridge.set_http_port(port);
+    Ok(port)
+}
+
 /// `--ui=true --port=N` spawn; stdin piped (kapanmaz). Hazır olmazsa çocuğu öldürür.
 /// Auto: band seçimi + bind yarışında 1 retry. User: conflict'te asla port değiştirmez.
+/// Daemon mode: open existing shared UI only (no spawn / no config mutation).
 pub async fn enable_graph_ui(
     app: &AppHandle,
     state: &GraphUiState,
@@ -1573,6 +1715,7 @@ mod tests {
                                 message_params: None,
                                 port_mode: GraphUiPortMode::Auto,
                                 owned_by_lounge: false,
+                                daemon_mode: false,
                             }
                         }
                     })

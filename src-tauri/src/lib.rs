@@ -1621,6 +1621,19 @@ async fn enable_graph_ui_cmd(
                 .unwrap_or_else(|| format!("Port {} is busy", status.port))
         }));
     }
+    // Shared daemon: Enable becomes "open existing" — never spawn / mutate config.
+    if status.daemon_mode {
+        if !status.ui_available {
+            return Err(status
+                .message_key
+                .unwrap_or_else(|| "graphDaemonSharedNoUi".into()));
+        }
+        let Some(name) = status.cbm_project_name else {
+            return Err("Index workspace first".into());
+        };
+        return open_or_focus_graph_window(&app, graph.inner(), status.port, &name)
+            .map_err(|err| err.to_string());
+    }
     enable_graph_ui(
         &app,
         graph.inner(),

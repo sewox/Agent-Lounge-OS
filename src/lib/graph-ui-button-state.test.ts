@@ -7,6 +7,7 @@ import {
   isEnableGraphUiDisabled,
   resolveGraphUiStatusMessage,
   shouldBlockEnableOnConflict,
+  shouldShowEnableGraphUi,
 } from "./graph-ui-button-state.ts";
 import { GraphUiButtonView } from "./graph-ui-button-view.ts";
 
@@ -14,6 +15,7 @@ const labels = {
   enable: "Enable Graph UI",
   enableWithPort: "Enable Graph UI · 18750",
   open: "Open 3D Graph",
+  openExisting: "Open existing Graph UI",
   indexFirst: "Index workspace first",
   busyEllipsis: "…",
 };
@@ -44,6 +46,25 @@ describe("graph-ui-button-state", () => {
   it("disables while busy regardless of mode", () => {
     assert.equal(
       isEnableGraphUiDisabled(true, { port_conflict: false, port_mode: "auto" }),
+      true,
+    );
+  });
+
+  it("hides Enable in shared daemon mode and keeps Open existing", () => {
+    assert.equal(
+      shouldShowEnableGraphUi({ ui_available: false, daemon_mode: true }),
+      false,
+    );
+    assert.equal(
+      shouldShowEnableGraphUi({ ui_available: false, daemon_mode: false }),
+      true,
+    );
+    assert.equal(
+      isEnableGraphUiDisabled(false, {
+        port_conflict: false,
+        port_mode: "auto",
+        daemon_mode: true,
+      }),
       true,
     );
   });
@@ -193,6 +214,38 @@ describe("GraphUiButtonView", () => {
     assert.match(html, /Antigravity/);
     assert.match(html, /title="[^"]*Antigravity[^"]*"/);
     assert.doesNotMatch(html, /data-qa="graph-ui-auto-info"/);
+  });
+
+  it("renders Open existing (not Enable) when shared daemon UI is up", () => {
+    const html = renderToStaticMarkup(
+      createElement(GraphUiButtonView, {
+        status: {
+          port: 9749,
+          port_conflict: false,
+          conflict_message: null,
+          message_key: "graphDaemonOpenExisting",
+          message_params: { port: 9749 },
+          info_message: null,
+          remap_from_port: null,
+          port_mode: "auto",
+          ui_available: true,
+          project_indexed: true,
+          daemon_mode: true,
+        },
+        busy: false,
+        infoNote:
+          "Shared codebase-memory-mcp daemon is serving Graph UI on port 9749. Lounge will open it without changing the shared port or config.",
+        conflictNote: null,
+        labels,
+        onEnable: () => undefined,
+        onOpen: () => undefined,
+      }),
+    );
+    assert.doesNotMatch(html, /data-qa="graph-ui-enable"/);
+    assert.match(html, /data-qa="graph-ui-open"/);
+    assert.match(html, /Open existing Graph UI/);
+    assert.match(html, /data-qa="graph-ui-auto-info"/);
+    assert.match(html, /without changing the shared port/);
   });
 
   it("renders conflict note for Auto band-exhausted (port_conflict)", () => {
