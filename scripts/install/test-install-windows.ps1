@@ -80,8 +80,11 @@ try {
     Write-Host "ok: checksum mismatch rejected"
   }
   if ($failed) { throw 'install succeeded with bad SHA256SUMS' }
-  Remove-Item -Recurse -Force $BadDir, $BadPrefix -ErrorAction Stop
-
+  foreach ($d in @($BadDir, $BadPrefix)) {
+    if (Test-Path -LiteralPath $d) {
+      Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction Stop
+    }
+  }
   Write-Host "== uninstall (NSIS) =="
   $env:LOUNGE_DOWNLOAD_DIR = $FixtureDir
   & "$Root\install.ps1" -Uninstall -Prefix $Prefix
