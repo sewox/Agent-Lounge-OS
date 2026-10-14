@@ -637,6 +637,11 @@ mod tests {
     #[tokio::test]
     async fn retry_backoff_persists_and_gives_up() {
         set_test_backoff_ms(Some(5));
+        // Override must affect the same helper the worker sleeps on.
+        assert_eq!(next_retry_delay(0), Duration::from_millis(5));
+        assert_eq!(next_retry_delay(2), Duration::from_millis(5));
+        assert_eq!(TITLE_BACKOFF_SECS, [2, 5, 15]);
+
         let store = ExperienceStore::memory().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let rec = sample_record(
@@ -647,19 +652,37 @@ mod tests {
         );
         store.insert_record(rec).await.unwrap();
 
+        // Instant HTTP 500 (not connection-refused): Windows TCP to a closed port
+        // can take ~2s/attempt and blow a wall-clock budget under parallel CI.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for _ in 0..TITLE_MAX_RETRIES as usize + 1 {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = vec![0u8; 512];
+                    let _ = stream.read(&mut buf).await;
+                    let body = "{\"error\":\"boom\"}";
+                    let response = format!(
+                        "HTTP/1.1 500 ERR\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            }
+        });
+        let endpoint = format!("http://127.0.0.1:{port}");
+
         let started = std::time::Instant::now();
-        let endpoint = "http://127.0.0.1:9";
-        let _ = generate_and_apply_for_tests(&store, endpoint, &id, "needs title eventually").await;
+        let _ =
+            generate_and_apply_for_tests(&store, &endpoint, &id, "needs title eventually").await;
         let elapsed = started.elapsed();
         set_test_backoff_ms(None);
 
-        // 3 retries × 5ms backoff (+ connect fails) — must not use production 2+5+15s.
+        // 3 × 5ms backoff ≪ production 2+5+15s sleeps.
         assert!(
-            elapsed < Duration::from_secs(3),
-            "backoff override not applied: {elapsed:?}"
+            elapsed < Duration::from_secs(5),
+            "expected fast overridden backoff, got {elapsed:?}"
         );
-        // Documented production delays still map correctly.
-        assert_eq!(TITLE_BACKOFF_SECS, [2, 5, 15]);
 
         let (attempts, next, give_up) = store.title_retry_state(id.clone()).await.unwrap();
         assert!(give_up, "must give up after max retries");
