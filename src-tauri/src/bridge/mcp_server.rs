@@ -1229,15 +1229,12 @@ impl McpServer {
         tokio::task::spawn_blocking(move || {
             let conn = store.conn.lock().expect("experience db lock");
             let hint_refs: Vec<&str> = hints.iter().map(|s| s.as_str()).collect();
-            bind_write_project_id(
-                &conn,
-                explicit_owned.as_deref(),
-                &hint_refs,
-                |path| match resolve_path_hint_for_bind(&conn, path)? {
+            bind_write_project_id(&conn, explicit_owned.as_deref(), &hint_refs, |path| {
+                match resolve_path_hint_for_bind(&conn, path)? {
                     Some(id) => prefer_canonical(&conn, &id).map(Some),
                     None => Ok(None),
-                },
-            )
+                }
+            })
         })
         .await
         .context("resolve_project_bind join")?
@@ -1997,10 +1994,7 @@ mod tests {
             .expect("resp");
         let val: Value = serde_json::from_str(&resp).unwrap();
         assert_ne!(val["result"]["isError"], true);
-        assert_eq!(
-            val["result"]["structuredContent"]["project_id"],
-            expected
-        );
+        assert_eq!(val["result"]["structuredContent"]["project_id"], expected);
         assert_eq!(
             val["result"]["structuredContent"]["display_name"],
             "auto-demo"
@@ -2040,7 +2034,10 @@ mod tests {
         assert_eq!(body["project_id"], crate::db::PROJECT_ID_UNCLASSIFIED);
         assert_eq!(body["identity_kind"], "unclassified");
         assert!(
-            body["project_warning"].as_str().unwrap_or("").contains("unclassified"),
+            body["project_warning"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unclassified"),
             "warning missing: {body}"
         );
         // Prove the row was not stored under the free-form slug.

@@ -93,11 +93,7 @@ pub fn migrate_project_identity(conn: &Connection) -> Result<()> {
 
 fn ensure_sentinel_projects(conn: &Connection) -> Result<()> {
     for (id, name, kind) in [
-        (
-            PROJECT_ID_UNCLASSIFIED,
-            "Unclassified",
-            "unclassified",
-        ),
+        (PROJECT_ID_UNCLASSIFIED, "Unclassified", "unclassified"),
         (
             PROJECT_ID_UNINDEXED_PLACEHOLDER,
             "Unindexed",
@@ -410,8 +406,8 @@ fn bind_from_matched(conn: &Connection, canonical_id: &str) -> Result<ProjectBin
             ProjectBindKind::UnindexedPlaceholder,
         ));
     }
-    let display = lookup_display_name(conn, canonical_id)?
-        .unwrap_or_else(|| path_basename(canonical_id));
+    let display =
+        lookup_display_name(conn, canonical_id)?.unwrap_or_else(|| path_basename(canonical_id));
     Ok(ProjectBind {
         canonical_id: canonical_id.to_string(),
         kind: ProjectBindKind::Canonical,
@@ -445,10 +441,7 @@ pub fn migrate_project_ids_to_canonical(conn: &Connection) -> Result<u64> {
             |row| row.get(0),
         )
         .optional()?;
-    if matches!(
-        done.as_deref(),
-        Some("1") | Some("true") | Some("\"1\"")
-    ) {
+    if matches!(done.as_deref(), Some("1") | Some("true") | Some("\"1\"")) {
         return Ok(0);
     }
 
@@ -526,10 +519,7 @@ pub fn migrate_project_ids_to_canonical(conn: &Connection) -> Result<u64> {
     conn.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-        params![
-            MIGRATION_PROJECT_ID_CANONICAL_V1_BACKUP,
-            backup.to_string()
-        ],
+        params![MIGRATION_PROJECT_ID_CANONICAL_V1_BACKUP, backup.to_string()],
     )?;
     conn.execute(
         "INSERT INTO settings(key, value_json) VALUES (?1, ?2)
@@ -637,7 +627,9 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            assert!(mixed.contains("Agent-Lounge-OS-Case") || mixed.ends_with("Agent-Lounge-OS-Case"));
+            assert!(
+                mixed.contains("Agent-Lounge-OS-Case") || mixed.ends_with("Agent-Lounge-OS-Case")
+            );
         }
     }
 
@@ -782,9 +774,12 @@ mod tests {
         let canonical = {
             let conn = store.conn.lock().unwrap();
             migrate_project_identity(&conn).unwrap();
-            register_path_project(&conn, "Agent Lounge OS", &root.to_string_lossy(), &[
-                "agent-lounge-os",
-            ])
+            register_path_project(
+                &conn,
+                "Agent Lounge OS",
+                &root.to_string_lossy(),
+                &["agent-lounge-os"],
+            )
             .unwrap()
         };
         let bind = {

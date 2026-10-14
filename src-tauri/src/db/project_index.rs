@@ -1113,8 +1113,12 @@ fn register_discovered_project_blocking(
     if repo.is_empty() {
         anyhow::bail!("repo_path boş");
     }
-    let canonical =
-        crate::db::project_identity::register_path_project(conn, lounge_name, repo, &[lounge_name])?;
+    let canonical = crate::db::project_identity::register_path_project(
+        conn,
+        lounge_name,
+        repo,
+        &[lounge_name],
+    )?;
     let exists: bool = conn
         .query_row(
             "SELECT 1 FROM project_index WHERE project_id = ?1 LIMIT 1",
@@ -1418,17 +1422,14 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
 }
 
 fn vault_identity_labels(conn: &Connection, project_id: &str) -> (String, Option<String>) {
-    let warning = if project_id
-        .eq_ignore_ascii_case(crate::db::PROJECT_ID_UNCLASSIFIED)
-    {
+    let warning = if project_id.eq_ignore_ascii_case(crate::db::PROJECT_ID_UNCLASSIFIED) {
         Some(
             "Records under unclassified — project_id did not match a known canonical repo path."
                 .into(),
         )
     } else if project_id.eq_ignore_ascii_case(crate::db::PROJECT_ID_UNINDEXED_PLACEHOLDER) {
         Some(
-            "Records under unindexed_placeholder — no indexed repo_path matched this write."
-                .into(),
+            "Records under unindexed_placeholder — no indexed repo_path matched this write.".into(),
         )
     } else {
         None
