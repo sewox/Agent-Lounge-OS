@@ -1,6 +1,16 @@
-import type { Page } from "@playwright/test";
+import type { Page, Expect } from "@playwright/test";
 
 export type Rect = { x: number; y: number; w: number; h: number };
+
+/**
+ * Canonical viewports for design-system / layout gates (D1–D3 from qa-plan).
+ * D0 (1280×800) remains covered by the default Playwright project matrix.
+ */
+export const LAYOUT_VIEWPORTS = {
+  D1: { width: 1512, height: 982 },
+  D2: { width: 1920, height: 1080 },
+  D3: { width: 1080, height: 1920 },
+} as const;
 
 export type LayoutMetrics = {
   route: string;
@@ -299,6 +309,28 @@ export function formatLayoutFailure(m: LayoutMetrics): string {
   }
   if (m.l6_pass === false) fails.push(`L6 portrait panels not >=95% content width`);
   return fails.join("; ") || "ok";
+}
+
+/**
+ * Shared L1–L6 assert helper — usable from any Playwright spec.
+ * Thresholds live only in `measureLayout` / this module; callers must not redefine them.
+ */
+export async function assertLayoutL1toL6(
+  page: Page,
+  route: string,
+  expect: Expect,
+): Promise<LayoutMetrics> {
+  const metrics = await measureLayout(page, route);
+  const fail = formatLayoutFailure(metrics);
+  expect(metrics.l1_pass, `L1: ${fail}`).toBe(true);
+  expect(metrics.l2_pass, `L2: ${fail}`).toBe(true);
+  expect(metrics.l3_pass, `L3: ${fail}`).toBe(true);
+  expect(metrics.l4_pass, `L4: ${fail}`).toBe(true);
+  expect(metrics.l5_pass, `L5: ${fail}`).toBe(true);
+  if (metrics.l6_pass !== null) {
+    expect(metrics.l6_pass, `L6: ${fail}`).toBe(true);
+  }
+  return metrics;
 }
 
 // Silence unused helper warning in some bundlers.
