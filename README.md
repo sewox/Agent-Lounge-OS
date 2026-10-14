@@ -127,7 +127,31 @@ Logo: [`public/logo.png`](public/logo.png)
 
 ## Kurulum
 
-### Önkoşullar
+### Script installer (rootless, önerilen)
+
+Paket yöneticisine veya root’a ihtiyaç duymadan GitHub Releases’ten platform artifact’ini indirir, **SHA256SUMS ile zorunlu doğrular** ve kullanıcı dizinine kurar (WrongStack tarzı; AGEZT/apt+systemd değil).
+
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sewox/Agent-Lounge-OS/main/install.sh | sh
+```
+
+**Windows (PowerShell, yönetici gerekmez):**
+
+```powershell
+irm https://raw.githubusercontent.com/sewox/Agent-Lounge-OS/main/install.ps1 | iex
+```
+
+| | Linux | macOS | Windows |
+|---|--------|--------|---------|
+| Artifact | `Agent-Lounge-OS-linux-<arch>.AppImage` | `Agent-Lounge-OS-macos-<arch>.app.tar.gz` | `Agent-Lounge-OS-windows-<arch>-setup.exe` |
+| Hedef | `~/.local` (bin + `.desktop` + icon) | `~/Applications/*.app` + `~/.local/bin` shim | `%LOCALAPPDATA%\AgentLounge` |
+| Bayraklar | `--uninstall` · `--version <v>` · `--prefix <dir>` | aynı | `-Uninstall` · `-Version` · `-Prefix` |
+
+Ortam: `LOUNGE_VERSION`, `LOUNGE_INSTALL_PREFIX`, `LOUNGE_DOWNLOAD_BASE` (ayna). İsteğe bağlı FUSE gibi bağımlılıklar için installer `/etc/os-release` + paket yöneticisini (apt / dnf / yum / zypper / pacman / apk) tespit eder ve **yalnızca açık yes/no** sonrası kurar — apt varsayılmaz. Alpine/musl AppImage desteklenmez (net hata). Yol haritası: **Minisign** imza, `update` alt komutu (henüz yok).
+
+### Önkoşullar (kaynaktan geliştirme)
 
 | Bileşen | Not |
 |---------|-----|
@@ -137,7 +161,7 @@ Logo: [`public/logo.png`](public/logo.png)
 | **NATS Server** | Yerel bus (`4222` / monitor `8222`) — uygulama yaşam döngüsünü de yönetebilir |
 | **LMR** | Lounge’a özel Ollama-uyumlu binary; host Ollama’dan ayrı dizin |
 
-### Hızlı başlangıç
+### Hızlı başlangıç (kaynak)
 
 ```bash
 git clone <repo-url> Agent-Lounge-OS

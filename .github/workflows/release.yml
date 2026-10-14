@@ -1,0 +1,246 @@
+# Tag release publisher (PR-Install-1).
+# Builds platform assets, renames them to the stable names expected by
+# install.sh / install.ps1, generates SHA256SUMS (mandatory for installers),
+# and uploads install scripts + assets to the GitHub Release.
+#
+# Does NOT rename or replace any of the 16 required PR checks.
+# Minisign signing is on the roadmap (not implemented here).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0); defaults to the pushed tag"
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+  NO_STRIP: "true"
+  CBM_RELEASE: "v0.11.0"
+  CBM_ASSET: "codebase-memory-mcp-linux-amd64-portable.tar.gz"
+  CBM_SHA256: "1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683"
+
+jobs:
+  linux:
+    name: Release Linux AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        timeout-minutes: 26
+        run: bash scripts/ci/install-linux-build-deps.sh
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch real codebase-memory-mcp (linux-amd64)
+        run: |
+          set -euo pipefail
+          URL="https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_RELEASE}/${CBM_ASSET}"
+          mkdir -p bridge
+          TMP="$(mktemp -d)"
+          curl -fsSL "$URL" -o "$TMP/mcp.tar.gz"
+          echo "${CBM_SHA256}  $TMP/mcp.tar.gz" | sha256sum -c -
+          tar -xzf "$TMP/mcp.tar.gz" -C "$TMP"
+          BIN="$(find "$TMP" -type f -name 'codebase-memory-mcp' | head -n1)"
+          test -n "$BIN"
+          install -m 755 "$BIN" bridge/codebase-memory-mcp
+          bash src-tauri/scripts/prepare-sidecar.sh
+
+      - name: Build Tauri Linux AppImage
+        run: npm run tauri -- build --bundles appimage
+
+      - name: Stage canonical Linux asset
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          src=$(ls -1 src-tauri/target/release/bundle/appimage/*.AppImage | head -n1)
+          test -n "$src"
+          cp -v "$src" dist-release/Agent-Lounge-OS-linux-x86_64.AppImage
+          bash scripts/install/generate-sha256sums.sh dist-release dist-release/SHA256SUMS.linux
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: dist-release/
+          if-no-files-found: error
+
+  macos:
+    name: Release macOS app
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Stage sidecar stub (mac release packaging)
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Build Tauri macOS app
+        run: npm run tauri -- build --bundles app
+
+      - name: Stage canonical macOS asset
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          arch=$(uname -m)
+          case "$arch" in
+            arm64|aarch64) canon=Agent-Lounge-OS-macos-aarch64.app.tar.gz ;;
+            x86_64) canon=Agent-Lounge-OS-macos-x86_64.app.tar.gz ;;
+            *) echo "unsupported mac arch $arch" >&2; exit 1 ;;
+          esac
+          app=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' | head -n1)
+          test -n "$app"
+          tar -czf "dist-release/$canon" -C "$(dirname "$app")" "$(basename "$app")"
+          bash scripts/install/generate-sha256sums.sh dist-release dist-release/SHA256SUMS.macos
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: dist-release/
+          if-no-files-found: error
+
+  windows:
+    name: Release Windows setup
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Stage sidecar stub (windows release packaging)
+        shell: bash
+        run: bash src-tauri/scripts/prepare-sidecar.sh --stub
+
+      - name: Build Tauri Windows NSIS
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Stage canonical Windows asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          src=$(find src-tauri/target/release/bundle/nsis -type f -name '*.exe' | head -n1)
+          test -n "$src"
+          cp -v "$src" dist-release/Agent-Lounge-OS-windows-x64-setup.exe
+          bash scripts/install/generate-sha256sums.sh dist-release dist-release/SHA256SUMS.windows
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: dist-release/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release + SHA256SUMS
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Merge assets and generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          find artifacts -type f \( \
+            -name 'Agent-Lounge-OS-*.AppImage' -o \
+            -name 'Agent-Lounge-OS-*.app.tar.gz' -o \
+            -name 'Agent-Lounge-OS-*-setup.exe' \
+          \) -exec cp -v {} dist-release/ \;
+          cp install.sh install.ps1 dist-release/
+          chmod +x dist-release/install.sh scripts/install/generate-sha256sums.sh
+          bash scripts/install/generate-sha256sums.sh dist-release
+          ls -lah dist-release
+          # Every uploaded binary/script asset that installers fetch must be listed
+          # except the install scripts themselves (fetched from raw/main or release).
+          test -f dist-release/SHA256SUMS
+          test -s dist-release/SHA256SUMS
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Agent Lounge OS ${{ steps.tag.outputs.tag }}
+          draft: false
+          generate_release_notes: true
+          # Upload whatever this tag produced (arch matrix may omit some names).
+          # SHA256SUMS always lists exactly the binary assets present.
+          files: dist-release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

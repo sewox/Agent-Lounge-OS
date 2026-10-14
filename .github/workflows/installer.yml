@@ -1,0 +1,90 @@
+# Installer smoke tests (PR-Install-1). Non-required check name — does not
+# rename or replace any of the 16 branch-protection required checks.
+# Container matrix covers debian/ubuntu/fedora/opensuse/arch/alpine with
+# explicit package-manager detection (never assumes apt).
+
+name: Installer
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-distros:
+    name: Installer Linux (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian
+            image: debian:bookworm-slim
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl coreutils findutils
+          - distro: ubuntu
+            image: ubuntu:24.04
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl coreutils findutils
+          - distro: fedora
+            image: fedora:41
+            setup: dnf install -y bash ca-certificates curl findutils
+          - distro: opensuse
+            image: opensuse/leap:15.6
+            setup: zypper --non-interactive install -y bash curl findutils gzip tar
+          - distro: arch
+            image: archlinux:latest
+            setup: pacman -Sy --noconfirm bash curl findutils tar gzip
+          - distro: alpine
+            image: alpine:3.20
+            setup: apk add --no-cache bash curl coreutils findutils tar gzip
+    container:
+      image: ${{ matrix.image }}
+      options: --user root
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install fixture tooling (${{ matrix.distro }})
+        run: |
+          set -euo pipefail
+          ${{ matrix.setup }}
+
+      - name: Run installer fixture tests
+        run: |
+          set -euo pipefail
+          chmod +x install.sh scripts/install/*.sh
+          bash scripts/install/test-install-unix.sh
+
+  macos:
+    name: Installer macOS
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run installer fixture tests
+        run: |
+          set -euo pipefail
+          chmod +x install.sh scripts/install/*.sh
+          bash scripts/install/test-install-unix.sh
+
+  windows:
+    name: Installer Windows
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run installer fixture tests
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\install\test-install-windows.ps1

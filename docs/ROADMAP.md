@@ -18,3 +18,11 @@ Sayfa ve deneyim aramasını SQLite `LIKE` sorgularından **FTS5** tam metin ind
 
 - **NATS ileride sidecar, LMR opsiyonel kalır** — NATS süreci ayrı bir sidecar olarak yönetilebilir; Lounge Model Runner (LMR) yerel inference için isteğe bağlı kalır.
 - **Global `i18n.t` yasak, `useTranslation` hook kullanılacak** — bileşenlerde doğrudan global çeviri erişimi yerine React hook tabanlı i18n; ESLint kuralı değerlendirilecek.
+
+---
+
+## Installer takip (PR-Install-1 sonrası)
+
+- **Minisign** — release asset imzalama + installer doğrulama (SHA256SUMS zorunlu kaldığı sürece ek katman).
+- **`update` alt komutu** — WrongStack’teki gibi kurulu kopyayı aynı kanaldan yenileme (şu an kapsam dışı).
+- **PR-Install-2** — kurulum sihirbazı / setup wizard.
