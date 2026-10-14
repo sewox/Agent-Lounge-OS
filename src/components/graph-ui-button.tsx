@@ -3,20 +3,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useLounge } from "@/components/lounge-provider";
+import {
+  resolveGraphUiStatusMessage,
+  shouldBlockEnableOnConflict,
+  type GraphUiButtonStatus,
+} from "@/lib/graph-ui-button-state";
+import { GraphUiButtonView } from "@/lib/graph-ui-button-view";
 import { isTauri } from "@/lib/lounge";
 
-export type GraphUiStatus = {
+export type GraphUiStatus = GraphUiButtonStatus & {
   binary_found: boolean;
-  ui_available: boolean;
-  project_indexed: boolean;
   cbm_project_name: string | null;
-  port: number;
-  port_conflict: boolean;
-  conflict_message: string | null;
-  port_mode: "auto" | "user";
   owned_by_lounge: boolean;
 };
+
+export { GraphUiButtonView } from "@/lib/graph-ui-button-view";
 
 type GraphUiButtonProps = {
   /** Aktif Lounge projesinin kök yolu (canonical eşleme için). */
@@ -24,6 +27,7 @@ type GraphUiButtonProps = {
 };
 
 export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
+  const { t } = useTranslation("vault");
   const { projects, selectedProject, semanticMap } = useLounge();
   const [status, setStatus] = useState<GraphUiStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -83,117 +87,87 @@ export function GraphUiButton({ projectRoot }: GraphUiButtonProps) {
     return null;
   }
 
-  const showEnable = !status.ui_available;
-  const showOpen = status.ui_available && status.project_indexed;
-  const showIndexedHint = status.ui_available && !status.project_indexed;
+  const statusNote = resolveGraphUiStatusMessage(status, (key, params) => t(key, params));
+  const infoNote =
+    status.port_mode === "auto" && !status.port_conflict ? statusNote : null;
+  const conflictNote = status.port_conflict ? statusNote : null;
 
-  const onEnable = async () => {
-    if (busy) {
-      return;
-    }
-    if (status.port_conflict) {
-      setToast(status.conflict_message || `Port ${status.port} meşgul`);
-      return;
-    }
-    const confirmed = await ask(
-      [
-        `What starts: codebase-memory-mcp Graph UI (--ui=true).`,
-        `Port: ${status.port} (change in Settings → Graph UI if busy).`,
-        `How to stop: close the Graph window, or quit Lounge (stops only the process Lounge started).`,
-        `Disable: the persistent enable flag is not auto-reverted — re-run enable flow / MCP settings to turn UI off.`,
-        ``,
-        `This setting applies to ALL codebase-memory sessions (Claude, Cursor, etc.).`,
-        ``,
-        `Continue?`,
-      ].join("\n"),
-      {
-        title: "Enable Graph UI",
-        kind: "warning",
-        okLabel: "Enable",
-        cancelLabel: "Cancel",
-      },
-    );
-    if (!confirmed) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await invoke("enable_graph_ui_cmd", { projectRoot: resolvedRoot });
-      const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
-        projectRoot: resolvedRoot,
+  const translateInvokeError = (err: unknown): string => {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (raw.startsWith("graphMsg")) {
+      return t(raw, {
+        port: status.port,
+        ...(status.message_params ?? {}),
       });
-      setStatus(next);
-    } catch (err) {
-      setToast(err instanceof Error ? err.message : String(err));
-      try {
-        const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
-          projectRoot: resolvedRoot,
-        });
-        setStatus(next);
-      } catch {
-        /* probe fail — toast yeterli */
-      }
-    } finally {
-      setBusy(false);
     }
-  };
-
-  const onOpen = async () => {
-    if (busy) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await invoke("open_graph_ui", { projectRoot: resolvedRoot });
-    } catch (err) {
-      setToast(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
+    return raw;
   };
 
   return (
-    <div className="flex flex-col items-end gap-1">
-      {showEnable ? (
-        <button
-          type="button"
-          disabled={busy || status.port_conflict}
-          title={
-            status.port_conflict
-              ? status.conflict_message || `Port ${status.port} meşgul`
-              : `codebase-memory-mcp Graph UI · port ${status.port}`
+    <GraphUiButtonView
+      status={status}
+      busy={busy}
+      toast={toast}
+      infoNote={infoNote}
+      conflictNote={conflictNote}
+      labels={{
+        enable: t("graphEnable"),
+        enableWithPort: t("graphEnableWithPort", { port: status.port }),
+        open: t("graphOpen"),
+        indexFirst: t("graphIndexFirst"),
+        busyEllipsis: "…",
+      }}
+      onEnable={async () => {
+        if (busy) {
+          return;
+        }
+        if (shouldBlockEnableOnConflict(status)) {
+          setToast(statusNote || t("graphPortBusy", { port: status.port }));
+          return;
+        }
+        const confirmed = await ask(t("graphEnableConfirmBody", { port: status.port }), {
+          title: t("graphEnableConfirmTitle"),
+          kind: "warning",
+          okLabel: t("graphEnableConfirmOk"),
+          cancelLabel: t("graphEnableConfirmCancel"),
+        });
+        if (!confirmed) {
+          return;
+        }
+        setBusy(true);
+        try {
+          await invoke("enable_graph_ui_cmd", { projectRoot: resolvedRoot });
+          const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
+            projectRoot: resolvedRoot,
+          });
+          setStatus(next);
+        } catch (err) {
+          setToast(translateInvokeError(err));
+          try {
+            const next = await invoke<GraphUiStatus>("get_graph_ui_status", {
+              projectRoot: resolvedRoot,
+            });
+            setStatus(next);
+          } catch {
+            /* probe fail — toast yeterli */
           }
-          onClick={() => void onEnable()}
-          className="rounded border border-outline-variant bg-surface-container-high px-2.5 py-1 font-body text-meta font-semibold text-on-surface hover:bg-surface-bright disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "…" : "Enable Graph UI"}
-        </button>
-      ) : null}
-      {showOpen ? (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void onOpen()}
-          className="rounded bg-primary-container px-2.5 py-1 font-body text-meta font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50"
-        >
-          {busy ? "…" : "Open 3D Graph"}
-        </button>
-      ) : null}
-      {showIndexedHint ? (
-        <button
-          type="button"
-          disabled
-          title="Index workspace first"
-          className="cursor-not-allowed rounded border border-outline-variant/60 bg-surface-container-high/50 px-2.5 py-1 font-body text-meta text-on-surface-variant opacity-70"
-        >
-          Open 3D Graph
-        </button>
-      ) : null}
-      {toast ? (
-        <p className="max-w-[18rem] text-right font-body text-meta text-error" role="status">
-          {toast}
-        </p>
-      ) : null}
-    </div>
+        } finally {
+          setBusy(false);
+        }
+      }}
+      onOpen={async () => {
+        if (busy) {
+          return;
+        }
+        setBusy(true);
+        try {
+          await invoke("open_graph_ui", { projectRoot: resolvedRoot });
+        } catch (err) {
+          setToast(translateInvokeError(err));
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />
   );
 }

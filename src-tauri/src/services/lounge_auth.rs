@@ -10,6 +10,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -94,11 +97,13 @@ fn token_path() -> PathBuf {
     lounge_nats_dir().join(TOKEN_FILE_NAME)
 }
 
-pub(crate) fn nats_server_conf_path() -> PathBuf {
-    // Prefer the session creds directory so tests can isolate via
-    // `LOUNGE_NATS_CREDS_FILE` without mutating `LOUNGE_NATS_DIR` (which races
-    // with path-ownership unit tests under parallel cargo test).
-    match default_creds_path().parent() {
+/// Conf path sibling to a session credentials file (or default nats dir).
+pub(crate) fn nats_server_conf_path_for(creds_file: &Path) -> PathBuf {
+    // Prefer the session creds directory so callers (and tests) can isolate via
+    // an explicit creds path / `LOUNGE_NATS_CREDS_FILE` without mutating
+    // `LOUNGE_NATS_DIR` (which races with path-ownership unit tests under
+    // parallel cargo test).
+    match creds_file.parent() {
         Some(dir) => dir.join(NATS_SERVER_CONF_NAME),
         None => lounge_nats_dir().join(NATS_SERVER_CONF_NAME),
     }
@@ -198,17 +203,20 @@ fn escape_nats_conf_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Write (or rewrite) `data/nats/nats-server.conf` for the current session credentials.
-pub(crate) fn write_nats_server_conf(creds: &NatsCredentials) -> Result<PathBuf> {
-    let path = nats_server_conf_path();
+/// Write (or rewrite) nats-server.conf next to the given session credentials file.
+pub(crate) fn write_nats_server_conf(
+    creds_file: &Path,
+    creds: &NatsCredentials,
+) -> Result<PathBuf> {
+    let path = nats_server_conf_path_for(creds_file);
     let body = render_nats_auth_config(creds)?;
     write_secret_file(&path, body)?;
     Ok(path)
 }
 
 /// Delete the conf when we started nats-server and are shutting it down cleanly.
-pub(crate) fn delete_nats_server_conf() {
-    let path = nats_server_conf_path();
+pub(crate) fn delete_nats_server_conf(creds_file: &Path) {
+    let path = nats_server_conf_path_for(creds_file);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -272,6 +280,8 @@ pub fn load_credentials_file(path: &Path) -> Result<Option<NatsCredentials>> {
 }
 
 pub fn write_credentials_file(path: &Path, creds: &NatsCredentials, nats_url: &str) -> Result<()> {
+    #[cfg(test)]
+    assert_test_creds_write_isolated(path);
     let body = CredsFile {
         user: creds.user.clone(),
         password: creds.password.clone(),
@@ -279,11 +289,12 @@ pub fn write_credentials_file(path: &Path, creds: &NatsCredentials, nats_url: &s
     };
     let json = serde_json::to_string_pretty(&body)?;
     write_secret_file(path, json)?;
-    // Path pointer only — never publish USER/PASS/TOKEN into the process environment
-    // (GuardedCommand strips those for children; see `.with_lounge_secrets()`).
-    unsafe {
-        std::env::set_var(LOUNGE_NATS_CREDS_FILE_ENV, path);
-    }
+    // Do not touch process env here. Publishing `LOUNGE_NATS_CREDS_FILE` via
+    // `set_var` races parallel tests (`getenv`/`setenv` is UB across threads on
+    // macOS/glibc) and can redirect a guarded auth test's conf into the real
+    // data dir. Callers that need a non-default path must pass it explicitly
+    // (`NatsConfig.creds_file` / `ensure_session_credentials_at`) or set the
+    // env under `TestAuthGuard` before the write. Never publish USER/PASS/TOKEN.
     Ok(())
 }
 
@@ -300,27 +311,37 @@ pub fn generate_session_credentials() -> NatsCredentials {
 
 /// Ensure session credentials exist when auth is required. Does not mark auth active.
 pub fn ensure_session_credentials(nats_url: &str) -> Result<Option<NatsCredentials>> {
+    ensure_session_credentials_at(&default_creds_path(), nats_url)
+}
+
+/// Like [`ensure_session_credentials`], writing to an explicit path (NatsConfig DI).
+pub fn ensure_session_credentials_at(
+    path: &Path,
+    nats_url: &str,
+) -> Result<Option<NatsCredentials>> {
     if !auth_required() {
         return Ok(None);
     }
     let mut guard = state().lock().expect("lounge_auth poison");
     if let Some(existing) = guard.creds.clone() {
-        let path = default_creds_path();
-        write_credentials_file(&path, &existing, nats_url)?;
+        write_credentials_file(path, &existing, nats_url)?;
         return Ok(Some(existing));
     }
     let creds = generate_session_credentials();
-    let path = default_creds_path();
-    write_credentials_file(&path, &creds, nats_url)?;
+    write_credentials_file(path, &creds, nats_url)?;
     guard.creds = Some(creds.clone());
     Ok(Some(creds))
 }
 
 /// Mint fresh credentials (legacy `--pass` argv leak → rotate before restart).
 pub fn rotate_session_credentials(nats_url: &str) -> Result<NatsCredentials> {
+    rotate_session_credentials_at(&default_creds_path(), nats_url)
+}
+
+/// Like [`rotate_session_credentials`], writing to an explicit path (NatsConfig DI).
+pub fn rotate_session_credentials_at(path: &Path, nats_url: &str) -> Result<NatsCredentials> {
     let creds = generate_session_credentials();
-    let path = default_creds_path();
-    write_credentials_file(&path, &creds, nats_url)?;
+    write_credentials_file(path, &creds, nats_url)?;
     let mut guard = state().lock().expect("lounge_auth poison");
     guard.creds = Some(creds.clone());
     guard.nats_auth_active = false;
@@ -709,6 +730,38 @@ pub fn remote_access_info(mcp_bind: &str, tunnel_url: Option<&str>) -> RemoteAcc
 #[cfg(test)]
 static TEST_AUTH_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
+thread_local! {
+    // Depth of TestAuthGuard held on this thread (for isolation asserts).
+    static TEST_AUTH_GUARD_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_auth_guard_held() -> bool {
+    TEST_AUTH_GUARD_DEPTH.with(|d| d.get() > 0)
+}
+
+/// Fail closed in tests: credential writes under the real lounge nats dir must
+/// hold [`TestAuthGuard`] (use a temp `NatsConfig.creds_file` / env path, or
+/// `LOUNGE_AUTH_REQUIRED=false`, so parallel suites never touch the real home).
+#[cfg(test)]
+fn assert_test_creds_write_isolated(path: &Path) {
+    if test_auth_guard_held() {
+        return;
+    }
+    let real_dir = lounge_nats_dir();
+    if path.starts_with(&real_dir) {
+        panic!(
+            "test wrote NATS credentials under {} without TestAuthGuard \
+             (path={}). Hold TestAuthGuard and use a temp creds path \
+             (NatsConfig.creds_file / LOUNGE_NATS_CREDS_FILE) or set \
+             LOUNGE_AUTH_REQUIRED=false.",
+            real_dir.display(),
+            path.display()
+        );
+    }
+}
+
 /// RAII guard: exclusive access for tests that flip auth env / allow-list / creds.
 #[cfg(test)]
 pub struct TestAuthGuard {
@@ -724,7 +777,15 @@ impl TestAuthGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         reset_test_state();
+        TEST_AUTH_GUARD_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
         Self { _serial: serial }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestAuthGuard {
+    fn drop(&mut self) {
+        TEST_AUTH_GUARD_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
     }
 }
 
@@ -958,10 +1019,12 @@ mod tests {
         let prev_user = std::env::var_os(LOUNGE_NATS_USER_ENV);
         let prev_pass = std::env::var_os(LOUNGE_NATS_PASS_ENV);
         let prev_token = std::env::var_os(LOUNGE_TOKEN_ENV);
+        let prev_creds_file = std::env::var_os(LOUNGE_NATS_CREDS_FILE_ENV);
         unsafe {
             std::env::remove_var(LOUNGE_NATS_USER_ENV);
             std::env::remove_var(LOUNGE_NATS_PASS_ENV);
             std::env::remove_var(LOUNGE_TOKEN_ENV);
+            std::env::remove_var(LOUNGE_NATS_CREDS_FILE_ENV);
         }
         let dir = std::env::temp_dir().join(format!("lounge-creds-env-{}", uuid::Uuid::new_v4()));
         let path = dir.join("session.creds.json");
@@ -977,7 +1040,8 @@ mod tests {
         assert!(std::env::var_os(LOUNGE_NATS_USER_ENV).is_none());
         assert!(std::env::var_os(LOUNGE_NATS_PASS_ENV).is_none());
         assert!(std::env::var_os(LOUNGE_TOKEN_ENV).is_none());
-        assert!(std::env::var_os(LOUNGE_NATS_CREDS_FILE_ENV).is_some());
+        // Must not publish path via process-wide set_var (parallel-test race).
+        assert!(std::env::var_os(LOUNGE_NATS_CREDS_FILE_ENV).is_none());
         unsafe {
             match prev_user {
                 Some(v) => std::env::set_var(LOUNGE_NATS_USER_ENV, v),
@@ -990,6 +1054,10 @@ mod tests {
             match prev_token {
                 Some(v) => std::env::set_var(LOUNGE_TOKEN_ENV, v),
                 None => std::env::remove_var(LOUNGE_TOKEN_ENV),
+            }
+            match prev_creds_file {
+                Some(v) => std::env::set_var(LOUNGE_NATS_CREDS_FILE_ENV, v),
+                None => std::env::remove_var(LOUNGE_NATS_CREDS_FILE_ENV),
             }
         }
         let _ = std::fs::remove_dir_all(dir);
