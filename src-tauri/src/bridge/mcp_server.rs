@@ -754,7 +754,7 @@ impl McpServer {
     async fn tool_record(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
         validate_schema(SchemaKind::McpRecord, args).map_err(|e| anyhow!(e))?;
         let bind = self
-            .resolve_project_bind(args)
+            .resolve_project_bind(args, Some(client))
             .await?
             .ok_or_else(|| {
                 anyhow!(
@@ -832,7 +832,7 @@ impl McpServer {
             "atomic": true,
             "event": EXPERIENCE_REPORTED,
         });
-        if let Some(warning) = bind.kind.warning() {
+        if let Some(warning) = bind.warning {
             out.as_object_mut()
                 .expect("object")
                 .insert("project_warning".into(), json!(warning));
@@ -1210,18 +1210,33 @@ impl McpServer {
 
     async fn resolve_project_arg(&self, args: &Value) -> Result<Option<String>> {
         Ok(self
-            .resolve_project_bind(args)
+            .resolve_project_bind(args, None)
             .await?
             .map(|b| b.canonical_id))
     }
 
     /// Project-ID-Core write binding: aliases + path → canonical id, else sentinel.
-    async fn resolve_project_bind(&self, args: &Value) -> Result<Option<ProjectBind>> {
+    ///
+    /// Path hints: `active_file` / `workspace_root` / `repo_path` plus optional
+    /// session `ClientCtx.workspace_path`. When an explicit project id resolves to
+    /// a *different* indexed canonical than those paths, the write is stored as
+    /// `unclassified` (not path-wins) so the conflict is visible.
+    async fn resolve_project_bind(
+        &self,
+        args: &Value,
+        client: Option<&ClientCtx>,
+    ) -> Result<Option<ProjectBind>> {
         let explicit = arg_str(args, "project_id").or_else(|| arg_str(args, "project"));
         let mut hints: Vec<String> = Vec::new();
         for key in ["active_file", "workspace_root", "repo_path"] {
             if let Some(path) = arg_str(args, key) {
                 hints.push(path.to_string());
+            }
+        }
+        if let Some(client) = client {
+            let ws = client.workspace_path.trim();
+            if !ws.is_empty() {
+                hints.push(ws.to_string());
             }
         }
         let store = self.store.clone();
@@ -2002,11 +2017,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Regression: free-form `project_id=photo-culling` must NOT silently accept
-    /// the slug as the stored id when it is not a known alias (f5d084e2 root cause —
-    /// Agent Lounge OS features were filed under a wrong open-folder slug).
+    /// Unknown free-form slug (no indexed alias) → unclassified.
     #[tokio::test]
-    async fn free_form_photo_culling_slug_stores_unclassified_with_warning() {
+    async fn free_form_unknown_slug_stores_unclassified_with_warning() {
         let store = ExperienceStore::memory().expect("db");
         let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
         let args = serde_json::json!({
@@ -2016,7 +2029,7 @@ mod tests {
             "params": {
                 "name": "lounge_record_experience",
                 "arguments": {
-                    "project_id": "photo-culling",
+                    "project_id": "totally-unknown-slug-xyz",
                     "context": "client profiles + A2A long_running/must_deliver + LMR :18790",
                     "decision": "document Agent Lounge OS orchestration flags"
                 }
@@ -2040,7 +2053,6 @@ mod tests {
                 .contains("unclassified"),
             "warning missing: {body}"
         );
-        // Prove the row was not stored under the free-form slug.
         let conn = store.conn.lock().unwrap();
         let pid: String = conn
             .query_row(
@@ -2050,7 +2062,117 @@ mod tests {
             )
             .expect("row");
         assert_eq!(pid, crate::db::PROJECT_ID_UNCLASSIFIED);
-        assert_ne!(pid, "photo-culling");
+    }
+
+    /// B1 / f5d084e2-class: photo-culling *is* indexed, but active_file lives under
+    /// Agent-Lounge-OS → conflict → unclassified (not silent photo-culling bind).
+    #[tokio::test]
+    async fn indexed_photo_culling_explicit_conflicts_with_lounge_active_file() {
+        use crate::db::canonicalize_repo_path;
+        use crate::models::{AstNode, IndexGraph};
+        let store = ExperienceStore::memory().expect("db");
+        let photo = std::env::temp_dir().join(format!("mcp-photo-{}", Uuid::new_v4()));
+        let lounge = std::env::temp_dir().join(format!("mcp-lounge-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(photo.join("src")).unwrap();
+        std::fs::create_dir_all(lounge.join("src")).unwrap();
+        let lounge_file = lounge.join("src/main.rs");
+        std::fs::write(&lounge_file, "fn main() {}").unwrap();
+
+        store
+            .save_project_index(IndexGraph {
+                project: "photo-culling".into(),
+                repo_path: photo.to_string_lossy().into_owned(),
+                status: None,
+                node_count: 0,
+                edge_count: 0,
+                files: Some(0),
+                nodes: vec![],
+                references: vec![],
+                dead: vec![],
+            })
+            .await
+            .unwrap();
+        store
+            .save_project_index(IndexGraph {
+                project: "Agent-Lounge-OS".into(),
+                repo_path: lounge.to_string_lossy().into_owned(),
+                status: None,
+                node_count: 1,
+                edge_count: 0,
+                files: Some(1),
+                nodes: vec![AstNode {
+                    id: "main".into(),
+                    name: "main".into(),
+                    kind: "fn".into(),
+                    file: Some(lounge_file.to_string_lossy().into_owned()),
+                    line: Some(1),
+                    ref_count: 0,
+                }],
+                references: vec![],
+                dead: vec![],
+            })
+            .await
+            .unwrap();
+
+        let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
+        let init = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "cursor",
+                    "version": "1",
+                    "workspace_path": lounge.to_string_lossy()
+                }
+            }
+        })
+        .to_string();
+        let _ = server.handle_line(&init).await.unwrap();
+
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "project_id": "photo-culling",
+                    "active_file": lounge_file.to_string_lossy(),
+                    "context": "client profiles + A2A long_running/must_deliver + LMR :18790",
+                    "decision": "document Agent Lounge OS orchestration flags"
+                }
+            }
+        })
+        .to_string();
+        let resp = server.handle_line(&args).await.unwrap().unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true, "{val}");
+        let body = &val["result"]["structuredContent"];
+        assert_eq!(body["project_id"], crate::db::PROJECT_ID_UNCLASSIFIED);
+        assert_eq!(body["identity_kind"], "unclassified");
+        let warning = body["project_warning"].as_str().unwrap_or("");
+        assert!(
+            warning.contains("photo-culling") && warning.contains("unclassified"),
+            "conflict warning missing: {warning}"
+        );
+        let photo_canon = canonicalize_repo_path(&photo.to_string_lossy());
+        let lounge_canon = canonicalize_repo_path(&lounge.to_string_lossy());
+        let conn = store.conn.lock().unwrap();
+        let pid: String = conn
+            .query_row(
+                "SELECT project_id FROM experiences ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid, crate::db::PROJECT_ID_UNCLASSIFIED);
+        assert_ne!(pid, photo_canon);
+        assert_ne!(pid, lounge_canon);
+        let _ = std::fs::remove_dir_all(&photo);
+        let _ = std::fs::remove_dir_all(&lounge);
     }
 
     #[tokio::test]

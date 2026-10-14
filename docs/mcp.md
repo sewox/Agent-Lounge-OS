@@ -28,15 +28,15 @@ Cursor / Claude Desktop
 
 | Kavram | Anlam |
 |--------|--------|
-| **Canonical ID** | Dunce-tarzı canonicalize edilmiş `repo_path` (symlink çözülür; Windows’ta `\\?\` yok; macOS/Windows’ta case-fold) |
-| **`project_aliases`** | Experience / CBM slug’ları (`agent-lounge-os`, klasör adı, …) → canonical id |
+| **Canonical ID** | Dunce-tarzı canonicalize edilmiş `repo_path` (symlink çözülür; Windows local’de `\\?\` yok; UNC korunur; trailing `/` silinir; macOS/Windows’ta **Unicode** case-fold; Linux’ta case korunur) |
+| **`project_aliases`** | Experience / CBM slug’ları → canonical id. Aynı slug iki repo’ya bağlanırsa **ambiguous** olur (sessiz overwrite yok). Alias case: Linux = case-sensitive; macOS/Windows = Unicode fold |
 | **displayName** | Lounge proje adı → `repo_path` basename → slug |
-| **`unclassified`** | Serbest biçim `project` / `project_id` hiçbir alias / bilinen path ile eşleşmezse |
+| **`unclassified`** | Bilinmeyen slug; ambiguous alias; **veya** explicit `project_id` ile `active_file` / session `workspace_path` farklı indexed canonical’lara çözülürse (çatışma). Path-wins yok — uyarı görünür kalsın diye bilinçli seçim |
 | **`unindexed_placeholder`** | Path ipucu var ama indekslenmiş/keşfedilmiş `repo_path` yoksa |
 
-`lounge_record_*` yanıtında `identity_kind` + isteğe bağlı `project_warning` döner; Vault satırında `identity_warning` gösterilir. Migrasyon (`migrations.project_id_canonical_v1`) mevcut index + experience `project_id` değerlerini kalıcı olarak canonical id’ye çevirir (yedek: `migrations.project_id_canonical_v1.backup`). Kullanıcı kaydı yeniden dosyalanmaz (ör. yanlış projeye düşmüş içerik Sercan onayı olmadan taşınmaz).
+`lounge_record_*` yanıtında `identity_kind` + isteğe bağlı `project_warning` döner; Vault satırında `identity_warning` gösterilir. Migrasyon (`migrations.project_id_canonical_v1`) **tek transaction** içinde çalışır; hata → ROLLBACK + yüksek sesli log, done-flag yazılmaz. Yedek: settings JSON + `project_id_canonical_v1_remap` / `_row_backup` tabloları (geri alınabilir). Kullanıcı kaydı yeniden dosyalanmaz (Sercan onayı olmadan çapraz proje taşıma yok).
 
-**Otomatik project_id:** `active_file` / `workspace_root` → en uzun `repo_path` eşleşmesi → alias üzerinden canonical id.
+**Otomatik project_id:** `active_file` / `workspace_root` / session `workspace_path` → en uzun `repo_path` eşleşmesi → unambiguous alias üzerinden canonical id.
 
 ## Binary derleme
 

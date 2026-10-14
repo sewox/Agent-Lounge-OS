@@ -405,7 +405,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
         let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
-        let _ = crate::db::project_identity::migrate_project_ids_to_canonical(conn);
+        crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
         return Ok(());
     }
 
@@ -425,7 +425,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         rebuild_legacy(conn, &cols)?;
         crate::db::experience_governance::migrate_experience_governance(conn)?;
         let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
-        let _ = crate::db::project_identity::migrate_project_ids_to_canonical(conn);
+        crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
         return Ok(());
     }
 
@@ -441,7 +441,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     )?;
     crate::db::experience_governance::migrate_experience_governance(conn)?;
     let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
-    let _ = crate::db::project_identity::migrate_project_ids_to_canonical(conn);
+    crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
     Ok(())
 }
 
