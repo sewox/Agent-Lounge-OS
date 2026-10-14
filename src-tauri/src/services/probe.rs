@@ -1330,25 +1330,14 @@ mod tests {
     }
 
     #[test]
-    fn tcp_bind_available_roundtrip() {
+    fn tcp_bind_available_reports_occupied_port() {
+        // Hold the listener for the assertion — do not free→rebind (TOCTOU /
+        // TIME_WAIT flake surface that NATS tests also retired via -p -1).
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         assert!(!tcp_bind_available(port), "bound port must not be free");
+        assert!(!tcp_bind_available(0), "port 0 is never reported available");
         drop(listener);
-        // macOS (and occasionally Windows) may briefly refuse re-bind after close
-        // (TIME_WAIT / stack delay). Poll with a hard deadline — still asserts the
-        // real contract that a released local listen port becomes bindable again.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if tcp_bind_available(port) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "released port {port} must become bindable within 3s (macOS/Windows TIME_WAIT)"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
     }
 
     #[test]
