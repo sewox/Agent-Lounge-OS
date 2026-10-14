@@ -29,6 +29,12 @@ use std::time::Duration;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    // Windows grandchild for M1: inherit stdio and park so killed parents leave
+    // open pipes for the probe's reader threads.
+    if args.first().map(String::as_str) == Some("hold-stdio") {
+        park_holding_stdio();
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) == Some("tcp-hold") {
         match run_tcp_hold(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
@@ -66,11 +72,13 @@ fn main() -> ExitCode {
 /// - `active:permanent:PORT` / `active:session:PORT` / `active:permanent:disabled`
 /// - `not-responding` → `daemon: not responding …` (exit 1)
 /// - `hang` → sleep forever (probe timeout → Unknown)
+/// - `hang-pipe-holder` → spawn grandchild holding inherited stdio, then hang
+///   (timeout kill must not leave the probe blocked on reader joins)
 /// - `empty` → exit 0, no stdout
 /// - `garbage` → exit 2, unrecognised text
 /// - `exit:N` → exit N with garbage body
 /// - `crlf-bom-active:PORT` → UTF-8 BOM + CRLF + mixed-case Active line
-/// - `pre-0.11` → usage/help without `daemon:` status (Inactive)
+/// - `pre-0.11` → usage/help + explicit `unknown command: daemon` (Inactive)
 /// - `crash` → exit 127, empty output (Unknown)
 fn run_daemon_ctl(args: &[String]) -> Result<ExitCode, String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
@@ -92,6 +100,59 @@ fn fake_daemon_spec() -> String {
         }
     }
     String::new()
+}
+
+fn park_holding_stdio() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Leave a child/grandchild holding inherited stdout/stderr, then hang so the
+/// probe times out and kills only this PID. Unbounded reader joins would block.
+fn spawn_stdio_holder_then_hang() -> Result<ExitCode, String> {
+    #[cfg(unix)]
+    {
+        // fork avoids std::process::Command (clippy disallowed) in this test bin.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(format!(
+                "fork hold-stdio: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if pid == 0 {
+            park_holding_stdio();
+            std::process::exit(0);
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::process::{Command, Stdio};
+        let exe = env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        // Test-only self-reexec; PolicyGate does not apply inside lounge-test-helper.
+        #[allow(clippy::disallowed_methods)]
+        let mut child = Command::new(&exe);
+        child
+            .arg("hold-stdio")
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let _child = child
+            .spawn()
+            .map_err(|e| format!("spawn hold-stdio grandchild: {e}"))?;
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err("hang-pipe-holder unsupported on this OS".into())
+    }
 }
 
 fn print_active(label: &str, port_or_disabled: &str, crlf_bom: bool) -> Result<ExitCode, String> {
@@ -141,6 +202,9 @@ fn run_daemon_status() -> Result<ExitCode, String> {
         loop {
             std::thread::sleep(Duration::from_secs(60));
         }
+    }
+    if spec.eq_ignore_ascii_case("hang-pipe-holder") {
+        spawn_stdio_holder_then_hang()?;
     }
     if spec.eq_ignore_ascii_case("empty") {
         return Ok(ExitCode::SUCCESS);

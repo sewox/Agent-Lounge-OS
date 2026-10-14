@@ -248,6 +248,55 @@ describe("GraphUiButtonView", () => {
     assert.match(html, /without changing the shared port/);
   });
 
+  it("renders the Unknown daemon probe message and hides Enable", () => {
+    assert.equal(
+      resolveGraphUiStatusMessage(
+        {
+          port: 18749,
+          message_key: "graphDaemonProbeUnknown",
+          message_params: { reason: "timeout" },
+          conflict_message: null,
+          info_message: null,
+          remap_from_port: null,
+        },
+        (key, params) => `${key}:${String(params?.reason ?? "")}`,
+      ),
+      "graphDaemonProbeUnknown:timeout",
+    );
+
+    const unknownNote =
+      "Could not determine whether a shared codebase-memory-mcp daemon is running (timeout). Lounge will not start Graph UI, so it cannot change a shared port used by Antigravity or other sessions.";
+    const html = renderToStaticMarkup(
+      createElement(GraphUiButtonView, {
+        status: {
+          port: 18749,
+          port_conflict: false,
+          conflict_message: null,
+          message_key: "graphDaemonProbeUnknown",
+          message_params: { reason: "timeout", port: 18749 },
+          info_message: null,
+          remap_from_port: null,
+          port_mode: "auto",
+          ui_available: false,
+          project_indexed: false,
+          daemon_mode: true,
+          daemon_presence: "unknown",
+        },
+        busy: false,
+        infoNote: unknownNote,
+        conflictNote: null,
+        labels,
+        onEnable: () => undefined,
+        onOpen: () => undefined,
+      }),
+    );
+    assert.doesNotMatch(html, /data-qa="graph-ui-enable"/);
+    assert.doesNotMatch(html, /data-qa="graph-ui-open"/);
+    assert.match(html, /data-qa="graph-ui-auto-info"/);
+    assert.match(html, /Could not determine whether a shared codebase-memory-mcp daemon/);
+    assert.match(html, /will not start Graph UI/);
+  });
+
   it("renders conflict note for Auto band-exhausted (port_conflict)", () => {
     const reason = "Graph UI port band 18749–18749 is full. Free a port or choose a fixed port.";
     const html = renderToStaticMarkup(

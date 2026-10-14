@@ -14,11 +14,18 @@
 //! **Active** and **Unknown** never spawn and never mutate shared config/port.
 //!
 //! ### Pre-0.11 `daemon status` behaviour
-//! Builds before the coordination daemon do not implement `daemon status`. When
-//! the binary responds with a usage/help/`unknown`/`unrecognized` style message
-//! and **no** `daemon:` status line, Lounge treats that as **Inactive** (safe to
-//! use the legacy per-session listener path). A hung or opaque failure is
-//! **Unknown** (fail-closed — do not spawn).
+//! Builds before the coordination daemon do not implement `daemon status`. Lounge
+//! treats that as **Inactive** (safe to use the legacy per-session path) **only**
+//! when **all** of the following hold:
+//!
+//! 1. the process exits **non-zero**,
+//! 2. the error text **explicitly** says the `daemon` subcommand is
+//!    unknown/unrecognized (same line), and
+//! 3. **no** output line starts with `daemon` (any case).
+//!
+//! Loose matches on bare `usage:`, or on the words `daemon` + `codebase-memory-mcp`
+//! alone, are **not** enough — those classify as **Unknown**. A hung or opaque
+//! failure is also **Unknown** (fail-closed — do not spawn).
 //!
 //! Alternatives considered and rejected for Lounge's gate:
 //! - HTTP `/api/ui-config` alone — does not prove daemon ownership vs per-session listener
@@ -40,6 +47,9 @@ use crate::kernel::GuardedCommand;
 const DAEMON_STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 /// Cap stdout/stderr so a noisy child cannot hang the reader indefinitely.
 const DAEMON_STATUS_MAX_CAPTURE: usize = 64 * 1024;
+/// After kill/timeout, do not wait forever for reader threads (a grandchild may
+/// still hold the inherited pipes).
+const DAEMON_STATUS_READER_JOIN: Duration = Duration::from_millis(500);
 
 /// Fail-closed presence of the shared coordination daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -125,6 +135,7 @@ impl CbmDaemonStatus {
         }
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn active_for_tests(ui_port: Option<u16>, permanent: bool) -> Self {
         Self {
             presence: CbmDaemonPresence::Active,
@@ -195,23 +206,43 @@ fn extract_loopback_ui_port(line_lower: &str) -> Option<u16> {
     None
 }
 
-fn looks_like_pre_0_11_unknown_subcommand(combined_lower: &str) -> bool {
-    let has_daemon_status_line = combined_lower.contains("daemon: active")
-        || combined_lower.contains("daemon: not running")
-        || combined_lower.contains("daemon: not responding");
-    if has_daemon_status_line {
+/// Pre-0.11 / old-binary: Inactive only when exit ≠ 0, an error line explicitly
+/// names `daemon` as an unknown/unrecognized command/subcommand, and no output
+/// line starts with `daemon`.
+fn looks_like_pre_0_11_unknown_subcommand(
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> bool {
+    if !matches!(exit_code, Some(code) if code != 0) {
         return false;
     }
-    let usageish = combined_lower.contains("usage:")
-        || combined_lower.contains("unknown command")
-        || combined_lower.contains("unrecognized")
-        || combined_lower.contains("unknown subcommand")
-        || combined_lower.contains("invalid command")
-        || (combined_lower.contains("daemon")
-            && (combined_lower.contains("--help")
-                || combined_lower.contains("codebase-memory-mcp")));
-    // Pre-0.11 often dumps the top-level help when given an unknown first arg.
-    usageish || (combined_lower.contains("run mcp server") && combined_lower.contains("--ui=true"))
+    let combined = format!("{stdout}\n{stderr}");
+    for line in combined.lines() {
+        if line.trim().to_ascii_lowercase().starts_with("daemon") {
+            return false;
+        }
+    }
+    explicitly_unknown_daemon_subcommand(&combined.to_ascii_lowercase())
+}
+
+fn explicitly_unknown_daemon_subcommand(combined_lower: &str) -> bool {
+    for line in combined_lower.lines() {
+        let line = line.trim();
+        if !line.contains("daemon") {
+            continue;
+        }
+        let names_unknown = line.contains("unknown command")
+            || line.contains("unrecognized command")
+            || line.contains("unknown subcommand")
+            || line.contains("unrecognized subcommand")
+            || line.contains("invalid command")
+            || line.contains("unexpected argument");
+        if names_unknown {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse `codebase-memory-mcp daemon status` stdout/stderr (v0.11.0 contract).
@@ -231,7 +262,6 @@ pub fn classify_daemon_probe_output(
     let stdout = normalize_newlines(strip_utf8_bom(stdout));
     let stderr = normalize_newlines(strip_utf8_bom(stderr));
     let combined = format!("{stdout}\n{stderr}");
-    let combined_lower = combined.to_ascii_lowercase();
     let summary: String = stdout.lines().take(8).collect::<Vec<_>>().join("\n");
 
     let mut permanent = false;
@@ -302,7 +332,7 @@ pub fn classify_daemon_probe_output(
             reason: Some("not_running".into()),
         };
     }
-    if looks_like_pre_0_11_unknown_subcommand(&combined_lower) {
+    if looks_like_pre_0_11_unknown_subcommand(&stdout, &stderr, exit_code) {
         let mut s = CbmDaemonStatus::inactive_pre_0_11();
         s.raw_summary = summary;
         return s;
@@ -429,6 +459,23 @@ fn read_bounded(mut reader: impl Read, max: usize) -> Vec<u8> {
     buf
 }
 
+/// Join a reader thread with a hard deadline. On timeout the join handle is
+/// abandoned (thread may outlive the probe) so a grandchild holding pipes cannot
+/// pin the single-flight lock forever.
+fn join_bounded<T: Send + 'static>(
+    handle: std::thread::JoinHandle<T>,
+    limit: Duration,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(Ok(value)) => Some(value),
+        _ => None,
+    }
+}
+
 fn wait_child_bounded(
     mut child: std::process::Child,
     timeout: Duration,
@@ -454,23 +501,28 @@ fn wait_child_bounded(
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                // Join readers so pipes close; discard partial output on timeout.
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
+                // Bounded joins: grandchild holding inherited pipes must not hang us.
+                let _ = join_bounded(stdout_handle, DAEMON_STATUS_READER_JOIN);
+                let _ = join_bounded(stderr_handle, DAEMON_STATUS_READER_JOIN);
                 anyhow::bail!("daemon status timed out after {timeout:?}");
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(err) => {
                 let _ = child.kill();
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
+                let _ = join_bounded(stdout_handle, DAEMON_STATUS_READER_JOIN);
+                let _ = join_bounded(stderr_handle, DAEMON_STATUS_READER_JOIN);
                 return Err(err).context("daemon status try_wait");
             }
         }
     };
 
-    let stdout_bytes = stdout_handle.join().unwrap_or_default();
-    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    // Child exited: pipes should EOF quickly. Still bound the join so a leaked
+    // grandchild cannot pin the probe (fail-closed → empty/partial → Unknown).
+    let join_limit = DAEMON_STATUS_READER_JOIN
+        .checked_mul(4)
+        .unwrap_or(DAEMON_STATUS_READER_JOIN);
+    let stdout_bytes = join_bounded(stdout_handle, join_limit).unwrap_or_default();
+    let stderr_bytes = join_bounded(stderr_handle, join_limit).unwrap_or_default();
     Ok(BoundedOutput {
         stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
         stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
@@ -484,6 +536,7 @@ pub fn cbm_config_path_in(cache_dir: &Path) -> PathBuf {
 }
 
 /// Sibling cache the fake helper pollutes on `--ui` spawn (no process-wide env).
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn fake_helper_pollution_config(binary: &Path) -> Option<PathBuf> {
     Some(
         binary
@@ -567,7 +620,7 @@ daemon: active (session-managed)
     }
 
     #[test]
-    fn classify_pre_0_11_usage_is_inactive() {
+    fn classify_genuine_old_binary_unknown_subcommand_is_inactive() {
         let help = "\
 codebase-memory-mcp 0.10.8
 
@@ -579,13 +632,58 @@ Usage:
         assert!(s.is_inactive());
         assert_eq!(s.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
         assert!(!s.blocks_spawn());
+
+        let clap = classify_daemon_probe_output(
+            "",
+            "error: unrecognized subcommand 'daemon'\n\nUsage: codebase-memory-mcp [OPTIONS]\n",
+            Some(2),
+        );
+        assert!(clap.is_inactive());
+        assert_eq!(clap.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
+    }
+
+    #[test]
+    fn classify_reworded_active_with_daemon_start_hint_is_unknown() {
+        // Must NOT match the old loose "daemon" + "codebase-memory-mcp" heuristic.
+        let stdout = "\
+shared coordination service is up (permanent)
+  pid: 12
+hint: `codebase-memory-mcp daemon start` keeps a daemon warm so CLI commands skip startup.
+";
+        let s = classify_daemon_probe_output(stdout, "", Some(0));
+        assert!(s.is_unknown(), "reworded active must be Unknown, got {s:?}");
+        assert!(s.blocks_spawn());
+    }
+
+    #[test]
+    fn classify_stray_unrecognized_on_stderr_exit_zero_is_unknown() {
+        let s = classify_daemon_probe_output(
+            "ready\n",
+            "warning: unrecognized locale setting\n",
+            Some(0),
+        );
+        assert!(s.is_unknown());
+        assert_ne!(s.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
+    }
+
+    #[test]
+    fn classify_bare_usage_without_daemon_unknown_is_unknown() {
+        let s =
+            classify_daemon_probe_output("Usage:\n  codebase-memory-mcp --ui=true\n", "", Some(1));
+        assert!(s.is_unknown());
+        assert_eq!(s.reason.as_deref(), Some("nonzero_exit"));
     }
 
     #[test]
     fn classify_not_running_nonzero_exit_is_inactive() {
-        // Upstream returns exit 1 with "daemon: not running".
-        let s = classify_daemon_probe_output("daemon: not running\n", "", Some(1));
+        // Upstream returns exit 1 with "daemon: not running" plus a daemon-start hint.
+        let stdout = "\
+daemon: not running
+hint: `codebase-memory-mcp daemon start` keeps a daemon warm so CLI commands and hooks skip the per-command startup cost.
+";
+        let s = classify_daemon_probe_output(stdout, "", Some(1));
         assert!(s.is_inactive());
+        assert_eq!(s.reason.as_deref(), Some("not_running"));
     }
 
     #[test]

@@ -121,6 +121,40 @@ fn classify_timeout_shaped_reasons() {
     assert_eq!(pre.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
 }
 
+#[test]
+fn classify_old_binary_strictness_negatives() {
+    // Reworded "active" + daemon-start hint must NOT be Inactive via loose match.
+    let reworded = classify_daemon_probe_output(
+        "shared coordination service is up (permanent)\nhint: `codebase-memory-mcp daemon start` keeps a daemon warm\n",
+        "",
+        Some(0),
+    );
+    assert_eq!(reworded.presence, CbmDaemonPresence::Unknown);
+
+    // Stray "unrecognized" on stderr with exit 0 → Unknown (not old-binary).
+    let stray =
+        classify_daemon_probe_output("ok\n", "warning: unrecognized locale setting\n", Some(0));
+    assert_eq!(stray.presence, CbmDaemonPresence::Unknown);
+
+    // Real upstream "not running" (+ hint) stays Inactive.
+    let not_running = classify_daemon_probe_output(
+        "daemon: not running\nhint: `codebase-memory-mcp daemon start` keeps a daemon warm\n",
+        "",
+        Some(1),
+    );
+    assert_eq!(not_running.presence, CbmDaemonPresence::Inactive);
+    assert_eq!(not_running.reason.as_deref(), Some("not_running"));
+
+    // Genuine old-binary unknown-subcommand → Inactive.
+    let old = classify_daemon_probe_output(
+        "codebase-memory-mcp 0.10.8\n",
+        "error: unrecognized subcommand 'daemon'\n",
+        Some(2),
+    );
+    assert_eq!(old.presence, CbmDaemonPresence::Inactive);
+    assert_eq!(old.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
+}
+
 // --- Real probe via fake helper marker (no in-process override) -------------
 
 #[tokio::test]
@@ -131,6 +165,23 @@ async fn probe_marker_timeout_is_unknown() {
     assert_eq!(status.presence, CbmDaemonPresence::Unknown);
     assert_eq!(status.reason.as_deref(), Some("timeout"));
     assert!(status.blocks_spawn());
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// M1: grandchild holding pipes after kill must not hang the probe (bounded joins).
+#[tokio::test]
+async fn probe_timeout_with_pipe_holder_does_not_hang() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+    write_marker(&scratch, "hang-pipe-holder");
+    let started = std::time::Instant::now();
+    let status = probe_daemon_status(&binary).expect("probe");
+    let elapsed = started.elapsed();
+    assert_eq!(status.presence, CbmDaemonPresence::Unknown);
+    assert_eq!(status.reason.as_deref(), Some("timeout"));
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "bounded reader joins must finish promptly, took {elapsed:?}"
+    );
     let _ = fs::remove_dir_all(&scratch);
 }
 
@@ -371,6 +422,45 @@ async fn status_and_enable_share_daemon_probe_cache() {
     state.clear_daemon_probe_cache();
     let fresh = state.probe_cbm_daemon_async(&binary).await;
     assert_eq!(fresh.presence, CbmDaemonPresence::Active);
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// M5: stale Inactive cache must not spawn — fresh recheck right before spawn.
+#[tokio::test]
+async fn enable_rechecks_daemon_fresh_before_spawn() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+    write_marker(&scratch, "inactive");
+    let config_path = scratch.join("watched-config.json");
+    let original = write_config(&config_path, false, 9749);
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind shared");
+    let shared_port = serve_shared_ui(listener).await;
+
+    let bridge = bridge_for(&binary, 18749);
+    let state = GraphUiState::new();
+    state.set_port_mode(GraphUiPortMode::Auto);
+    state.set_cbm_config_path_override(Some(config_path.clone()));
+
+    // Prime the brief cache as Inactive.
+    let cached = state.probe_cbm_daemon_async(&binary).await;
+    assert_eq!(cached.presence, CbmDaemonPresence::Inactive);
+
+    // Flip to Active with a live UI — enable must recheck (bypass cache) and refuse spawn.
+    write_marker(&scratch, &format!("active:permanent:{shared_port}"));
+    let preferred_before = bridge.http_port();
+    let live = enable_graph_ui_headless(&state, &bridge, None, 18749..=18759)
+        .await
+        .expect("fresh Active should open existing UI");
+    assert_eq!(live, shared_port);
+    assert!(state.spawned_child_pid().is_none());
+    assert_eq!(bridge.http_port(), preferred_before);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    let pollution = fake_helper_pollution_config(&binary).expect("pollution path");
+    assert!(
+        !pollution.is_file(),
+        "must not spawn on stale Inactive cache"
+    );
 
     let _ = fs::remove_dir_all(&scratch);
 }

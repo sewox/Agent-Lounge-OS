@@ -223,12 +223,25 @@ impl GraphUiState {
     /// Probe `daemon status` off the async runtime (`spawn_blocking`), with a
     /// short shared cache used by both status refresh and enable.
     pub async fn probe_cbm_daemon_async(&self, binary: &Path) -> CbmDaemonStatus {
+        self.probe_cbm_daemon_inner(binary, false).await
+    }
+
+    /// Same as [`Self::probe_cbm_daemon_async`] but always re-runs the CLI probe
+    /// (ignores the brief cache). Used immediately before spawn so a stale
+    /// Inactive entry cannot race into `--ui=true --port=N`.
+    pub async fn probe_cbm_daemon_fresh(&self, binary: &Path) -> CbmDaemonStatus {
+        self.probe_cbm_daemon_inner(binary, true).await
+    }
+
+    async fn probe_cbm_daemon_inner(&self, binary: &Path, bypass_cache: bool) -> CbmDaemonStatus {
         #[cfg(any(test, feature = "test-helpers"))]
         if let Some(overridden) = self.daemon_status_override() {
             return overridden;
         }
-        if let Some(cached) = self.cached_daemon_probe() {
-            return cached;
+        if !bypass_cache {
+            if let Some(cached) = self.cached_daemon_probe() {
+                return cached;
+            }
         }
         let binary = binary.to_path_buf();
         let status = tokio::task::spawn_blocking(move || {
@@ -1148,9 +1161,34 @@ pub async fn spawn_graph_ui_on_port_with_store(
     port: u16,
     store: Option<&crate::db::ExperienceStore>,
 ) -> Result<()> {
+    // Direct callers always re-check (bypass cache) before mutating shared config.
+    spawn_graph_ui_on_port_inner(state, bridge, port, store, true).await
+}
+
+/// `recheck_daemon`: when false, caller already ran [`GraphUiState::probe_cbm_daemon_fresh`].
+async fn spawn_graph_ui_on_port_inner(
+    state: &GraphUiState,
+    bridge: &MemoryBridge,
+    port: u16,
+    store: Option<&crate::db::ExperienceStore>,
+    recheck_daemon: bool,
+) -> Result<()> {
     let binary = bridge.binary_path();
     if !binary.is_file() {
         bail!("codebase-memory-mcp bulunamadı");
+    }
+
+    if recheck_daemon {
+        let fresh = state.probe_cbm_daemon_fresh(binary).await;
+        if fresh.blocks_spawn() {
+            match fresh.presence {
+                CbmDaemonPresence::Unknown => bail!("graphDaemonProbeUnknown"),
+                CbmDaemonPresence::Active => bail!("graphDaemonSharedNoUi"),
+                CbmDaemonPresence::Inactive => {
+                    bail!("internal: blocks_spawn with Inactive")
+                }
+            }
+        }
     }
 
     // Keep a pending older snapshot (pre-pollution) when re-spawning; only update lounge_port.
@@ -1345,7 +1383,7 @@ pub async fn enable_graph_ui_headless(
     // Share the brief daemon-status cache with the status single-flight path.
     let daemon = state.probe_cbm_daemon_async(bridge.binary_path()).await;
     if daemon.blocks_spawn() {
-        return enable_graph_ui_fail_closed(bridge, &daemon).await;
+        return enable_graph_ui_fail_closed(&daemon).await;
     }
 
     if port_owned_by_lounge(preferred, child_pid) && probe_ui_config(preferred).await {
@@ -1379,7 +1417,14 @@ pub async fn enable_graph_ui_headless(
         return Ok(selected);
     }
 
-    match spawn_graph_ui_on_port_with_store(state, bridge, selected, store).await {
+    // M5: bypass cache immediately before any spawn — a stale Inactive must not
+    // race into mutating the shared daemon port/config.
+    let fresh = state.probe_cbm_daemon_fresh(bridge.binary_path()).await;
+    if fresh.blocks_spawn() {
+        return enable_graph_ui_fail_closed(&fresh).await;
+    }
+
+    match spawn_graph_ui_on_port_inner(state, bridge, selected, store, false).await {
         Ok(()) => {}
         Err(first_err) => {
             if mode == GraphUiPortMode::Auto {
@@ -1392,7 +1437,11 @@ pub async fn enable_graph_ui_headless(
                         log::warn!(
                             "graph UI bind race on {selected}, retrying on {next}: {first_err}"
                         );
-                        spawn_graph_ui_on_port_with_store(state, bridge, next, store).await?;
+                        let fresh_retry = state.probe_cbm_daemon_fresh(bridge.binary_path()).await;
+                        if fresh_retry.blocks_spawn() {
+                            return enable_graph_ui_fail_closed(&fresh_retry).await;
+                        }
+                        spawn_graph_ui_on_port_inner(state, bridge, next, store, false).await?;
                     }
                     Ok(_) | Err(PortSelectError::BandExhausted { .. }) => {
                         bail!("{first_err}; ayrıca port bandı tükendi veya retry yok")
@@ -1422,10 +1471,7 @@ pub async fn enable_graph_ui_headless(
 }
 
 /// Active/Unknown path: never spawn, never write config.json / change Lounge http_port.
-async fn enable_graph_ui_fail_closed(
-    bridge: &MemoryBridge,
-    daemon: &CbmDaemonStatus,
-) -> Result<u16> {
+async fn enable_graph_ui_fail_closed(daemon: &CbmDaemonStatus) -> Result<u16> {
     match daemon.presence {
         CbmDaemonPresence::Unknown => bail!("graphDaemonProbeUnknown"),
         CbmDaemonPresence::Inactive => {
@@ -1444,7 +1490,6 @@ async fn enable_graph_ui_fail_closed(
     }
     // Do **not** call bridge.set_http_port — daemon port must not stick as Lounge's
     // preferred port after the shared daemon stops (nit B review).
-    let _ = bridge;
     Ok(port)
 }
 
