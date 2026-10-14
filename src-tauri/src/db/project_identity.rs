@@ -289,6 +289,11 @@ fn is_unc_path(raw: &str) -> bool {
 }
 
 /// Canonical repo path identity string (Project-ID-Core).
+///
+/// On Windows local (drive-letter) paths: `std::fs::canonicalize` first (resolves
+/// symlinks, junctions, 8.3 short names), strip `\\?\`, slash-unify, Unicode
+/// case-fold. Text-only [`windows_identity_key`] is used only when canonicalize
+/// fails (e.g. nonexistent path) or for Windows-shaped inputs on non-Windows hosts.
 pub fn canonicalize_repo_path(raw: &str) -> String {
     let stripped = strip_windows_extended_prefix(raw);
     let trimmed = stripped.trim();
@@ -296,17 +301,40 @@ pub fn canonicalize_repo_path(raw: &str) -> String {
         return String::new();
     }
     let unc = is_unc_path(trimmed);
-    // Keep UNC server/share structure; still unify separators for identity.
     let unified = trimmed.replace('\\', "/");
-    if !unc && super::project_index::path_has_windows_drive(trimmed) {
-        // Windows drive paths: full Windows identity pipeline (slash unify + fold).
-        // Applies on every OS so `C:\Foo` and `c:/foo` share a key in tests/CI.
-        return windows_identity_key(trimmed);
+
+    if unc {
+        // UNC: lexical only (mixed-host / test-friendly); fold on Win/macOS.
+        let resolved = trim_trailing_slashes(&lexical_normalize_unc(&unified));
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            return unicode_case_fold_key(&resolved);
+        }
+        return resolved;
     }
-    let resolved = if unc {
-        // Do not call std canonicalize on UNC in tests / mixed hosts — lexical only.
-        trim_trailing_slashes(&lexical_normalize_unc(&unified))
-    } else {
+
+    #[cfg(windows)]
+    {
+        // Prefer FS canonicalize so junctions / symlinks / 8.3 collapse to one key.
+        let path = PathBuf::from(trimmed);
+        match path.canonicalize() {
+            Ok(canon) => {
+                let s = canon.to_string_lossy().into_owned();
+                let body = strip_windows_extended_prefix(&s).replace('\\', "/");
+                return unicode_case_fold_key(&trim_trailing_slashes(&body));
+            }
+            Err(_) => {
+                // Nonexistent (or otherwise unresolvable) path → text-only key.
+                return windows_identity_key(trimmed);
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Windows drive letters on Linux/macOS CI: no local volume — text-only key.
+        if super::project_index::path_has_windows_drive(trimmed) {
+            return windows_identity_key(trimmed);
+        }
         let path = PathBuf::from(&unified);
         let body = match path.canonicalize() {
             Ok(canon) => {
@@ -315,17 +343,7 @@ pub fn canonicalize_repo_path(raw: &str) -> String {
             }
             Err(_) => lexical_normalize(&unified),
         };
-        trim_trailing_slashes(&body)
-    };
-    // UNC is case-insensitive on Windows; fold when building Win/mac identity.
-    if unc {
-        if cfg!(any(target_os = "macos", target_os = "windows")) {
-            unicode_case_fold_key(&resolved)
-        } else {
-            resolved
-        }
-    } else {
-        fold_identity_case(&resolved)
+        fold_identity_case(&trim_trailing_slashes(&body))
     }
 }
 
@@ -726,8 +744,12 @@ fn resolve_known(conn: &Connection, raw: &str) -> Result<ExplicitResolution> {
 }
 
 /// One-shot atomic remap. Done-flag set only on COMMIT. Errors roll back fully.
+///
+/// Legacy `project_aliases` upgrade runs even when the remap done-flag is already
+/// set, so a DB that finished remapping with an old alias table still upgrades.
 pub fn migrate_project_ids_to_canonical(conn: &Connection) -> Result<u64> {
     migrate_project_identity(conn)?;
+
     let done: Option<String> = conn
         .query_row(
             "SELECT value_json FROM settings WHERE key = ?1",
@@ -735,8 +757,37 @@ pub fn migrate_project_ids_to_canonical(conn: &Connection) -> Result<u64> {
             |row| row.get(0),
         )
         .optional()?;
-    if matches!(done.as_deref(), Some("1") | Some("true") | Some("\"1\"")) {
+    let remap_done = matches!(done.as_deref(), Some("1") | Some("true") | Some("\"1\""));
+    let legacy_aliases = alias_table_is_legacy(conn)?;
+
+    if remap_done && !legacy_aliases {
         return Ok(0);
+    }
+
+    // Done-flag set but legacy alias table remains → upgrade only (cheap txn).
+    if remap_done && legacy_aliases {
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .context("legacy alias upgrade BEGIN")?;
+        match (|| -> Result<()> {
+            upgrade_legacy_alias_table(conn)?;
+            ensure_sentinel_projects(conn)?;
+            Ok(())
+        })() {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")
+                    .context("legacy alias upgrade COMMIT")?;
+                return Ok(0);
+            }
+            Err(err) => {
+                if let Err(rb) = conn.execute_batch("ROLLBACK") {
+                    log::error!("legacy alias upgrade ROLLBACK failed: {rb:#}");
+                    eprintln!("[lounge] CRITICAL: legacy alias upgrade ROLLBACK failed: {rb:#}");
+                }
+                log::error!("legacy alias upgrade failed; DB unchanged: {err:#}");
+                eprintln!("[lounge] CRITICAL: legacy alias upgrade failed; DB unchanged: {err:#}");
+                return Err(err);
+            }
+        }
     }
 
     conn.execute_batch("BEGIN IMMEDIATE")
@@ -1046,7 +1097,7 @@ mod tests {
 
     #[test]
     fn drive_letter_windows_rules_exact_keys() {
-        // Windows identity rules: slash unify + case fold — exact equality.
+        // Text-only Windows identity (canonicalize fallback / non-Windows hosts).
         assert_eq!(windows_identity_key(r"C:\Foo"), "c:/foo");
         assert_eq!(windows_identity_key(r"c:/foo"), "c:/foo");
         assert_eq!(
@@ -1059,11 +1110,63 @@ mod tests {
             "different drives must not collide"
         );
         assert_eq!(windows_identity_key(r"D:\Foo"), "d:/foo");
-        // Trailing slash / dots under Windows rules.
         assert_eq!(
             windows_identity_key(r"C:\Users\dev\..\Foo\"),
             "c:/users/foo"
         );
+        // Nonexistent drive paths share the text-only key via canonicalize_repo_path.
+        assert_eq!(canonicalize_repo_path(r"C:\Foo"), "c:/foo");
+        assert_eq!(canonicalize_repo_path(r"c:/foo"), "c:/foo");
+        assert_ne!(
+            canonicalize_repo_path(r"C:\Foo"),
+            canonicalize_repo_path(r"D:\Foo")
+        );
+    }
+
+    /// Windows: real directory and a junction (or symlink) to it must share one key.
+    #[cfg(windows)]
+    #[test]
+    fn windows_real_dir_and_junction_share_canonical_key() {
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!(
+            "lounge-pid-junc-{}",
+            &uuid::Uuid::new_v4().to_string()[..8]
+        ));
+        let real = root.join("real-proj");
+        let link = root.join("via-junction");
+        std::fs::create_dir_all(&real).expect("create real dir");
+
+        let mk = Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &real.to_string_lossy(),
+            ])
+            .status()
+            .expect("spawn mklink");
+        assert!(
+            mk.success(),
+            "mklink /J failed — junction required for this test"
+        );
+        assert!(link.exists(), "junction path should exist");
+
+        let key_real = canonicalize_repo_path(&real.to_string_lossy());
+        let key_link = canonicalize_repo_path(&link.to_string_lossy());
+        assert_eq!(
+            key_real, key_link,
+            "junction must resolve to the same canonical key as the real dir"
+        );
+        assert!(
+            key_real.contains("real-proj"),
+            "resolved key should name the real dir, got {key_real}"
+        );
+        assert!(!key_real.contains("via-junction"), "got {key_real}");
+
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1145,6 +1248,51 @@ mod tests {
             .unwrap();
             assert!(alias_table_is_legacy(&conn).unwrap());
             migrate_project_ids_to_canonical(&conn).unwrap();
+            assert!(!alias_table_is_legacy(&conn).unwrap());
+            let key = alias_key("Photo-Culling");
+            let canon: String = conn
+                .query_row(
+                    "SELECT canonical_id FROM project_aliases WHERE alias_key = ?1",
+                    params![key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(canon, "/tmp/photo");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_alias_upgrades_even_when_done_flag_set() {
+        let store = ExperienceStore::memory().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // Remap migration already finished (ExperienceStore::memory).
+            let done: String = conn
+                .query_row(
+                    "SELECT value_json FROM settings WHERE key = ?1",
+                    params![MIGRATION_PROJECT_ID_CANONICAL_V1],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(matches!(done.as_str(), "1" | "true" | "\"1\""));
+
+            // Simulate a DB that kept the legacy alias table after the done flag.
+            conn.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS project_aliases;
+                CREATE TABLE project_aliases (
+                  alias TEXT PRIMARY KEY COLLATE NOCASE,
+                  canonical_id TEXT NOT NULL
+                );
+                INSERT INTO project_aliases(alias, canonical_id)
+                  VALUES ('Photo-Culling', '/tmp/photo');
+                "#,
+            )
+            .unwrap();
+            assert!(alias_table_is_legacy(&conn).unwrap());
+
+            let n = migrate_project_ids_to_canonical(&conn).unwrap();
+            assert_eq!(n, 0, "remap already done — upgrade-only returns 0");
             assert!(!alias_table_is_legacy(&conn).unwrap());
             let key = alias_key("Photo-Culling");
             let canon: String = conn
