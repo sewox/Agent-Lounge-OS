@@ -113,12 +113,17 @@ function Uninstall-Lounge {
   $errors = [System.Collections.Generic.List[string]]::new()
 
   # Prefer NSIS uninstaller when present.
+  # Note (PS 5.1 / NSIS): some uninstallers copy themselves to %TEMP% and
+  # relaunch. We Start-Process -Wait the UninstallString/uninstall.exe we
+  # invoke; that wait is sufficient for our fixture and Tauri NSIS layout
+  # (no extra TEMP-child polling). Failures still surface via exit code and
+  # the post-checks below (exe/registry/shortcuts still present).
   $Uninstaller = Join-Path $NsisDir 'uninstall.exe'
   if (Test-Path -LiteralPath $Uninstaller) {
     Write-Host "Running NSIS uninstaller: $Uninstaller /S"
     $p = Start-Process -FilePath $Uninstaller -ArgumentList @('/S') -Wait -PassThru
-    if ($p.ExitCode -ne 0) {
-      $errors.Add("NSIS uninstaller exited $($p.ExitCode)")
+    if ($null -eq $p -or $p.ExitCode -ne 0) {
+      $errors.Add("NSIS uninstaller exited $(if ($null -eq $p) { 'null' } else { $p.ExitCode })")
     }
   } elseif (Test-Path -LiteralPath $UninstallRegPath) {
     $regUninstall = (Get-ItemProperty -LiteralPath $UninstallRegPath -ErrorAction SilentlyContinue).UninstallString
@@ -128,8 +133,8 @@ function Uninstall-Lounge {
       if (Test-Path -LiteralPath $exe) {
         Write-Host "Running registry UninstallString: $exe /S"
         $p = Start-Process -FilePath $exe -ArgumentList @('/S') -Wait -PassThru
-        if ($p.ExitCode -ne 0) {
-          $errors.Add("registry uninstaller exited $($p.ExitCode)")
+        if ($null -eq $p -or $p.ExitCode -ne 0) {
+          $errors.Add("registry uninstaller exited $(if ($null -eq $p) { 'null' } else { $p.ExitCode })")
         }
       } else {
         $errors.Add("UninstallString path missing: $exe")

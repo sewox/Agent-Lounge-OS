@@ -201,7 +201,49 @@ printf '%s' "$bad_out" | grep -Eqi 'checksum mismatch' \
   || { echo "FAIL: expected checksum mismatch message" >&2; echo "$bad_out" >&2; exit 1; }
 echo "ok: checksum mismatch rejected"
 
+echo "== uninstall fails loudly: missing manifest =="
+EMPTY_PREFIX=$(mktemp -d "${TMPDIR:-/tmp}/lounge-empty-prefix.XXXXXX")
+set +e
+miss_out=$(sh "$ROOT/install.sh" --uninstall --prefix "$EMPTY_PREFIX" 2>&1)
+miss_rc=$?
+set -e
+rm -rf "$EMPTY_PREFIX"
+if [[ "$miss_rc" -eq 0 ]]; then
+  echo "FAIL: uninstall with missing manifest exited 0" >&2
+  echo "$miss_out" >&2
+  exit 1
+fi
+if ! printf '%s' "$miss_out" | grep -Eqi 'no install manifest|uninstall failed'; then
+  echo "FAIL: missing-manifest uninstall lacked clear error" >&2
+  echo "$miss_out" >&2
+  exit 1
+fi
+echo "ok: missing manifest → non-zero uninstall"
+
+echo "== uninstall fails loudly: undeletable path =="
+# Make the share directory non-writable so rm of installed files fails.
+SHARE_DIR="$PREFIX/share/agent-lounge-os"
+chmod a-w "$SHARE_DIR"
+set +e
+lock_out=$(sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX" 2>&1)
+lock_rc=$?
+set -e
+chmod u+w "$SHARE_DIR"
+if [[ "$lock_rc" -eq 0 ]]; then
+  echo "FAIL: uninstall with undeletable paths exited 0" >&2
+  echo "$lock_out" >&2
+  exit 1
+fi
+if ! printf '%s' "$lock_out" | grep -Eqi 'failed to remove|still present|uninstall incomplete'; then
+  echo "FAIL: undeletable-path uninstall lacked clear error" >&2
+  echo "$lock_out" >&2
+  exit 1
+fi
+echo "ok: undeletable path → non-zero uninstall"
+
 echo "== uninstall (every installed file) =="
+# Re-assert share dir is writable before the success-path uninstall.
+chmod u+w "$SHARE_DIR" 2>/dev/null || chmod u+w "$(dirname "$SHARE_DIR")"
 sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX"
 for p in "${INSTALLED_FILES[@]}"; do
   if [[ -e "$p" || -L "$p" ]]; then

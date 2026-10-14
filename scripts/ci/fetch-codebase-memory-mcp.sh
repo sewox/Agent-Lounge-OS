@@ -6,7 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CBM_RELEASE="${CBM_RELEASE:-v0.11.0}"
 
-# Pinned v0.11.0 assets (DeusData/codebase-memory-mcp checksums.txt).
+# Pinned v0.11.0 assets — verified against upstream release checksums.txt:
+# https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/checksums.txt
 pin_for() {
   case "$1" in
     linux-amd64)

@@ -12,6 +12,7 @@ $MainExeName = 'agent-lounge-os.exe'
 $UninstallRegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$ProductName"
 $StartMenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) "Programs\$ProductName"
 $StartMenuShortcut = Join-Path $StartMenuDir "$ProductName.lnk"
+$lockStream = $null
 
 try {
   & "$Root\scripts\install\fixture-nsis\build-fixture-nsis.ps1" -OutDir $FixtureDir -Version $Version
@@ -85,8 +86,37 @@ try {
       Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction Stop
     }
   }
-  Write-Host "== uninstall (NSIS) =="
+
+  Write-Host "== uninstall fails loudly when main exe is locked =="
   $env:LOUNGE_DOWNLOAD_DIR = $FixtureDir
+  # Exclusive lock so NSIS / Remove-Item cannot delete agent-lounge-os.exe.
+  $lockStream = [System.IO.File]::Open(
+    $MainExe,
+    [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read,
+    [System.IO.FileShare]::None
+  )
+  $lockedUninstallSucceeded = $false
+  try {
+    & "$Root\install.ps1" -Uninstall -Prefix $Prefix
+    $lockedUninstallSucceeded = $true
+  } catch {
+    $msg = "$($_.Exception.Message)$($_)"
+    if ($msg -notmatch 'uninstall incomplete') {
+      throw "expected 'uninstall incomplete' while exe locked, got: $msg"
+    }
+    Write-Host "ok: locked exe → uninstall incomplete (throw / non-zero)"
+  }
+  if ($lockedUninstallSucceeded) {
+    throw 'uninstall succeeded while agent-lounge-os.exe was locked'
+  }
+  if (-not (Test-Path -LiteralPath $MainExe)) {
+    throw 'main exe disappeared while lock was held (lock test invalid)'
+  }
+  $lockStream.Dispose()
+  $lockStream = $null
+
+  Write-Host "== uninstall (NSIS) after unlock =="
   & "$Root\install.ps1" -Uninstall -Prefix $Prefix
 
   foreach ($p in $InstalledPaths) {
@@ -103,8 +133,16 @@ try {
 
   Write-Host 'ALL OK (windows real NSIS installer fixture)'
 } finally {
-  Remove-Item -Recurse -Force $FixtureDir, $Prefix -ErrorAction SilentlyContinue
-  Remove-Item Env:LOUNGE_DOWNLOAD_DIR -ErrorAction SilentlyContinue
-  Remove-Item Env:LOUNGE_NO_MODIFY_PATH -ErrorAction SilentlyContinue
-  Remove-Item Env:LOUNGE_FIXTURE_SKIP_NSIS -ErrorAction SilentlyContinue
+  if ($null -ne $lockStream) {
+    $lockStream.Dispose()
+    $lockStream = $null
+  }
+  foreach ($d in @($FixtureDir, $Prefix)) {
+    if (Test-Path -LiteralPath $d) {
+      Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction Stop
+    }
+  }
+  if (Test-Path Env:LOUNGE_DOWNLOAD_DIR) { Remove-Item Env:LOUNGE_DOWNLOAD_DIR }
+  if (Test-Path Env:LOUNGE_NO_MODIFY_PATH) { Remove-Item Env:LOUNGE_NO_MODIFY_PATH }
+  if (Test-Path Env:LOUNGE_FIXTURE_SKIP_NSIS) { Remove-Item Env:LOUNGE_FIXTURE_SKIP_NSIS }
 }
