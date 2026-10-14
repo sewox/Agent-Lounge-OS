@@ -116,7 +116,7 @@ impl ExperienceStore {
         .context("set_experience_title join")?
     }
 
-    /// Rows with empty title or fallback source — for upgrade backfill enqueue.
+    /// Rows with empty/fallback title that are due for (re)try — excludes give-up.
     pub async fn list_ids_needing_title(&self) -> Result<Vec<(String, String)>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -125,6 +125,92 @@ impl ExperienceStore {
         })
         .await
         .context("list_ids_needing_title join")?
+    }
+
+    pub async fn record_title_retry(
+        &self,
+        id: String,
+        attempts: u32,
+        next_retry_at: String,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            record_title_retry_blocking(&conn, &id, attempts, &next_retry_at)
+        })
+        .await
+        .context("record_title_retry join")?
+    }
+
+    pub async fn mark_title_give_up(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            mark_title_give_up_blocking(&conn, &id)
+        })
+        .await
+        .context("mark_title_give_up join")?
+    }
+
+    pub async fn clear_title_retry(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            clear_title_retry_blocking(&conn, &id)
+        })
+        .await
+        .context("clear_title_retry join")?
+    }
+
+    pub async fn count_title_backlog(&self) -> Result<u64> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            count_title_backlog_blocking(&conn)
+        })
+        .await
+        .context("count_title_backlog join")?
+    }
+
+    pub async fn settings_flag_done(&self, key: String) -> Result<bool> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            settings_flag_done_blocking(&conn, &key)
+        })
+        .await
+        .context("settings_flag_done join")?
+    }
+
+    pub async fn set_settings_flag(&self, key: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            set_settings_flag_blocking(&conn, &key)
+        })
+        .await
+        .context("set_settings_flag join")?
+    }
+
+    /// Title retry bookkeeping for tests / Health-1.
+    pub async fn title_retry_state(&self, id: String) -> Result<(u32, Option<String>, bool)> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            conn.query_row(
+                "SELECT COALESCE(title_attempts,0), title_next_retry_at, COALESCE(title_give_up,0) FROM experiences WHERE id = ?1",
+                params![id],
+                |row| {
+                    let attempts: i64 = row.get(0)?;
+                    let next: Option<String> = row.get(1)?;
+                    let give: i64 = row.get(2)?;
+                    Ok((attempts.max(0) as u32, next, give != 0))
+                },
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .context("title_retry_state join")?
     }
 
     pub async fn insert_record(&self, record: ExperienceRecord) -> Result<()> {
@@ -430,7 +516,10 @@ fn create_experiences_sql() -> &'static str {
                 archived_by TEXT,
                 title TEXT NOT NULL DEFAULT '',
                 title_source TEXT NOT NULL DEFAULT 'fallback',
-                source TEXT NOT NULL DEFAULT ''
+                source TEXT NOT NULL DEFAULT '',
+                title_attempts INTEGER NOT NULL DEFAULT 0,
+                title_next_retry_at TEXT,
+                title_give_up INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_experiences_project ON experiences(project_id);
             CREATE INDEX IF NOT EXISTS idx_experiences_agent ON experiences(agent_id);
@@ -568,7 +657,7 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
         }
     });
     let title = if record.title.trim().is_empty() {
-        crate::models::protocol::truncate_title_for_db(
+        crate::bridge::hygiene::fallback_title(
             &record.solution_summary,
             crate::models::TITLE_MAX_CHARS,
         )
@@ -712,24 +801,105 @@ fn set_title_blocking(
 }
 
 fn list_needing_title_blocking(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let now = now_rfc3339();
     let mut stmt = conn.prepare(
         r#"
         SELECT id, COALESCE(NULLIF(trim(solution_summary), ''), topic)
         FROM experiences
         WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(title_give_up, 0) = 0
+          AND lower(COALESCE(title_source, 'fallback')) NOT IN ('agent', 'user', 'llm')
           AND (
             title IS NULL OR trim(title) = ''
             OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
           )
-          AND lower(COALESCE(title_source, 'fallback')) NOT IN ('agent', 'user')
+          AND (
+            title_next_retry_at IS NULL OR title_next_retry_at = ''
+            OR title_next_retry_at <= ?1
+          )
         "#,
     )?;
-    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let rows = stmt.query_map(params![now], |row| Ok((row.get(0)?, row.get(1)?)))?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
     }
     Ok(out)
+}
+
+fn record_title_retry_blocking(
+    conn: &Connection,
+    id: &str,
+    attempts: u32,
+    next_retry_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE experiences SET title_attempts = ?1, title_next_retry_at = ?2, updated_at = ?3 WHERE id = ?4",
+        params![attempts as i64, next_retry_at, now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn mark_title_give_up_blocking(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE experiences SET title_give_up = 1, title_next_retry_at = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn clear_title_retry_blocking(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE experiences SET title_attempts = 0, title_next_retry_at = NULL, title_give_up = 0, updated_at = ?1 WHERE id = ?2",
+        params![now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn count_title_backlog_blocking(conn: &Connection) -> Result<u64> {
+    let now = now_rfc3339();
+    let n: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM experiences
+        WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(title_give_up, 0) = 0
+          AND lower(COALESCE(title_source, 'fallback')) NOT IN ('agent', 'user', 'llm')
+          AND (
+            title IS NULL OR trim(title) = ''
+            OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
+          )
+          AND (
+            title_next_retry_at IS NULL OR title_next_retry_at = ''
+            OR title_next_retry_at <= ?1
+          )
+        "#,
+        params![now],
+        |row| row.get(0),
+    )?;
+    Ok(n.max(0) as u64)
+}
+
+fn settings_flag_done_blocking(conn: &Connection, key: &str) -> Result<bool> {
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(
+        done.as_deref(),
+        Some("1") | Some("true") | Some("\"1\"")
+    ))
+}
+
+fn set_settings_flag_blocking(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings(key, value_json) VALUES(?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        params![key],
+    )?;
+    Ok(())
 }
 
 const RECORD_SELECT_COLS: &str = r#"
@@ -1011,6 +1181,9 @@ mod tests {
             "title",
             "title_source",
             "source",
+            "title_attempts",
+            "title_next_retry_at",
+            "title_give_up",
         ] {
             assert!(cols.iter().any(|col| col == name), "missing {name}");
         }

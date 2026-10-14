@@ -837,7 +837,8 @@ impl McpServer {
         } else if !source_parts.iter().any(|s| s == "mcp") {
             source_parts.insert(0, "mcp".into());
         }
-        let source = source_parts.join(",");
+        // Provenance column format: comma-separated lowercase tokens (e.g. `mcp,external`).
+        let source = super::hygiene::format_source_metadata(&source_parts);
 
         let agent_title = arg_str(args, "title").map(str::to_string);
         let (title, title_source) = if let Some(t) = agent_title {

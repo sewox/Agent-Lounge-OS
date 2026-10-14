@@ -56,7 +56,7 @@ pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
 };
 pub use experience_title::{
-    backfill_missing_titles, enqueue_title, ensure_title_worker, title_backlog_count,
+    backfill_missing_titles, enqueue_title, ensure_title_worker, title_backlog_count, TitleError,
     TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT, TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
 };
 pub use graph_ui::{

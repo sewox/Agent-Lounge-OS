@@ -4,7 +4,7 @@ mod discovery;
 mod hf;
 mod memory;
 mod policy;
-pub mod protocol;
+mod protocol;
 mod quota;
 mod service;
 

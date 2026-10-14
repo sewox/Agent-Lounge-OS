@@ -1,22 +1,18 @@
 //! Experience content hygiene — mask transient/sensitive fragments before persist
 //! and before/after LLM title generation.
 //!
-//! Masking (not rejection): private IP:port, device serials, tokens/keys, absolute
-//! home paths. Masked writes are flagged `reviewed=0` and return a warning to the agent.
-//! Existing rows are NOT redacted without explicit approval (OPEN assumption).
+//! Masking (not rejection): IP:port (private and public), device serials, tokens/keys,
+//! absolute home paths. Masked writes are flagged `reviewed=0` and return a warning
+//! to the agent. Existing rows are NOT redacted without explicit approval (OPEN).
 
 use std::sync::OnceLock;
 
 use regex::Regex;
 
-fn re_private_ip_port() -> &'static Regex {
+fn re_ip_port() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)\b(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2}|127(?:\.\d{1,3}){3}):(\d{1,5})\b",
-        )
-        .expect("private ip:port regex")
-    })
+    // Any IPv4:port (private + public). Port capture kept for `<device-ip>:<port>`.
+    RE.get_or_init(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}:(\d{1,5})\b").expect("ip:port regex"))
 }
 
 fn re_serial_labeled() -> &'static Regex {
@@ -31,16 +27,25 @@ fn re_serial_labeled() -> &'static Regex {
 
 fn re_serial_bare() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b([A-F0-9]{16})\b").expect("bare serial regex"))
+    // Case-insensitive 16-hex device serials.
+    RE.get_or_init(|| Regex::new(r"(?i)\b([A-F0-9]{16})\b").expect("bare serial regex"))
 }
 
 fn re_token() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // Avoid r#"..."# — embedded quotes terminate those delimiters.
         Regex::new(concat!(
-            r"(?i)\b(?:bearer\s+[A-Za-z0-9\-._~+/]+=*|sk-[A-Za-z0-9]{16,}|",
+            r"(?i)\b(?:",
+            r"bearer\s+[A-Za-z0-9\-._~+/]+=*|",
+            r"sk-[A-Za-z0-9]{16,}|",
+            r"ghp_[A-Za-z0-9]{20,}|",
+            r"xox[baprs]-[A-Za-z0-9-]{10,}|",
+            r"SU[A-Za-z0-9]{48,}|",
+            r"(?:nats[_-]?seed|nkey[_-]?seed|seed)\s*[:=]\s*[A-Za-z0-9]{32,}|",
             r"(?:api[_-]?key|access[_-]?token|secret|auth[_-]?token)\s*[:=]\s*",
-            r#"['"]?[A-Za-z0-9\-._~+/]{12,}['"]?)"#,
+            r"\S{12,}",
+            r")",
         ))
         .expect("token regex")
     })
@@ -70,12 +75,12 @@ pub fn scrub(input: &str) -> HygieneResult {
     let mut warnings = Vec::new();
     let mut masked = false;
 
-    let next = re_private_ip_port()
+    let next = re_ip_port()
         .replace_all(&text, "<device-ip>:$1")
         .into_owned();
     if next != text {
         masked = true;
-        warnings.push("masked private IP:port as <device-ip>:<port>".into());
+        warnings.push("masked IP:port as <device-ip>:<port>".into());
         text = next;
     }
 
@@ -121,8 +126,10 @@ pub const MAX_TAGS: usize = 16;
 pub const MAX_TAG_LEN: usize = 32;
 
 /// Normalize agent-supplied tags: lowercase, trim, dedupe, drop source tags,
-/// enforce count/length limits. Returns `(tags, source_meta)` where source_meta
-/// collects `mcp`/`external` moved out of tags.
+/// enforce count/length limits. Returns `(tags, source_parts)`.
+///
+/// `source_parts` collects `mcp`/`external` moved out of tags. Join with
+/// [`format_source_metadata`] for the DB/API `source` field.
 pub fn normalize_tags(raw: &[String]) -> (Vec<String>, Vec<String>) {
     let mut source = Vec::new();
     let mut tags = Vec::new();
@@ -146,6 +153,19 @@ pub fn normalize_tags(raw: &[String]) -> (Vec<String>, Vec<String>) {
         }
     }
     (tags, source)
+}
+
+/// Format provenance tokens for the experience `source` column.
+///
+/// **Format:** comma-separated lowercase tokens, no spaces (e.g. `mcp,external`).
+/// Callers should put `mcp` first when present. Empty input → empty string.
+pub fn format_source_metadata(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Format optional structured ADR fields into a single record body.
@@ -175,7 +195,8 @@ pub fn format_adr(
     }
 }
 
-/// Fallback title: truncate content to ≤max_chars on a word boundary when possible.
+/// Fallback title: truncate to ≤max_chars on a **word boundary**.
+/// Never cuts mid-word when at least one full word fits; otherwise hard-caps.
 pub fn fallback_title(content: &str, max_chars: usize) -> String {
     let trimmed = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if trimmed.is_empty() {
@@ -200,6 +221,7 @@ pub fn fallback_title(content: &str, max_chars: usize) -> String {
         out.push_str(word);
     }
     if out.is_empty() {
+        // Single oversize token: hard cap (no word boundary available).
         trimmed.chars().take(max_chars).collect()
     } else {
         out
@@ -255,27 +277,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn masks_private_ip_port() {
-        let r = scrub("connect 192.168.1.10:5555 for adb");
+    fn masks_private_and_public_ip_port() {
+        let r = scrub("connect 192.168.1.10:5555 and 8.8.8.8:53");
         assert!(r.masked);
         assert!(r.text.contains("<device-ip>:5555"));
+        assert!(r.text.contains("<device-ip>:53"));
         assert!(!r.text.contains("192.168.1.10"));
+        assert!(!r.text.contains("8.8.8.8"));
     }
 
     #[test]
-    fn masks_token_and_home() {
-        let r = scrub("api_key=sk-abcdefghijklmnopqrstuvwxyz0123 path=/Users/alice/proj");
+    fn masks_token_variants_and_home() {
+        let r = scrub(
+            "api_key=sk-abcdefghijklmnopqrstuvwxyz0123 ghp_abcdefghijklmnopqrstuv path=/Users/alice/proj",
+        );
         assert!(r.masked);
         assert!(r.text.contains("<redacted-token>"));
         assert!(r.text.contains("<home>"));
         assert!(!r.text.contains("/Users/alice"));
+        assert!(!r.text.contains("ghp_"));
     }
 
     #[test]
-    fn masks_serial_label() {
-        let r = scrub("device id: ABCDEF1234567890 ready");
+    fn masks_slack_and_nats_seed() {
+        let r = scrub(
+            "xoxb-1234567890-abcdefghij seed=SUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
         assert!(r.masked);
-        assert!(r.text.contains("<device-serial>"));
+        assert!(r.text.contains("<redacted-token>"));
+        assert!(!r.text.contains("xoxb-"));
+        assert!(!r.text.contains("SUAAAA"));
+    }
+
+    #[test]
+    fn masks_serial_label_and_bare_case_insensitive() {
+        let r = scrub("device id: ABCDEF1234567890 and bare abcdef1234567890");
+        assert!(r.masked);
+        assert_eq!(r.text.matches("<device-serial>").count(), 2);
     }
 
     #[test]
@@ -289,14 +327,18 @@ mod tests {
         ]);
         assert_eq!(tags, vec!["redis", "nats"]);
         assert_eq!(source, vec!["mcp", "external"]);
+        assert_eq!(format_source_metadata(&source), "mcp,external");
     }
 
     #[test]
-    fn fallback_truncates_to_limit() {
+    fn fallback_truncates_on_word_boundary() {
         let long = "word ".repeat(40);
         let t = fallback_title(&long, 80);
         assert!(t.chars().count() <= 80);
         assert!(!t.ends_with(' '));
+        // Must end on a full word (no trailing partial token).
+        assert!(t.ends_with("word"));
+        assert!(t.split_whitespace().all(|w| w == "word"));
     }
 
     #[test]

@@ -683,10 +683,7 @@ impl ExperienceRecord {
     }
 }
 
-pub fn truncate_title_for_db(content: &str, max_chars: usize) -> String {
-    truncate_title(content, max_chars)
-}
-
+/// Word-boundary truncate for titles (same rules as hygiene::fallback_title).
 fn truncate_title(content: &str, max_chars: usize) -> String {
     let trimmed = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if trimmed.is_empty() {
