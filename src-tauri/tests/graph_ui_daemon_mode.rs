@@ -1,17 +1,19 @@
-//! PR-Graph-2: shared coordination daemon mode — never mutate port/config.
+//! PR-Graph-2: shared coordination daemon — fail-closed Active/Inactive/Unknown.
 //!
 //! Runs on Linux, macOS, and Windows CI without `#[ignore]`, skip, or soft gates.
-//! Uses the staged `lounge-test-helper` fake for both `daemon status` and UI HTTP.
+//! End-to-end paths drive the staged fake helper via its sibling marker file
+//! (no in-process override, no process-wide `CBM_CACHE_DIR` races).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use app_lib::services::memory_bridge::{MemoryBridge, MemoryBridgeConfig, TransportMode};
 use app_lib::services::{
-    enable_graph_ui_headless, graph_ui_status, port_owned_by_lounge, probe_daemon_status,
-    probe_ui_config, stage_codebase_memory_mcp_double, wait_until, CbmDaemonStatus,
-    GraphUiPortMode, GraphUiState,
+    classify_daemon_probe_output, enable_graph_ui_headless, fake_helper_pollution_config,
+    graph_ui_status, parse_daemon_status_output, port_owned_by_lounge, probe_daemon_status,
+    probe_ui_config, stage_codebase_memory_mcp_double, strip_utf8_bom, wait_until,
+    CbmDaemonPresence, CbmDaemonStatus, GraphUiPortMode, GraphUiState,
 };
 use axum::routing::get;
 use axum::{Json, Router};
@@ -20,7 +22,11 @@ fn helper_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_lounge-test-helper"))
 }
 
-fn write_config(path: &PathBuf, enabled: bool, port: u16) -> String {
+fn write_marker(scratch: &Path, spec: &str) {
+    fs::write(scratch.join("lounge-fake-cbm-daemon"), spec).expect("write marker");
+}
+
+fn write_config(path: &Path, enabled: bool, port: u16) -> String {
     let body = format!(
         "{{\n    \"ui_enabled\": {},\n    \"ui_port\": {}\n}}\n",
         if enabled { "true" } else { "false" },
@@ -54,141 +60,225 @@ async fn serve_shared_ui(listener: std::net::TcpListener) -> u16 {
     port
 }
 
-/// Daemon mode + live shared UI: enable must not spawn and must leave config untouched.
-#[tokio::test]
-async fn daemon_mode_enable_opens_existing_without_touching_config() {
-    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
-    let cache = scratch.join("cbm-cache");
-    fs::create_dir_all(&cache).expect("cache");
-    let config_path = cache.join("config.json");
-
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind shared");
-    let shared_port = serve_shared_ui(listener).await;
-    let original = write_config(&config_path, true, shared_port);
-
-    // If Lounge wrongly spawns `--ui=true --port=N`, the fake writes CBM_CACHE_DIR.
-    std::env::set_var("CBM_CACHE_DIR", &cache);
-
-    let bridge = MemoryBridge::with_config(
-        &binary,
+fn bridge_for(binary: &Path, port: u16) -> MemoryBridge {
+    MemoryBridge::with_config(
+        binary,
         MemoryBridgeConfig {
-            http_port: 18749,
+            http_port: port,
             transport: TransportMode::ForceCli,
             ..MemoryBridgeConfig::default()
         },
+    )
+}
+
+// --- Parser / classify robustness (pure) ------------------------------------
+
+#[test]
+fn parse_accepts_bom_crlf_case_and_hosts() {
+    let bom_crlf =
+        "\u{FEFF}Daemon: Active (Permanent)\r\n  ui: configured at http://localhost:9749\r\n";
+    let s = parse_daemon_status_output(bom_crlf);
+    assert_eq!(s.presence, CbmDaemonPresence::Active);
+    assert_eq!(s.ui_port, Some(9749));
+
+    let v6 = "daemon: active (session-managed)\n  ui: configured at http://[::1]:18750\n";
+    assert_eq!(parse_daemon_status_output(v6).ui_port, Some(18750));
+
+    let nr = "DAEMON: NOT RUNNING\n";
+    assert_eq!(
+        parse_daemon_status_output(nr).presence,
+        CbmDaemonPresence::Inactive
     );
+
+    let resp = "daemon: not responding (endpoint held by pid 9)\n";
+    assert_eq!(
+        parse_daemon_status_output(resp).presence,
+        CbmDaemonPresence::Unknown
+    );
+    assert!(strip_utf8_bom("\u{FEFF}x").starts_with('x'));
+}
+
+#[test]
+fn classify_timeout_shaped_reasons() {
+    assert_eq!(
+        classify_daemon_probe_output("", "", Some(0))
+            .reason
+            .as_deref(),
+        Some("empty_output")
+    );
+    assert_eq!(
+        classify_daemon_probe_output("nope", "", Some(2))
+            .reason
+            .as_deref(),
+        Some("nonzero_exit")
+    );
+    let pre = classify_daemon_probe_output(
+        "Usage:\n  codebase-memory-mcp --ui=true\n",
+        "unknown command: daemon\n",
+        Some(1),
+    );
+    assert_eq!(pre.presence, CbmDaemonPresence::Inactive);
+    assert_eq!(pre.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
+}
+
+// --- Real probe via fake helper marker (no in-process override) -------------
+
+#[tokio::test]
+async fn probe_marker_timeout_is_unknown() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+    write_marker(&scratch, "hang");
+    let status = probe_daemon_status(&binary).expect("probe");
+    assert_eq!(status.presence, CbmDaemonPresence::Unknown);
+    assert_eq!(status.reason.as_deref(), Some("timeout"));
+    assert!(status.blocks_spawn());
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[tokio::test]
+async fn probe_marker_nonzero_garbage_empty_crash_not_responding() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+
+    write_marker(&scratch, "garbage");
+    let g = probe_daemon_status(&binary).expect("garbage");
+    assert_eq!(g.presence, CbmDaemonPresence::Unknown);
+    assert_eq!(g.reason.as_deref(), Some("nonzero_exit"));
+
+    write_marker(&scratch, "empty");
+    let e = probe_daemon_status(&binary).expect("empty");
+    assert_eq!(e.presence, CbmDaemonPresence::Unknown);
+    assert_eq!(e.reason.as_deref(), Some("empty_output"));
+
+    write_marker(&scratch, "crash");
+    let c = probe_daemon_status(&binary).expect("crash");
+    assert_eq!(c.presence, CbmDaemonPresence::Unknown);
+
+    write_marker(&scratch, "not-responding");
+    let n = probe_daemon_status(&binary).expect("not-responding");
+    assert_eq!(n.presence, CbmDaemonPresence::Unknown);
+    assert_eq!(n.reason.as_deref(), Some("not_responding"));
+
+    write_marker(&scratch, "exit:3");
+    let x = probe_daemon_status(&binary).expect("exit:3");
+    assert_eq!(x.presence, CbmDaemonPresence::Unknown);
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[tokio::test]
+async fn probe_marker_crlf_bom_active_and_pre_0_11() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+
+    write_marker(&scratch, "crlf-bom-active:9749");
+    let a = probe_daemon_status(&binary).expect("crlf-bom");
+    assert_eq!(a.presence, CbmDaemonPresence::Active);
+    assert_eq!(a.ui_port, Some(9749));
+
+    write_marker(&scratch, "pre-0.11");
+    let p = probe_daemon_status(&binary).expect("pre-0.11");
+    assert_eq!(p.presence, CbmDaemonPresence::Inactive);
+    assert_eq!(p.reason.as_deref(), Some("pre_0_11_unknown_subcommand"));
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[tokio::test]
+async fn probe_binary_fails_to_start_is_unknown() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let scratch = std::env::temp_dir().join(format!(
+        "lounge-cbm-spawnfail-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    fs::create_dir_all(&scratch).expect("mkdir");
+    let binary = scratch.join(if cfg!(windows) {
+        "codebase-memory-mcp.exe"
+    } else {
+        "codebase-memory-mcp"
+    });
+    // Empty non-executable file → spawn failure on Unix; on Windows may also fail.
+    fs::write(&binary, []).expect("write empty");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&binary).unwrap().permissions();
+        perms.set_mode(0o644); // not executable
+        fs::set_permissions(&binary, perms).unwrap();
+    }
+    let status = probe_daemon_status(&binary).expect("probe");
+    assert_eq!(status.presence, CbmDaemonPresence::Unknown);
+    assert!(
+        status.reason.as_deref() == Some("spawn_failed")
+            || status.reason.as_deref() == Some("gate_error")
+            || status.reason.as_deref() == Some("wait_error"),
+        "expected spawn/gate/wait unknown, got {:?}",
+        status.reason
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+// --- E2E Active / Inactive / Unknown via marker (all 3 OSes) ----------------
+
+/// Active: enable must not spawn; sibling pollution config must stay absent/untouched.
+#[tokio::test]
+async fn e2e_active_opens_existing_without_touching_config() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+    let config_path = scratch.join("watched-config.json");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind shared");
+    let shared_port = serve_shared_ui(listener).await;
+    let original = write_config(&config_path, true, shared_port);
+    write_marker(&scratch, &format!("active:permanent:{shared_port}"));
+
+    let bridge = bridge_for(&binary, 18749);
     let state = GraphUiState::new();
     state.set_port_mode(GraphUiPortMode::Auto);
     state.set_cbm_config_path_override(Some(config_path.clone()));
-    state.set_daemon_status_override(Some(CbmDaemonStatus {
-        active: true,
-        permanent: true,
-        daemon_pid: Some(4242),
-        ui_port: Some(shared_port),
-        ui_disabled: false,
-        raw_summary: format!("daemon: active (permanent) ui={shared_port}"),
-    }));
+    // No in-process override — real `daemon status` via marker.
 
     let status = graph_ui_status(&state, &bridge, None).await;
-    assert!(status.daemon_mode, "status must report daemon_mode");
-    assert!(status.ui_available, "shared UI must be available");
-    assert!(!status.owned_by_lounge);
-    assert!(
-        !status.port_conflict,
-        "daemon mode must not be an error state"
-    );
+    assert_eq!(status.daemon_presence, CbmDaemonPresence::Active);
+    assert!(status.daemon_mode);
+    assert!(status.ui_available);
+    assert!(!status.port_conflict);
     assert_eq!(status.port, shared_port);
     assert_eq!(
         status.message_key.as_deref(),
         Some("graphDaemonOpenExisting")
     );
 
+    let preferred_before = bridge.http_port();
     let live = enable_graph_ui_headless(&state, &bridge, None, 18749..=18759)
         .await
-        .expect("daemon enable returns existing port");
+        .expect("active enable");
     assert_eq!(live, shared_port);
-    assert!(
-        state.spawned_child_pid().is_none(),
-        "daemon mode must never spawn a Lounge child"
-    );
-
-    let after = fs::read_to_string(&config_path).expect("read config after");
-    assert_eq!(
-        after, original,
-        "shared config.json must be byte-identical after enable"
-    );
-    assert!(
-        after.contains(&format!("\"ui_port\": {shared_port}")),
-        "ui_port must remain {shared_port}"
-    );
-
-    std::env::remove_var("CBM_CACHE_DIR");
-    let _ = fs::remove_dir_all(&scratch);
-}
-
-/// Daemon active but UI disabled: no spawn, config untouched, clear non-error info.
-#[tokio::test]
-async fn daemon_mode_without_ui_does_not_spawn_or_mutate() {
-    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
-    let cache = scratch.join("cbm-cache");
-    fs::create_dir_all(&cache).expect("cache");
-    let config_path = cache.join("config.json");
-    let original = write_config(&config_path, false, 9749);
-
-    std::env::set_var("CBM_CACHE_DIR", &cache);
-
-    let bridge = MemoryBridge::with_config(
-        &binary,
-        MemoryBridgeConfig {
-            http_port: 18749,
-            transport: TransportMode::ForceCli,
-            ..MemoryBridgeConfig::default()
-        },
-    );
-    let state = GraphUiState::new();
-    state.set_cbm_config_path_override(Some(config_path.clone()));
-    state.set_daemon_status_override(Some(CbmDaemonStatus {
-        active: true,
-        permanent: true,
-        daemon_pid: Some(7),
-        ui_port: None,
-        ui_disabled: true,
-        raw_summary: "daemon: active ui disabled".into(),
-    }));
-
-    let status = graph_ui_status(&state, &bridge, None).await;
-    assert!(status.daemon_mode);
-    assert!(!status.ui_available);
-    assert!(!status.port_conflict);
-    assert_eq!(status.message_key.as_deref(), Some("graphDaemonSharedNoUi"));
-
-    let err = enable_graph_ui_headless(&state, &bridge, None, 18749..=18759)
-        .await
-        .expect_err("enable must refuse spawn when shared UI is down");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("graphDaemonSharedNoUi"),
-        "expected i18n key, got {msg}"
-    );
     assert!(state.spawned_child_pid().is_none());
-    let after = fs::read_to_string(&config_path).expect("config");
-    assert_eq!(after, original);
+    assert_eq!(
+        bridge.http_port(),
+        preferred_before,
+        "daemon enable must not permanently set_http_port"
+    );
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    // Fake helper would write sibling pollution dir if spawn happened.
+    let pollution = fake_helper_pollution_config(&binary).expect("pollution path");
+    assert!(
+        !pollution.is_file(),
+        "spawn pollution config must not appear: {}",
+        pollution.display()
+    );
 
-    std::env::remove_var("CBM_CACHE_DIR");
     let _ = fs::remove_dir_all(&scratch);
 }
 
-/// Per-session (daemon inactive): existing spawn path still owns the child port.
+/// Inactive: per-session spawn still owns the child port.
 #[tokio::test]
-async fn per_session_mode_still_spawns_and_owns() {
+async fn e2e_inactive_still_spawns_and_owns() {
     let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
-    let cache = scratch.join("cbm-cache");
-    fs::create_dir_all(&cache).expect("cache");
-    let config_path = cache.join("config.json");
+    write_marker(&scratch, "inactive");
+    let config_path = scratch.join("watched-config.json");
     write_config(&config_path, false, 9749);
-    std::env::set_var("CBM_CACHE_DIR", &cache);
 
-    // Stage a reserved listener for handoff — never free-then-rebind.
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind lounge port");
     let lounge_port = listener.local_addr().expect("addr").port();
 
@@ -202,45 +292,104 @@ async fn per_session_mode_still_spawns_and_owns() {
     );
     let state = GraphUiState::new();
     state.set_port_mode(GraphUiPortMode::User);
-    state.set_cbm_config_path_override(Some(config_path.clone()));
-    state.set_daemon_status_override(Some(CbmDaemonStatus::inactive()));
+    state.set_cbm_config_path_override(Some(config_path));
     state.stage_listen_handoff(listener);
+
+    let status = graph_ui_status(&state, &bridge, None).await;
+    assert_eq!(status.daemon_presence, CbmDaemonPresence::Inactive);
+    assert!(!status.daemon_mode);
 
     let live = enable_graph_ui_headless(&state, &bridge, None, lounge_port..=lounge_port)
         .await
-        .expect("per-session enable");
+        .expect("inactive enable");
     assert_eq!(live, lounge_port);
     let child = state.spawned_child_pid().expect("child spawned");
-    assert!(
-        port_owned_by_lounge(live, Some(child)),
-        "per-session child must own the listen port"
-    );
-
-    let status = graph_ui_status(&state, &bridge, None).await;
-    assert!(!status.daemon_mode);
-    assert!(status.ui_available);
-    assert!(status.owned_by_lounge);
+    assert!(port_owned_by_lounge(live, Some(child)));
 
     state.kill_spawned_child();
-    std::env::remove_var("CBM_CACHE_DIR");
     let _ = fs::remove_dir_all(&scratch);
 }
 
-/// Fake helper `daemon status` argv path (sibling marker file) matches upstream format.
+/// Unknown: never spawn; dedicated info key; config untouched.
 #[tokio::test]
-async fn fake_helper_daemon_status_argv_roundtrip() {
+async fn e2e_unknown_never_spawns() {
     let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
-    let marker = scratch.join("lounge-fake-cbm-daemon");
-    fs::write(&marker, "active:permanent:9749").expect("write marker");
+    write_marker(&scratch, "not-responding");
+    let config_path = scratch.join("watched-config.json");
+    let original = write_config(&config_path, false, 9749);
 
-    let status = probe_daemon_status(&binary).expect("probe");
-    assert!(status.active);
-    assert!(status.permanent);
-    assert_eq!(status.ui_port, Some(9749));
+    let bridge = bridge_for(&binary, 18749);
+    let state = GraphUiState::new();
+    state.set_cbm_config_path_override(Some(config_path.clone()));
 
-    fs::write(&marker, "inactive").expect("write inactive");
-    let off = probe_daemon_status(&binary).expect("probe off");
-    assert!(!off.active);
+    let status = graph_ui_status(&state, &bridge, None).await;
+    assert_eq!(status.daemon_presence, CbmDaemonPresence::Unknown);
+    assert!(status.daemon_mode);
+    assert!(!status.ui_available);
+    assert!(!status.port_conflict);
+    assert_eq!(
+        status.message_key.as_deref(),
+        Some("graphDaemonProbeUnknown")
+    );
 
+    let err = enable_graph_ui_headless(&state, &bridge, None, 18749..=18759)
+        .await
+        .expect_err("unknown must refuse spawn");
+    assert!(
+        format!("{err}").contains("graphDaemonProbeUnknown"),
+        "got {err}"
+    );
+    assert!(state.spawned_child_pid().is_none());
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    let pollution = fake_helper_pollution_config(&binary).expect("pollution path");
+    assert!(!pollution.is_file());
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// Status + enable share the brief daemon probe cache (one marker flip mid-flight).
+#[tokio::test]
+async fn status_and_enable_share_daemon_probe_cache() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+    write_marker(&scratch, "not-responding");
+
+    let _bridge = bridge_for(&binary, 18749);
+    let state = GraphUiState::new();
+
+    let first = state.probe_cbm_daemon_async(&binary).await;
+    assert_eq!(first.presence, CbmDaemonPresence::Unknown);
+
+    // Flip marker to Active — cached Unknown must still win within TTL.
+    write_marker(&scratch, "active:permanent:9749");
+    let cached = state.probe_cbm_daemon_async(&binary).await;
+    assert_eq!(
+        cached.presence,
+        CbmDaemonPresence::Unknown,
+        "enable/status must share the brief cache"
+    );
+
+    state.clear_daemon_probe_cache();
+    let fresh = state.probe_cbm_daemon_async(&binary).await;
+    assert_eq!(fresh.presence, CbmDaemonPresence::Active);
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// Override path still used by ownership tests (Active helper).
+#[tokio::test]
+async fn override_active_without_ui_refuses_spawn() {
+    let (binary, scratch) = stage_codebase_memory_mcp_double(&helper_bin()).expect("stage");
+    let bridge = bridge_for(&binary, 18749);
+    let state = GraphUiState::new();
+    state.set_daemon_status_override(Some(CbmDaemonStatus::active_for_tests(None, true)));
+
+    let status = graph_ui_status(&state, &bridge, None).await;
+    assert_eq!(status.daemon_presence, CbmDaemonPresence::Active);
+    assert_eq!(status.message_key.as_deref(), Some("graphDaemonSharedNoUi"));
+
+    let err = enable_graph_ui_headless(&state, &bridge, None, 18749..=18759)
+        .await
+        .expect_err("no ui");
+    assert!(format!("{err}").contains("graphDaemonSharedNoUi"));
     let _ = fs::remove_dir_all(&scratch);
 }

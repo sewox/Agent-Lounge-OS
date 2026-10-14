@@ -22,7 +22,6 @@
 use std::env;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,15 +58,20 @@ fn main() -> ExitCode {
 
 /// Fake `daemon <status|start|stop>` — only `status` is implemented for Lounge probes.
 ///
-/// Signal (first match wins), so parallel tests do not race on process env:
-/// 1. Sibling file `lounge-fake-cbm-daemon` next to this binary (one line)
-/// 2. Else `LOUNGE_FAKE_CBM_DAEMON` env
+/// Signal (sibling file only — no process-wide env races in parallel tests):
+/// `lounge-fake-cbm-daemon` next to this binary (one line).
 ///
 /// Values:
 /// - unset / `off` / `inactive` → `daemon: not running` (exit 1, like upstream)
-/// - `active:permanent:PORT` → active permanent + UI on PORT
-/// - `active:session:PORT` → active session-managed + UI on PORT
-/// - `active:permanent:disabled` → active, UI disabled
+/// - `active:permanent:PORT` / `active:session:PORT` / `active:permanent:disabled`
+/// - `not-responding` → `daemon: not responding …` (exit 1)
+/// - `hang` → sleep forever (probe timeout → Unknown)
+/// - `empty` → exit 0, no stdout
+/// - `garbage` → exit 2, unrecognised text
+/// - `exit:N` → exit N with garbage body
+/// - `crlf-bom-active:PORT` → UTF-8 BOM + CRLF + mixed-case Active line
+/// - `pre-0.11` → usage/help without `daemon:` status (Inactive)
+/// - `crash` → exit 127, empty output (Unknown)
 fn run_daemon_ctl(args: &[String]) -> Result<ExitCode, String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     if sub != "status" {
@@ -87,7 +91,39 @@ fn fake_daemon_spec() -> String {
             }
         }
     }
-    env::var("LOUNGE_FAKE_CBM_DAEMON").unwrap_or_default()
+    String::new()
+}
+
+fn print_active(label: &str, port_or_disabled: &str, crlf_bom: bool) -> Result<ExitCode, String> {
+    let pid = std::process::id();
+    let mut body = format!(
+        "daemon: active ({label})\n  pid: {pid}\n  build: 0.11.0 (fakehelper000...)\n  committed clients: 0\n"
+    );
+    if port_or_disabled.eq_ignore_ascii_case("disabled") {
+        body.push_str("  ui: disabled (enable with `daemon start` in a UI build)\n");
+    } else {
+        let port: u16 = port_or_disabled
+            .parse()
+            .map_err(|e| format!("bad daemon UI port {port_or_disabled:?}: {e}"))?;
+        body.push_str(&format!(
+            "  ui: configured at http://127.0.0.1:{port} (readiness not checked; `daemon start --open` verifies it)\n"
+        ));
+    }
+    if crlf_bom {
+        // Mixed case + BOM + CRLF for parser robustness tests.
+        let mixed = body.replace("daemon: active", "Daemon: Active");
+        let crlf = mixed.replace('\n', "\r\n");
+        let mut out = Vec::from(b"\xEF\xBB\xBF".as_slice());
+        out.extend_from_slice(crlf.as_bytes());
+        let mut stdout = std::io::stdout();
+        stdout
+            .write_all(&out)
+            .map_err(|e| format!("write stdout: {e}"))?;
+        let _ = stdout.flush();
+    } else {
+        print!("{body}");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_daemon_status() -> Result<ExitCode, String> {
@@ -101,10 +137,49 @@ fn run_daemon_status() -> Result<ExitCode, String> {
         );
         return Ok(ExitCode::from(1));
     }
+    if spec.eq_ignore_ascii_case("hang") {
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+    if spec.eq_ignore_ascii_case("empty") {
+        return Ok(ExitCode::SUCCESS);
+    }
+    if spec.eq_ignore_ascii_case("garbage") {
+        println!("this is not a daemon status blob");
+        return Ok(ExitCode::from(2));
+    }
+    if spec.eq_ignore_ascii_case("crash") {
+        return Ok(ExitCode::from(127));
+    }
+    if spec.eq_ignore_ascii_case("not-responding") {
+        println!("daemon: not responding (endpoint held by pid 12)");
+        println!("hint: terminate pid 12, then run daemon start");
+        return Ok(ExitCode::from(1));
+    }
+    if spec.eq_ignore_ascii_case("pre-0.11") {
+        println!("codebase-memory-mcp 0.10.8");
+        println!();
+        println!("Usage:");
+        println!("  codebase-memory-mcp              Run MCP server on stdio");
+        println!("  codebase-memory-mcp --ui=true    Enable HTTP graph visualization");
+        eprintln!("unknown command: daemon");
+        return Ok(ExitCode::from(1));
+    }
+    if let Some(code) = spec.strip_prefix("exit:") {
+        let code: u8 = code
+            .parse()
+            .map_err(|e| format!("bad exit code {code:?}: {e}"))?;
+        println!("nope");
+        return Ok(ExitCode::from(code));
+    }
+    if let Some(port) = spec.strip_prefix("crlf-bom-active:") {
+        return print_active("permanent", port, true);
+    }
 
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.first().copied() != Some("active") {
-        return Err(format!("bad LOUNGE_FAKE_CBM_DAEMON: {spec}"));
+        return Err(format!("bad lounge-fake-cbm-daemon marker: {spec}"));
     }
     let kind = parts.get(1).copied().unwrap_or("permanent");
     let permanent = kind.eq_ignore_ascii_case("permanent");
@@ -113,33 +188,17 @@ fn run_daemon_status() -> Result<ExitCode, String> {
     } else {
         "session-managed"
     };
-    let pid = std::process::id();
-    println!("daemon: active ({label})");
-    println!("  pid: {pid}");
-    println!("  build: 0.11.0 (fakehelper000...)");
-    println!("  committed clients: 0");
-
     let port_or_disabled = parts.get(2).copied().unwrap_or("disabled");
-    if port_or_disabled.eq_ignore_ascii_case("disabled") {
-        println!("  ui: disabled (enable with `daemon start` in a UI build)");
-    } else {
-        let port: u16 = port_or_disabled
-            .parse()
-            .map_err(|e| format!("bad daemon UI port {port_or_disabled:?}: {e}"))?;
-        println!(
-            "  ui: configured at http://127.0.0.1:{port} (readiness not checked; `daemon start --open` verifies it)"
-        );
-    }
-    Ok(ExitCode::SUCCESS)
+    print_active(label, port_or_disabled, false)
 }
 
+/// Pollute a sibling cache dir (no process-wide `CBM_CACHE_DIR` env).
 fn maybe_pollute_cbm_config(port: u16) -> Result<(), String> {
-    let Some(cache) = env::var_os("CBM_CACHE_DIR").map(PathBuf::from) else {
-        return Ok(());
-    };
-    if cache.as_os_str().is_empty() {
-        return Ok(());
-    }
+    let exe = env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let cache = exe
+        .parent()
+        .ok_or_else(|| "binary has no parent".to_string())?
+        .join("lounge-fake-cbm-cache");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
     let path = cache.join("config.json");
     let body = format!("{{\n    \"ui_enabled\": true,\n    \"ui_port\": {port}\n}}\n");

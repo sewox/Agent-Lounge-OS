@@ -31,10 +31,10 @@ use services::{
     open_or_focus_graph_window, open_path_in_editor, persist_port, persist_port_preference,
     placement_for_window, record_dead_snapshot, record_whisper_injection,
     resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, AgentEfficiencyReport, EfficiencyReportQuery, FixDeadSymbolResult,
-    GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob, IndexProgress,
-    IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
-    WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
+    spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence, EfficiencyReportQuery,
+    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob,
+    IndexProgress, IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
+    SharedServices, WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -1621,12 +1621,16 @@ async fn enable_graph_ui_cmd(
                 .unwrap_or_else(|| format!("Port {} is busy", status.port))
         }));
     }
-    // Shared daemon: Enable becomes "open existing" — never spawn / mutate config.
+    // Active/Unknown: never spawn / mutate config. Active may open existing UI.
     if status.daemon_mode {
         if !status.ui_available {
-            return Err(status
-                .message_key
-                .unwrap_or_else(|| "graphDaemonSharedNoUi".into()));
+            return Err(status.message_key.unwrap_or_else(|| {
+                if status.daemon_presence == CbmDaemonPresence::Unknown {
+                    "graphDaemonProbeUnknown".into()
+                } else {
+                    "graphDaemonSharedNoUi".into()
+                }
+            }));
         }
         let Some(name) = status.cbm_project_name else {
             return Err("Index workspace first".into());

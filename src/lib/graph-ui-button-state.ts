@@ -17,8 +17,10 @@ export type GraphUiButtonStatus = {
   port_mode: GraphUiPortMode;
   ui_available: boolean;
   project_indexed: boolean;
-  /** Upstream shared coordination daemon is active — do not Enable/spawn. */
+  /** True when spawn is forbidden (daemon Active or probe Unknown). */
   daemon_mode?: boolean;
+  /** Fail-closed presence from backend: active | inactive | unknown. */
+  daemon_presence?: "active" | "inactive" | "unknown";
 };
 
 /** Disable Enable only while busy, or when User mode has a real conflict. */

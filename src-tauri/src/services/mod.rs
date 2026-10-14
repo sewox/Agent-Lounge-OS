@@ -49,7 +49,8 @@ pub use approval_notify::{
 pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;
 pub use cbm_daemon::{
-    parse_daemon_status_output, probe_daemon_status, probe_daemon_status_with_override,
+    classify_daemon_probe_output, fake_helper_pollution_config, parse_daemon_status_output,
+    probe_daemon_status, probe_daemon_status_with_override, strip_utf8_bom, CbmDaemonPresence,
     CbmDaemonStatus,
 };
 pub use cbm_ui_config::{
