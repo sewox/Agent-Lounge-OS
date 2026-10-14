@@ -1,7 +1,7 @@
 # Installer smoke tests (PR-Install-1). Non-required check name — does not
 # rename or replace any of the 16 branch-protection required checks.
-# Container matrix covers debian/ubuntu/fedora/opensuse/arch/alpine with
-# explicit package-manager detection (never assumes apt).
+# Distro matrix runs via docker on ubuntu-latest (checkout stays on the host so
+# images without tar/git still work). Never assumes apt.
 
 name: Installer
 
@@ -22,7 +22,7 @@ jobs:
   linux-distros:
     name: Installer Linux (${{ matrix.distro }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -45,22 +45,30 @@ jobs:
           - distro: alpine
             image: alpine:3.20
             setup: apk add --no-cache bash curl coreutils findutils tar gzip
-    container:
-      image: ${{ matrix.image }}
-      options: --user root
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install fixture tooling (${{ matrix.distro }})
-        run: |
-          set -euo pipefail
-          ${{ matrix.setup }}
-
-      - name: Run installer fixture tests
+      - name: Run installer fixture tests in ${{ matrix.distro }}
         run: |
           set -euo pipefail
           chmod +x install.sh scripts/install/*.sh
-          bash scripts/install/test-install-unix.sh
+          WT="${RUNNER_TEMP}/lounge-${{ matrix.distro }}"
+          mkdir -p "$WT"
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            -v "$WT:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            sh -c 'set -eu
+              ${{ matrix.setup }}
+              export TMPDIR=/work/tmp
+              export LOUNGE_FIXTURE_DIR=/work/fixture
+              export LOUNGE_TEST_PREFIX=/work/prefix
+              mkdir -p "$TMPDIR" "$LOUNGE_FIXTURE_DIR" "$LOUNGE_TEST_PREFIX"
+              cp -a /src/. /work/src
+              cd /work/src
+              chmod +x install.sh scripts/install/*.sh
+              bash scripts/install/test-install-unix.sh'
 
   macos:
     name: Installer macOS

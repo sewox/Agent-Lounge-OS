@@ -7,6 +7,21 @@ OUT="${1:?usage: build-fixture-release.sh <out-dir>}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 VERSION="${LOUNGE_FIXTURE_VERSION:-0.0.0-fixture}"
 
+# Git Bash / MSYS: convert Windows paths so GNU tar does not treat "C:" as a host.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      OUT="$(cygpath -u "$OUT")"
+      ROOT="$(cygpath -u "$ROOT")"
+    fi
+    # Prefer a Unix-style temp staging dir to avoid drive-letter traps in tar -C.
+    IS_WINDOWS=1
+    ;;
+  *)
+    IS_WINDOWS=0
+    ;;
+esac
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
@@ -25,7 +40,7 @@ EOF
   chmod 755 "$dest"
 }
 
-# Fake macOS .app in a tar.gz
+# Fake macOS .app in a tar.gz (skipped on Windows Git Bash — tar drive-letter issues).
 macos_tarball() {
   local arch="$1"
   local staging="$OUT/.mac-$arch"
@@ -58,9 +73,6 @@ PLIST
 # Fake Windows setup.exe (portable stub; install.ps1 uses LOUNGE_FIXTURE_SKIP_NSIS)
 windows_stub() {
   local dest="$1"
-  # A tiny PE-like isn't needed; PowerShell just hashes + moves the file.
-  # Provide a .cmd-compatible script renamed .exe for fixture --version via cmd shim target.
-  # Actual bytes are arbitrary; CLI shim points at this file — for fixture we also write a .cmd twin.
   cat >"$dest" <<EOF
 @echo off
 if "%~1"=="--version" (
@@ -72,41 +84,40 @@ exit /b 0
 EOF
 }
 
+# Always produce Linux + Windows stubs. macOS tarballs only on Unix hosts.
 linux_stub "$OUT/Agent-Lounge-OS-linux-x86_64.AppImage"
 linux_stub "$OUT/Agent-Lounge-OS-linux-aarch64.AppImage"
-macos_tarball "x86_64"
-macos_tarball "aarch64"
 windows_stub "$OUT/Agent-Lounge-OS-windows-x64-setup.exe"
 windows_stub "$OUT/Agent-Lounge-OS-windows-arm64-setup.exe"
+if [[ "$IS_WINDOWS" -eq 0 ]]; then
+  macos_tarball "x86_64"
+  macos_tarball "aarch64"
+fi
 
-# Marker for readers / docs
 printf '%s\n' "$VERSION" >"$OUT/VERSION"
 printf 'fixture built from %s\n' "$ROOT" >"$OUT/README.txt"
 
-# SHA256SUMS — mandatory format: "<hash>  <filename>" (two spaces, GNU coreutils style)
+# Hash only files that exist (platform may omit macOS tarballs).
 (
   cd "$OUT"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum Agent-Lounge-OS-linux-x86_64.AppImage \
-      Agent-Lounge-OS-linux-aarch64.AppImage \
-      Agent-Lounge-OS-macos-x86_64.app.tar.gz \
-      Agent-Lounge-OS-macos-aarch64.app.tar.gz \
-      Agent-Lounge-OS-windows-x64-setup.exe \
-      Agent-Lounge-OS-windows-arm64-setup.exe
-  else
-    for f in Agent-Lounge-OS-linux-x86_64.AppImage \
-      Agent-Lounge-OS-linux-aarch64.AppImage \
-      Agent-Lounge-OS-macos-x86_64.app.tar.gz \
-      Agent-Lounge-OS-macos-aarch64.app.tar.gz \
-      Agent-Lounge-OS-windows-x64-setup.exe \
-      Agent-Lounge-OS-windows-arm64-setup.exe; do
+  for f in \
+    Agent-Lounge-OS-linux-x86_64.AppImage \
+    Agent-Lounge-OS-linux-aarch64.AppImage \
+    Agent-Lounge-OS-macos-x86_64.app.tar.gz \
+    Agent-Lounge-OS-macos-aarch64.app.tar.gz \
+    Agent-Lounge-OS-windows-x64-setup.exe \
+    Agent-Lounge-OS-windows-arm64-setup.exe
+  do
+    [[ -f "$f" ]] || continue
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha256sum "$f"
+    else
       printf '%s  %s\n' "$(shasum -a 256 "$f" | awk '{print $1}')" "$f"
-    done
-  fi
+    fi
+  done
 ) >"$OUT/SHA256SUMS"
 
-# Deliberately wrong sums file for mismatch rejection tests
-sed 's/^[0-9a-fA-F]/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
+sed 's/^[0-9a-fA-F]\{64\}/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' \
   "$OUT/SHA256SUMS" >"$OUT/SHA256SUMS.bad"
 
 echo "Fixture release ready at $OUT"

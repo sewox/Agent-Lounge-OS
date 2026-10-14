@@ -1,21 +1,58 @@
 # Windows installer smoke against a local fixture release (no network).
+# Builds fixtures in PowerShell (avoids Git Bash tar "C:" host traps).
 # install → verify → --version → --uninstall + checksum-mismatch rejection.
 $ErrorActionPreference = 'Stop'
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $FixtureDir = Join-Path ([System.IO.Path]::GetTempPath()) ("lounge-fixture-" + [guid]::NewGuid())
 $Prefix = Join-Path ([System.IO.Path]::GetTempPath()) ("lounge-prefix-" + [guid]::NewGuid())
+$Version = '0.0.0-fixture'
+
+function New-WindowsStub([string]$Path, [string]$Ver) {
+  $content = @"
+@echo off
+if "%~1"=="--version" (
+  echo Agent Lounge OS $Ver
+  exit /b 0
+)
+echo Agent Lounge OS fixture Windows payload
+exit /b 0
+"@
+  Set-Content -Path $Path -Value $content -Encoding Ascii
+}
+
+function Write-Sha256Sums([string]$Dir) {
+  $names = @(
+    'Agent-Lounge-OS-windows-x64-setup.exe',
+    'Agent-Lounge-OS-windows-arm64-setup.exe'
+  )
+  $lines = foreach ($name in $names) {
+    $p = Join-Path $Dir $name
+    if (-not (Test-Path -LiteralPath $p)) { continue }
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLower()
+    "{0}  {1}" -f $hash, $name
+  }
+  $sums = Join-Path $Dir 'SHA256SUMS'
+  Set-Content -Path $sums -Value $lines -Encoding Ascii
+  $bad = foreach ($line in $lines) {
+    $line -replace '^[0-9a-fA-F]{64}', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+  }
+  Set-Content -Path (Join-Path $Dir 'SHA256SUMS.bad') -Value $bad -Encoding Ascii
+}
 
 try {
-  & bash "$Root/scripts/install/build-fixture-release.sh" "$FixtureDir"
-  if ($LASTEXITCODE -ne 0) { throw "build-fixture-release.sh failed: $LASTEXITCODE" }
+  New-Item -ItemType Directory -Force -Path $FixtureDir | Out-Null
+  New-WindowsStub -Path (Join-Path $FixtureDir 'Agent-Lounge-OS-windows-x64-setup.exe') -Ver $Version
+  New-WindowsStub -Path (Join-Path $FixtureDir 'Agent-Lounge-OS-windows-arm64-setup.exe') -Ver $Version
+  Set-Content -Path (Join-Path $FixtureDir 'VERSION') -Value $Version -Encoding Ascii
+  Write-Sha256Sums -Dir $FixtureDir
 
   $env:LOUNGE_DOWNLOAD_DIR = $FixtureDir
   $env:LOUNGE_FIXTURE_SKIP_NSIS = '1'
   $env:LOUNGE_NO_MODIFY_PATH = '1'
 
   Write-Host "== install =="
-  & "$Root/install.ps1" -Prefix $Prefix -Version '0.0.0-fixture'
+  & "$Root/install.ps1" -Prefix $Prefix -Version $Version
   $Cli = Join-Path $Prefix 'bin\agent-lounge-os.cmd'
   if (-not (Test-Path -LiteralPath $Cli)) { throw "missing CLI shim $Cli" }
 
