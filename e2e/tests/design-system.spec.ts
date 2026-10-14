@@ -1,8 +1,21 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { assertLayoutL1toL6, LAYOUT_VIEWPORTS } from "../helpers/layout";
 import { openRoute } from "../helpers/nav";
 
 const DS_LAB = "/ds-lab";
+
+/** Detail is inline (two/three/portrait) or behind the narrow-mode drawer trigger. */
+async function revealDetailPanel(page: Page) {
+  const inline = page.locator('[data-panel-slot="detail"]');
+  const drawer = page.locator('[data-qa="panel-grid-drawer-detail"]');
+  const openBtn = page.locator('[data-qa="open-detail-drawer"]');
+  const inlineVisible = await inline.isVisible();
+  if (!inlineVisible) {
+    await expect(openBtn).toBeVisible();
+    await openBtn.click();
+  }
+  await expect(inline.or(drawer)).toBeVisible();
+}
 
 test.describe("PR-DS-0 design-system reference", () => {
   test("DS-01 · StatsStrip click sets filter + aria-pressed", async ({ page }) => {
@@ -40,14 +53,38 @@ test.describe("PR-DS-0 design-system reference", () => {
 
     await page.locator('[data-qa="stats-strip-item"][data-stat-id="all"]').click();
     await page.locator('[data-qa="ds-lab-row"][data-row-id="a4"]').click();
-    const errorPill = page.locator('[data-panel-slot="detail"] [data-qa="status-pill"]');
-    await expect(errorPill).toHaveAttribute("data-tone", "error");
+    await expect(
+      page.locator('[data-qa="ds-lab-row"][data-row-id="a4"] [data-qa="status-pill"]'),
+    ).toHaveAttribute("data-tone", "error");
     await expect(page.locator('[data-qa="halted-banner"]')).toHaveCount(0);
+    await expect(page.locator('[data-qa="ds-lab-halted-idle"]')).toBeVisible();
+
+    await revealDetailPanel(page);
+    const detailPill = page.locator(
+      '[data-panel-slot="detail"] [data-qa="status-pill"], [data-qa="panel-grid-drawer-detail"] [data-qa="status-pill"]',
+    );
+    await expect(detailPill.first()).toHaveAttribute("data-tone", "error");
+
+    // Close drawer if open so the next selection starts clean on narrow viewports.
+    const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+    if (await closeBtn.isVisible()) {
+      await closeBtn.click();
+    }
 
     await page.locator('[data-qa="ds-lab-row"][data-row-id="a3"]').click();
     await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
+    await expect(page.locator('[data-qa="halted-hatch"]')).toBeVisible();
     await expect(
-      page.locator('[data-panel-slot="detail"] [data-qa="status-pill"]'),
+      page.locator('[data-qa="ds-lab-row"][data-row-id="a3"] [data-qa="status-pill"]'),
+    ).toHaveAttribute("data-tone", "halted");
+
+    await revealDetailPanel(page);
+    await expect(
+      page
+        .locator(
+          '[data-panel-slot="detail"] [data-qa="status-pill"], [data-qa="panel-grid-drawer-detail"] [data-qa="status-pill"]',
+        )
+        .first(),
     ).toHaveAttribute("data-tone", "halted");
   });
 
