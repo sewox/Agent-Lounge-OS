@@ -379,7 +379,17 @@ impl NatsService {
             self.config.creds_file = Some(path.clone());
             write_nats_server_conf(&path, creds)?;
         }
-        let args = nats_server_args(&self.config, with_monitor);
+        let ephemeral = self.config.port == 0;
+        let ports_dir = if ephemeral {
+            Some(make_ports_file_dir()?)
+        } else {
+            None
+        };
+        let mut args = nats_server_args(&self.config, with_monitor);
+        if let Some(dir) = &ports_dir {
+            args.push("--ports_file_dir".to_string());
+            args.push(dir.display().to_string());
+        }
 
         let std_cmd = GuardedCommand::new(&binary)
             .args(&args)
@@ -391,9 +401,30 @@ impl NatsService {
         attach_nats_log(&mut command);
         apply_no_window(&mut command);
 
-        let child = command
+        let mut child = command
             .spawn()
             .with_context(|| format!("NATS başlatılamadı: {}", binary.display()))?;
+        if ephemeral {
+            let pid = child.id().ok_or_else(|| {
+                anyhow::anyhow!("nats-server child pid unavailable after ephemeral spawn")
+            })?;
+            let dir = ports_dir.clone().expect("ports_dir set when ephemeral");
+            let ports_result = tokio::task::spawn_blocking(move || {
+                wait_nats_ports_file_client_port(&dir, pid, PORTS_FILE_WAIT)
+            })
+            .await
+            .context("nats ports file wait task join")?;
+            match ports_result {
+                Ok(port) => {
+                    self.config.port = port;
+                }
+                Err(err) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(err);
+                }
+            }
+        }
         self.child = Some(child);
         self.started_by_us = true;
         log::info!(
@@ -493,12 +524,19 @@ fn resolve_nats_binary(requested: &str) -> Option<std::path::PathBuf> {
     find_executable(requested)
 }
 
+/// `NatsConfig::port == 0` means "let nats-server pick an ephemeral client port"
+/// via `-p -1` (note: nats-server treats `-p 0` as the default 4222, not ephemeral).
 pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<String> {
+    let port_arg = if config.port == 0 {
+        "-1".to_string()
+    } else {
+        config.port.to_string()
+    };
     let mut args = vec![
         "-a".to_string(),
         config.host.clone(),
         "-p".to_string(),
-        config.port.to_string(),
+        port_arg,
     ];
     if with_monitor && config.http_port > 0 {
         args.push("-m".to_string());
@@ -510,6 +548,115 @@ pub(crate) fn nats_server_args(config: &NatsConfig, with_monitor: bool) -> Vec<S
     }
     args.extend(config.args.iter().cloned());
     args
+}
+
+const PORTS_FILE_WAIT: Duration = Duration::from_secs(10);
+
+/// Parse nats-server `--ports_file_dir` JSON (`{"nats":["nats://host:port", ...]}`).
+pub(crate) fn parse_nats_ports_file_client_port(contents: &str) -> Result<u16> {
+    let value: serde_json::Value = serde_json::from_str(contents.trim())
+        .with_context(|| format!("malformed nats ports file JSON: {contents:?}"))?;
+    let nats = value
+        .get("nats")
+        .and_then(|v| v.as_array())
+        .with_context(|| format!("nats ports file missing \"nats\" array: {contents:?}"))?;
+    let url = nats
+        .first()
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("nats ports file has empty \"nats\" list: {contents:?}"))?;
+    client_port_from_nats_url(url)
+        .with_context(|| format!("nats ports file client URL unparsable: {url:?}"))
+}
+
+fn client_port_from_nats_url(url: &str) -> Result<u16> {
+    let rest = url
+        .strip_prefix("nats://")
+        .or_else(|| url.strip_prefix("tls://"))
+        .ok_or_else(|| anyhow::anyhow!("expected nats:// or tls:// URL, got {url:?}"))?;
+    let port_str = if let Some(bracket_end) = rest.find(']') {
+        rest[bracket_end + 1..]
+            .strip_prefix(':')
+            .ok_or_else(|| anyhow::anyhow!("IPv6 URL missing :port: {url:?}"))?
+    } else {
+        rest.rsplit_once(':')
+            .map(|(_, p)| p)
+            .ok_or_else(|| anyhow::anyhow!("URL missing :port: {url:?}"))?
+    };
+    let port: u16 = port_str
+        .parse()
+        .with_context(|| format!("invalid port in URL {url:?}"))?;
+    if port == 0 {
+        anyhow::bail!("ports file reported client port 0: {url:?}");
+    }
+    Ok(port)
+}
+
+fn find_ports_file_for_pid(dir: &std::path::Path, pid: u32) -> Option<std::path::PathBuf> {
+    let suffix = format!("_{pid}.ports");
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(&suffix) {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// Poll until nats-server writes `<exe>_<pid>.ports` under `dir`, then parse the client port.
+///
+/// Clear error on timeout or a persistently malformed file. Works on macOS, Windows, and Linux
+/// (`nats-server_<pid>.ports` or `nats-server.exe_<pid>.ports`).
+pub(crate) fn wait_nats_ports_file_client_port(
+    dir: &std::path::Path,
+    pid: u32,
+    timeout: Duration,
+) -> Result<u16> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_err: Option<anyhow::Error> = None;
+    while std::time::Instant::now() < deadline {
+        if let Some(path) = find_ports_file_for_pid(dir, pid) {
+            match std::fs::read_to_string(&path) {
+                Ok(body) if !body.trim().is_empty() => {
+                    match parse_nats_ports_file_client_port(&body) {
+                        Ok(port) => return Ok(port),
+                        Err(err) => last_err = Some(err),
+                    }
+                }
+                Ok(_) => {
+                    last_err = Some(anyhow::anyhow!("nats ports file empty: {}", path.display()));
+                }
+                Err(err) => {
+                    last_err = Some(anyhow::anyhow!(
+                        "read nats ports file {}: {err}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    match last_err {
+        Some(err) => Err(err).with_context(|| {
+            format!(
+                "nats ports file for pid {pid} in {} not usable within {timeout:?}",
+                dir.display()
+            )
+        }),
+        None => anyhow::bail!(
+            "nats ports file for pid {pid} not created in {} within {timeout:?}",
+            dir.display()
+        ),
+    }
+}
+
+fn make_ports_file_dir() -> Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("lounge-nats-ports-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create nats ports_file_dir {}", dir.display()))?;
+    Ok(dir)
 }
 
 /// True when a nats-server listening on `port` has `--pass` in its argv (legacy leak).
@@ -958,6 +1105,135 @@ mod tests {
     }
 
     #[test]
+    fn spawn_args_port_zero_requests_ephemeral_minus_one() {
+        let config = NatsConfig {
+            port: 0,
+            http_port: 0,
+            ..NatsConfig::default()
+        };
+        let args = nats_server_args(&config, false);
+        assert!(
+            args.windows(2).any(|pair| pair == ["-p", "-1"]),
+            "port 0 must map to nats-server -p -1 (not -p 0): {args:?}"
+        );
+        assert!(!args.windows(2).any(|pair| pair == ["-p", "0"]));
+    }
+
+    #[test]
+    fn parse_nats_ports_file_client_port_valid() {
+        let port = parse_nats_ports_file_client_port(r#"{"nats":["nats://127.0.0.1:43757"]}"#)
+            .expect("valid ports file");
+        assert_eq!(port, 43757);
+        let with_monitor = parse_nats_ports_file_client_port(
+            r#"{"nats":["nats://127.0.0.1:41234"],"monitoring":["http://127.0.0.1:8222"]}"#,
+        )
+        .expect("valid ports file with monitoring");
+        assert_eq!(with_monitor, 41234);
+    }
+
+    #[test]
+    fn parse_nats_ports_file_client_port_missing_nats_array() {
+        let err = parse_nats_ports_file_client_port(r#"{"monitoring":["http://127.0.0.1:1"]}"#)
+            .expect_err("missing nats");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("missing \"nats\"") || text.contains("nats"),
+            "{text}"
+        );
+        let empty =
+            parse_nats_ports_file_client_port(r#"{"nats":[]}"#).expect_err("empty nats list");
+        let text = format!("{empty:#}");
+        assert!(text.contains("empty"), "{text}");
+    }
+
+    #[test]
+    fn parse_nats_ports_file_client_port_malformed() {
+        let err = parse_nats_ports_file_client_port("not-json").expect_err("malformed");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("malformed") || text.contains("JSON") || text.contains("json"),
+            "{text}"
+        );
+        let bad_url = parse_nats_ports_file_client_port(r#"{"nats":["http://127.0.0.1:9"]}"#)
+            .expect_err("wrong scheme");
+        let text = format!("{bad_url:#}");
+        assert!(
+            text.contains("nats://") || text.contains("unparsable") || text.contains("expected"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn wait_nats_ports_file_client_port_times_out_when_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "lounge-nats-ports-timeout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = wait_nats_ports_file_client_port(&dir, 9_999_999, Duration::from_millis(80))
+            .expect_err("must time out");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("not created") || text.contains("within"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_nats_ports_file_client_port_rejects_malformed_before_timeout() {
+        let dir =
+            std::env::temp_dir().join(format!("lounge-nats-ports-bad-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nats-server_4242.ports");
+        std::fs::write(&path, "{{{").unwrap();
+        let err = wait_nats_ports_file_client_port(&dir, 4242, Duration::from_millis(100))
+            .expect_err("malformed must fail");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("malformed") || text.contains("JSON") || text.contains("not usable"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Integration: real nats-server chooses an ephemeral port; parent never probe-binds.
+    #[test]
+    fn ephemeral_nats_server_via_ports_file_on_all_oses() {
+        let (url, mut child) = spawn_ephemeral_nats().unwrap_or_else(|err| {
+            panic!(
+                "nats-server required for ephemeral_nats_server_via_ports_file_on_all_oses: {err}"
+            );
+        });
+        let port: u16 = url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .expect("url port");
+        assert_ne!(port, 0);
+        assert_ne!(
+            port, 4222,
+            "ephemeral must not silently fall back to default 4222"
+        );
+        let cmdline = process_cmdline(child.id());
+        assert!(
+            cmdline.windows(2).any(|w| w == ["-p", "-1"]),
+            "expected -p -1 in argv: {cmdline:?}"
+        );
+        assert!(
+            cmdline.iter().any(|a| a == "--ports_file_dir"),
+            "expected --ports_file_dir in argv: {cmdline:?}"
+        );
+        assert!(
+            super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(5),)
+                .is_ok(),
+            "must accept connections at {url}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
     fn spawn_args_use_conf_not_user_pass_when_credentials_set() {
         let config = NatsConfig {
             credentials: Some(NatsCredentials {
@@ -1052,13 +1328,10 @@ mod tests {
             std::env::remove_var(super::super::lounge_auth::LOUNGE_NATS_PASS_ENV);
         }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
+        // port 0 → `-p -1` + `--ports_file_dir` (no free→rebind race).
         let mut service = NatsService::with_config(NatsConfig {
             host: "127.0.0.1".into(),
-            port,
+            port: 0,
             http_port: 0,
             binary: "nats-server".into(),
             args: Vec::new(),
@@ -1077,6 +1350,28 @@ mod tests {
         assert!(crate::services::lounge_auth::nats_ingress_source_verified());
 
         let url = service.endpoint();
+        let bound_port: u16 = url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .expect("endpoint port after ephemeral ensure");
+        assert_ne!(
+            bound_port, 0,
+            "ensure must resolve ephemeral port from ports file"
+        );
+        let child = service
+            .child
+            .as_ref()
+            .expect("nats service must own a child process after ensure");
+        let cmd = process_cmdline(child.id().expect("child pid"));
+        assert!(
+            cmd.windows(2).any(|w| w == ["-p", "-1"]),
+            "ephemeral ensure must pass -p -1: {cmd:?}"
+        );
+        assert!(
+            cmd.iter().any(|a| a == "--ports_file_dir"),
+            "ephemeral ensure must pass --ports_file_dir: {cmd:?}"
+        );
         assert!(
             super::super::lounge_auth::connect_nats_timeout(&url, None, Duration::from_secs(5))
                 .is_err(),
@@ -1097,12 +1392,6 @@ mod tests {
         assert!(nats_connect(&url).is_ok());
 
         // Spawned child cmdline: no password, has -c (match counts only).
-        let child = service
-            .child
-            .as_ref()
-            .expect("nats service must own a child process after ensure");
-        let pid = child.id().expect("child pid");
-        let cmd = process_cmdline(pid);
         let pass_hits = cmd.iter().filter(|a| a.contains(&creds.password)).count();
         assert_eq!(pass_hits, 0, "password must not appear in child argv");
         assert!(cmd.iter().any(|a| a == "-c"), "expected -c: {cmd:?}");
@@ -1160,18 +1449,16 @@ mod tests {
         let binary = find_executable("nats-server").ok_or_else(|| {
             anyhow::anyhow!("nats-server not on PATH (install locally or rely on CI install step)")
         })?;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .context("bind ephemeral port for nats-server")?;
-        let port = listener
-            .local_addr()
-            .context("ephemeral listener local_addr")?
-            .port();
-        drop(listener);
+        // nats-server picks the port (`-p -1`); we read it back from `--ports_file_dir`
+        // — no parent bind→free→rebind window for another process to steal.
+        let ports_dir = make_ports_file_dir()?;
         let mut args = vec![
             "-a".to_string(),
             "127.0.0.1".to_string(),
             "-p".to_string(),
-            port.to_string(),
+            "-1".to_string(),
+            "--ports_file_dir".to_string(),
+            ports_dir.display().to_string(),
         ];
         // Keep conf dir alive for the child process lifetime.
         let _conf_dir_keepalive;
@@ -1201,6 +1488,16 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .context("spawn nats-server")?;
+        let pid = child.id();
+        let port = match wait_nats_ports_file_client_port(&ports_dir, pid, PORTS_FILE_WAIT) {
+            Ok(port) => port,
+            Err(err) => {
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).context("ephemeral nats-server ports file");
+            }
+        };
         let url = format!("nats://127.0.0.1:{port}");
         // Bounded dials: raw nats::connect can hang forever on a non-NATS listener.
         // ~10s budget (200 × 50ms) absorbs slow Windows/macOS process start without flakes.
@@ -1222,8 +1519,9 @@ mod tests {
             if ok {
                 // Brief settle so subscribe/publish races on a freshly-bound port are rare.
                 std::thread::sleep(Duration::from_millis(50));
-                // Leak conf dir intentionally until process exits (OS cleans temp).
+                // Leak temp dirs intentionally until process exits (OS cleans temp).
                 std::mem::forget(_conf_dir_keepalive);
+                std::mem::forget(ports_dir);
                 return Ok((url, child));
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -1243,15 +1541,14 @@ mod tests {
         let binary = find_executable("nats-server").ok_or_else(|| {
             anyhow::anyhow!("nats-server not on PATH (install locally or rely on CI install step)")
         })?;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .context("bind ephemeral port for legacy nats")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
+        let ports_dir = make_ports_file_dir()?;
         let args = vec![
             "-a".to_string(),
             "127.0.0.1".to_string(),
             "-p".to_string(),
-            port.to_string(),
+            "-1".to_string(),
+            "--ports_file_dir".to_string(),
+            ports_dir.display().to_string(),
             "--user".to_string(),
             creds.user.clone(),
             "--pass".to_string(),
@@ -1268,6 +1565,16 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .context("spawn legacy nats-server")?;
+        let pid = child.id();
+        let port = match wait_nats_ports_file_client_port(&ports_dir, pid, PORTS_FILE_WAIT) {
+            Ok(port) => port,
+            Err(err) => {
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).context("legacy nats-server ports file");
+            }
+        };
         let url = format!("nats://127.0.0.1:{port}");
         for _ in 0..200 {
             if super::super::lounge_auth::connect_nats_timeout(
@@ -1278,6 +1585,7 @@ mod tests {
             .is_ok()
             {
                 std::thread::sleep(Duration::from_millis(50));
+                std::mem::forget(ports_dir);
                 return Ok((port, child));
             }
             std::thread::sleep(Duration::from_millis(50));
