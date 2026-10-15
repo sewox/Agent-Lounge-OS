@@ -617,29 +617,80 @@ fn is_trait_impl_header(line: &str) -> bool {
 }
 
 /// Mask absolute home prefixes as `~/...` for emitted output only.
+///
+/// On Windows, repo paths from `canonicalize` may carry a `\\?\` prefix, an 8.3
+/// short name (`RUNNER~1`), or a differently-cased drive letter than
+/// `USERPROFILE`/`HOME`. Both sides are normalized via
+/// [`crate::db::canonicalize_repo_path`] (strips `\\?\`, resolves short names,
+/// case-folds on Windows) before the prefix compare.
 pub fn mask_home_path(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    let Some(home) = dirs_home() else {
-        return normalized;
-    };
-    let home_s = home.replace('\\', "/");
-    if home_s.is_empty() {
-        return normalized;
+    let display = display_normalize_path(path);
+    let path_key = path_home_compare_key(path);
+    if path_key.is_empty() {
+        return display;
     }
-    if normalized == home_s {
-        return "~/".into();
+
+    for home_raw in home_env_candidates() {
+        let home_key = path_home_compare_key(&home_raw);
+        if home_key.is_empty() {
+            continue;
+        }
+        if path_key == home_key {
+            return "~/".into();
+        }
+        let prefix = format!("{}/", home_key.trim_end_matches('/'));
+        if let Some(rest) = path_key.strip_prefix(&prefix) {
+            // Preserve relative segment separators as `/` (already slash-unified).
+            return format!("~/{rest}");
+        }
     }
-    let prefix = format!("{home_s}/");
-    if let Some(rest) = normalized.strip_prefix(&prefix) {
-        return format!("~/{rest}");
-    }
-    normalized
+    display
 }
 
+/// Display form when not masked: strip `\\?\`, unify slashes (no case fold).
+fn display_normalize_path(path: &str) -> String {
+    crate::db::strip_windows_extended_prefix(path).replace('\\', "/")
+}
+
+/// Comparison key for home-prefix matching (canonical when the path exists).
+fn path_home_compare_key(raw: &str) -> String {
+    let key = crate::db::canonicalize_repo_path(raw);
+    if !key.is_empty() {
+        return key;
+    }
+    // Nonexistent path — lexical normalize still strips `\\?\` / unifies slashes.
+    let stripped = crate::db::strip_windows_extended_prefix(raw);
+    let mut s = stripped.replace('\\', "/");
+    s = s.trim_end_matches('/').to_string();
+    if cfg!(windows) {
+        s = s.to_ascii_lowercase();
+    }
+    s
+}
+
+fn home_env_candidates() -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["HOME", "USERPROFILE"] {
+        if let Ok(v) = std::env::var(key) {
+            let t = v.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+    }
+    // HOMEDRIVE + HOMEPATH (classic Windows profile).
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        let combined = format!("{}{}", drive.trim(), path.trim());
+        if !combined.is_empty() && !out.iter().any(|h| h.eq_ignore_ascii_case(&combined)) {
+            out.push(combined);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
 fn dirs_home() -> Option<String> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|v| v.to_string_lossy().into_owned())
+    home_env_candidates().into_iter().next()
 }
 
 #[cfg(test)]
@@ -1009,6 +1060,84 @@ impl Foo {
         // Must not mangle a different user path that merely contains the home string.
         let other = format!("{home}2/extra/src/lib.rs");
         assert_eq!(mask_home_path(&other), other.replace('\\', "/"));
+    }
+
+    #[test]
+    fn mask_home_path_strips_verbatim_prefix_lexically() {
+        // Lexical path (may not exist): `\\?\` / `//?/` must still match home.
+        let home = dirs_home().expect("home");
+        let home_slash = home.replace('\\', "/");
+        let verbatim = format!(
+            r"\\?\{}\projects\Agent-Lounge-OS\src\lib.rs",
+            home.trim_end_matches(['/', '\\'])
+        );
+        let masked = mask_home_path(&verbatim);
+        assert!(
+            masked.starts_with("~/"),
+            "verbatim prefix must mask: {masked} (home={home_slash})"
+        );
+        let slash_verbatim = format!("//?/{home_slash}/projects/x.rs");
+        let masked2 = mask_home_path(&slash_verbatim);
+        assert!(
+            masked2.starts_with("~/"),
+            "//?/ prefix must mask: {masked2}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mask_home_path_windows_verbatim_case_and_resolved_temp() {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .expect("USERPROFILE/HOME");
+        let probe = PathBuf::from(&home)
+            .join("al-mask-probe-8452")
+            .join("nested");
+        fs::create_dir_all(&probe).unwrap();
+
+        // Canonical form often includes `\\?\` and resolves 8.3 components.
+        let canon = probe.canonicalize().expect("canonicalize probe");
+        let canon_s = canon.to_string_lossy().into_owned();
+        let masked = mask_home_path(&canon_s);
+        assert!(
+            masked.starts_with("~/"),
+            "canonical/verbatim must mask: {masked} from {canon_s}"
+        );
+        assert_eq!(masked, "~/al-mask-probe-8452/nested");
+
+        // Drive-letter case flip (C: vs c:).
+        let flipped: String = {
+            let mut chars: Vec<char> = home.chars().collect();
+            if let Some(c) = chars.first_mut() {
+                if c.is_ascii_uppercase() {
+                    *c = c.to_ascii_lowercase();
+                } else if c.is_ascii_lowercase() {
+                    *c = c.to_ascii_uppercase();
+                }
+            }
+            chars.into_iter().collect()
+        };
+        let cased = PathBuf::from(&flipped)
+            .join("al-mask-probe-8452")
+            .join("nested");
+        let masked_case = mask_home_path(&cased.to_string_lossy());
+        assert!(
+            masked_case.starts_with("~/"),
+            "drive-letter case must mask: {masked_case}"
+        );
+
+        // Temp dir is typically under the profile and may use short names (RUNNER~1).
+        let tmp = std::env::temp_dir();
+        if let Ok(tc) = tmp.canonicalize() {
+            let ts = tc.to_string_lossy().into_owned();
+            let masked_tmp = mask_home_path(&ts);
+            assert!(
+                masked_tmp.starts_with("~/"),
+                "temp under profile must mask (short-name safe): {masked_tmp} from {ts}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(PathBuf::from(&home).join("al-mask-probe-8452"));
     }
 
     #[test]

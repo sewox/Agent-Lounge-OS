@@ -1400,10 +1400,21 @@ print({})
         assert_eq!(parsed["rows"][0][2], win_path);
     }
 
+    /// Fixture under the user home so `mask_home_path` output is assertable on
+    /// every OS (`/tmp` is outside `$HOME` on Linux; Windows temp is under profile).
+    fn fixture_dir_under_home(label: &str) -> PathBuf {
+        let base = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!("al-health-{label}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[tokio::test]
     async fn t1_paged_scan_methods_broken_indexed_at_and_boundaries() {
-        let dir = std::env::temp_dir().join(format!("al-health-t1-{}", Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = fixture_dir_under_home("t1");
         let fn_count = 5000usize;
         let method_count = 2500usize;
         let script =
@@ -1512,12 +1523,11 @@ print({})
             "expected absolute stored path, got {sample_file}"
         );
         assert!(!sample_file.starts_with("~/"));
-        // Output is masked.
+        // Output must be home-masked (no weak fallback — product requirement on all OSes).
         assert!(
-            result.repo_path.starts_with("~/")
-                || !result
-                    .repo_path
-                    .contains(&std::env::var("HOME").unwrap_or_default())
+            result.repo_path.starts_with("~/"),
+            "repo_path must be home-masked as ~/..., got {:?}",
+            result.repo_path
         );
     }
 
