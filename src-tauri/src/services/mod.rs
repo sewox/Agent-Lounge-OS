@@ -78,6 +78,7 @@ pub use graph_ui::{
 pub use health_scan::{
     enqueue_after_index, install_health_scan_queue, run_health_scan, HealthScanEvent,
     HealthScanJob, HealthScanPhase, HealthScanQueue, HEALTH_SCAN_CONCURRENCY, HEALTH_SCAN_EVENT,
+    HEALTH_SCAN_PROGRESS_EVENT,
 };
 pub use index_queue::{
     IndexJob, IndexJobEvent, IndexJobPhase, IndexProgress, IndexQueue, WorkspaceScanResult,
@@ -93,10 +94,10 @@ pub use lounge_auth::{
     lounge_token, nats_auth_active, nats_ingress_source_verified, remote_access_info,
     remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
 };
-pub use memory_bridge::HEALTH_SCAN_PAGE_SIZE;
 pub use memory_bridge::{
-    probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode, DEFAULT_GRAPH_UI_PORT,
-    GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, LEGACY_GRAPH_UI_PORT,
+    health_page_timeout, probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode,
+    DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, HEALTH_SCAN_PAGE_SIZE,
+    LEGACY_GRAPH_UI_PORT,
 };
 pub use model_manager::{LayaEnginePhase, LayaEngineStatus, ModelManager, LAYA_ENGINE_EVENT};
 pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};

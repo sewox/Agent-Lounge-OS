@@ -1,27 +1,28 @@
 //! Health-1a dead-symbol filters (H2).
 //!
-//! Excludes docs/build/generated/.gitignore paths. Marks entry-point-like symbols
-//! (tauri commands, trait impls, Next.js exports, tests, JSX components) as not-dead.
-//! Surviving findings are split into Kritik / Potansiyel with a rule id.
+//! Path exclusions (docs/build/generated/gitignore/examples/tests/benches) and
+//! entry-point exclusions (tauri command, trait impl, Next.js, tests, JSX).
+//! Surviving findings split into Kritik / Potansiyel with a rule id.
+//!
+//! Absolute paths are used for detection; callers mask home prefixes only when
+//! emitting results to the user.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::models::DeadSymbol;
 
-/// Severity for confirmed findings.
 pub const SEVERITY_KRITIK: &str = "Kritik";
 pub const SEVERITY_POTANSIYEL: &str = "Potansiyel";
 
-/// Finding rules (attached to surviving symbols).
 pub const RULE_BROKEN_MISSING_TARGET: &str = "broken-missing-target";
 pub const RULE_UNUSED_NO_INBOUND: &str = "unused-no-inbound";
 
-/// Exclusion rules (why a candidate was dropped).
 pub const RULE_FILTER_DOCS: &str = "filter-docs";
 pub const RULE_FILTER_BUILD: &str = "filter-build";
 pub const RULE_FILTER_GENERATED: &str = "filter-generated";
 pub const RULE_FILTER_GITIGNORE: &str = "filter-gitignore";
+pub const RULE_FILTER_EXAMPLES_TESTS_BENCHES: &str = "filter-examples-tests-benches";
 pub const RULE_FILTER_TAURI_COMMAND: &str = "filter-tauri-command";
 pub const RULE_FILTER_TRAIT_IMPL: &str = "filter-trait-impl";
 pub const RULE_FILTER_NEXT_EXPORT: &str = "filter-next-export";
@@ -30,13 +31,13 @@ pub const RULE_FILTER_JSX_COMPONENT: &str = "filter-jsx-component";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterDecision {
-    /// Keep as a finding with severity + rule.
     Keep {
         severity: &'static str,
         rule: &'static str,
     },
-    /// Drop — not a real dead symbol.
-    Exclude { rule: &'static str },
+    Exclude {
+        rule: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -80,15 +81,19 @@ impl HealthFilterContext {
         if file.is_empty() {
             return None;
         }
-        let normalized = normalize_rel(file);
+        let rel = relativize_to_repo(&self.repo_root, file);
+        let normalized = normalize_slashes(&rel);
         if is_docs_path(&normalized) {
             return Some(RULE_FILTER_DOCS);
         }
         if is_build_path(&normalized) {
             return Some(RULE_FILTER_BUILD);
         }
-        if is_generated_path(&normalized) {
+        if is_generated_path(&normalized) || file_has_generated_marker(&self.repo_root, file) {
             return Some(RULE_FILTER_GENERATED);
+        }
+        if is_examples_tests_benches_path(&normalized) {
+            return Some(RULE_FILTER_EXAMPLES_TESTS_BENCHES);
         }
         if matches_gitignore(&normalized, &self.gitignore_globs) {
             return Some(RULE_FILTER_GITIGNORE);
@@ -97,7 +102,6 @@ impl HealthFilterContext {
     }
 }
 
-/// Apply filters; attach severity/rule; split into Kritik / Potansiyel.
 pub fn split_findings(
     ctx: &HealthFilterContext,
     candidates: Vec<DeadSymbol>,
@@ -121,7 +125,23 @@ pub fn split_findings(
     (kritik, potansiyel)
 }
 
-fn normalize_rel(path: &str) -> String {
+fn relativize_to_repo(repo_root: &Path, file: &str) -> String {
+    let path = PathBuf::from(file);
+    if path.is_absolute() {
+        if let Ok(stripped) = path.strip_prefix(repo_root) {
+            return stripped.to_string_lossy().replace('\\', "/");
+        }
+        // Also try canonicalized roots.
+        if let (Ok(root), Ok(abs)) = (repo_root.canonicalize(), path.canonicalize()) {
+            if let Ok(stripped) = abs.strip_prefix(root) {
+                return stripped.to_string_lossy().replace('\\', "/");
+            }
+        }
+    }
+    normalize_slashes(file)
+}
+
+fn normalize_slashes(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_string()
 }
 
@@ -140,8 +160,6 @@ fn is_docs_path(path: &str) -> bool {
     let segs = path_segments(&lower);
     segs.iter()
         .any(|s| s == "docs" || s == "doc" || s == "documentation")
-        || lower.contains("/docs/")
-        || lower.starts_with("docs/")
 }
 
 fn is_build_path(path: &str) -> bool {
@@ -164,13 +182,21 @@ fn is_build_path(path: &str) -> bool {
     segs.iter().any(|s| BUILD_DIRS.contains(&s.as_str()))
 }
 
+fn is_examples_tests_benches_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let segs = path_segments(&lower);
+    // Top-level (or nested) Cargo/JS convention dirs — not `src/.../tests.rs` files.
+    segs.iter()
+        .any(|s| s == "examples" || s == "benches" || s == "tests")
+}
+
 fn is_generated_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = Path::new(&lower)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    name.contains(".generated.")
+    if name.contains(".generated.")
         || name.ends_with(".generated.rs")
         || name.ends_with(".generated.ts")
         || name.ends_with(".generated.js")
@@ -183,6 +209,25 @@ fn is_generated_path(path: &str) -> bool {
         || name.ends_with(".gen.js")
         || lower.contains("/generated/")
         || lower.contains("/.generated/")
+    {
+        return true;
+    }
+    false
+}
+
+fn file_has_generated_marker(repo_root: &Path, file: &str) -> bool {
+    let path = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
+    } else {
+        repo_root.join(file)
+    };
+    let Ok(head) = fs::read_to_string(path) else {
+        return false;
+    };
+    head.chars()
+        .take(512)
+        .collect::<String>()
+        .contains("@generated")
 }
 
 fn load_gitignore_globs(repo_root: &Path) -> Vec<String> {
@@ -215,7 +260,6 @@ fn matches_gitignore(path: &str, globs: &[String]) -> bool {
             if simple_glob_match(pattern, path) {
                 return true;
             }
-            // Also match basename-only globs (e.g. `*.log`).
             if let Some(base) = Path::new(path).file_name().and_then(|s| s.to_str()) {
                 if simple_glob_match(pattern, base) {
                     return true;
@@ -230,7 +274,6 @@ fn matches_gitignore(path: &str, globs: &[String]) -> bool {
     false
 }
 
-/// Minimal `*` glob (no `**` recursion beyond path suffix).
 fn simple_glob_match(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
@@ -248,9 +291,7 @@ fn simple_glob_match(pattern: &str, text: &str) -> bool {
             continue;
         }
         match rest.find(part) {
-            Some(idx) => {
-                rest = &rest[idx + part.len()..];
-            }
+            Some(idx) => rest = &rest[idx + part.len()..],
             None => return false,
         }
     }
@@ -260,8 +301,8 @@ fn simple_glob_match(pattern: &str, text: &str) -> bool {
 fn entrypoint_exclusion(symbol: &DeadSymbol, repo_root: &Path) -> Option<&'static str> {
     let name = symbol.name.as_str();
     let file = symbol.file.as_deref().unwrap_or("");
-    let normalized = normalize_rel(file);
-    let lower = normalized.to_ascii_lowercase();
+    let rel = relativize_to_repo(repo_root, file);
+    let lower = rel.to_ascii_lowercase();
 
     if is_test_symbol(name, &lower) {
         return Some(RULE_FILTER_TEST);
@@ -273,24 +314,12 @@ fn entrypoint_exclusion(symbol: &DeadSymbol, repo_root: &Path) -> Option<&'stati
         return Some(RULE_FILTER_JSX_COMPONENT);
     }
 
-    // Source-backed checks (positive when file exists).
-    if let Some(src) = read_symbol_window(repo_root, &normalized, symbol.line) {
-        if looks_like_tauri_command(&src, name) {
+    if let Some(src) = read_source_file(repo_root, file) {
+        if looks_like_tauri_command(&src, name, symbol.line) {
             return Some(RULE_FILTER_TAURI_COMMAND);
         }
-        if looks_like_trait_impl(&src, name) {
+        if looks_like_trait_impl(&src, name, symbol.line) {
             return Some(RULE_FILTER_TRAIT_IMPL);
-        }
-    } else {
-        // Fallback heuristics without source (detail / path cues).
-        if let Some(detail) = symbol.detail.as_deref() {
-            let d = detail.to_ascii_lowercase();
-            if d.contains("tauri::command") || d.contains("#[tauri::command]") {
-                return Some(RULE_FILTER_TAURI_COMMAND);
-            }
-            if d.contains("trait impl") || (d.contains("impl ") && d.contains(" for ")) {
-                return Some(RULE_FILTER_TRAIT_IMPL);
-            }
         }
     }
 
@@ -298,12 +327,12 @@ fn entrypoint_exclusion(symbol: &DeadSymbol, repo_root: &Path) -> Option<&'stati
 }
 
 fn is_test_symbol(name: &str, file_lower: &str) -> bool {
-    let base = name.rsplit("::").next().unwrap_or(name);
+    let base = symbol_base(name);
     if base.starts_with("test_") || base.ends_with("_test") || base.starts_with("it_") {
         return true;
     }
+    // File-level test conventions (not the `tests/` directory — that is examples/tests/benches).
     if file_lower.contains("/__tests__/")
-        || file_lower.contains("/tests/")
         || file_lower.ends_with("_test.rs")
         || file_lower.ends_with(".test.ts")
         || file_lower.ends_with(".test.tsx")
@@ -314,12 +343,13 @@ fn is_test_symbol(name: &str, file_lower: &str) -> bool {
     {
         return true;
     }
+    // `#[test]` attribute directly above the fn — checked via source when available,
+    // but name/file heuristics above cover the common cases without I/O.
     false
 }
 
 fn is_next_export(name: &str, file_lower: &str) -> bool {
-    let base = name.rsplit("::").next().unwrap_or(name);
-    let base = base.rsplit('/').next().unwrap_or(base);
+    let base = symbol_base(name);
     const NEXT_FILES: &[&str] = &[
         "page.tsx",
         "page.ts",
@@ -345,22 +375,23 @@ fn is_next_export(name: &str, file_lower: &str) -> bool {
         .and_then(|s| s.to_str())
         .unwrap_or("");
     if NEXT_FILES.contains(&file_name)
-        && (base == "default"
-            || base == "GET"
-            || base == "POST"
-            || base == "PUT"
-            || base == "PATCH"
-            || base == "DELETE"
-            || base == "HEAD"
-            || base == "OPTIONS"
-            || base == "generateMetadata"
-            || base == "generateStaticParams"
-            || base == "metadata"
-            || is_pascal_case(base))
+        && (matches!(
+            base,
+            "default"
+                | "GET"
+                | "POST"
+                | "PUT"
+                | "PATCH"
+                | "DELETE"
+                | "HEAD"
+                | "OPTIONS"
+                | "generateMetadata"
+                | "generateStaticParams"
+                | "metadata"
+        ) || is_pascal_case(base))
     {
         return true;
     }
-    // Named Next.js convention exports even outside page files.
     matches!(
         base,
         "generateMetadata" | "generateStaticParams" | "generateViewport"
@@ -371,9 +402,7 @@ fn is_jsx_component(name: &str, file_lower: &str) -> bool {
     if !(file_lower.ends_with(".tsx") || file_lower.ends_with(".jsx")) {
         return false;
     }
-    let base = name.rsplit("::").next().unwrap_or(name);
-    let base = base.rsplit('.').next().unwrap_or(base);
-    is_pascal_case(base)
+    is_pascal_case(symbol_base(name))
 }
 
 fn is_pascal_case(name: &str) -> bool {
@@ -384,73 +413,193 @@ fn is_pascal_case(name: &str) -> bool {
     }
 }
 
-fn read_symbol_window(repo_root: &Path, rel: &str, line: Option<i64>) -> Option<String> {
-    let path = if Path::new(rel).is_absolute() {
-        PathBuf::from(rel)
+fn symbol_base(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+fn read_source_file(repo_root: &Path, file: &str) -> Option<String> {
+    let path = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
     } else {
-        repo_root.join(rel)
+        repo_root.join(file)
     };
-    let text = fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = text.lines().collect();
-    let idx = line.unwrap_or(1).max(1) as usize;
-    let start = idx.saturating_sub(12);
-    let end = (idx + 4).min(lines.len());
-    Some(lines[start..end].join("\n"))
+    fs::read_to_string(path).ok()
 }
 
-fn looks_like_tauri_command(window: &str, name: &str) -> bool {
-    let base = name.rsplit("::").next().unwrap_or(name);
-    if !window.contains("#[tauri::command]") && !window.contains("#[tauri::command(") {
+/// `#[tauri::command]` must sit directly above the fn (allowing only blank / doc /
+/// other attribute lines). Name match is exact (`fn name(`), not a substring.
+pub fn looks_like_tauri_command(src: &str, name: &str, line: Option<i64>) -> bool {
+    let base = symbol_base(name);
+    let lines: Vec<&str> = src.lines().collect();
+    let Some(fn_idx) = find_exact_fn_line(&lines, base, line) else {
         return false;
+    };
+    // Walk upward: skip blank, `///`/`//!`/`//`, and `#[...]` attrs. Require
+    // `#[tauri::command]` (or `#[tauri::command(...)]`) among those attrs, and
+    // stop when we hit a non-attr code line.
+    let mut saw_tauri = false;
+    let mut i = fn_idx;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("#[") && t.ends_with(']') {
+            if t.starts_with("#[tauri::command]") || t.starts_with("#[tauri::command(") {
+                saw_tauri = true;
+            }
+            continue;
+        }
+        break;
     }
-    // Attribute should precede a fn with this name in the window.
-    window.contains(&format!("fn {base}"))
-        || window.contains(&format!("async fn {base}"))
-        || window.contains(&format!("pub fn {base}"))
-        || window.contains(&format!("pub async fn {base}"))
+    saw_tauri
 }
 
-fn looks_like_trait_impl(window: &str, name: &str) -> bool {
-    let base = name.rsplit("::").next().unwrap_or(name);
-    let has_impl_for = window.lines().any(|line| {
-        let t = line.trim();
-        t.starts_with("impl ") && t.contains(" for ")
-    });
-    if !has_impl_for {
+/// Trait-impl methods: fn must sit inside an `impl Trait for Type { ... }` block,
+/// with an exact name match (not `fn fmt_helper` for `fmt`).
+pub fn looks_like_trait_impl(src: &str, name: &str, line: Option<i64>) -> bool {
+    let base = symbol_base(name);
+    let lines: Vec<&str> = src.lines().collect();
+    let Some(fn_idx) = find_exact_fn_line(&lines, base, line) else {
         return false;
-    }
-    window.contains(&format!("fn {base}"))
-        || window.contains(&format!("async fn {base}"))
-        || window.contains(&format!("pub fn {base}"))
+    };
+    enclosing_trait_impl(&lines, fn_idx).is_some()
 }
 
-/// Mask absolute home prefixes as `~/...` for logs / exported paths.
+fn find_exact_fn_line(lines: &[&str], base: &str, line: Option<i64>) -> Option<usize> {
+    let candidates: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line_text)| {
+            if exact_fn_signature(line_text, base) {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    if let Some(lineno) = line {
+        let want = (lineno.max(1) as usize).saturating_sub(1);
+        // Prefer the declaration at/near the reported line.
+        if let Some(&idx) = candidates.iter().find(|&&idx| idx == want) {
+            return Some(idx);
+        }
+        // Allow small drift (±2) from tree-sitter vs source.
+        if let Some(&idx) = candidates.iter().find(|&&idx| idx.abs_diff(want) <= 2) {
+            return Some(idx);
+        }
+    }
+    // Unique exact match in the file.
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+    None
+}
+
+fn exact_fn_signature(line: &str, base: &str) -> bool {
+    let t = line.trim();
+    // Strip visibility / async / const / unsafe prefixes.
+    let mut rest = t;
+    for prefix in [
+        "pub(crate) ",
+        "pub(super) ",
+        "pub ",
+        "const ",
+        "async ",
+        "unsafe ",
+    ] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped.trim_start();
+        }
+    }
+    let Some(after_fn) = rest.strip_prefix("fn ") else {
+        return false;
+    };
+    let after_fn = after_fn.trim_start();
+    // Exact name then `(` or `<` (generics) — reject `fn fmt_helper`.
+    if let Some(rest) = after_fn.strip_prefix(base) {
+        matches!(rest.chars().next(), Some('(') | Some('<') | None)
+            || rest.starts_with(" (")
+            || rest.starts_with(" <")
+    } else {
+        false
+    }
+}
+
+fn enclosing_trait_impl(lines: &[&str], fn_idx: usize) -> Option<usize> {
+    for (start, end) in trait_impl_ranges(lines) {
+        if fn_idx > start && fn_idx <= end {
+            return Some(start);
+        }
+    }
+    None
+}
+
+fn trait_impl_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !is_trait_impl_header(lines[i].trim()) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut depth = 0i32;
+        let mut started = false;
+        let mut j = i;
+        while j < lines.len() {
+            for ch in lines[j].chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        started = true;
+                    }
+                    '}' => {
+                        depth -= 1;
+                        if started && depth == 0 {
+                            ranges.push((start, j));
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if started && depth == 0 {
+                break;
+            }
+            j += 1;
+        }
+        i = j.saturating_add(1).max(i + 1);
+    }
+    ranges
+}
+
+fn is_trait_impl_header(line: &str) -> bool {
+    let t = line.trim();
+    let rest = t.strip_prefix("pub ").unwrap_or(t);
+    rest.starts_with("impl ") && rest.contains(" for ")
+}
+
+/// Mask absolute home prefixes as `~/...` for emitted output only.
 pub fn mask_home_path(path: &str) -> String {
     let normalized = path.replace('\\', "/");
-    let home = dirs_home();
-    if let Some(home) = home {
-        let home_s = home.replace('\\', "/");
-        if normalized == home_s || normalized.starts_with(&(home_s.clone() + "/")) {
-            let rest = normalized[home_s.len()..].trim_start_matches('/');
-            return if rest.is_empty() {
-                "~/".into()
-            } else {
-                format!("~/{rest}")
-            };
-        }
+    let Some(home) = dirs_home() else {
+        return normalized;
+    };
+    let home_s = home.replace('\\', "/");
+    if home_s.is_empty() {
+        return normalized;
     }
-    // Also mask common env forms embedded mid-string.
-    if let Ok(home) = std::env::var("HOME") {
-        let home = home.replace('\\', "/");
-        if !home.is_empty() && normalized.contains(&home) {
-            return normalized.replace(&home, "~");
-        }
+    if normalized == home_s {
+        return "~/".into();
     }
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let home = home.replace('\\', "/");
-        if !home.is_empty() && normalized.contains(&home) {
-            return normalized.replace(&home, "~");
-        }
+    let prefix = format!("{home_s}/");
+    if let Some(rest) = normalized.strip_prefix(&prefix) {
+        return format!("~/{rest}");
     }
     normalized
 }
@@ -476,190 +625,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn t2_docs_build_generated_gitignore_positive_and_negative() {
-        let dir = tempfile_dir("filter-path");
-        fs::write(
-            dir.join(".gitignore"),
-            "secrets/\n*.log\n# comment\nignored_out/\n",
-        )
-        .unwrap();
-        let ctx = HealthFilterContext::for_repo(&dir);
-
-        // Positive exclusions
-        assert!(matches!(
-            ctx.decide(&sym("a", "unused", "docs/guide.md")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_DOCS
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("b", "unused", "target/debug/foo.rs")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_BUILD
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("c", "unused", "src/api.generated.ts")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_GENERATED
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("d", "unused", "secrets/token.txt")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_GITIGNORE
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("e", "unused", "app.log")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_GITIGNORE
-            }
-        ));
-
-        // Negative: normal source stays
-        let keep = ctx.decide(&sym("orphan", "unused", "src/lib/orphan.rs"));
-        assert!(matches!(
-            keep,
-            FilterDecision::Keep {
-                severity: SEVERITY_POTANSIYEL,
-                rule: RULE_UNUSED_NO_INBOUND
-            }
-        ));
-        let keep_b = ctx.decide(&sym("ghost", "broken", "src/lib/call.rs"));
-        assert!(matches!(
-            keep_b,
-            FilterDecision::Keep {
-                severity: SEVERITY_KRITIK,
-                rule: RULE_BROKEN_MISSING_TARGET
-            }
-        ));
-    }
-
-    #[test]
-    fn t2_tauri_command_trait_impl_next_test_jsx() {
-        let dir = tempfile_dir("filter-entry");
-        // tauri command — positive
-        let tauri_file = dir.join("src-tauri/src/cmds.rs");
-        fs::create_dir_all(tauri_file.parent().unwrap()).unwrap();
-        fs::write(
-            &tauri_file,
-            "#[tauri::command]\npub async fn index_workspace(path: String) -> Result<(), String> { Ok(()) }\n",
-        )
-        .unwrap();
-        // trait impl — positive
-        let trait_file = dir.join("src/trait_demo.rs");
-        fs::create_dir_all(trait_file.parent().unwrap()).unwrap();
-        fs::write(
-            &trait_file,
-            "impl Display for Foo {\n    fn fmt(&self, f: &mut Formatter) -> Result { Ok(()) }\n}\n",
-        )
-        .unwrap();
-        let ctx = HealthFilterContext::for_repo(&dir);
-
-        assert!(matches!(
-            ctx.decide(&DeadSymbol {
-                name: "index_workspace".into(),
-                kind: "unused".into(),
-                file: Some("src-tauri/src/cmds.rs".into()),
-                line: Some(2),
-                ..DeadSymbol::default()
-            }),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_TAURI_COMMAND
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&DeadSymbol {
-                name: "fmt".into(),
-                kind: "unused".into(),
-                file: Some("src/trait_demo.rs".into()),
-                line: Some(2),
-                ..DeadSymbol::default()
-            }),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_TRAIT_IMPL
-            }
-        ));
-
-        // Next.js export — positive
-        assert!(matches!(
-            ctx.decide(&sym("default", "unused", "src/app/page.tsx")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_NEXT_EXPORT
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("generateMetadata", "unused", "src/app/layout.tsx")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_NEXT_EXPORT
-            }
-        ));
-
-        // Test — positive
-        assert!(matches!(
-            ctx.decide(&sym("test_parse", "unused", "src/lib.rs")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_TEST
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("helper", "unused", "src/foo.spec.ts")),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_TEST
-            }
-        ));
-
-        // JSX component — positive
-        assert!(matches!(
-            ctx.decide(&sym(
-                "DeadSymbolsPanel",
-                "unused",
-                "src/components/panel.tsx"
-            )),
-            FilterDecision::Exclude {
-                rule: RULE_FILTER_JSX_COMPONENT
-            }
-        ));
-
-        // Negatives: ordinary unused Rust fn / camelCase js helper stay
-        assert!(matches!(
-            ctx.decide(&sym("compute_score", "unused", "src/score.rs")),
-            FilterDecision::Keep {
-                severity: SEVERITY_POTANSIYEL,
-                ..
-            }
-        ));
-        assert!(matches!(
-            ctx.decide(&sym("formatDate", "unused", "src/utils/date.ts")),
-            FilterDecision::Keep {
-                severity: SEVERITY_POTANSIYEL,
-                ..
-            }
-        ));
-        // Non-command near tauri file but different name
-        assert!(matches!(
-            ctx.decide(&DeadSymbol {
-                name: "helper_only".into(),
-                kind: "unused".into(),
-                file: Some("src-tauri/src/cmds.rs".into()),
-                line: Some(2),
-                ..DeadSymbol::default()
-            }),
-            FilterDecision::Keep { .. }
-        ));
-    }
-
-    #[test]
-    fn mask_home_path_replaces_prefix() {
-        let home = dirs_home().expect("home");
-        let full = format!("{home}/projects/Agent-Lounge-OS/src/lib.rs");
-        let masked = mask_home_path(&full);
-        assert!(masked.starts_with("~/"), "{masked}");
-        assert!(!masked.contains(&home), "{masked}");
-    }
-
     fn tempfile_dir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         dir.push(format!(
@@ -671,5 +636,331 @@ mod tests {
         let mut marker = fs::File::create(dir.join(".al-test")).unwrap();
         let _ = writeln!(marker, "ok");
         dir
+    }
+
+    #[test]
+    fn every_path_filter_has_positive_and_negative() {
+        let dir = tempfile_dir("path-rules");
+        fs::write(dir.join(".gitignore"), "secrets/\n*.log\n").unwrap();
+        let ctx = HealthFilterContext::for_repo(&dir);
+
+        // docs
+        assert!(matches!(
+            ctx.decide(&sym("a", "unused", "docs/guide.md")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_DOCS
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("a", "unused", "src/docs_helper.rs")),
+            FilterDecision::Keep { .. }
+        ));
+
+        // build
+        assert!(matches!(
+            ctx.decide(&sym("b", "unused", "target/debug/foo.rs")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_BUILD
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("b", "unused", "src/build_plan.rs")),
+            FilterDecision::Keep { .. }
+        ));
+
+        // generated
+        assert!(matches!(
+            ctx.decide(&sym("c", "unused", "src/api.generated.ts")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_GENERATED
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("c", "unused", "src/api.ts")),
+            FilterDecision::Keep { .. }
+        ));
+
+        // gitignore
+        assert!(matches!(
+            ctx.decide(&sym("d", "unused", "secrets/token.txt")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_GITIGNORE
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("d", "unused", "src/token.txt")),
+            FilterDecision::Keep { .. }
+        ));
+
+        // examples / tests / benches class
+        assert!(matches!(
+            ctx.decide(&sym("e", "unused", "examples/demo.rs")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_EXAMPLES_TESTS_BENCHES
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("e", "unused", "tests/integration.rs")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_EXAMPLES_TESTS_BENCHES
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("e", "unused", "benches/hot.rs")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_EXAMPLES_TESTS_BENCHES
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("e", "unused", "src/lib.rs")),
+            FilterDecision::Keep { .. }
+        ));
+    }
+
+    #[test]
+    fn every_entrypoint_filter_has_positive_and_negative() {
+        let dir = tempfile_dir("entry-rules");
+
+        // --- tauri command ---
+        let tauri_file = dir.join("src-tauri/src/cmds.rs");
+        fs::create_dir_all(tauri_file.parent().unwrap()).unwrap();
+        fs::write(
+            &tauri_file,
+            r#"
+#[tauri::command]
+pub async fn index_workspace(path: String) -> Result<(), String> { Ok(()) }
+
+pub async fn index_workspace_helper() {}
+
+/// Nearby attr must not bleed onto the next fn.
+#[tauri::command]
+pub fn open_graph() {}
+
+pub fn open_graph_helper() {}
+"#,
+        )
+        .unwrap();
+        let ctx = HealthFilterContext::for_repo(&dir);
+
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "index_workspace".into(),
+                kind: "unused".into(),
+                file: Some(tauri_file.to_string_lossy().into()),
+                line: Some(3),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_TAURI_COMMAND
+            }
+        ));
+        // Negative: same file, no attribute directly above, exact name differs.
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "index_workspace_helper".into(),
+                kind: "unused".into(),
+                file: Some(tauri_file.to_string_lossy().into()),
+                line: Some(5),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Keep { .. }
+        ));
+        // Negative: substring would have matched `open_graph` inside helper — must not.
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "open_graph_helper".into(),
+                kind: "unused".into(),
+                file: Some(tauri_file.to_string_lossy().into()),
+                line: Some(12),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Keep { .. }
+        ));
+        // Negative: #[tauri::command] is NOT directly above (intervening non-attr code).
+        assert!(!looks_like_tauri_command(
+            "#[tauri::command]\npub fn real_cmd() {}\n\npub fn orphan() {}\n",
+            "orphan",
+            Some(4),
+        ));
+
+        // --- trait impl ---
+        let trait_file = dir.join("src/trait_demo.rs");
+        fs::create_dir_all(trait_file.parent().unwrap()).unwrap();
+        fs::write(
+            &trait_file,
+            r#"
+impl Display for Foo {
+    fn fmt(&self, f: &mut Formatter) -> Result { Ok(()) }
+    fn fmt_helper(&self) {}
+}
+
+fn fmt() {}
+
+impl Foo {
+    fn inherent_only(&self) {}
+}
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "fmt".into(),
+                kind: "unused".into(),
+                file: Some(trait_file.to_string_lossy().into()),
+                line: Some(3),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_TRAIT_IMPL
+            }
+        ));
+        // Still inside trait impl → excluded (entrypoint), but exact-name
+        // matching is covered by exact_fn_rejects_substring_names.
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "fmt_helper".into(),
+                kind: "unused".into(),
+                file: Some(trait_file.to_string_lossy().into()),
+                line: Some(4),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_TRAIT_IMPL
+            }
+        ));
+        // Negative: free fn `fmt` outside trait impl.
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "fmt".into(),
+                kind: "unused".into(),
+                file: Some(trait_file.to_string_lossy().into()),
+                line: Some(7),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Keep { .. }
+        ));
+        // Negative: inherent impl (no `for`) — not a trait impl.
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "inherent_only".into(),
+                kind: "unused".into(),
+                file: Some(trait_file.to_string_lossy().into()),
+                line: Some(10),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Keep { .. }
+        ));
+        // Negative: exact name — `fn fmt_helper` must not satisfy lookup for `fmt`.
+        assert!(!exact_fn_signature("    fn fmt_helper(&self) {}", "fmt"));
+        assert!(!looks_like_trait_impl(
+            "impl Display for Foo {\n    fn fmt_helper(&self) {}\n}\n",
+            "fmt",
+            Some(2)
+        ));
+
+        // --- Next.js ---
+        assert!(matches!(
+            ctx.decide(&sym("default", "unused", "src/app/page.tsx")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_NEXT_EXPORT
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("helper", "unused", "src/app/utils.ts")),
+            FilterDecision::Keep { .. }
+        ));
+
+        // --- test ---
+        assert!(matches!(
+            ctx.decide(&sym("test_parse", "unused", "src/lib.rs")),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_TEST
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("parse", "unused", "src/lib.rs")),
+            FilterDecision::Keep { .. }
+        ));
+
+        // --- JSX ---
+        assert!(matches!(
+            ctx.decide(&sym(
+                "DeadSymbolsPanel",
+                "unused",
+                "src/components/panel.tsx"
+            )),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_JSX_COMPONENT
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&sym("formatDate", "unused", "src/components/panel.tsx")),
+            FilterDecision::Keep { .. }
+        ));
+    }
+
+    #[test]
+    fn absolute_paths_under_repo_root_are_filtered() {
+        let dir = tempfile_dir("abs-path");
+        let abs_docs = dir.join("docs").join("readme.md");
+        fs::create_dir_all(abs_docs.parent().unwrap()).unwrap();
+        fs::write(&abs_docs, "x").unwrap();
+        let abs_src = dir.join("src").join("lib.rs");
+        fs::create_dir_all(abs_src.parent().unwrap()).unwrap();
+        fs::write(&abs_src, "fn orphan() {}").unwrap();
+        let ctx = HealthFilterContext::for_repo(&dir);
+
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "in_docs".into(),
+                kind: "unused".into(),
+                file: Some(abs_docs.to_string_lossy().into()),
+                line: Some(1),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_DOCS
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "orphan".into(),
+                kind: "unused".into(),
+                file: Some(abs_src.to_string_lossy().into()),
+                line: Some(1),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Keep {
+                severity: SEVERITY_POTANSIYEL,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mask_home_path_only_prefix_not_contains() {
+        let home = dirs_home().expect("home");
+        let full = format!("{home}/projects/Agent-Lounge-OS/src/lib.rs");
+        let masked = mask_home_path(&full);
+        assert!(masked.starts_with("~/"), "{masked}");
+        assert!(!masked.contains(&home), "{masked}");
+        // Must not mangle a different user path that merely contains the home string.
+        let other = format!("{home}2/extra/src/lib.rs");
+        assert_eq!(mask_home_path(&other), other.replace('\\', "/"));
+    }
+
+    #[test]
+    fn exact_fn_rejects_substring_names() {
+        assert!(exact_fn_signature("    fn fmt(&self) {}", "fmt"));
+        assert!(!exact_fn_signature("    fn fmt_helper(&self) {}", "fmt"));
+        assert!(exact_fn_signature(
+            "pub async fn index_workspace(",
+            "index_workspace"
+        ));
+        assert!(!exact_fn_signature(
+            "pub async fn index_workspace_helper(",
+            "index_workspace"
+        ));
     }
 }
