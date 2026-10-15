@@ -1152,10 +1152,10 @@ fn replace_dead_rows_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::GuardedCommand;
     use crate::services::memory_bridge::{health_page_timeout, MemoryBridge, MemoryBridgeConfig};
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
     use std::time::Duration;
 
     /// Fast cross-platform stub: pre-rendered JSON pages, no per-call Python.
@@ -1773,31 +1773,41 @@ edition = "2021"
     }
 
     fn ensure_real_cbm_binary() -> PathBuf {
-        // Prefer already-fetched bridge binary.
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bridge_unix = manifest.join("../bridge/codebase-memory-mcp");
+        let bridge_win = manifest.join("../bridge/codebase-memory-mcp.exe");
         let candidates = [
+            bridge_unix.clone(),
+            bridge_win.clone(),
             PathBuf::from("/workspace/bridge/codebase-memory-mcp"),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bridge/codebase-memory-mcp"),
         ];
         for c in &candidates {
             if c.is_file() {
                 let meta = fs::metadata(c).unwrap();
+                // Compile stubs are tiny (<4KB); real v0.11.0 is multi-MB.
                 if meta.len() > 4096 {
                     return c.clone();
                 }
             }
         }
-        // Fetch pinned v0.11.0 via project script (no apt).
-        let status = Command::new("bash")
-            .arg("/workspace/scripts/ci/fetch-codebase-memory-mcp.sh")
-            .status()
-            .expect("spawn fetch-codebase-memory-mcp.sh");
-        assert!(status.success(), "fetch real CBM v0.11.0 failed");
-        let bin = PathBuf::from("/workspace/bridge/codebase-memory-mcp");
+        // Fetch pinned v0.11.0 via project script (PolicyGate via GuardedCommand).
+        let script = manifest.join("../scripts/ci/fetch-codebase-memory-mcp.sh");
         assert!(
-            bin.is_file() && fs::metadata(&bin).unwrap().len() > 4096,
-            "real CBM binary missing after fetch"
+            script.is_file(),
+            "fetch script missing at {}",
+            script.display()
         );
-        bin
+        let status = GuardedCommand::new("bash")
+            .arg(&script)
+            .status()
+            .expect("spawn fetch-codebase-memory-mcp.sh via GuardedCommand");
+        assert!(status.success(), "fetch real CBM v0.11.0 failed");
+        for c in &[bridge_unix, bridge_win] {
+            if c.is_file() && fs::metadata(c).unwrap().len() > 4096 {
+                return c.clone();
+            }
+        }
+        panic!("real CBM binary missing after fetch");
     }
 
     #[test]
