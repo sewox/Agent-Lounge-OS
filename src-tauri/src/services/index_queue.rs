@@ -298,13 +298,17 @@ impl IndexQueue {
             job.status = IndexJobPhase::Done;
             job.error = None;
             job.error_code = None;
-            job.snapshot = Some(snapshot);
+            job.snapshot = Some(snapshot.clone());
             job.updated_at = now_rfc3339();
+            let repo_path = job.repo_path.clone();
+            let project_hint = snapshot.project.clone();
             let event_job = job.clone();
             let progress = IndexProgress::from_jobs(&guard.jobs);
             let jobs = guard.jobs.clone();
             drop(guard);
             emit_job(app, event_job, progress, jobs);
+            // Health-1a: full dead-symbol scan after each successful index (concurrency 1).
+            crate::services::health_scan::enqueue_after_index(&repo_path, &project_hint).await;
         }
     }
 

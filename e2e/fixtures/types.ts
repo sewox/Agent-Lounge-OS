@@ -47,6 +47,8 @@ export type DeadSymbol = {
   detail?: string | null;
   project_id?: string | null;
   last_ref?: string | null;
+  severity?: string | null;
+  rule?: string | null;
 };
 
 export type AstNode = {

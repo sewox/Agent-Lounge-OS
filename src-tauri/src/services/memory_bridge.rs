@@ -31,8 +31,11 @@ pub const DEFAULT_GRAPH_UI_PORT: u16 = GRAPH_UI_PORT_BAND_START;
 pub const LIST_PROJECTS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Semantic map UI için üst sınır — viewport kilitli listede sayfalama var.
+/// Health-1a full dead scan does **not** use these; see [`HEALTH_SCAN_PAGE_SIZE`].
 const SEMANTIC_NODE_LIMIT: u32 = 400;
 const SEMANTIC_CALL_LIMIT: u32 = 800;
+/// Health-1a paged Cypher scan page size (Function+Method / CALLS).
+pub const HEALTH_SCAN_PAGE_SIZE: u32 = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransportMode {
@@ -246,14 +249,8 @@ impl MemoryBridge {
         }
 
         apply_ref_counts(&mut graph.nodes, &graph.references);
-        if graph.dead.is_empty() && (!graph.nodes.is_empty() || !graph.references.is_empty()) {
-            graph.dead = derive_dead(&graph.nodes, &graph.references, project);
-            for item in &mut graph.dead {
-                if item.project_id.is_none() {
-                    item.project_id = Some(project.to_string());
-                }
-            }
-        }
+        // Health-1a: do not derive dead from SEMANTIC_* LIMIT samples.
+        // Full paged scan + SQLite JOIN owns dead/broken (background after index).
         // EX-14: truncated LIMIT lists must not overwrite real graph totals.
         if let Ok((nodes, edges)) = self.fetch_graph_totals(project).await {
             if nodes > 0 {
@@ -291,6 +288,7 @@ impl MemoryBridge {
     }
 
     async fn fetch_ast_nodes(&self, project: &str) -> Result<Vec<AstNode>> {
+        // Semantic map viewport sample only — Health-1a uses fetch_ast_nodes_page.
         let mut nodes = Vec::new();
         for (label, kind) in [("Function", "function"), ("Method", "method")] {
             let query = format!(
@@ -308,6 +306,7 @@ impl MemoryBridge {
     }
 
     async fn fetch_call_edges(&self, project: &str) -> Result<Vec<CodeReference>> {
+        // Semantic map viewport sample only — Health-1a uses fetch_call_edges_page.
         let query = format!(
             "MATCH (caller)-[r:CALLS]->(callee) \
              RETURN caller.name AS caller, callee.name AS callee, \
@@ -316,6 +315,64 @@ impl MemoryBridge {
         );
         let payload = self.query_graph_json(project, &query).await?;
         Ok(call_edges_from_query(&payload))
+    }
+
+    /// Health-1a: one page of Function or Method symbols (ORDER BY for stable boundaries).
+    pub async fn fetch_ast_nodes_page(
+        &self,
+        project: &str,
+        label: &str,
+        kind: &str,
+        skip: u64,
+        limit: u32,
+    ) -> Result<Vec<AstNode>> {
+        let query = format!(
+            "MATCH (f:{label}) RETURN f.name AS name, f.qualified_name AS id, \
+             f.file_path AS file, f.start_line AS line \
+             ORDER BY f.qualified_name SKIP {skip} LIMIT {limit}"
+        );
+        let payload = self.query_graph_json(project, &query).await?;
+        Ok(ast_nodes_from_query(&payload, kind))
+    }
+
+    /// Health-1a: one page of CALLS edges.
+    pub async fn fetch_call_edges_page(
+        &self,
+        project: &str,
+        skip: u64,
+        limit: u32,
+    ) -> Result<Vec<CodeReference>> {
+        let query = format!(
+            "MATCH (caller)-[r:CALLS]->(callee) \
+             RETURN caller.name AS caller, callee.name AS callee, \
+             caller.qualified_name AS from_id, callee.qualified_name AS to_id, \
+             caller.file_path AS file, r.line AS line \
+             ORDER BY caller.qualified_name, callee.qualified_name, r.line \
+             SKIP {skip} LIMIT {limit}"
+        );
+        let payload = self.query_graph_json(project, &query).await?;
+        Ok(call_edges_from_query(&payload))
+    }
+
+    /// Best-effort CBM project name for query_graph (basename / list_projects match).
+    pub async fn resolve_cbm_project_name(&self, repo_path: &str) -> Option<String> {
+        let want = PathBuf::from(repo_path);
+        let want_canon = want.canonicalize().unwrap_or(want);
+        if let Ok(projects) = self.list_projects().await {
+            for row in projects {
+                if let Some(root) = row.root_path.as_deref() {
+                    let root_path = PathBuf::from(root);
+                    let root_canon = root_path.canonicalize().unwrap_or(root_path);
+                    if root_canon == want_canon && !row.name.trim().is_empty() {
+                        return Some(row.name);
+                    }
+                }
+            }
+        }
+        Path::new(repo_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
     }
 
     async fn query_graph_json(&self, project: &str, query: &str) -> Result<Value> {
@@ -1202,6 +1259,8 @@ fn dead_symbol_from_value(value: &Value, default_kind: &str) -> Option<DeadSymbo
         detail: json_str(value, &["detail", "reason", "message"]),
         project_id: json_str(value, &["project_id", "project"]),
         last_ref: json_str(value, &["last_ref", "lastRef", "reference"]),
+        severity: json_str(value, &["severity"]),
+        rule: json_str(value, &["rule"]),
     })
 }
 
@@ -1256,6 +1315,8 @@ pub fn derive_dead(
             detail: Some(format!("{} → {} hedefi yok", edge.from_id, edge.to_id)),
             project_id: Some(project.to_string()),
             last_ref: None,
+            severity: None,
+            rule: None,
         });
     }
 
@@ -1276,6 +1337,8 @@ pub fn derive_dead(
                 detail: Some("gelen referans yok".into()),
                 project_id: Some(project.to_string()),
                 last_ref: None,
+                severity: None,
+                rule: None,
             });
         }
     }

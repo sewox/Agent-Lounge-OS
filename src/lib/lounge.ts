@@ -1593,6 +1593,10 @@ export type DeadSymbol = {
   detail?: string | null;
   project_id?: string | null;
   last_ref?: string | null;
+  /** Health-1a: Kritik | Potansiyel */
+  severity?: string | null;
+  /** Health-1a rule id that flagged the finding */
+  rule?: string | null;
 };
 
 export type AstNode = {

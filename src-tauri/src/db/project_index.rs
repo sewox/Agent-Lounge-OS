@@ -562,20 +562,30 @@ fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<
         } else {
             "dead"
         };
-        insert_row(
-            conn,
-            IndexRow {
-                project_id: &project,
-                repo_path: &graph.repo_path,
+        let payload = serde_json::json!({
+            "severity": symbol.severity,
+            "rule": symbol.rule,
+        })
+        .to_string();
+        conn.execute(
+            r#"
+            INSERT INTO project_index (
+                id, project_id, repo_path, kind, name, file_path, line, target,
+                ref_count, detail, payload_json, indexed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 0, ?8, ?9, ?10)
+            "#,
+            params![
+                Uuid::new_v4().to_string(),
+                project,
+                graph.repo_path,
                 kind,
-                name: &symbol.name,
-                file_path: symbol.file.as_deref(),
-                line: symbol.line,
-                target: None,
-                ref_count: 0,
-                detail: symbol.detail.as_deref(),
-                indexed_at: &now,
-            },
+                symbol.name,
+                symbol.file.as_deref(),
+                symbol.line,
+                symbol.detail.as_deref(),
+                payload,
+                now,
+            ],
         )?;
     }
 
@@ -682,6 +692,23 @@ fn insert_row(conn: &Connection, row: IndexRow<'_>) -> Result<()> {
     Ok(())
 }
 
+fn severity_rule_from_payload(payload: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return (None, None);
+    };
+    let severity = value
+        .get("severity")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let rule = value
+        .get("rule")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    (severity, rule)
+}
+
 fn list_dead_symbols_blocking(
     conn: &Connection,
     project_id: Option<&str>,
@@ -702,7 +729,8 @@ fn list_dead_symbols_blocking(
               AND COALESCE(r.file_path, '') = COALESCE(d.file_path, '')
             ORDER BY r.indexed_at DESC
             LIMIT 1
-          ) AS last_ref
+          ) AS last_ref,
+          COALESCE(d.payload_json, '{}')
         FROM project_index d
         WHERE d.kind IN ('dead', 'broken')
           AND (?1 IS NULL OR d.project_id = ?1)
@@ -726,6 +754,8 @@ fn list_dead_symbols_blocking(
         } else {
             "unused"
         };
+        let payload: String = row.get(7)?;
+        let (severity, rule) = severity_rule_from_payload(&payload);
         Ok(DeadSymbol {
             project_id: Some(row.get(0)?),
             name: row.get(1)?,
@@ -734,6 +764,8 @@ fn list_dead_symbols_blocking(
             line: row.get(4)?,
             detail: row.get(5)?,
             last_ref: row.get(6)?,
+            severity,
+            rule,
         })
     })?;
     let mut symbols = Vec::new();
@@ -955,6 +987,7 @@ fn resolve_dead_symbol_blocking(conn: &Connection, key: &DeadSymbol) -> Result<R
         line,
         detail,
         last_ref: lookup_last_ref_blocking(conn, project, name, Some(file_path.as_str())),
+        ..DeadSymbol::default()
     };
     Ok(ResolvedDeadSymbol {
         symbol,
@@ -1033,6 +1066,7 @@ fn list_ignored_symbols_blocking(
             line: row.get(4)?,
             detail: Some("ignored".into()),
             last_ref: None,
+            ..DeadSymbol::default()
         })
     })?;
     let mut out = Vec::new();
@@ -1727,7 +1761,8 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
     let mut by_project: BTreeMap<String, SemanticProject> = BTreeMap::new();
     {
         let sql = r#"
-            SELECT project_id, repo_path, kind, name, file_path, line, target, ref_count, detail
+            SELECT project_id, repo_path, kind, name, file_path, line, target, ref_count, detail,
+                   COALESCE(payload_json, '{}')
             FROM project_index
             WHERE ?1 IS NULL OR project_id = ?1
             ORDER BY project_id, kind, name
@@ -1744,6 +1779,7 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
                 target: row.get(6)?,
                 ref_count: row.get(7)?,
                 detail: row.get(8)?,
+                payload_json: row.get(9)?,
             })
         })?;
 
@@ -1787,6 +1823,7 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
                     });
                 }
                 "dead" | "broken" => {
+                    let (severity, rule) = severity_rule_from_payload(&row.payload_json);
                     project.dead.push(DeadSymbol {
                         name: row.name,
                         kind: if row.kind == "broken" {
@@ -1799,6 +1836,8 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
                         detail: row.detail,
                         project_id: Some(row.project_id),
                         last_ref: None,
+                        severity,
+                        rule,
                     });
                 }
                 _ => {}
@@ -1862,6 +1901,7 @@ struct MapRow {
     target: Option<String>,
     ref_count: i64,
     detail: Option<String>,
+    payload_json: String,
 }
 
 #[cfg(test)]
@@ -1910,6 +1950,7 @@ mod tests {
                     detail: Some("gelen referans yok".into()),
                     project_id: Some("lounge".into()),
                     last_ref: None,
+                    ..DeadSymbol::default()
                 },
                 DeadSymbol {
                     name: "ghost".into(),
@@ -1919,6 +1960,7 @@ mod tests {
                     detail: Some("foo → ghost hedefi yok".into()),
                     project_id: Some("lounge".into()),
                     last_ref: None,
+                    ..DeadSymbol::default()
                 },
             ],
         }
