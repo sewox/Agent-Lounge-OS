@@ -1,6 +1,7 @@
 import { createElement, type ReactNode } from "react";
 import {
   isEnableGraphUiDisabled,
+  shouldShowEnableGraphUi,
   type GraphUiButtonStatus,
 } from "@/lib/graph-ui-button-state";
 
@@ -8,6 +9,7 @@ export type GraphUiButtonViewLabels = {
   enable: string;
   enableWithPort: string;
   open: string;
+  openExisting?: string;
   indexFirst: string;
   busyEllipsis: string;
 };
@@ -36,13 +38,16 @@ export function GraphUiButtonView({
   onEnable,
   onOpen,
 }: GraphUiButtonViewProps): ReactNode {
-  const showEnable = !status.ui_available;
+  const showEnable = shouldShowEnableGraphUi(status);
   const showOpen = status.ui_available && status.project_indexed;
   const showIndexedHint = status.ui_available && !status.project_indexed;
   const enableDisabled = isEnableGraphUiDisabled(busy, status);
-  const showInfo = Boolean(infoNote?.trim());
+  const daemonInfo = Boolean(status.daemon_mode && infoNote?.trim());
+  const showInfo = Boolean(infoNote?.trim()) && (!status.port_conflict || daemonInfo);
   const showConflict = Boolean(status.port_conflict && conflictNote?.trim());
   const enableLabel = showInfo ? labels.enableWithPort : labels.enable;
+  const openLabel =
+    status.daemon_mode && labels.openExisting ? labels.openExisting : labels.open;
   const buttonTitle = showConflict
     ? conflictNote || undefined
     : showInfo
@@ -87,7 +92,7 @@ export function GraphUiButtonView({
           className:
             "rounded bg-primary-container px-2.5 py-1 font-body text-meta font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-50",
         },
-        busy ? labels.busyEllipsis : labels.open,
+        busy ? labels.busyEllipsis : openLabel,
       ),
     );
   }
@@ -104,7 +109,7 @@ export function GraphUiButtonView({
           className:
             "cursor-not-allowed rounded border border-outline-variant/60 bg-surface-container-high/50 px-2.5 py-1 font-body text-meta text-on-surface-variant opacity-70",
         },
-        labels.open,
+        openLabel,
       ),
     );
   }

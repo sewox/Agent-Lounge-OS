@@ -24,7 +24,19 @@ Cursor / Claude Desktop
 
 **Atomik kayıt:** `lounge_record_*` SQLite (+ yerel embedding) yazar; `LOUNGE_QDRANT_URL` / `LOUNGE_CHROMA_URL` varsa uzak indeksi de bekler — uzak yazım başarısızsa SQLite satırı geri alınır.
 
-**Otomatik project_id:** `active_file` veya `workspace_root` verildiğinde `project_index.repo_path` üzerinden en uzun eşleşen proje seçilir.
+**Canonical project identity (Project-ID-Core):** her Knowledge Vault / MCP yazımı tek bir **canonical id**’ye bağlanır.
+
+| Kavram | Anlam |
+|--------|--------|
+| **Canonical ID** | Dunce-tarzı canonicalize edilmiş `repo_path` (Windows local’de önce `canonicalize()` — symlink/junction/8.3 çözülür, sonra `\\?\` strip + fold; canonicalize başarısızsa veya non-Windows’ta drive-letter input’ta text-only key; UNC korunur; trailing `/` silinir; macOS/Windows’ta **Unicode case fold** — `İ`/`istanbul` eşleşir; Linux’ta case korunur) |
+| **`project_aliases`** | Experience / CBM slug’ları → canonical id. Aynı slug iki repo’ya bağlanırsa **ambiguous** olur (sessiz overwrite yok). Alias case: Linux = case-sensitive; macOS/Windows = Unicode fold. Legacy tablo upgrade’i canonical migrasyon transaction’ı içinde |
+| **displayName** | Lounge proje adı → `repo_path` basename → slug |
+| **`unclassified`** | Bilinmeyen slug; ambiguous alias; **veya** explicit `project_id` ile `active_file` / session `workspace_path` farklı indexed canonical’lara çözülürse (çatışma). Path-wins yok — uyarı görünür kalsın diye bilinçli seçim |
+| **`unindexed_placeholder`** | Path ipucu var ama indekslenmiş/keşfedilmiş `repo_path` yoksa |
+
+`lounge_record_*` yanıtında `identity_kind` + isteğe bağlı `project_warning` döner; Vault satırında `identity_warning` gösterilir. Migrasyon (`migrations.project_id_canonical_v1`) **tek transaction** içinde çalışır; hata → ROLLBACK + yüksek sesli log, done-flag yazılmaz. Yedek: settings JSON + `project_id_canonical_v1_remap` / `_row_backup` tabloları (geri alınabilir). Kullanıcı kaydı yeniden dosyalanmaz (Sercan onayı olmadan çapraz proje taşıma yok).
+
+**Otomatik project_id:** `active_file` / `workspace_root` / session `workspace_path` → en uzun `repo_path` eşleşmesi → unambiguous alias üzerinden canonical id.
 
 ## Binary derleme
 

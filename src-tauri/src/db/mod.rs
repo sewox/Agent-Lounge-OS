@@ -7,6 +7,7 @@ mod experience_governance;
 mod experience_store;
 mod experiences;
 pub mod feedback;
+mod project_identity;
 mod project_index;
 mod vector_memory;
 
@@ -30,4 +31,11 @@ pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,
 };
 pub use experiences::{column_names, default_db_path, ExperienceStore};
+pub use project_identity::{
+    bind_write_project_id, canonicalize_repo_path, choose_display_name, migrate_project_identity,
+    migrate_project_ids_to_canonical, prefer_canonical, register_path_project,
+    strip_windows_extended_prefix, upsert_alias, upsert_project, ProjectBind, ProjectBindKind,
+    MIGRATION_PROJECT_ID_CANONICAL_V1, MIGRATION_PROJECT_ID_CANONICAL_V1_BACKUP,
+    PROJECT_ID_UNCLASSIFIED, PROJECT_ID_UNINDEXED_PLACEHOLDER,
+};
 pub use project_index::{accepts_cross_platform_path, normalize_path_str, path_has_windows_drive};

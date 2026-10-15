@@ -247,6 +247,15 @@ function ProjectRow({
             {` · ${t("astNodes", { count: row.nodeCount })} · ${t("edges", { count: row.edgeCount })}`}
             {row.lastUpdated ? ` · ${formatStamp(row.lastUpdated)}` : ""}
           </span>
+          {row.identityWarning ? (
+            <span
+              className="mt-0.5 block truncate font-body text-meta text-error"
+              data-qa="vault-project-identity-warning"
+              title={row.identityWarning}
+            >
+              {t("identityWarning")}
+            </span>
+          ) : null}
         </span>
       </span>
       <button

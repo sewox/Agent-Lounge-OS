@@ -165,7 +165,11 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            list_dead_symbols_blocking(&conn, project_id.as_deref())
+            let resolved = project_id
+                .as_deref()
+                .map(|id| resolve_project_filter(&conn, id))
+                .transpose()?;
+            list_dead_symbols_blocking(&conn, resolved.as_deref())
         })
         .await
         .context("project_index dead list join")?
@@ -178,7 +182,11 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            project_index_snapshot_blocking(&conn, project_id.as_deref())
+            let resolved = project_id
+                .as_deref()
+                .map(|id| resolve_project_filter(&conn, id))
+                .transpose()?;
+            project_index_snapshot_blocking(&conn, resolved.as_deref())
         })
         .await
         .context("project_index snapshot join")?
@@ -219,9 +227,10 @@ impl ExperienceStore {
         let off = offset.unwrap_or(0);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
+            let resolved = resolve_project_filter(&conn, &project_id)?;
             list_project_pages_blocking(
                 &conn,
-                &project_id,
+                &resolved,
                 query.as_deref().unwrap_or(""),
                 sort.as_deref().unwrap_or("path"),
                 off,
@@ -241,7 +250,8 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            list_file_symbols_blocking(&conn, &project_id, &file_path)
+            let resolved = resolve_project_filter(&conn, &project_id)?;
+            list_file_symbols_blocking(&conn, &resolved, &file_path)
         })
         .await
         .context("file symbols join")?
@@ -280,10 +290,25 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            load_semantic_map_blocking(&conn, project_id.as_deref())
+            let resolved = project_id
+                .as_deref()
+                .map(|id| resolve_project_filter(&conn, id))
+                .transpose()?;
+            load_semantic_map_blocking(&conn, resolved.as_deref())
         })
         .await
         .context("project_index semantic map join")?
+    }
+
+    /// Resolve lounge/CBM slug or path to the stored canonical project_id filter.
+    pub async fn resolve_project_filter_id(&self, project_id: String) -> Result<String> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            resolve_project_filter(&conn, &project_id)
+        })
+        .await
+        .context("resolve_project_filter join")?
     }
 
     /// Command Palette: proje indeksinde ucuz isim/dosya araması (memory_bridge SQLite).
@@ -329,7 +354,11 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            list_ignored_symbols_blocking(&conn, project_id.as_deref())
+            let resolved = project_id
+                .as_deref()
+                .map(|id| resolve_project_filter(&conn, id))
+                .transpose()?;
+            list_ignored_symbols_blocking(&conn, resolved.as_deref())
         })
         .await
         .context("list_ignored_symbols join")?
@@ -340,11 +369,19 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
+            let mut symbol = symbol;
+            if let Some(pid) = symbol.project_id.take() {
+                symbol.project_id = Some(resolve_project_filter(&conn, &pid)?);
+            }
             resolve_dead_symbol_blocking(&conn, &symbol)
         })
         .await
         .context("resolve_dead_symbol join")?
     }
+}
+
+fn resolve_project_filter(conn: &Connection, project_id: &str) -> Result<String> {
+    crate::db::project_identity::prefer_canonical(conn, project_id)
 }
 
 fn resolve_project_id_blocking(conn: &Connection, path_hint: &str) -> Result<Option<String>> {
@@ -388,7 +425,13 @@ fn resolve_project_id_blocking(conn: &Connection, path_hint: &str) -> Result<Opt
             }
         }
     }
-    Ok(best.map(|(_, id)| id))
+    match best {
+        Some((_, id)) => {
+            let canonical = crate::db::project_identity::prefer_canonical(conn, &id)?;
+            Ok(Some(canonical))
+        }
+        None => Ok(None),
+    }
 }
 
 fn normalize_path_hint(raw: &str) -> PathBuf {
@@ -431,11 +474,43 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 
 fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<()> {
     let now = now_rfc3339();
-    let project = if graph.project.is_empty() {
+    let lounge_name = if graph.project.is_empty() {
         "unknown"
     } else {
         graph.project.as_str()
     };
+    // Project-ID-Core: persist under canonicalized repo_path; keep lounge/CBM names as aliases.
+    let project = if graph.repo_path.trim().is_empty() {
+        let _ = crate::db::project_identity::migrate_project_identity(conn);
+        let _ = crate::db::project_identity::upsert_project(
+            conn,
+            lounge_name,
+            &crate::db::project_identity::choose_display_name(
+                Some(lounge_name),
+                None,
+                Some(lounge_name),
+            ),
+            None,
+            "unindexed_placeholder",
+        );
+        let _ = crate::db::project_identity::upsert_alias(conn, lounge_name, lounge_name);
+        lounge_name.to_string()
+    } else {
+        crate::db::project_identity::register_path_project(
+            conn,
+            lounge_name,
+            &graph.repo_path,
+            &[lounge_name],
+        )
+        .unwrap_or_else(|_| lounge_name.to_string())
+    };
+    // Also drop any legacy slug-keyed rows so one project has one canonical bucket.
+    if project != lounge_name {
+        conn.execute(
+            "DELETE FROM project_index WHERE project_id = ?1",
+            params![lounge_name],
+        )?;
+    }
     conn.execute(
         "DELETE FROM project_index WHERE project_id = ?1",
         params![project],
@@ -445,7 +520,7 @@ fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<
         insert_row(
             conn,
             IndexRow {
-                project_id: project,
+                project_id: &project,
                 repo_path: &graph.repo_path,
                 kind: "node",
                 name: if node.name.is_empty() {
@@ -467,7 +542,7 @@ fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<
         insert_row(
             conn,
             IndexRow {
-                project_id: project,
+                project_id: &project,
                 repo_path: &graph.repo_path,
                 kind: "reference",
                 name: &edge.from_id,
@@ -490,7 +565,7 @@ fn save_project_index_blocking(conn: &Connection, graph: &IndexGraph) -> Result<
         insert_row(
             conn,
             IndexRow {
-                project_id: project,
+                project_id: &project,
                 repo_path: &graph.repo_path,
                 kind,
                 name: &symbol.name,
@@ -1030,24 +1105,37 @@ fn register_discovered_project_blocking(
     project_id: &str,
     repo_path: &str,
 ) -> Result<()> {
-    let project = project_id.trim();
+    let lounge_name = project_id.trim();
     let repo = repo_path.trim();
-    if project.is_empty() {
+    if lounge_name.is_empty() {
         anyhow::bail!("project_id boş");
     }
     if repo.is_empty() {
         anyhow::bail!("repo_path boş");
     }
+    let canonical = crate::db::project_identity::register_path_project(
+        conn,
+        lounge_name,
+        repo,
+        &[lounge_name],
+    )?;
     let exists: bool = conn
         .query_row(
             "SELECT 1 FROM project_index WHERE project_id = ?1 LIMIT 1",
-            params![project],
+            params![canonical],
             |_| Ok(true),
         )
         .optional()?
         .unwrap_or(false);
     if exists {
         return Ok(());
+    }
+    // Drop legacy slug registration if present so vault lists one row.
+    if canonical != lounge_name {
+        conn.execute(
+            "DELETE FROM project_index WHERE project_id = ?1 AND kind = 'meta' AND name = '__registered__'",
+            params![lounge_name],
+        )?;
     }
     let now = now_rfc3339();
     conn.execute(
@@ -1057,7 +1145,7 @@ fn register_discovered_project_blocking(
             ref_count, detail, payload_json, indexed_at
         ) VALUES (?1, ?2, ?3, 'meta', '__registered__', NULL, NULL, NULL, 0, 'registered', '{}', ?4)
         "#,
-        params![Uuid::new_v4().to_string(), project, repo, now],
+        params![Uuid::new_v4().to_string(), canonical, repo, now],
     )?;
     Ok(())
 }
@@ -1086,13 +1174,14 @@ fn list_indexed_projects_blocking(conn: &Connection) -> Result<Vec<ProjectSummar
     })?;
     let mut projects = Vec::new();
     for row in rows {
-        let (name, root_path, counted_nodes, counted_edges, files) = row?;
-        if crate::db::experience_governance::is_project_hidden(conn, &name)? {
+        let (canonical_id, root_path, counted_nodes, counted_edges, files) = row?;
+        if crate::db::experience_governance::is_project_hidden(conn, &canonical_id)? {
             continue;
         }
-        let (declared_nodes, declared_edges) = read_declared_totals(conn, &name)?;
+        let (declared_nodes, declared_edges) = read_declared_totals(conn, &canonical_id)?;
+        let (display_name, _) = vault_identity_labels(conn, &canonical_id);
         projects.push(ProjectSummary {
-            name,
+            name: display_name,
             root_path: root_path.filter(|path| !path.is_empty()),
             nodes: reconcile_totals(declared_nodes, counted_nodes),
             edges: reconcile_totals(declared_edges, counted_edges),
@@ -1314,8 +1403,9 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
         } else {
             "discovered"
         };
+        let (display_name, identity_warning) = vault_identity_labels(conn, &name);
         projects.push(VaultProjectAggregate {
-            name,
+            name: display_name,
             repo_path: repo_path.filter(|path| !path.is_empty()),
             page_count: pages,
             node_count,
@@ -1324,9 +1414,39 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             unreviewed_count,
             last_updated: last,
             source_type: source_type.into(),
+            canonical_id: Some(name),
+            identity_warning,
         });
     }
     Ok(projects)
+}
+
+fn vault_identity_labels(conn: &Connection, project_id: &str) -> (String, Option<String>) {
+    let warning = if project_id.eq_ignore_ascii_case(crate::db::PROJECT_ID_UNCLASSIFIED) {
+        Some(
+            "Records under unclassified — project_id did not match a known canonical repo path."
+                .into(),
+        )
+    } else if project_id.eq_ignore_ascii_case(crate::db::PROJECT_ID_UNINDEXED_PLACEHOLDER) {
+        Some(
+            "Records under unindexed_placeholder — no indexed repo_path matched this write.".into(),
+        )
+    } else {
+        None
+    };
+    let display = crate::db::project_identity::lookup_display_name(conn, project_id)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            // Prefer basename when canonical id is a path.
+            if crate::db::accepts_cross_platform_path(project_id) {
+                path_basename(project_id)
+            } else {
+                project_id.to_string()
+            }
+        });
+    (display, warning)
 }
 
 /// Escape `%`, `_`, and `\` for SQLite `LIKE … ESCAPE '\'`.
@@ -1629,6 +1749,8 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
 
         for row in rows {
             let row = row?;
+            // Keep map key + temporary name as canonical_id for COUNT / declared-totals
+            // lookups; displayName is applied after aggregation.
             let project =
                 by_project
                     .entry(row.project_id.clone())
@@ -1685,32 +1807,33 @@ fn load_semantic_map_blocking(conn: &Connection, project_id: Option<&str>) -> Re
     }
 
     let projects = by_project
-        .into_values()
-        .filter(|project| {
-            !crate::db::experience_governance::is_project_hidden(conn, &project.name)
+        .into_iter()
+        .filter(|(canonical_id, _)| {
+            !crate::db::experience_governance::is_project_hidden(conn, canonical_id)
                 .unwrap_or(false)
         })
-        .map(|mut project| {
+        .map(|(canonical_id, mut project)| {
             // Prefer max(declared bridge totals, COUNT(*)) so LIMIT-capped lists
             // cannot rewrite the UI to SEMANTIC_NODE_LIMIT / SEMANTIC_CALL_LIMIT.
             let node_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM project_index WHERE project_id = ?1 AND kind = 'node'",
-                    params![project.name],
+                    params![canonical_id],
                     |row| row.get(0),
                 )
                 .unwrap_or(project.nodes.len() as i64);
             let edge_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM project_index WHERE project_id = ?1 AND kind = 'reference'",
-                    params![project.name],
+                    params![canonical_id],
                     |row| row.get(0),
                 )
                 .unwrap_or(project.references.len() as i64);
             let (declared_nodes, declared_edges) =
-                read_declared_totals(conn, &project.name).unwrap_or((0, 0));
+                read_declared_totals(conn, &canonical_id).unwrap_or((0, 0));
             project.node_count = reconcile_totals(declared_nodes, node_count.max(0) as u64);
             project.edge_count = reconcile_totals(declared_edges, edge_count.max(0) as u64);
+            project.name = vault_identity_labels(conn, &canonical_id).0;
             let mut files = HashSet::new();
             for node in &project.nodes {
                 if let Some(file) = node.file.as_deref().filter(|path| !path.is_empty()) {

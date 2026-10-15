@@ -542,12 +542,14 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;
+    crate::db::project_identity::migrate_project_identity(conn)?;
     crate::db::feedback::migrate_feedback(conn)?;
     crate::db::a2a::migrate_a2a(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
         let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
+        crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
         return Ok(());
     }
 
@@ -567,6 +569,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         rebuild_legacy(conn, &cols)?;
         crate::db::experience_governance::migrate_experience_governance(conn)?;
         let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
+        crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
         return Ok(());
     }
 
@@ -582,6 +585,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     )?;
     crate::db::experience_governance::migrate_experience_governance(conn)?;
     let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
+    crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
     Ok(())
 }
 
@@ -1180,6 +1184,46 @@ mod tests {
         ] {
             assert!(cols.iter().any(|col| col == name), "missing {name}");
         }
+    }
+
+    /// Prove SELECT/map offsets after Project-ID-Core + MCP-Quality column merge:
+    /// `project_id`, `title`, `title_source`, and `source` round-trip intact.
+    #[tokio::test]
+    async fn title_source_and_project_id_roundtrip_offsets() {
+        let store = ExperienceStore::memory().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let record = ExperienceRecord {
+            id: id.clone(),
+            project_id: "/canonical/repo/path".into(),
+            agent_id: "cursor".into(),
+            topic: "topic about redis".into(),
+            solution_summary: "use connection pool".into(),
+            adr_record: "Decision: pool".into(),
+            title: "Redis pool fix".into(),
+            title_source: crate::models::TitleSource::Agent,
+            source: "mcp,external".into(),
+            tags: vec!["redis".into()],
+            outcome: ExperienceOutcome::Success,
+            ..Default::default()
+        };
+        store.insert_record(record).await.unwrap();
+
+        let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+        assert_eq!(loaded.project_id, "/canonical/repo/path");
+        assert_eq!(loaded.title, "Redis pool fix");
+        assert_eq!(loaded.title_source, crate::models::TitleSource::Agent);
+        assert_eq!(loaded.source, "mcp,external");
+        assert_eq!(loaded.solution_summary, "use connection pool");
+        assert_eq!(loaded.adr_record, "Decision: pool");
+        assert_eq!(loaded.tags, vec!["redis"]);
+
+        // Latest path uses the same RECORD_SELECT_COLS / map offsets.
+        let latest = store.latest(5).await.unwrap();
+        let card = latest.iter().find(|e| e.id == id).expect("in latest");
+        assert_eq!(card.project_id, "/canonical/repo/path");
+        assert_eq!(card.title, "Redis pool fix");
+        assert_eq!(card.title_source, crate::models::TitleSource::Agent);
+        assert_eq!(card.source, "mcp,external");
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ pub mod approval_notify;
 pub mod approval_sound;
 pub mod auto_archive;
 pub mod autodiscover;
+pub mod cbm_daemon;
 pub mod cbm_ui_config;
 pub mod dead_symbol_actions;
 pub mod experience_title;
@@ -48,6 +49,12 @@ pub use approval_notify::{
 };
 pub use approval_sound::MAX_CUSTOM_SOUND_BYTES;
 pub use auto_archive::spawn_auto_archive;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use cbm_daemon::fake_helper_pollution_config;
+pub use cbm_daemon::{
+    classify_daemon_probe_output, parse_daemon_status_output, probe_daemon_status,
+    probe_daemon_status_with_override, strip_utf8_bom, CbmDaemonPresence, CbmDaemonStatus,
+};
 pub use cbm_ui_config::{
     cbm_cache_dir, cbm_cache_dir_from, cbm_ui_config_path, migrate_lounge_cbm_config_pollution,
     restore_cbm_ui_config, snapshot_cbm_ui_config_at, CbmUiConfigSnapshot, RestoreOutcome,
@@ -101,8 +108,8 @@ pub use probe::{
     data_root, ensure_data_layout, listen_pids, lounge_laya_dir, lounge_lmr_binary_path,
     lounge_lmr_dir, lounge_nats_dir, lounge_ollama_endpoint, nats_monitor_endpoint,
     port_owned_by_lounge, resolve_data_root, resolve_data_root_for_app, system_ollama_endpoint,
-    tcp_bind_available, DataRootEnv, APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV, LOUNGE_OLLAMA_PORT,
-    SYSTEM_OLLAMA_PORT,
+    tcp_bind_available, wait_until, DataRootEnv, APP_IDENTIFIER, LOUNGE_DATA_DIR_ENV,
+    LOUNGE_OLLAMA_PORT, SYSTEM_OLLAMA_PORT,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use probe::{
