@@ -1,0 +1,234 @@
+# Tag release publisher (PR-Install-1).
+# - Linux AppImage: reused from linux-bundle.yml (no duplicated Tauri build).
+# - macOS / Windows: real SHA-pinned codebase-memory-mcp sidecar (never --stub).
+# - Publishes DRAFT GitHub releases by default + SHA256SUMS + icon asset.
+# Does NOT rename or replace any of the 16 required PR checks.
+# Minisign signing is on the roadmap (not implemented here).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0); defaults to the pushed tag"
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+  NO_STRIP: "true"
+  CBM_RELEASE: "v0.11.0"
+
+jobs:
+  linux:
+    name: Stage Linux AppImage (from linux-bundle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Wait for linux-bundle artifact and stage canonical AppImage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/wait-download-linux-bundle.sh
+          bash scripts/ci/wait-download-linux-bundle.sh dist-release
+          cp src-tauri/icons/128x128.png dist-release/Agent-Lounge-OS-icon-128.png
+          bash scripts/install/generate-sha256sums.sh dist-release dist-release/SHA256SUMS.linux
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: dist-release/
+          if-no-files-found: error
+
+  macos:
+    name: Release macOS app
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch real codebase-memory-mcp (macOS)
+        env:
+          TAURI_ENV_PLATFORM: macos
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
+          bash scripts/ci/fetch-codebase-memory-mcp.sh
+
+      - name: Build Tauri macOS app
+        run: npm run tauri -- build --bundles app
+
+      - name: Stage canonical macOS asset
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          arch=$(uname -m)
+          case "$arch" in
+            arm64|aarch64) canon=Agent-Lounge-OS-macos-aarch64.app.tar.gz ;;
+            x86_64)
+              echo "Intel Mac release runner: staging Agent-Lounge-OS-macos-x86_64.app.tar.gz"
+              canon=Agent-Lounge-OS-macos-x86_64.app.tar.gz
+              ;;
+            *) echo "unsupported mac arch $arch" >&2; exit 1 ;;
+          esac
+          app=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' | head -n1)
+          test -n "$app"
+          tar -czf "dist-release/$canon" -C "$(dirname "$app")" "$(basename "$app")"
+          cp src-tauri/icons/128x128.png dist-release/Agent-Lounge-OS-icon-128.png
+          bash scripts/install/generate-sha256sums.sh dist-release dist-release/SHA256SUMS.macos
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: dist-release/
+          if-no-files-found: error
+
+  windows:
+    name: Release Windows setup
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch real codebase-memory-mcp (Windows)
+        shell: bash
+        env:
+          TAURI_ENV_PLATFORM: windows
+          TAURI_ENV_ARCH: x86_64
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
+          bash scripts/ci/fetch-codebase-memory-mcp.sh
+
+      - name: Build Tauri Windows NSIS
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Stage canonical Windows asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          # Prefer exact Tauri naming pattern; never "first random exe".
+          src=$(find src-tauri/target/release/bundle/nsis -type f -name 'agent-lounge-os_*_x64-setup.exe' | head -n1)
+          if [[ -z "$src" ]]; then
+            src=$(find src-tauri/target/release/bundle/nsis -type f -name '*_x64-setup.exe' | head -n1)
+          fi
+          test -n "$src"
+          cp -v "$src" dist-release/Agent-Lounge-OS-windows-x64-setup.exe
+          cp src-tauri/icons/128x128.png dist-release/Agent-Lounge-OS-icon-128.png
+          bash scripts/install/generate-sha256sums.sh dist-release dist-release/SHA256SUMS.windows
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: dist-release/
+          if-no-files-found: error
+
+  publish:
+    name: Publish draft GitHub Release + SHA256SUMS
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Merge assets and generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          while IFS= read -r -d '' f; do
+            base="$(basename "$f")"
+            if [[ -e "dist-release/$base" ]]; then
+              continue
+            fi
+            cp -v "$f" "dist-release/$base"
+          done < <(find artifacts -type f \( \
+            -name 'Agent-Lounge-OS-icon-128.png' -o \
+            -name 'Agent-Lounge-OS-*.AppImage' -o \
+            -name 'Agent-Lounge-OS-*.app.tar.gz' -o \
+            -name 'Agent-Lounge-OS-*-setup.exe' \
+          \) -print0)
+          if [[ ! -f dist-release/Agent-Lounge-OS-icon-128.png ]]; then
+            cp src-tauri/icons/128x128.png dist-release/Agent-Lounge-OS-icon-128.png
+          fi
+          cp install.sh install.ps1 dist-release/
+          chmod +x dist-release/install.sh scripts/install/generate-sha256sums.sh
+          bash scripts/install/generate-sha256sums.sh dist-release
+          # Icon must be present in SHA256SUMS for installers.
+          grep -q 'Agent-Lounge-OS-icon-128.png' dist-release/SHA256SUMS
+          ls -lah dist-release
+          test -s dist-release/SHA256SUMS
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload draft release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Agent Lounge OS ${{ steps.tag.outputs.tag }}
+          draft: true
+          generate_release_notes: true
+          files: dist-release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

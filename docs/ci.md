@@ -26,6 +26,8 @@ Branch protection (owner-managed) can require these **16** check names. They mus
 - **Zero-failure policy:** no `continue-on-error`, no `|| true`, no `#[ignore]`, no expected-fail in PR CI.
 - **Concurrency:** PR workflows use `cancel-in-progress` on the same ref so superseded pushes free runners.
 - **Not required:** `nightly-laya.yml` (`Prove live_laya_infer filter` / `Laya live infer`) is schedule / `workflow_dispatch` (and path-filtered on PRs that touch its wiring only). Do not add those names to branch protection.
+- **Not required (installer):** `installer.yml` (`Installer Linux (*)` / `Installer macOS` / `Installer Windows`) exercises `install.sh` / `install.ps1` against a local fixture release (incl. Alpine unsupported + checksum mismatch). Do not rename the 16 required checks to absorb these.
+- **Release:** `release.yml` (tag `v*` only) publishes a **draft** GitHub Release with canonical assets + icon + **SHA256SUMS**. Linux AppImage is reused from `linux-bundle.yml` (no duplicated Tauri build); macOS/Windows fetch the real SHA-pinned codebase-memory-mcp sidecar (never `--stub`).
 
 ## apt mirror stalls
 
