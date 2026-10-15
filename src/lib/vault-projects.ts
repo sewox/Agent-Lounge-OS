@@ -101,6 +101,10 @@ export type VaultProjectRow = {
   unreviewedCount: number;
   lastUpdated: string | null;
   sourceType: Exclude<VaultSourceType, "all">;
+  /** Project-ID-Core canonical key when provided by the host. */
+  canonicalId?: string | null;
+  /** Warning when records sit under unclassified / unindexed_placeholder. */
+  identityWarning?: string | null;
 };
 
 export type ProjectPageRow = {
@@ -278,6 +282,8 @@ export function buildVaultProjectRows(input: {
       unreviewedCount,
       lastUpdated,
       sourceType,
+      canonicalId: partial.canonicalId ?? prev?.canonicalId ?? null,
+      identityWarning: partial.identityWarning ?? prev?.identityWarning ?? null,
     });
   };
 
@@ -519,6 +525,14 @@ export function mapVaultAggregate(raw: Record<string, unknown>): VaultProjectRow
     sourceRaw === "discovered" || sourceRaw === "imported" || sourceRaw === "indexed"
       ? sourceRaw
       : resolveSourceType({ pageCount, nodeCount, experienceCount });
+  const canonicalId =
+    (typeof raw.canonical_id === "string" && raw.canonical_id) ||
+    (typeof raw.canonicalId === "string" && raw.canonicalId) ||
+    null;
+  const identityWarning =
+    (typeof raw.identity_warning === "string" && raw.identity_warning) ||
+    (typeof raw.identityWarning === "string" && raw.identityWarning) ||
+    null;
   return {
     name,
     repoPath,
@@ -529,6 +543,8 @@ export function mapVaultAggregate(raw: Record<string, unknown>): VaultProjectRow
     unreviewedCount,
     lastUpdated,
     sourceType,
+    canonicalId,
+    identityWarning,
   };
 }
 
