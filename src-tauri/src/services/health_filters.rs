@@ -315,6 +315,10 @@ fn entrypoint_exclusion(symbol: &DeadSymbol, repo_root: &Path) -> Option<&'stati
     }
 
     if let Some(src) = read_source_file(repo_root, file) {
+        // `#[test]` without a `test_`/`_test` name prefix — exact attr above the fn.
+        if looks_like_rust_test_attr(&src, name, symbol.line) {
+            return Some(RULE_FILTER_TEST);
+        }
         if looks_like_tauri_command(&src, name, symbol.line) {
             return Some(RULE_FILTER_TAURI_COMMAND);
         }
@@ -343,8 +347,36 @@ fn is_test_symbol(name: &str, file_lower: &str) -> bool {
     {
         return true;
     }
-    // `#[test]` attribute directly above the fn — checked via source when available,
-    // but name/file heuristics above cover the common cases without I/O.
+    false
+}
+
+/// `#[test]` (or `#[tokio::test]`) must sit directly above the fn — covers names
+/// without a `test_` prefix.
+pub fn looks_like_rust_test_attr(src: &str, name: &str, line: Option<i64>) -> bool {
+    let base = symbol_base(name);
+    let lines: Vec<&str> = src.lines().collect();
+    let Some(fn_idx) = find_exact_fn_line(&lines, base, line) else {
+        return false;
+    };
+    let mut i = fn_idx;
+    while i > 0 {
+        i -= 1;
+        let t = lines[i].trim();
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        if t.starts_with("#[") && t.ends_with(']') {
+            if t == "#[test]"
+                || t.starts_with("#[test(")
+                || t == "#[tokio::test]"
+                || t.starts_with("#[tokio::test(")
+            {
+                return true;
+            }
+            continue;
+        }
+        break;
+    }
     false
 }
 
@@ -880,6 +912,35 @@ impl Foo {
         ));
         assert!(matches!(
             ctx.decide(&sym("parse", "unused", "src/lib.rs")),
+            FilterDecision::Keep { .. }
+        ));
+        // `#[test]` without a test_ prefix (file must not end with `_test.rs`).
+        let bare_attr = dir.join("src/attr_only.rs");
+        fs::write(
+            &bare_attr,
+            "#[test]\nfn paging_boundaries() {}\n\nfn helper() {}\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "paging_boundaries".into(),
+                kind: "unused".into(),
+                file: Some(bare_attr.to_string_lossy().into()),
+                line: Some(2),
+                ..DeadSymbol::default()
+            }),
+            FilterDecision::Exclude {
+                rule: RULE_FILTER_TEST
+            }
+        ));
+        assert!(matches!(
+            ctx.decide(&DeadSymbol {
+                name: "helper".into(),
+                kind: "unused".into(),
+                file: Some(bare_attr.to_string_lossy().into()),
+                line: Some(4),
+                ..DeadSymbol::default()
+            }),
             FilterDecision::Keep { .. }
         ));
 

@@ -1152,15 +1152,18 @@ fn replace_dead_rows_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::GuardedCommand;
     use crate::services::memory_bridge::{health_page_timeout, MemoryBridge, MemoryBridgeConfig};
+    use sha2::{Digest, Sha256};
     use std::fs;
-    use std::path::PathBuf;
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     /// Fast cross-platform stub: pre-rendered JSON pages, no per-call Python.
     /// Function: sym_00000..sym_N-1; Method: meth_00000..meth_M-1;
     /// CALLS: each sym_i → meth_i (matched) plus every 10th → ghost_XXXXX (broken).
+    ///
+    /// Page bodies are built with `serde_json` so Windows paths with `\` are escaped.
     fn write_fast_paged_stub(
         dir: &std::path::Path,
         fn_count: usize,
@@ -1170,56 +1173,63 @@ mod tests {
         let pages = dir.join("pages");
         fs::create_dir_all(&pages).unwrap();
 
+        let write_symbol_page = |prefix: &str, skip: usize, rows: Vec<serde_json::Value>| {
+            let body = serde_json::json!({
+                "columns": ["name", "id", "file", "line"],
+                "rows": rows,
+            });
+            fs::write(
+                pages.join(format!("{prefix}_skip_{skip}.json")),
+                serde_json::to_string(&body).unwrap(),
+            )
+            .unwrap();
+        };
+
         // Pre-render pages keyed by exact skip offset so peek-after-short-page
         // (skip=end) returns empty instead of replaying the last page index.
         let mut skip = 0usize;
         while skip < fn_count {
             let end = (skip + page_size).min(fn_count);
-            let rows: Vec<String> = (skip..end)
+            let rows: Vec<serde_json::Value> = (skip..end)
                 .map(|i| {
-                    format!(
-                        "[\"sym_{i:05}\",\"sym_{i:05}\",\"{}/src/fn/sym_{i:05}.rs\",{line}]",
-                        dir.display(),
-                        line = i + 1
-                    )
+                    let file = dir.join("src").join("fn").join(format!("sym_{i:05}.rs"));
+                    serde_json::json!([
+                        format!("sym_{i:05}"),
+                        format!("sym_{i:05}"),
+                        file.to_string_lossy(),
+                        (i + 1) as i64
+                    ])
                 })
                 .collect();
-            let body = format!(
-                "{{\"columns\":[\"name\",\"id\",\"file\",\"line\"],\"rows\":[{}]}}",
-                rows.join(",")
-            );
-            fs::write(pages.join(format!("fn_skip_{skip}.json")), body).unwrap();
+            write_symbol_page("fn", skip, rows);
             skip = end;
         }
 
         skip = 0;
         while skip < method_count {
             let end = (skip + page_size).min(method_count);
-            let rows: Vec<String> = (skip..end)
+            let rows: Vec<serde_json::Value> = (skip..end)
                 .map(|i| {
-                    format!(
-                        "[\"meth_{i:05}\",\"meth_{i:05}\",\"{}/src/meth/meth_{i:05}.rs\",{line}]",
-                        dir.display(),
-                        line = i + 1
-                    )
+                    let file = dir.join("src").join("meth").join(format!("meth_{i:05}.rs"));
+                    serde_json::json!([
+                        format!("meth_{i:05}"),
+                        format!("meth_{i:05}"),
+                        file.to_string_lossy(),
+                        (i + 1) as i64
+                    ])
                 })
                 .collect();
-            let body = format!(
-                "{{\"columns\":[\"name\",\"id\",\"file\",\"line\"],\"rows\":[{}]}}",
-                rows.join(",")
-            );
-            fs::write(pages.join(format!("meth_skip_{skip}.json")), body).unwrap();
+            write_symbol_page("meth", skip, rows);
             skip = end;
         }
 
         // CALLS pages: matched edges + broken ghosts. Total edges = method_count + broken_count.
-        // We emit one edge per method (sym→meth) and one ghost per 10 functions.
-        let mut edges: Vec<(String, String, String, i64)> = Vec::new();
+        let mut edges: Vec<(String, String, PathBuf, i64)> = Vec::new();
         for i in 0..method_count {
             edges.push((
                 format!("sym_{i:05}"),
                 format!("meth_{i:05}"),
-                format!("{}/src/fn/sym_{i:05}.rs", dir.display()),
+                dir.join("src").join("fn").join(format!("sym_{i:05}.rs")),
                 (i + 1) as i64,
             ));
         }
@@ -1227,7 +1237,7 @@ mod tests {
             edges.push((
                 format!("sym_{i:05}"),
                 format!("ghost_{i:05}"),
-                format!("{}/src/fn/sym_{i:05}.rs", dir.display()),
+                dir.join("src").join("fn").join(format!("sym_{i:05}.rs")),
                 (i + 1) as i64,
             ));
         }
@@ -1235,22 +1245,31 @@ mod tests {
         skip = 0;
         while skip < edge_total {
             let end = (skip + page_size).min(edge_total);
-            let rows: Vec<String> = edges[skip..end]
+            let rows: Vec<serde_json::Value> = edges[skip..end]
                 .iter()
                 .map(|(fr, to, file, line)| {
-                    format!("[\"{fr}\",\"{to}\",\"{fr}\",\"{to}\",\"{file}\",{line}]")
+                    serde_json::json!([fr, to, fr, to, file.to_string_lossy(), *line])
                 })
                 .collect();
-            let body = format!(
-                "{{\"columns\":[\"caller\",\"callee\",\"from_id\",\"to_id\",\"file\",\"line\"],\"rows\":[{}]}}",
-                rows.join(",")
-            );
-            fs::write(pages.join(format!("calls_skip_{skip}.json")), body).unwrap();
+            let body = serde_json::json!({
+                "columns": ["caller", "callee", "from_id", "to_id", "file", "line"],
+                "rows": rows,
+            });
+            fs::write(
+                pages.join(format!("calls_skip_{skip}.json")),
+                serde_json::to_string(&body).unwrap(),
+            )
+            .unwrap();
             skip = end;
         }
         fs::write(
             dir.join("counts.json"),
-            format!("{{\"fn\":{fn_count},\"method\":{method_count},\"calls\":{edge_total}}}"),
+            serde_json::to_string(&serde_json::json!({
+                "fn": fn_count,
+                "method": method_count,
+                "calls": edge_total,
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -1310,6 +1329,7 @@ print({})
 
         #[cfg(windows)]
         {
+            // Quote the dispatcher path; cmd handles backslashes inside quotes.
             fs::write(
                 &script,
                 format!(
@@ -1361,6 +1381,23 @@ print({})
         assert!(t4000 > t2000);
         // 2000 → +30s (2 chunks × 15)
         assert_eq!(t2000, cfg.read_timeout + Duration::from_secs(30));
+    }
+
+    #[test]
+    fn stub_page_json_escapes_windows_style_paths() {
+        // Regression: format!-built JSON with `C:\Users\...` is invalid; serde_json must escape.
+        let win_path = r"C:\Users\RUNNER~1\AppData\Local\Temp\al-health\src\fn\sym_00000.rs";
+        let body = serde_json::json!({
+            "columns": ["name", "id", "file", "line"],
+            "rows": [["sym_00000", "sym_00000", win_path, 1]],
+        });
+        let text = serde_json::to_string(&body).unwrap();
+        assert!(
+            text.contains(r"C:\\Users\\RUNNER~1"),
+            "expected escaped backslashes, got {text}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("round-trip parse");
+        assert_eq!(parsed["rows"][0][2], win_path);
     }
 
     #[tokio::test]
@@ -1772,42 +1809,186 @@ edition = "2021"
         assert_eq!(scanned, total, "paged scan must equal count(f)");
     }
 
-    fn ensure_real_cbm_binary() -> PathBuf {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let bridge_unix = manifest.join("../bridge/codebase-memory-mcp");
-        let bridge_win = manifest.join("../bridge/codebase-memory-mcp.exe");
-        let candidates = [
-            bridge_unix.clone(),
-            bridge_win.clone(),
-            PathBuf::from("/workspace/bridge/codebase-memory-mcp"),
-        ];
-        for c in &candidates {
-            if c.is_file() {
-                let meta = fs::metadata(c).unwrap();
-                // Compile stubs are tiny (<4KB); real v0.11.0 is multi-MB.
-                if meta.len() > 4096 {
-                    return c.clone();
+    /// Pinned DeusData codebase-memory-mcp v0.11.0 assets (scripts/ci/fetch-codebase-memory-mcp.sh).
+    fn cbm_v011_pin() -> (&'static str, &'static str) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            (
+                "codebase-memory-mcp-linux-amd64-portable.tar.gz",
+                "1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683",
+            )
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            (
+                "codebase-memory-mcp-darwin-arm64.tar.gz",
+                "4dee7f38b63740e6751d7a7ed7eb10291c1f2a3ea2415f599dc68370ca0a2d18",
+            )
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            (
+                "codebase-memory-mcp-darwin-amd64.tar.gz",
+                "dbf1c73bfcbde64e7dde4cd1320da7afc02e2c972ee1789ae039521411f5132e",
+            )
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            (
+                "codebase-memory-mcp-windows-amd64.zip",
+                "6eb6beaf261b19e419766e78baf93cbc3cf1c6338cff8fb7c0234859f96d1685",
+            )
+        }
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        {
+            (
+                "codebase-memory-mcp-windows-arm64.zip",
+                "52b29881214fce47d529e098308b1de77c40f6812e20a34d588ee4c25b84fd1a",
+            )
+        }
+        #[cfg(not(any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "aarch64"),
+        )))]
+        compile_error!("unsupported platform for real CBM v0.11.0 fetch");
+    }
+
+    fn is_real_cbm_binary(path: &Path) -> bool {
+        path.is_file() && fs::metadata(path).map(|m| m.len() > 4096).unwrap_or(false)
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn extract_cbm_from_archive(bytes: &[u8], asset: &str, dest_dir: &Path) -> PathBuf {
+        fs::create_dir_all(dest_dir).unwrap();
+        if asset.ends_with(".zip") {
+            let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open zip");
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i).expect("zip entry");
+                let name = file.name().to_string();
+                let out_path = dest_dir.join(Path::new(&name).file_name().unwrap_or_default());
+                if name.ends_with('/') {
+                    continue;
+                }
+                let mut out = fs::File::create(&out_path).expect("create extract");
+                std::io::copy(&mut file, &mut out).expect("copy zip entry");
+            }
+        } else if asset.ends_with(".tar.gz") {
+            let gz = flate2::read::GzDecoder::new(Cursor::new(bytes));
+            let mut archive = tar::Archive::new(gz);
+            archive.unpack(dest_dir).expect("untar");
+        } else {
+            panic!("unknown CBM archive type: {asset}");
+        }
+        // Prefer the platform binary name anywhere under dest_dir.
+        let want = if cfg!(windows) {
+            "codebase-memory-mcp.exe"
+        } else {
+            "codebase-memory-mcp"
+        };
+        let mut found = None;
+        fn walk(dir: &Path, want: &str, found: &mut Option<PathBuf>) {
+            let Ok(rd) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(&p, want, found);
+                } else if p.file_name().and_then(|s| s.to_str()) == Some(want) {
+                    *found = Some(p);
                 }
             }
         }
-        // Fetch pinned v0.11.0 via project script (PolicyGate via GuardedCommand).
-        let script = manifest.join("../scripts/ci/fetch-codebase-memory-mcp.sh");
-        assert!(
-            script.is_file(),
-            "fetch script missing at {}",
-            script.display()
-        );
-        let status = GuardedCommand::new("bash")
-            .arg(&script)
-            .status()
-            .expect("spawn fetch-codebase-memory-mcp.sh via GuardedCommand");
-        assert!(status.success(), "fetch real CBM v0.11.0 failed");
-        for c in &[bridge_unix, bridge_win] {
-            if c.is_file() && fs::metadata(c).unwrap().len() > 4096 {
+        walk(dest_dir, want, &mut found);
+        found.unwrap_or_else(|| panic!("CBM binary {want} not found in {asset}"))
+    }
+
+    /// Locate or download the pinned real CBM v0.11.0 binary (all 3 OSes, checksummed).
+    /// Honors `HEALTH_CBM_BIN` / `LOUNGE_MEMORY_BIN` when set to a real (non-stub) binary.
+    fn ensure_real_cbm_binary() -> PathBuf {
+        for key in ["HEALTH_CBM_BIN", "LOUNGE_MEMORY_BIN"] {
+            if let Ok(raw) = std::env::var(key) {
+                let p = PathBuf::from(raw.trim());
+                if is_real_cbm_binary(&p) {
+                    return p;
+                }
+            }
+        }
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bridge_dir = manifest.join("../bridge");
+        let bridge_unix = bridge_dir.join("codebase-memory-mcp");
+        let bridge_win = bridge_dir.join("codebase-memory-mcp.exe");
+        for c in [
+            &bridge_unix,
+            &bridge_win,
+            &PathBuf::from("/workspace/bridge/codebase-memory-mcp"),
+        ] {
+            if is_real_cbm_binary(c) {
                 return c.clone();
             }
         }
-        panic!("real CBM binary missing after fetch");
+
+        let (asset, expect_sha) = cbm_v011_pin();
+        let url = format!(
+            "https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/{asset}"
+        );
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .expect("reqwest blocking client");
+        let bytes = client
+            .get(&url)
+            .send()
+            .unwrap_or_else(|e| panic!("download CBM v0.11.0 failed: {e} ({url})"))
+            .error_for_status()
+            .unwrap_or_else(|e| panic!("CBM download HTTP error: {e}"))
+            .bytes()
+            .unwrap_or_else(|e| panic!("CBM download body: {e}"))
+            .to_vec();
+        let actual = sha256_hex(&bytes);
+        assert_eq!(
+            actual, expect_sha,
+            "CBM v0.11.0 sha256 mismatch for {asset}"
+        );
+
+        let tmp = std::env::temp_dir().join(format!("al-cbm-fetch-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let extracted = extract_cbm_from_archive(&bytes, asset, &tmp);
+        fs::create_dir_all(&bridge_dir).unwrap();
+        let dest = if cfg!(windows) {
+            bridge_win.clone()
+        } else {
+            bridge_unix.clone()
+        };
+        fs::copy(&extracted, &dest)
+            .unwrap_or_else(|e| panic!("copy CBM to {}: {e}", dest.display()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
+        }
+        let _ = fs::remove_dir_all(&tmp);
+        assert!(
+            is_real_cbm_binary(&dest),
+            "real CBM missing after fetch at {}",
+            dest.display()
+        );
+        dest
     }
 
     #[test]
