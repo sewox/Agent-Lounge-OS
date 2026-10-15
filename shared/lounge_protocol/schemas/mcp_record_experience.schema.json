@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/mcp_record_experience.schema.json",
   "title": "McpRecordExperienceArgs",
-  "description": "lounge_record_experience / lounge_record_decision tool girdileri. Sonuç LoungeExperience şemasına dönüştürülüp doğrulanır.",
+  "description": "lounge_record_experience / lounge_record_decision tool girdileri. Sonuç LoungeExperience şemasına dönüştürülüp doğrulanır. Mimari kararlar için `adr` alanını doldurun (context / decision / consequences / alternatives).",
   "type": "object",
   "additionalProperties": false,
   "required": [],
@@ -20,7 +20,30 @@
     },
     "agent": { "type": "string", "minLength": 1 },
     "active_file": { "type": "string", "minLength": 1 },
-    "workspace_root": { "type": "string", "minLength": 1 }
+    "workspace_root": { "type": "string", "minLength": 1 },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 16,
+      "description": "Agent-supplied technology/topic tags. Server normalizes (lowercase, dedupe). mcp/external move to source metadata."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "Optional agent-provided title (never overwritten by LLM)."
+    },
+    "adr": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional structured ADR. When omitted, adr_record stays empty and UI shows No ADR.",
+      "properties": {
+        "context": { "type": "string" },
+        "decision": { "type": "string" },
+        "consequences": { "type": "string" },
+        "alternatives": { "type": "string" }
+      }
+    }
   },
   "anyOf": [
     { "required": ["context"] },

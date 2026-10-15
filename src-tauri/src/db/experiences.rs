@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::embedding::{cosine_similarity, decode_embedding, encode_embedding, lexical_embedding};
-use crate::models::{ExperienceHit, ExperienceRecord, LoungeExperience, RoutingPolicy};
+use crate::models::{
+    now_rfc3339, ExperienceHit, ExperienceRecord, LoungeExperience, RoutingPolicy,
+};
 
 const DEFAULT_SIMILAR_LIMIT: usize = 3;
 const MIN_COSINE: f32 = 0.22;
@@ -71,8 +73,144 @@ impl ExperienceStore {
     }
 
     pub async fn insert(&self, experience: &LoungeExperience) -> Result<()> {
-        let record = ExperienceRecord::from_lounge(experience, experience.adr_summary.clone());
+        let solution = if experience
+            .original_content
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
+        {
+            if experience.adr_summary.trim().is_empty() {
+                experience.title.clone()
+            } else {
+                experience.adr_summary.clone()
+            }
+        } else {
+            experience
+                .original_content
+                .clone()
+                .unwrap_or_else(|| experience.adr_summary.clone())
+        };
+        let topic = if experience.title.trim().is_empty() {
+            solution.clone()
+        } else {
+            experience.title.clone()
+        };
+        let record = ExperienceRecord::from_lounge(experience, topic, solution);
         self.insert_record(record).await
+    }
+
+    /// Persist a title when allowed (never overwrites agent/user unless `force`).
+    pub async fn set_experience_title(
+        &self,
+        id: String,
+        title: String,
+        source: crate::models::TitleSource,
+        force: bool,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            set_title_blocking(&conn, &id, &title, source, force)
+        })
+        .await
+        .context("set_experience_title join")?
+    }
+
+    /// Rows with empty/fallback title that are due for (re)try — excludes give-up.
+    pub async fn list_ids_needing_title(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_needing_title_blocking(&conn)
+        })
+        .await
+        .context("list_ids_needing_title join")?
+    }
+
+    pub async fn record_title_retry(
+        &self,
+        id: String,
+        attempts: u32,
+        next_retry_at: String,
+    ) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            record_title_retry_blocking(&conn, &id, attempts, &next_retry_at)
+        })
+        .await
+        .context("record_title_retry join")?
+    }
+
+    pub async fn mark_title_give_up(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            mark_title_give_up_blocking(&conn, &id)
+        })
+        .await
+        .context("mark_title_give_up join")?
+    }
+
+    pub async fn clear_title_retry(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            clear_title_retry_blocking(&conn, &id)
+        })
+        .await
+        .context("clear_title_retry join")?
+    }
+
+    pub async fn count_title_backlog(&self) -> Result<u64> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            count_title_backlog_blocking(&conn)
+        })
+        .await
+        .context("count_title_backlog join")?
+    }
+
+    pub async fn settings_flag_done(&self, key: String) -> Result<bool> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            settings_flag_done_blocking(&conn, &key)
+        })
+        .await
+        .context("settings_flag_done join")?
+    }
+
+    pub async fn set_settings_flag(&self, key: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            set_settings_flag_blocking(&conn, &key)
+        })
+        .await
+        .context("set_settings_flag join")?
+    }
+
+    /// Title retry bookkeeping for tests / Health-1.
+    pub async fn title_retry_state(&self, id: String) -> Result<(u32, Option<String>, bool)> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            conn.query_row(
+                "SELECT COALESCE(title_attempts,0), title_next_retry_at, COALESCE(title_give_up,0) FROM experiences WHERE id = ?1",
+                params![id],
+                |row| {
+                    let attempts: i64 = row.get(0)?;
+                    let next: Option<String> = row.get(1)?;
+                    let give: i64 = row.get(2)?;
+                    Ok((attempts.max(0) as u32, next, give != 0))
+                },
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .context("title_retry_state join")?
     }
 
     pub async fn insert_record(&self, record: ExperienceRecord) -> Result<()> {
@@ -375,7 +513,13 @@ fn create_experiences_sql() -> &'static str {
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT,
                 original_content TEXT,
-                archived_by TEXT
+                archived_by TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                title_source TEXT NOT NULL DEFAULT 'fallback',
+                source TEXT NOT NULL DEFAULT '',
+                title_attempts INTEGER NOT NULL DEFAULT 0,
+                title_next_retry_at TEXT,
+                title_give_up INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_experiences_project ON experiences(project_id);
             CREATE INDEX IF NOT EXISTS idx_experiences_agent ON experiences(agent_id);
@@ -398,12 +542,14 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;
+    crate::db::project_identity::migrate_project_identity(conn)?;
     crate::db::feedback::migrate_feedback(conn)?;
     crate::db::a2a::migrate_a2a(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
         let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
+        crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
         return Ok(());
     }
 
@@ -423,6 +569,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         rebuild_legacy(conn, &cols)?;
         crate::db::experience_governance::migrate_experience_governance(conn)?;
         let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
+        crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
         return Ok(());
     }
 
@@ -438,6 +585,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     )?;
     crate::db::experience_governance::migrate_experience_governance(conn)?;
     let _ = crate::db::experience_governance::cleanup_placeholder_projects(conn);
+    crate::db::project_identity::migrate_project_ids_to_canonical(conn)?;
     Ok(())
 }
 
@@ -506,12 +654,22 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
         .clone()
         .unwrap_or_else(|| record.created_at.clone());
     let original = record.original_content.clone().unwrap_or_else(|| {
-        if record.adr_record.trim().is_empty() {
-            record.solution_summary.clone()
+        if record.solution_summary.trim().is_empty() {
+            record.topic.clone()
         } else {
-            record.adr_record.clone()
+            record.solution_summary.clone()
         }
     });
+    let title = if record.title.trim().is_empty() {
+        crate::bridge::hygiene::fallback_title(
+            &record.solution_summary,
+            crate::models::TITLE_MAX_CHARS,
+        )
+    } else {
+        record.title.clone()
+    };
+    let title_source = record.title_source.as_str();
+    let source = record.source.clone();
 
     let exists: bool = conn
         .query_row(
@@ -539,8 +697,17 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 embedding = ?9,
                 payload_json = ?10,
                 updated_at = ?11,
-                original_content = COALESCE(original_content, ?12)
-            WHERE id = ?13
+                original_content = COALESCE(original_content, ?12),
+                title = CASE
+                    WHEN title_source IN ('agent','user') AND length(trim(title)) > 0 THEN title
+                    ELSE ?13
+                END,
+                title_source = CASE
+                    WHEN title_source IN ('agent','user') AND length(trim(title)) > 0 THEN title_source
+                    ELSE ?14
+                END,
+                source = CASE WHEN length(trim(source)) > 0 THEN source ELSE ?15 END
+            WHERE id = ?16
             "#,
             params![
                 record.project_id,
@@ -555,6 +722,9 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 payload,
                 updated_at,
                 original,
+                title,
+                title_source,
+                source,
                 record.id,
             ],
         )?;
@@ -565,9 +735,9 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 id, project_id, agent_id, topic, solution_summary, adr_record,
                 outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                 status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                updated_at, original_content, archived_by
+                updated_at, original_content, archived_by, title, title_source, source
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
             "#,
             params![
                 record.id,
@@ -591,9 +761,141 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 updated_at,
                 original,
                 record.archived_by,
+                title,
+                title_source,
+                source,
             ],
         )?;
     }
+    Ok(())
+}
+
+fn set_title_blocking(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    source: crate::models::TitleSource,
+    force: bool,
+) -> Result<()> {
+    let existing: Option<(String, String)> = conn
+        .query_row(
+            "SELECT COALESCE(title_source,''), COALESCE(title,'') FROM experiences WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((cur_source, cur_title)) = existing else {
+        anyhow::bail!("not found: {id}");
+    };
+    let cur = crate::models::TitleSource::parse(&cur_source);
+    if !force
+        && matches!(
+            cur,
+            crate::models::TitleSource::Agent | crate::models::TitleSource::User
+        )
+        && !cur_title.trim().is_empty()
+    {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE experiences SET title = ?1, title_source = ?2, updated_at = ?3 WHERE id = ?4",
+        params![title, source.as_str(), now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn list_needing_title_blocking(conn: &Connection) -> Result<Vec<(String, String)>> {
+    // Include rows whose `title_next_retry_at` is still in the future so a process
+    // restart can resume mid-backoff retries (not only due-now rows).
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, COALESCE(NULLIF(trim(solution_summary), ''), topic)
+        FROM experiences
+        WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(title_give_up, 0) = 0
+          AND lower(COALESCE(title_source, 'fallback')) NOT IN ('agent', 'user', 'llm')
+          AND (
+            title IS NULL OR trim(title) = ''
+            OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
+          )
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+fn record_title_retry_blocking(
+    conn: &Connection,
+    id: &str,
+    attempts: u32,
+    next_retry_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE experiences SET title_attempts = ?1, title_next_retry_at = ?2, updated_at = ?3 WHERE id = ?4",
+        params![attempts as i64, next_retry_at, now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn mark_title_give_up_blocking(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE experiences SET title_give_up = 1, title_next_retry_at = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn clear_title_retry_blocking(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE experiences SET title_attempts = 0, title_next_retry_at = NULL, title_give_up = 0, updated_at = ?1 WHERE id = ?2",
+        params![now_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+fn count_title_backlog_blocking(conn: &Connection) -> Result<u64> {
+    // Same membership as `list_needing_title_blocking` (includes future next_retry_at).
+    let n: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM experiences
+        WHERE COALESCE(status, 'active') = 'active'
+          AND COALESCE(title_give_up, 0) = 0
+          AND lower(COALESCE(title_source, 'fallback')) NOT IN ('agent', 'user', 'llm')
+          AND (
+            title IS NULL OR trim(title) = ''
+            OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
+          )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(n.max(0) as u64)
+}
+
+fn settings_flag_done_blocking(conn: &Connection, key: &str) -> Result<bool> {
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(
+        done.as_deref(),
+        Some("1") | Some("true") | Some("\"1\"")
+    ))
+}
+
+fn set_settings_flag_blocking(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings(key, value_json) VALUES(?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        params![key],
+    )?;
     Ok(())
 }
 
@@ -601,7 +903,7 @@ const RECORD_SELECT_COLS: &str = r#"
     id, project_id, agent_id, topic, solution_summary, adr_record,
     outcome, related_task_id, tags_json, created_at, embedding, payload_json,
     status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-    updated_at, original_content, archived_by
+    updated_at, original_content, archived_by, title, title_source, source
 "#;
 
 fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceRecord>> {
@@ -779,6 +1081,15 @@ fn map_record_from_parts(
     let updated_at = row.get::<_, Option<String>>(offset + 18)?;
     let original_content = row.get::<_, Option<String>>(offset + 19)?;
     let archived_by = row.get::<_, Option<String>>(offset + 20).unwrap_or(None);
+    let title = row
+        .get::<_, Option<String>>(offset + 21)?
+        .unwrap_or_default();
+    let title_source = row
+        .get::<_, Option<String>>(offset + 22)?
+        .unwrap_or_default();
+    let source = row
+        .get::<_, Option<String>>(offset + 23)?
+        .unwrap_or_default();
     Ok(ExperienceRecord {
         id: row.get(offset)?,
         project_id: row.get(offset + 1)?,
@@ -804,6 +1115,9 @@ fn map_record_from_parts(
         is_pinned: is_pinned != 0,
         updated_at,
         original_content,
+        title,
+        title_source: crate::models::TitleSource::parse(&title_source),
+        source,
     })
 }
 
@@ -861,9 +1175,55 @@ mod tests {
             "topic",
             "solution_summary",
             "adr_record",
+            "title",
+            "title_source",
+            "source",
+            "title_attempts",
+            "title_next_retry_at",
+            "title_give_up",
         ] {
             assert!(cols.iter().any(|col| col == name), "missing {name}");
         }
+    }
+
+    /// Prove SELECT/map offsets after Project-ID-Core + MCP-Quality column merge:
+    /// `project_id`, `title`, `title_source`, and `source` round-trip intact.
+    #[tokio::test]
+    async fn title_source_and_project_id_roundtrip_offsets() {
+        let store = ExperienceStore::memory().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let record = ExperienceRecord {
+            id: id.clone(),
+            project_id: "/canonical/repo/path".into(),
+            agent_id: "cursor".into(),
+            topic: "topic about redis".into(),
+            solution_summary: "use connection pool".into(),
+            adr_record: "Decision: pool".into(),
+            title: "Redis pool fix".into(),
+            title_source: crate::models::TitleSource::Agent,
+            source: "mcp,external".into(),
+            tags: vec!["redis".into()],
+            outcome: ExperienceOutcome::Success,
+            ..Default::default()
+        };
+        store.insert_record(record).await.unwrap();
+
+        let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+        assert_eq!(loaded.project_id, "/canonical/repo/path");
+        assert_eq!(loaded.title, "Redis pool fix");
+        assert_eq!(loaded.title_source, crate::models::TitleSource::Agent);
+        assert_eq!(loaded.source, "mcp,external");
+        assert_eq!(loaded.solution_summary, "use connection pool");
+        assert_eq!(loaded.adr_record, "Decision: pool");
+        assert_eq!(loaded.tags, vec!["redis"]);
+
+        // Latest path uses the same RECORD_SELECT_COLS / map offsets.
+        let latest = store.latest(5).await.unwrap();
+        let card = latest.iter().find(|e| e.id == id).expect("in latest");
+        assert_eq!(card.project_id, "/canonical/repo/path");
+        assert_eq!(card.title, "Redis pool fix");
+        assert_eq!(card.title_source, crate::models::TitleSource::Agent);
+        assert_eq!(card.source, "mcp,external");
     }
 
     #[tokio::test]

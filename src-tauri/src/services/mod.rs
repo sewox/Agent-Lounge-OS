@@ -7,6 +7,7 @@ pub mod autodiscover;
 pub mod cbm_daemon;
 pub mod cbm_ui_config;
 pub mod dead_symbol_actions;
+pub mod experience_title;
 pub mod graph_ui;
 pub mod hardware;
 pub mod hf_catalog;
@@ -60,6 +61,10 @@ pub use cbm_ui_config::{
 };
 pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
+};
+pub use experience_title::{
+    backfill_missing_titles, enqueue_title, ensure_title_worker, title_backlog_count, TitleError,
+    TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT, TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
 };
 pub use graph_ui::{
     classify_port_status, default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless,

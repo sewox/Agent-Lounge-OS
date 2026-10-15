@@ -29,7 +29,7 @@ use super::timeout_manager::{
     parse_timeout_setting, TimeoutManager, ENV_MCP_TIMEOUT_SECS, SETTING_MCP_TIMEOUT_SECS,
 };
 use super::wait_clock::{SystemWaitClock, WaitClock};
-use crate::db::ExperienceStore;
+use crate::db::{bind_write_project_id, prefer_canonical, ExperienceStore, ProjectBind};
 use crate::kernel::worker_registry::{workers_status_json, WorkerRegistry};
 use crate::models::{
     host_display_name, now_rfc3339, DiscoveredTool, ExperienceOutcome, ExperienceRecord,
@@ -753,14 +753,15 @@ impl McpServer {
 
     async fn tool_record(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
         validate_schema(SchemaKind::McpRecord, args).map_err(|e| anyhow!(e))?;
-        let project = self
-            .resolve_project_arg(args)
+        let bind = self
+            .resolve_project_bind(args, Some(client))
             .await?
             .ok_or_else(|| {
                 anyhow!(
                     "project_id çözülemedi — project / project_id verin veya active_file / workspace_root ile project_index eşleşsin"
                 )
             })?;
+        let project = bind.canonical_id.clone();
         let context = arg_str(args, "context")
             .or_else(|| arg_str(args, "topic"))
             .unwrap_or("")
@@ -780,15 +781,85 @@ impl McpServer {
             .map(str::to_string)
             .unwrap_or_else(|| client.name.clone());
 
-        let topic = if context.is_empty() {
+        let topic_raw = if context.is_empty() {
             decision.clone()
         } else {
             context.clone()
         };
-        let solution = if decision.is_empty() {
+        let solution_raw = if decision.is_empty() {
             context.clone()
         } else {
             decision.clone()
+        };
+
+        // Structured ADR (optional). Absent → adr_record stays empty (UI: No ADR).
+        let adr_raw = args
+            .get("adr")
+            .and_then(|v| {
+                super::hygiene::format_adr(
+                    v.get("context").and_then(|x| x.as_str()),
+                    v.get("decision").and_then(|x| x.as_str()),
+                    v.get("consequences").and_then(|x| x.as_str()),
+                    v.get("alternatives").and_then(|x| x.as_str()),
+                )
+            })
+            .unwrap_or_default();
+
+        // Hygiene before persist (mask, do not reject).
+        let topic_h = super::hygiene::scrub(&topic_raw);
+        let solution_h = super::hygiene::scrub(&solution_raw);
+        let adr_h = super::hygiene::scrub(&adr_raw);
+        let mut warnings = Vec::new();
+        let mut hygiene_masked = false;
+        for part in [&topic_h, &solution_h, &adr_h] {
+            if part.masked {
+                hygiene_masked = true;
+                for w in &part.warnings {
+                    if !warnings.iter().any(|x| x == w) {
+                        warnings.push(w.clone());
+                    }
+                }
+            }
+        }
+
+        // Agent tags only + normalization; mcp/external → source metadata.
+        let raw_tags: Vec<String> = args
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (tags, mut source_parts) = super::hygiene::normalize_tags(&raw_tags);
+        if source_parts.is_empty() {
+            source_parts = vec!["mcp".into(), "external".into()];
+        } else if !source_parts.iter().any(|s| s == "mcp") {
+            source_parts.insert(0, "mcp".into());
+        }
+        // Provenance column format: comma-separated lowercase tokens (e.g. `mcp,external`).
+        let source = super::hygiene::format_source_metadata(&source_parts);
+
+        let agent_title = arg_str(args, "title").map(str::to_string);
+        let (title, title_source) = if let Some(t) = agent_title {
+            let cleaned = super::hygiene::scrub(&t);
+            if cleaned.masked {
+                hygiene_masked = true;
+                for w in &cleaned.warnings {
+                    if !warnings.iter().any(|x| x == w) {
+                        warnings.push(w.clone());
+                    }
+                }
+            }
+            let title =
+                super::hygiene::fallback_title(&cleaned.text, crate::models::TITLE_MAX_CHARS);
+            (title, crate::models::TitleSource::Agent)
+        } else {
+            (
+                super::hygiene::fallback_title(&solution_h.text, crate::models::TITLE_MAX_CHARS),
+                crate::models::TitleSource::Fallback,
+            )
         };
 
         let experience = LoungeExperience {
@@ -796,39 +867,73 @@ impl McpServer {
             msg_type: "experience".into(),
             agent: agent.clone(),
             project_id: project.clone(),
-            adr_summary: solution.clone(),
+            adr_summary: adr_h.text.clone(),
             outcome: outcome.clone(),
             related_task_id: None,
-            tags: vec!["mcp".into(), "external".into()],
+            tags: tags.clone(),
             created_at: now_rfc3339(),
             reviewed: false,
+            title: title.clone(),
+            title_source,
+            source: source.clone(),
+            original_content: Some(solution_h.text.clone()),
             ..Default::default()
         };
         let experience_json = serde_json::to_value(&experience)?;
         validate_schema(SchemaKind::Experience, &experience_json).map_err(|e| anyhow!(e))?;
 
-        let record = ExperienceRecord::from_lounge(&experience, topic.clone());
+        let mut record = ExperienceRecord::from_lounge(
+            &experience,
+            topic_h.text.clone(),
+            solution_h.text.clone(),
+        );
         // O6: MCP rows are auto-approved (active) but unreviewed.
-        let mut record = record;
+        // Hygiene mask → stay in reviewed=0 queue (already false).
         record.status = crate::models::EXPERIENCE_STATUS_ACTIVE.into();
         record.reviewed = false;
         let id = record.id.clone();
+        let enqueue_content = record.solution_summary.clone();
+        let enqueue_source = record.title_source;
         self.store.insert_record_atomic(record).await?;
+
+        // Async title generation (never overwrites agent titles).
+        crate::services::experience_title::enqueue_title(
+            &self.store,
+            &id,
+            &enqueue_content,
+            enqueue_source,
+        )
+        .await;
 
         // Dashboard sayacı / event pump: lounge.experience.reported
         if let Err(err) = self.publish_experience_reported(&experience).await {
             eprintln!("[lounge-mcp] experience.reported yayınlanamadı: {err}");
         }
 
-        Ok(json!({
+        let mut out = json!({
             "id": id,
             "project_id": project,
+            "display_name": bind.display_name,
+            "identity_kind": bind.kind.as_str(),
             "agent": agent,
-            "topic": topic,
+            "topic": topic_h.text,
+            "title": title,
+            "title_source": title_source.as_str(),
+            "source": source,
             "recorded": true,
             "atomic": true,
             "event": EXPERIENCE_REPORTED,
-        }))
+            "hygiene_masked": hygiene_masked,
+        });
+        if !warnings.is_empty() {
+            out["hygiene_warnings"] = json!(warnings);
+        }
+        if let Some(warning) = bind.warning {
+            out.as_object_mut()
+                .expect("object")
+                .insert("project_warning".into(), json!(warning));
+        }
+        Ok(out)
     }
 
     async fn publish_experience_reported(&self, experience: &LoungeExperience) -> Result<()> {
@@ -1200,18 +1305,101 @@ impl McpServer {
     }
 
     async fn resolve_project_arg(&self, args: &Value) -> Result<Option<String>> {
-        if let Some(explicit) = arg_str(args, "project_id").or_else(|| arg_str(args, "project")) {
-            return Ok(Some(explicit.to_string()));
-        }
+        Ok(self
+            .resolve_project_bind(args, None)
+            .await?
+            .map(|b| b.canonical_id))
+    }
+
+    /// Project-ID-Core write binding: aliases + path → canonical id, else sentinel.
+    ///
+    /// Path hints: `active_file` / `workspace_root` / `repo_path` plus optional
+    /// session `ClientCtx.workspace_path`. When an explicit project id resolves to
+    /// a *different* indexed canonical than those paths, the write is stored as
+    /// `unclassified` (not path-wins) so the conflict is visible.
+    async fn resolve_project_bind(
+        &self,
+        args: &Value,
+        client: Option<&ClientCtx>,
+    ) -> Result<Option<ProjectBind>> {
+        let explicit = arg_str(args, "project_id").or_else(|| arg_str(args, "project"));
+        let mut hints: Vec<String> = Vec::new();
         for key in ["active_file", "workspace_root", "repo_path"] {
             if let Some(path) = arg_str(args, key) {
-                if let Some(id) = self.store.resolve_project_id(path).await? {
-                    return Ok(Some(id));
+                hints.push(path.to_string());
+            }
+        }
+        if let Some(client) = client {
+            let ws = client.workspace_path.trim();
+            if !ws.is_empty() {
+                hints.push(ws.to_string());
+            }
+        }
+        let store = self.store.clone();
+        let explicit_owned = explicit.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = store.conn.lock().expect("experience db lock");
+            let hint_refs: Vec<&str> = hints.iter().map(|s| s.as_str()).collect();
+            bind_write_project_id(&conn, explicit_owned.as_deref(), &hint_refs, |path| {
+                match resolve_path_hint_for_bind(&conn, path)? {
+                    Some(id) => prefer_canonical(&conn, &id).map(Some),
+                    None => Ok(None),
+                }
+            })
+        })
+        .await
+        .context("resolve_project_bind join")?
+    }
+}
+
+/// Shared with `project_index::resolve_project_id_blocking` logic without async.
+fn resolve_path_hint_for_bind(
+    conn: &rusqlite::Connection,
+    path_hint: &str,
+) -> Result<Option<String>> {
+    // Delegate via store helper path: duplicate longest-match using public normalize.
+    use crate::db::normalize_path_str;
+    use std::path::PathBuf;
+
+    let needle = PathBuf::from(normalize_path_str(path_hint));
+    if needle.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT DISTINCT project_id, repo_path, file_path
+        FROM project_index
+        WHERE TRIM(repo_path) != '' OR (file_path IS NOT NULL AND TRIM(file_path) != '')
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut best: Option<(usize, String)> = None;
+    for row in rows {
+        let (project_id, repo_path, file_path) = row?;
+        for candidate in [Some(repo_path.as_str()), file_path.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let root = PathBuf::from(normalize_path_str(candidate));
+            if root.as_os_str().is_empty() {
+                continue;
+            }
+            if needle == root || needle.starts_with(&root) {
+                let score = root.as_os_str().len();
+                if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                    best = Some((score, project_id.clone()));
                 }
             }
         }
-        Ok(None)
     }
+    Ok(best.map(|(_, id)| id))
 }
 
 fn is_forbidden_tool(name: &str) -> bool {
@@ -1282,12 +1470,15 @@ Kota aşımında -32029. Ayrıntı: resources/read {A2A_GUIDE_URI}.",
         ),
         tool_def(
             "lounge_record_experience",
-            "Tecrübe kaydı (SQLite + vektör atomik). Kota/politika değiştirmez; dosya yazmaz.",
+            "Tecrübe kaydı (SQLite + vektör atomik). Kota/politika değiştirmez; dosya yazmaz. \
+Mimari kararlar için isteğe bağlı `adr` {context,decision,consequences,alternatives} doldurun; \
+yoksa ADR boş kalır (UI: No ADR). `tags` ajan etiketleridir (normalize edilir; mcp/external → source). \
+İsteğe bağlı `title` (≤80) LLM tarafından ezilmez.",
             include_schema("mcp_record_experience.schema.json"),
         ),
         tool_def(
             "lounge_record_decision",
-            "lounge_record_experience alias — ADR kaydı.",
+            "lounge_record_experience alias — ADR kaydı. Mimari kararlar için `adr` alanını doldurun.",
             include_schema("mcp_record_experience.schema.json"),
         ),
         tool_def(
@@ -1865,6 +2056,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_project_from_workspace_root() {
+        use crate::db::canonicalize_repo_path;
         use crate::models::{AstNode, IndexGraph};
         let store = ExperienceStore::memory().expect("db");
         let root = std::env::temp_dir().join(format!("lounge-mcp-proj-{}", Uuid::new_v4()));
@@ -1891,6 +2083,7 @@ mod tests {
             dead: vec![],
         };
         store.save_project_index(graph).await.expect("index");
+        let expected = canonicalize_repo_path(&root.to_string_lossy());
 
         let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
         // serde_json escapes Windows `\` paths; raw format! does not.
@@ -1915,9 +2108,221 @@ mod tests {
             .expect("resp");
         let val: Value = serde_json::from_str(&resp).unwrap();
         assert_ne!(val["result"]["isError"], true);
+        assert_eq!(val["result"]["structuredContent"]["project_id"], expected);
         assert_eq!(
-            val["result"]["structuredContent"]["project_id"],
+            val["result"]["structuredContent"]["display_name"],
             "auto-demo"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Unknown free-form slug (no indexed alias) → unclassified.
+    #[tokio::test]
+    async fn free_form_unknown_slug_stores_unclassified_with_warning() {
+        let store = ExperienceStore::memory().expect("db");
+        let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "project_id": "totally-unknown-slug-xyz",
+                    "context": "client profiles + A2A long_running/must_deliver + LMR :18790",
+                    "decision": "document Agent Lounge OS orchestration flags"
+                }
+            }
+        })
+        .to_string();
+        let resp = server
+            .handle_line(&args)
+            .await
+            .expect("handle")
+            .expect("resp");
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true, "{val}");
+        let body = &val["result"]["structuredContent"];
+        assert_eq!(body["project_id"], crate::db::PROJECT_ID_UNCLASSIFIED);
+        assert_eq!(body["identity_kind"], "unclassified");
+        assert!(
+            body["project_warning"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unclassified"),
+            "warning missing: {body}"
+        );
+        let conn = store.conn.lock().unwrap();
+        let pid: String = conn
+            .query_row(
+                "SELECT project_id FROM experiences ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(pid, crate::db::PROJECT_ID_UNCLASSIFIED);
+    }
+
+    /// B1 / f5d084e2-class: photo-culling *is* indexed, but active_file lives under
+    /// Agent-Lounge-OS → conflict → unclassified (not silent photo-culling bind).
+    #[tokio::test]
+    async fn indexed_photo_culling_explicit_conflicts_with_lounge_active_file() {
+        use crate::db::canonicalize_repo_path;
+        use crate::models::{AstNode, IndexGraph};
+        let store = ExperienceStore::memory().expect("db");
+        let photo = std::env::temp_dir().join(format!("mcp-photo-{}", Uuid::new_v4()));
+        let lounge = std::env::temp_dir().join(format!("mcp-lounge-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(photo.join("src")).unwrap();
+        std::fs::create_dir_all(lounge.join("src")).unwrap();
+        let lounge_file = lounge.join("src/main.rs");
+        std::fs::write(&lounge_file, "fn main() {}").unwrap();
+
+        store
+            .save_project_index(IndexGraph {
+                project: "photo-culling".into(),
+                repo_path: photo.to_string_lossy().into_owned(),
+                status: None,
+                node_count: 0,
+                edge_count: 0,
+                files: Some(0),
+                nodes: vec![],
+                references: vec![],
+                dead: vec![],
+            })
+            .await
+            .unwrap();
+        store
+            .save_project_index(IndexGraph {
+                project: "Agent-Lounge-OS".into(),
+                repo_path: lounge.to_string_lossy().into_owned(),
+                status: None,
+                node_count: 1,
+                edge_count: 0,
+                files: Some(1),
+                nodes: vec![AstNode {
+                    id: "main".into(),
+                    name: "main".into(),
+                    kind: "fn".into(),
+                    file: Some(lounge_file.to_string_lossy().into_owned()),
+                    line: Some(1),
+                    ref_count: 0,
+                }],
+                references: vec![],
+                dead: vec![],
+            })
+            .await
+            .unwrap();
+
+        let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
+        let init = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "cursor",
+                    "version": "1",
+                    "workspace_path": lounge.to_string_lossy()
+                }
+            }
+        })
+        .to_string();
+        let _ = server.handle_line(&init).await.unwrap();
+
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "project_id": "photo-culling",
+                    "active_file": lounge_file.to_string_lossy(),
+                    "context": "client profiles + A2A long_running/must_deliver + LMR :18790",
+                    "decision": "document Agent Lounge OS orchestration flags"
+                }
+            }
+        })
+        .to_string();
+        let resp = server.handle_line(&args).await.unwrap().unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true, "{val}");
+        let body = &val["result"]["structuredContent"];
+        assert_eq!(body["project_id"], crate::db::PROJECT_ID_UNCLASSIFIED);
+        assert_eq!(body["identity_kind"], "unclassified");
+        let warning = body["project_warning"].as_str().unwrap_or("");
+        assert!(
+            warning.contains("photo-culling") && warning.contains("unclassified"),
+            "conflict warning missing: {warning}"
+        );
+        let photo_canon = canonicalize_repo_path(&photo.to_string_lossy());
+        let lounge_canon = canonicalize_repo_path(&lounge.to_string_lossy());
+        let conn = store.conn.lock().unwrap();
+        let pid: String = conn
+            .query_row(
+                "SELECT project_id FROM experiences ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid, crate::db::PROJECT_ID_UNCLASSIFIED);
+        assert_ne!(pid, photo_canon);
+        assert_ne!(pid, lounge_canon);
+        let _ = std::fs::remove_dir_all(&photo);
+        let _ = std::fs::remove_dir_all(&lounge);
+    }
+
+    #[tokio::test]
+    async fn known_alias_slug_binds_canonical_not_verbatim() {
+        use crate::db::canonicalize_repo_path;
+        use crate::models::IndexGraph;
+        let store = ExperienceStore::memory().expect("db");
+        let root = std::env::temp_dir().join(format!("lounge-alias-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        store
+            .save_project_index(IndexGraph {
+                project: "Agent-Lounge-OS".into(),
+                repo_path: root.to_string_lossy().into_owned(),
+                status: None,
+                node_count: 0,
+                edge_count: 0,
+                files: Some(0),
+                nodes: vec![],
+                references: vec![],
+                dead: vec![],
+            })
+            .await
+            .expect("index");
+        // Extra CBM-style slug alias.
+        {
+            let conn = store.conn.lock().unwrap();
+            let canonical = canonicalize_repo_path(&root.to_string_lossy());
+            crate::db::upsert_alias(&conn, "agent-lounge-os", &canonical).unwrap();
+        }
+        let expected = canonicalize_repo_path(&root.to_string_lossy());
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9");
+        let args = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "project": "agent-lounge-os",
+                    "context": "LMR",
+                    "decision": "bind to canonical path"
+                }
+            }
+        })
+        .to_string();
+        let resp = server.handle_line(&args).await.unwrap().unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(val["result"]["structuredContent"]["project_id"], expected);
+        assert_ne!(
+            val["result"]["structuredContent"]["project_id"],
+            "agent-lounge-os"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2092,7 +2497,8 @@ mod tests {
         let val: Value = serde_json::from_str(&resp).unwrap();
         assert_ne!(val["result"]["isError"], true);
         let body = &val["result"]["structuredContent"];
-        assert_eq!(body["project_id"], "project-b");
+        let expected_b = crate::db::canonicalize_repo_path(&root_b.to_string_lossy());
+        assert_eq!(body["project_id"], expected_b);
         let experiences = body["experiences"].as_array().unwrap();
         assert!(
             experiences.iter().any(|row| {
@@ -2129,7 +2535,7 @@ mod tests {
         let experiences2 = body2["experiences"].as_array().unwrap();
         assert!(experiences2
             .iter()
-            .all(|row| row["project_id"] == "project-b"));
+            .all(|row| row["project_id"] == expected_b));
 
         let _ = std::fs::remove_dir_all(&root_b);
     }
@@ -2213,6 +2619,93 @@ mod tests {
         assert_eq!(latest.len(), 1);
         assert!(!latest[0].reviewed, "MCP rows land unreviewed");
         assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
+        // No structured adr → empty ADR (No ADR), solution kept separately.
+        let rec = store
+            .get_record(latest[0].id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rec.adr_record.trim().is_empty(),
+            "adr_record must stay empty without adr: {:?}",
+            rec.adr_record
+        );
+        assert_eq!(rec.solution_summary, "6380");
+        assert!(rec.source.contains("mcp"));
+        assert!(!rec.tags.iter().any(|t| t == "mcp" || t == "external"));
+    }
+
+    #[tokio::test]
+    async fn tool_record_adr_tags_hygiene_and_agent_title() {
+        let store = ExperienceStore::memory().expect("db");
+        let mut server = McpServer::new(store.clone(), "nats://127.0.0.1:9");
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lounge_record_experience",
+                "arguments": {
+                    "project_id": "proj-q",
+                    "context": "connect 192.168.1.20:5555 from /Users/dev/app",
+                    "decision": "use adb over wifi",
+                    "tags": ["MCP", "Redis", "redis", "external"],
+                    "title": "ADB wifi setup",
+                    "adr": {
+                        "context": "device debugging",
+                        "decision": "wifi adb",
+                        "consequences": "no usb cable",
+                        "alternatives": "usb only"
+                    }
+                }
+            }
+        })
+        .to_string();
+        let resp = server.handle_line(&line).await.unwrap().unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true);
+        let body = &val["result"]["structuredContent"];
+        assert_eq!(body["hygiene_masked"], true);
+        assert_eq!(body["title_source"], "agent");
+        assert_eq!(body["title"], "ADB wifi setup");
+
+        let latest = store.latest(1).await.unwrap();
+        let rec = store
+            .get_record(latest[0].id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rec.adr_record.contains("Decision: wifi adb"));
+        assert!(!rec.adr_record.contains("192.168"));
+        assert!(
+            rec.topic.contains("<device-ip>:5555"),
+            "topic should mask IP: {}",
+            rec.topic
+        );
+        assert!(
+            rec.topic.contains("<home>"),
+            "topic should mask home: {}",
+            rec.topic
+        );
+        assert_eq!(rec.tags, vec!["redis"]);
+        assert!(rec.source.contains("mcp"));
+        assert!(rec.source.contains("external"));
+        assert_eq!(rec.title_source, crate::models::TitleSource::Agent);
+        assert_eq!(rec.title, "ADB wifi setup");
+        assert!(!rec.reviewed);
+
+        store
+            .set_experience_title(
+                rec.id.clone(),
+                "LLM should not win".into(),
+                crate::models::TitleSource::Llm,
+                false,
+            )
+            .await
+            .unwrap();
+        let again = store.get_record(rec.id.clone()).await.unwrap().unwrap();
+        assert_eq!(again.title, "ADB wifi setup");
+        assert_eq!(again.title_source, crate::models::TitleSource::Agent);
     }
 
     #[test]

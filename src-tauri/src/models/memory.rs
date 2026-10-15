@@ -242,6 +242,12 @@ pub struct VaultProjectAggregate {
     /// `indexed` | `discovered` | `imported`
     #[serde(default)]
     pub source_type: String,
+    /// Stable Project-ID-Core key (canonicalized repo_path or sentinel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
+    /// Clear UI warning when id is `unclassified` / `unindexed_placeholder`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_warning: Option<String>,
 }
 
 /// One indexed page (unique file) inside a project — drill-down row.

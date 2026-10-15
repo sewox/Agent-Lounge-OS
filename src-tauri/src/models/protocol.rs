@@ -4,6 +4,40 @@ use uuid::Uuid;
 
 pub const DEFAULT_OLLAMA_MODEL: &str = "llama3.1:8b";
 
+/// Max experience title length (characters).
+pub const TITLE_MAX_CHARS: usize = 80;
+
+/// Provenance of an experience title. Agent/user titles are never overwritten by LLM.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    Agent,
+    Llm,
+    #[default]
+    Fallback,
+    User,
+}
+
+impl TitleSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Llm => "llm",
+            Self::Fallback => "fallback",
+            Self::User => "user",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "agent" => Self::Agent,
+            "llm" => Self::Llm,
+            "user" => Self::User,
+            _ => Self::Fallback,
+        }
+    }
+}
+
 pub const TASK_REQUESTED: &str = "lounge.task.requested";
 pub const TASK_ASSIGNED: &str = "lounge.task.assigned";
 pub const TASK_ACKED: &str = "lounge.task.acked";
@@ -332,6 +366,8 @@ pub struct LoungeExperience {
     pub msg_type: String,
     pub agent: String,
     pub project_id: String,
+    /// ADR body when present; empty string means no ADR (UI: "No ADR").
+    #[serde(default)]
     pub adr_summary: String,
     pub outcome: ExperienceOutcome,
     #[serde(default)]
@@ -359,6 +395,15 @@ pub struct LoungeExperience {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub original_content: Option<String>,
+    /// Short card heading (≤80). Empty until fallback/LLM/agent fills it.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub title_source: TitleSource,
+    /// Provenance metadata — comma-separated lowercase tokens, no spaces
+    /// (e.g. `mcp,external`). Not tags; `mcp`/`external` are extracted from tags.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// Manual archive from the Vault UI.
@@ -391,6 +436,9 @@ impl Default for LoungeExperience {
             is_pinned: false,
             updated_at: None,
             original_content: None,
+            title: String::new(),
+            title_source: TitleSource::Fallback,
+            source: String::new(),
         }
     }
 }
@@ -459,6 +507,14 @@ pub struct ExperienceRecord {
     /// First ADR/content snapshot preserved across edits.
     #[serde(default)]
     pub original_content: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub title_source: TitleSource,
+    /// Provenance metadata — comma-separated lowercase tokens, no spaces
+    /// (e.g. `mcp,external`). Not tags; `mcp`/`external` are extracted from tags.
+    #[serde(default)]
+    pub source: String,
 }
 
 fn default_experience_status() -> String {
@@ -489,34 +545,49 @@ impl Default for ExperienceRecord {
             is_pinned: false,
             updated_at: Some(created),
             original_content: None,
+            title: String::new(),
+            title_source: TitleSource::Fallback,
+            source: String::new(),
         }
     }
 }
 
 impl ExperienceRecord {
-    pub fn from_lounge(experience: &LoungeExperience, topic: impl Into<String>) -> Self {
-        let content = experience.adr_summary.clone();
+    /// Build a row from a lounge experience.
+    /// `topic` / `solution` are the experience body; `experience.adr_summary` is the ADR
+    /// (empty → No ADR). Does **not** copy solution into adr_record.
+    pub fn from_lounge(
+        experience: &LoungeExperience,
+        topic: impl Into<String>,
+        solution: impl Into<String>,
+    ) -> Self {
+        let topic = topic.into();
+        let solution = solution.into();
+        let adr = experience.adr_summary.clone();
         Self {
             id: experience.id.clone(),
             project_id: experience.project_id.clone(),
             agent_id: experience.agent.clone(),
-            topic: topic.into(),
-            solution_summary: content.clone(),
-            adr_record: content.clone(),
+            topic,
+            solution_summary: solution.clone(),
+            adr_record: adr,
             outcome: experience.outcome.clone(),
             related_task_id: experience.related_task_id.clone(),
             tags: experience.tags.clone(),
             created_at: experience.created_at.clone(),
             embedding: Vec::new(),
             status: EXPERIENCE_STATUS_ACTIVE.into(),
-            reviewed: false,
-            use_count: 0,
-            last_used_at: None,
-            archived_at: None,
-            archived_by: None,
-            is_pinned: false,
+            reviewed: experience.reviewed,
+            use_count: experience.use_count,
+            last_used_at: experience.last_used_at.clone(),
+            archived_at: experience.archived_at.clone(),
+            archived_by: experience.archived_by.clone(),
+            is_pinned: experience.is_pinned,
             updated_at: Some(experience.created_at.clone()),
-            original_content: Some(content),
+            original_content: experience.original_content.clone().or(Some(solution)),
+            title: experience.title.clone(),
+            title_source: experience.title_source,
+            source: experience.source.clone(),
         }
     }
 
@@ -530,6 +601,7 @@ impl ExperienceRecord {
         let solution_summary = solution_summary.into();
         let adr_record = adr_record.into();
         let created = now_rfc3339();
+        let title = truncate_title(&solution_summary, TITLE_MAX_CHARS);
         Self {
             id: Uuid::new_v4().to_string(),
             project_id: task.project_id.clone(),
@@ -555,13 +627,16 @@ impl ExperienceRecord {
             } else {
                 adr_record
             }),
+            title,
+            title_source: TitleSource::Fallback,
+            source: String::new(),
         }
     }
 
     pub fn search_text(&self) -> String {
         format!(
-            "{} {} {}",
-            self.topic, self.solution_summary, self.adr_record
+            "{} {} {} {}",
+            self.title, self.topic, self.solution_summary, self.adr_record
         )
     }
 
@@ -571,11 +646,8 @@ impl ExperienceRecord {
             msg_type: "experience".into(),
             agent: self.agent_id.clone(),
             project_id: self.project_id.clone(),
-            adr_summary: if self.adr_record.trim().is_empty() {
-                self.solution_summary.clone()
-            } else {
-                self.adr_record.clone()
-            },
+            // Empty adr_record → empty adr_summary so UI can show "No ADR".
+            adr_summary: self.adr_record.clone(),
             outcome: self.outcome.clone(),
             related_task_id: self.related_task_id.clone(),
             tags: self.tags.clone(),
@@ -588,8 +660,59 @@ impl ExperienceRecord {
             archived_by: self.archived_by.clone(),
             is_pinned: self.is_pinned,
             updated_at: self.updated_at.clone(),
-            original_content: self.original_content.clone(),
+            original_content: self.original_content.clone().or_else(|| {
+                Some(if self.solution_summary.trim().is_empty() {
+                    self.topic.clone()
+                } else {
+                    self.solution_summary.clone()
+                })
+            }),
+            title: if self.title.trim().is_empty() {
+                truncate_title(
+                    if self.solution_summary.trim().is_empty() {
+                        &self.topic
+                    } else {
+                        &self.solution_summary
+                    },
+                    TITLE_MAX_CHARS,
+                )
+            } else {
+                self.title.clone()
+            },
+            title_source: self.title_source,
+            source: self.source.clone(),
         }
+    }
+}
+
+/// Word-boundary truncate for titles (same rules as hygiene::fallback_title).
+fn truncate_title(content: &str, max_chars: usize) -> String {
+    let trimmed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.is_empty() {
+        return "Untitled".into();
+    }
+    if trimmed.chars().count() <= max_chars {
+        return trimmed;
+    }
+    let mut out = String::new();
+    for word in trimmed.split_whitespace() {
+        let next_len = if out.is_empty() {
+            word.chars().count()
+        } else {
+            out.chars().count() + 1 + word.chars().count()
+        };
+        if next_len > max_chars {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.is_empty() {
+        trimmed.chars().take(max_chars).collect()
+    } else {
+        out
     }
 }
 
