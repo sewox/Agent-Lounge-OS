@@ -127,6 +127,15 @@ export const vaultStrings = {
   get adr() {
     return t("adr");
   },
+  get noAdr() {
+    return t("noAdr");
+  },
+  get autoTitle() {
+    return t("autoTitle");
+  },
+  get title() {
+    return t("title");
+  },
   get loadMore() {
     return t("loadMore");
   },

@@ -180,10 +180,21 @@ export function ExperienceDrawer({
             <p className="text-error">{error || s("loadError")}</p>
           ) : experience ? (
             <div className="space-y-4" data-qa="experience-view-mode">
+              {experience.title ? (
+                <section className="space-y-1">
+                  <h3 className="font-mono text-meta font-semibold uppercase text-outline">
+                    {s("title")}
+                    {experience.title_source === "llm" || experience.title_source === "fallback" ? (
+                      <span className="ml-2 font-normal lowercase text-outline">{s("autoTitle")}</span>
+                    ) : null}
+                  </h3>
+                  <div className="break-words text-on-surface">{experience.title}</div>
+                </section>
+              ) : null}
               <section className="space-y-2">
                 <h3 className="font-mono text-meta font-semibold uppercase text-outline">{s("adr")}</h3>
                 <div className="whitespace-pre-wrap break-words rounded border border-outline-variant/50 bg-surface-container-high/50 px-3 py-2 leading-relaxed text-on-surface">
-                  {experience.adr_summary}
+                  {experience.adr_summary?.trim() ? experience.adr_summary : s("noAdr")}
                 </div>
               </section>
               {experience.original_content &&
@@ -204,7 +215,9 @@ export function ExperienceDrawer({
                 </div>
                 <div>
                   <dt className="uppercase text-outline">{s("source")}</dt>
-                  <dd className="text-on-surface">{experience.type}</dd>
+                  <dd className="text-on-surface">
+                    {experience.source?.trim() ? experience.source : experience.type}
+                  </dd>
                 </div>
                 <div>
                   <dt className="uppercase text-outline">{s("useCount")}</dt>

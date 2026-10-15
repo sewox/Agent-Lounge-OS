@@ -6,8 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::experiences::{column_names, has_col};
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, ExperienceRecord, ARCHIVED_BY_TTL, ARCHIVED_BY_USER, EXPERIENCE_STATUS_ACTIVE,
-    EXPERIENCE_STATUS_ARCHIVED,
+    now_rfc3339, ExperienceRecord, TitleSource, ARCHIVED_BY_TTL, ARCHIVED_BY_USER,
+    EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
 };
 
 /// Settings key for auto-archive TTL in days (default 90).
@@ -18,6 +18,10 @@ pub const SETTING_EXPERIENCE_USE_COUNT_THRESHOLD: &str = "experience_use_count_t
 pub const DEFAULT_EXPERIENCE_USE_COUNT_THRESHOLD: u64 = 0;
 /// One-time soft-hide of empty placeholder project_index rows.
 pub const MIGRATION_PLACEHOLDER_CLEANUP_V1: &str = "migrations.placeholder_cleanup_v1";
+/// One-time transactional MCP-Quality migration (title/source columns + ADR cleanup).
+pub const MIGRATION_MCP_QUALITY_V1: &str = "migrations.mcp_quality_v1";
+/// One-time: enqueue title generation for existing untitled rows (runtime, not DDL).
+pub const MIGRATION_TITLE_BACKFILL_ENQUEUE_V1: &str = "migrations.title_backfill_enqueue_v1";
 
 const PLACEHOLDER_NAMES: &[&str] = &["backend-legacy", "frontend-new"];
 
@@ -28,6 +32,7 @@ pub struct ExperienceUpdate {
     pub outcome: Option<crate::models::ExperienceOutcome>,
     pub project_id: Option<String>,
     pub topic: Option<String>,
+    pub title: Option<String>,
 }
 
 /// Injectable clock for TTL tests (seconds since UNIX epoch as RFC3339 helper).
@@ -256,8 +261,8 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
         });
     }
     if let Some(adr) = &patch.adr_summary {
+        // User edits ADR only — do not re-copy into solution_summary.
         record.adr_record = adr.clone();
-        record.solution_summary = adr.clone();
     }
     if let Some(tags) = &patch.tags {
         record.tags = tags.clone();
@@ -270,6 +275,11 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
     }
     if let Some(topic) = &patch.topic {
         record.topic = topic.clone();
+    }
+    if let Some(title) = &patch.title {
+        let clipped: String = title.chars().take(crate::models::TITLE_MAX_CHARS).collect();
+        record.title = clipped;
+        record.title_source = TitleSource::User;
     }
     let now = now_rfc3339();
     record.updated_at = Some(now.clone());
@@ -290,8 +300,10 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
             tags_json = ?6,
             updated_at = ?7,
             original_content = COALESCE(original_content, ?8),
-            payload_json = ?9
-        WHERE id = ?10
+            payload_json = ?9,
+            title = ?10,
+            title_source = ?11
+        WHERE id = ?12
         "#,
         params![
             record.project_id,
@@ -303,6 +315,8 @@ fn update_experience_blocking(conn: &Connection, id: &str, patch: &ExperienceUpd
             now,
             record.original_content,
             payload,
+            record.title,
+            record.title_source.as_str(),
             id,
         ],
     )?;
@@ -332,7 +346,7 @@ fn get_full_record(conn: &Connection, id: &str) -> Result<Option<ExperienceRecor
             SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                    outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                    status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-                   updated_at, original_content, archived_by
+                   updated_at, original_content, archived_by, title, title_source, source
             FROM experiences WHERE id = ?1
             "#,
             params![id],
@@ -349,6 +363,9 @@ fn map_full_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExperienceRecord
     let reviewed: i64 = row.get(13)?;
     let use_count: i64 = row.get(14)?;
     let is_pinned: i64 = row.get(17)?;
+    let title = row.get::<_, Option<String>>(21)?.unwrap_or_default();
+    let title_source = row.get::<_, Option<String>>(22)?.unwrap_or_default();
+    let source = row.get::<_, Option<String>>(23)?.unwrap_or_default();
     Ok(ExperienceRecord {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -376,6 +393,9 @@ fn map_full_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExperienceRecord
         updated_at: row.get(18)?,
         original_content: row.get(19)?,
         archived_by: row.get(20)?,
+        title,
+        title_source: TitleSource::parse(&title_source),
+        source,
     })
 }
 
@@ -396,9 +416,9 @@ fn search_filtered_blocking(
         SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                status, reviewed, use_count, last_used_at, archived_at, is_pinned,
-               updated_at, original_content, archived_by
+               updated_at, original_content, archived_by, title, title_source, source
         FROM experiences
-        WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
+        WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || COALESCE(title,'') || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
           {status_clause}
         ORDER BY is_pinned DESC, created_at DESC
         LIMIT ?{limit_idx}
@@ -496,12 +516,14 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
         ("archived_by", "TEXT"),
     ];
     let mut added_reviewed = false;
+    let mut cols = cols;
     for (name, decl) in additions {
         if !has_col(&cols, name) {
             conn.execute(
                 &format!("ALTER TABLE experiences ADD COLUMN {name} {decl}"),
                 [],
             )?;
+            cols.push((*name).to_string());
             if *name == "reviewed" {
                 added_reviewed = true;
             }
@@ -522,13 +544,14 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
         params![now],
     )?;
     conn.execute(
-        "UPDATE experiences SET original_content = COALESCE(original_content, adr_record, solution_summary) WHERE original_content IS NULL OR original_content = ''",
+        "UPDATE experiences SET original_content = COALESCE(original_content, solution_summary, adr_record) WHERE original_content IS NULL OR original_content = ''",
         [],
     )?;
     conn.execute(
         "UPDATE experiences SET updated_at = COALESCE(updated_at, created_at) WHERE updated_at IS NULL OR updated_at = ''",
         [],
     )?;
+    migrate_mcp_quality_v1(conn)?;
     conn.execute_batch(
         r#"
         CREATE INDEX IF NOT EXISTS idx_experiences_status ON experiences(status);
@@ -536,6 +559,97 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_experiences_pinned ON experiences(is_pinned);
         "#,
     )?;
+    Ok(())
+}
+
+/// MCP-Quality-1 migration in a **single transaction**:
+/// ALTER (title/source/retry cols) + title backfill + ADR cleanup + done flag.
+/// All commit together or all roll back. Requires an existing `settings` table
+/// (created by `migrate_schema` / test fixtures — not created here).
+pub fn migrate_mcp_quality_v1(conn: &Connection) -> Result<()> {
+    migrate_mcp_quality_v1_impl(conn, None)
+}
+
+/// `fail_before`: test hook — abort before this step name so the transaction rolls back.
+/// Steps: `after_alter` | `after_title_backfill` | `after_adr_clear` | `before_done_flag`.
+fn migrate_mcp_quality_v1_impl(conn: &Connection, fail_before: Option<&str>) -> Result<()> {
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            params![MIGRATION_MCP_QUALITY_V1],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if matches!(done.as_deref(), Some("1") | Some("true") | Some("\"1\"")) {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let cols = column_names(&tx, "experiences")?;
+    let quality_cols: &[(&str, &str)] = &[
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("title_source", "TEXT NOT NULL DEFAULT 'fallback'"),
+        ("source", "TEXT NOT NULL DEFAULT ''"),
+        ("title_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("title_next_retry_at", "TEXT"),
+        ("title_give_up", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+    for (name, decl) in quality_cols {
+        if !has_col(&cols, name) {
+            tx.execute(
+                &format!("ALTER TABLE experiences ADD COLUMN {name} {decl}"),
+                [],
+            )?;
+        }
+    }
+    if fail_before == Some("after_alter") {
+        anyhow::bail!("forced failure after_alter");
+    }
+
+    // Word-boundary title backfill (not raw substr).
+    {
+        let mut stmt = tx.prepare(
+            r#"
+            SELECT id, COALESCE(NULLIF(trim(solution_summary), ''), topic)
+            FROM experiences
+            WHERE trim(COALESCE(title, '')) = ''
+            "#,
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for (id, content) in rows {
+            let title =
+                crate::bridge::hygiene::fallback_title(&content, crate::models::TITLE_MAX_CHARS);
+            tx.execute(
+                "UPDATE experiences SET title = ?1, title_source = 'fallback' WHERE id = ?2",
+                params![title, id],
+            )?;
+        }
+    }
+    if fail_before == Some("after_title_backfill") {
+        anyhow::bail!("forced failure after_title_backfill");
+    }
+
+    // Approved: clear adr_record where it was a duplicate of solution_summary.
+    tx.execute(
+        "UPDATE experiences SET adr_record = '' WHERE adr_record = solution_summary",
+        [],
+    )?;
+    if fail_before == Some("after_adr_clear") {
+        anyhow::bail!("forced failure after_adr_clear");
+    }
+    if fail_before == Some("before_done_flag") {
+        anyhow::bail!("forced failure before_done_flag");
+    }
+
+    tx.execute(
+        "INSERT INTO settings(key, value_json) VALUES(?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+        params![MIGRATION_MCP_QUALITY_V1],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -644,11 +758,11 @@ mod tests {
     use super::*;
     use crate::models::{ExperienceOutcome, LoungeTask};
 
-    #[tokio::test]
-    async fn migration_marks_existing_reviewed() {
+    fn fixture_legacy_experiences_with_settings(sql_extra: &str) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             r#"
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
             CREATE TABLE experiences (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
@@ -663,6 +777,17 @@ mod tests {
                 embedding BLOB,
                 payload_json TEXT NOT NULL
             );
+            {sql_extra}
+            "#
+        ))
+        .unwrap();
+        conn
+    }
+
+    #[tokio::test]
+    async fn migration_marks_existing_reviewed() {
+        let conn = fixture_legacy_experiences_with_settings(
+            r#"
             INSERT INTO experiences (
                 id, project_id, agent_id, topic, solution_summary, adr_record,
                 outcome, tags_json, created_at, payload_json
@@ -671,8 +796,7 @@ mod tests {
                 'success', '[]', '2026-01-01T00:00:00Z', '{}'
             );
             "#,
-        )
-        .unwrap();
+        );
         migrate_experience_governance(&conn).unwrap();
         let reviewed: i64 = conn
             .query_row(
@@ -682,6 +806,125 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reviewed, 1);
+    }
+
+    #[test]
+    fn mcp_quality_migration_success_clears_dup_adr_and_sets_flag() {
+        let conn = fixture_legacy_experiences_with_settings(
+            r#"
+            INSERT INTO experiences (
+                id, project_id, agent_id, topic, solution_summary, adr_record,
+                outcome, tags_json, created_at, payload_json
+            ) VALUES
+                ('dup', 'p', 'a', 'topic here', 'same body', 'same body',
+                 'success', '[]', '2026-01-01T00:00:00Z', '{}'),
+                ('ok', 'p', 'a', 'topic', 'solution', 'real adr',
+                 'success', '[]', '2026-01-01T00:00:00Z', '{}');
+            "#,
+        );
+        migrate_mcp_quality_v1(&conn).unwrap();
+        let (adr_dup, title_dup): (String, String) = conn
+            .query_row(
+                "SELECT adr_record, title FROM experiences WHERE id = 'dup'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(adr_dup, "");
+        assert!(!title_dup.is_empty());
+        assert!(title_dup.chars().count() <= 80);
+        let adr_ok: String = conn
+            .query_row(
+                "SELECT adr_record FROM experiences WHERE id = 'ok'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(adr_ok, "real adr");
+        let flag: String = conn
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![MIGRATION_MCP_QUALITY_V1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(flag, "1");
+    }
+
+    #[test]
+    fn mcp_quality_migration_midway_failure_rolls_back_no_flag() {
+        let conn = fixture_legacy_experiences_with_settings(
+            r#"
+            INSERT INTO experiences (
+                id, project_id, agent_id, topic, solution_summary, adr_record,
+                outcome, tags_json, created_at, payload_json
+            ) VALUES (
+                'dup', 'p', 'a', 't', 'same', 'same',
+                'success', '[]', '2026-01-01T00:00:00Z', '{}'
+            );
+            "#,
+        );
+        let err = migrate_mcp_quality_v1_impl(&conn, Some("before_done_flag")).unwrap_err();
+        assert!(err.to_string().contains("forced failure"));
+        // No done flag.
+        let flag: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM settings WHERE key = ?1",
+                params![MIGRATION_MCP_QUALITY_V1],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(flag.is_none(), "done flag must not be written on rollback");
+        // ADR cleanup rolled back.
+        let adr: String = conn
+            .query_row(
+                "SELECT adr_record FROM experiences WHERE id = 'dup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(adr, "same");
+        // Title column must not remain from a partial commit.
+        let cols = column_names(&conn, "experiences").unwrap();
+        assert!(
+            !has_col(&cols, "title"),
+            "ALTER must roll back with the transaction"
+        );
+    }
+
+    #[test]
+    fn mcp_quality_migration_idempotent_rerun() {
+        let conn = fixture_legacy_experiences_with_settings(
+            r#"
+            INSERT INTO experiences (
+                id, project_id, agent_id, topic, solution_summary, adr_record,
+                outcome, tags_json, created_at, payload_json
+            ) VALUES (
+                'dup', 'p', 'a', 't', 'body', 'body',
+                'success', '[]', '2026-01-01T00:00:00Z', '{}'
+            );
+            "#,
+        );
+        migrate_mcp_quality_v1(&conn).unwrap();
+        // Restore a duplicate ADR after first run — re-run must be a no-op (flag set).
+        conn.execute(
+            "UPDATE experiences SET adr_record = solution_summary WHERE id = 'dup'",
+            [],
+        )
+        .unwrap();
+        migrate_mcp_quality_v1(&conn).unwrap();
+        let adr: String = conn
+            .query_row(
+                "SELECT adr_record FROM experiences WHERE id = 'dup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            adr, "body",
+            "idempotent re-run must not re-apply ADR cleanup"
+        );
     }
 
     #[tokio::test]
@@ -842,24 +1085,9 @@ mod tests {
 
     #[test]
     fn deprecated_status_maps_to_archived() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
+        let conn = fixture_legacy_experiences_with_settings(
             r#"
-            CREATE TABLE experiences (
-                id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                topic TEXT NOT NULL,
-                solution_summary TEXT NOT NULL,
-                adr_record TEXT NOT NULL,
-                outcome TEXT NOT NULL DEFAULT 'success',
-                related_task_id TEXT,
-                tags_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL,
-                embedding BLOB,
-                payload_json TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'deprecated'
-            );
+            ALTER TABLE experiences ADD COLUMN status TEXT NOT NULL DEFAULT 'deprecated';
             INSERT INTO experiences (
                 id, project_id, agent_id, topic, solution_summary, adr_record,
                 outcome, tags_json, created_at, payload_json, status
@@ -868,8 +1096,7 @@ mod tests {
                 'success', '[]', '2026-01-01T00:00:00Z', '{}', 'deprecated'
             );
             "#,
-        )
-        .unwrap();
+        );
         migrate_experience_governance(&conn).unwrap();
         let (status, archived_at): (String, Option<String>) = conn
             .query_row(

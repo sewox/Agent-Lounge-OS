@@ -1,5 +1,6 @@
 //! Dış dünya köprüleri — MCP sunucusu (Cursor / Claude Desktop / Antigravity).
 
+pub mod hygiene;
 pub mod mcp_http;
 pub mod mcp_server;
 pub mod nats_terminal;
