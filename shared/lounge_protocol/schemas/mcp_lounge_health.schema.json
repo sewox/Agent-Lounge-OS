@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/mcp_lounge_health.schema.json",
   "title": "McpLoungeHealthArgs",
-  "description": "lounge_health — argüman kabul etmez. Yanıt şema sürümü 1.0.0 (agents, title, dead_symbols, cbm, platform).",
+  "description": "lounge_health — argüman kabul etmez. Yanıt şema sürümü 1.0.0 (agents, title, dead_symbols, cbm, platform). title.queue_backlog / last_error_type process-local (standalone MCP'te 0/null); db_backlog/give_ups SQLite.",
   "type": "object",
   "additionalProperties": false,
   "properties": {}

@@ -99,7 +99,10 @@ pub use lounge_auth::{
     lounge_token, nats_auth_active, nats_ingress_source_verified, remote_access_info,
     remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
 };
-pub use lounge_health::{cached_lounge_health, collect_lounge_health, run_startup_lounge_health};
+pub use lounge_health::{
+    build_lounge_health, cached_lounge_health, collect_lounge_health, run_startup_lounge_health,
+    LoungeHealthOptions,
+};
 pub use memory_bridge::{
     health_page_timeout, probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode,
     DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, HEALTH_SCAN_PAGE_SIZE,

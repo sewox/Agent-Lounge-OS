@@ -1538,7 +1538,7 @@ yoksa ADR boş kalır (UI: No ADR). `tags` ajan etiketleridir (normalize edilir;
         ),
         tool_def(
             "lounge_health",
-            "Health-1b birleşik sağlık (şema 1.0.0): dead symbols, ajan lounge-mcp config (salt okunur), title/LMR backlog, CBM daemon + 18749 pollution tespiti (düzeltmez). Ev yolları ~/… maskeli. Ayar/config yazmaz.",
+            "Health-1b birleşik sağlık (şema 1.0.0): dead symbols, ajan lounge-mcp config (salt okunur; her config yolu ayrı rapor), title/LMR backlog, CBM daemon + 18749 pollution tespiti (düzeltmez). Ev yolları ~/… maskeli. Ayar/config yazmaz. Not: title.queue_backlog ve last_error_type bu süreçte localdir — standalone lounge-mcp'te 0/null; Tauri lounge_health canlı worker değerlerini verir. db_backlog/give_ups SQLite.",
             include_schema("mcp_lounge_health.schema.json"),
         ),
     ]

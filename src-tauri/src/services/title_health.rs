@@ -121,7 +121,8 @@ fn tags_contain_model(body: &Value, model: &str) -> bool {
         .filter_map(|row| row.get("name").and_then(Value::as_str))
         .any(|name| {
             let n = name.to_ascii_lowercase();
-            n == want || n.starts_with(&format!("{want}:")) || n.starts_with(&want)
+            // Exact name, or `name:tag` / `name:latest` — not bare prefix (gemma-2 ≠ gemma-2-27b).
+            n == want || n.starts_with(&format!("{want}:"))
         })
 }
 

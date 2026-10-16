@@ -1,6 +1,7 @@
 //! H3: read-only lounge-mcp entry health per desktop/CLI client.
 //!
 //! Never writes MCP configs. Checks only at caller request (startup + on-demand).
+//! When several configs exist for one client, every path is reported (no "best" mask).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -99,62 +100,62 @@ fn resolve_expected_lounge_mcp_path() -> Option<PathBuf> {
     find_executable("lounge-mcp")
 }
 
-/// Scan all first-class clients under `roots`.
+/// Scan all first-class clients under `roots` (one entry per config path used).
 pub fn check_all_agents(
     roots: &AgentHealthRoots,
     expected: &ExpectedLoungeMcp,
 ) -> Vec<AgentHealthEntry> {
-    vec![
-        check_client(
-            "antigravity",
-            client_installed_antigravity(),
-            antigravity_config_paths(roots),
-            roots,
-            expected,
-        ),
-        check_client(
-            "cursor",
-            client_installed_cursor(),
-            cursor_config_paths(roots),
-            roots,
-            expected,
-        ),
-        check_client(
-            "claude_desktop",
-            client_installed_claude_desktop(),
-            vec![claude_desktop_config_path(roots)],
-            roots,
-            expected,
-        ),
-        check_client(
-            "claude_code",
-            client_installed_claude_code(),
-            claude_code_config_paths(roots),
-            roots,
-            expected,
-        ),
-        check_client(
-            "grok_bot",
-            client_installed_grok(),
-            grok_config_paths(roots),
-            roots,
-            expected,
-        ),
-        check_client(
-            "vscode",
-            client_installed_vscode(),
-            vscode_config_paths(roots),
-            roots,
-            expected,
-        ),
-        check_client(
-            "windsurf",
-            client_installed_windsurf(),
-            windsurf_config_paths(roots),
-            roots,
-            expected,
-        ),
-    ]
+    let mut out = Vec::new();
+    out.extend(check_client_entries(
+        "antigravity",
+        client_installed_antigravity(),
+        antigravity_config_paths(roots),
+        false,
+        expected,
+    ));
+    out.extend(check_client_entries(
+        "cursor",
+        client_installed_cursor(),
+        cursor_config_paths(roots),
+        true, // JSONC
+        expected,
+    ));
+    out.extend(check_client_entries(
+        "claude_desktop",
+        client_installed_claude_desktop(),
+        vec![claude_desktop_config_path(roots)],
+        false,
+        expected,
+    ));
+    out.extend(check_client_entries(
+        "claude_code",
+        client_installed_claude_code(),
+        claude_code_config_paths(roots),
+        false,
+        expected,
+    ));
+    out.extend(check_client_entries(
+        "grok_bot",
+        client_installed_grok(),
+        grok_config_paths(roots),
+        false,
+        expected,
+    ));
+    out.extend(check_client_entries(
+        "vscode",
+        client_installed_vscode(),
+        vscode_config_paths(roots),
+        true, // JSONC
+        expected,
+    ));
+    out.extend(check_client_entries(
+        "windsurf",
+        client_installed_windsurf(),
+        windsurf_config_paths(roots),
+        true, // JSONC
+        expected,
+    ));
+    out
 }
 
 fn client_installed_antigravity() -> bool {
@@ -184,7 +185,6 @@ fn client_installed_windsurf() -> bool {
 }
 
 fn roots_hint_vscode_app() -> bool {
-    // Soft signal: common install dirs exist (read-only existence check).
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
@@ -272,94 +272,85 @@ fn windsurf_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
     ]
 }
 
-fn check_client(
+/// Report every existing config path for this client (no healthy-mask-stale).
+pub fn check_client_entries(
     client: &str,
     installed: bool,
     paths: Vec<PathBuf>,
-    _roots: &AgentHealthRoots,
+    allow_jsonc: bool,
     expected: &ExpectedLoungeMcp,
-) -> AgentHealthEntry {
+) -> Vec<AgentHealthEntry> {
+    let mut entries = Vec::new();
     let mut any_file = false;
-    let mut last_unreadable: Option<(PathBuf, String)> = None;
-    let mut best: Option<AgentHealthEntry> = None;
 
     for path in &paths {
         if !path.exists() {
             continue;
         }
         any_file = true;
-        match read_lounge_entry(path) {
-            Ok(None) => {
-                // File ok, no lounge entry — keep scanning other paths.
+        match read_lounge_entries(path, allow_jsonc, client == "claude_code") {
+            Ok(found) if found.is_empty() => {
+                entries.push(entry_base(
+                    client,
+                    AgentMcpStatus::Missing,
+                    Some(path.clone()),
+                    None,
+                    None,
+                    expected,
+                    Some("lounge-mcp entry absent".into()),
+                ));
             }
-            Ok(Some(raw)) => {
-                let entry = classify_entry(client, path, &raw, expected);
-                // Prefer actionable statuses: ok > hash_mismatch > stale > non_canonical > missing
-                if is_better(&entry, best.as_ref()) {
-                    best = Some(entry);
+            Ok(found) => {
+                for (scope, raw) in found {
+                    let mut entry = classify_entry(client, path, &raw, expected);
+                    if let Some(scope) = scope {
+                        let note = format!("project scope: {}", mask_home_path(&scope));
+                        entry.detail = Some(match entry.detail {
+                            Some(d) => format!("{d}; {note}"),
+                            None => note,
+                        });
+                    }
+                    entries.push(entry);
                 }
             }
             Err(err) => {
-                last_unreadable = Some((path.clone(), err));
+                entries.push(entry_base(
+                    client,
+                    AgentMcpStatus::Unreadable,
+                    Some(path.clone()),
+                    None,
+                    None,
+                    expected,
+                    Some(err),
+                ));
             }
         }
     }
 
-    if let Some(entry) = best {
-        return entry;
+    if entries.is_empty() {
+        if !installed && !any_file {
+            entries.push(entry_base(
+                client,
+                AgentMcpStatus::NotInstalled,
+                None,
+                None,
+                None,
+                expected,
+                Some("client not detected".into()),
+            ));
+        } else {
+            entries.push(entry_base(
+                client,
+                AgentMcpStatus::Missing,
+                None,
+                None,
+                None,
+                expected,
+                Some("lounge-mcp entry absent".into()),
+            ));
+        }
     }
-
-    if let Some((path, err)) = last_unreadable {
-        return entry_base(
-            client,
-            AgentMcpStatus::Unreadable,
-            Some(path),
-            None,
-            None,
-            expected,
-            Some(err),
-        );
-    }
-
-    if !installed && !any_file {
-        return entry_base(
-            client,
-            AgentMcpStatus::NotInstalled,
-            None,
-            None,
-            None,
-            expected,
-            Some("client not detected".into()),
-        );
-    }
-
-    // Installed (or empty config present) but no lounge-mcp entry.
-    let config_path = paths.into_iter().find(|p| p.exists());
-    entry_base(
-        client,
-        AgentMcpStatus::Missing,
-        config_path,
-        None,
-        None,
-        expected,
-        Some("lounge-mcp entry absent".into()),
-    )
-}
-
-fn is_better(new: &AgentHealthEntry, old: Option<&AgentHealthEntry>) -> bool {
-    let rank = |s: AgentMcpStatus| match s {
-        AgentMcpStatus::Ok => 0,
-        AgentMcpStatus::HashMismatch => 1,
-        AgentMcpStatus::Stale => 2,
-        AgentMcpStatus::NonCanonical => 3,
-        AgentMcpStatus::Missing => 4,
-        AgentMcpStatus::Unreadable => 5,
-        AgentMcpStatus::NotInstalled => 6,
-    };
-    match old {
-        None => true,
-        Some(prev) => rank(new.status) < rank(prev.status),
-    }
+    entries
 }
 
 #[derive(Debug)]
@@ -370,26 +361,54 @@ struct RawLoungeEntry {
     env_keys: Vec<String>,
 }
 
-fn read_lounge_entry(path: &Path) -> Result<Option<RawLoungeEntry>, String> {
-    let raw = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let value: Value =
-        serde_json::from_str(&raw).map_err(|e| format!("json {}: {e}", path.display()))?;
-    Ok(find_lounge_entry_in_value(&value))
+fn read_lounge_entries(
+    path: &Path,
+    allow_jsonc: bool,
+    scan_claude_projects: bool,
+) -> Result<Vec<(Option<String>, RawLoungeEntry)>, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
+    let value = if allow_jsonc {
+        parse_jsonc(&raw).map_err(|e| format!("jsonc parse failed: {e}"))?
+    } else {
+        serde_json::from_str(&raw).map_err(|e| format!("json parse failed: {e}"))?
+    };
+    Ok(collect_lounge_entries_in_value(
+        &value,
+        scan_claude_projects,
+    ))
 }
 
-fn find_lounge_entry_in_value(value: &Value) -> Option<RawLoungeEntry> {
+fn collect_lounge_entries_in_value(
+    value: &Value,
+    scan_claude_projects: bool,
+) -> Vec<(Option<String>, RawLoungeEntry)> {
+    let mut out = Vec::new();
+    if let Some(entry) = find_lounge_entry_in_map(value) {
+        out.push((None, entry));
+    }
+    if scan_claude_projects {
+        if let Some(projects) = value.get("projects").and_then(Value::as_object) {
+            for (proj_path, proj) in projects {
+                if let Some(entry) = find_lounge_entry_in_map(proj) {
+                    out.push((Some(proj_path.clone()), entry));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn find_lounge_entry_in_map(value: &Value) -> Option<RawLoungeEntry> {
     for map_key in ["mcpServers", "servers", "context_servers"] {
         let Some(obj) = value.get(map_key).and_then(Value::as_object) else {
             continue;
         };
-        // Prefer canonical key.
         if let Some(spec) = obj.get(LOUNGE_MCP_SERVER_KEY) {
             return Some(raw_from_spec(LOUNGE_MCP_SERVER_KEY, spec));
         }
-        // Fallback: any entry whose command looks like lounge-mcp.
         for (name, spec) in obj {
             let command = spec.get("command").and_then(Value::as_str).unwrap_or("");
-            if command_looks_like_lounge_mcp(command) {
+            if command_is_exact_lounge_mcp(command) {
                 return Some(raw_from_spec(name, spec));
             }
         }
@@ -422,13 +441,41 @@ fn raw_from_spec(key: &str, spec: &Value) -> RawLoungeEntry {
     }
 }
 
-fn command_looks_like_lounge_mcp(command: &str) -> bool {
-    let base = Path::new(command)
+/// Exact basename match: `lounge-mcp`, `lounge-mcp.exe`, `.cmd`, `.bat` — no substring.
+pub fn command_is_exact_lounge_mcp(command: &str) -> bool {
+    let base = Path::new(command.trim())
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or(command)
+        .unwrap_or(command.trim())
         .to_ascii_lowercase();
-    base == "lounge-mcp" || base == "lounge-mcp.exe" || base.contains("lounge-mcp")
+    matches!(
+        base.as_str(),
+        "lounge-mcp" | "lounge-mcp.exe" | "lounge-mcp.cmd" | "lounge-mcp.bat"
+    )
+}
+
+/// Resolve absolute/relative path or bare PATH name to a file.
+pub fn resolve_lounge_mcp_command(command: &str) -> Option<PathBuf> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let as_path = PathBuf::from(command);
+    if as_path.is_file() {
+        return Some(as_path);
+    }
+    // Bare name or PATH-relative: look up via PATH.
+    let base = as_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command);
+    find_executable(base).or_else(|| {
+        if command_is_exact_lounge_mcp(base) {
+            find_executable("lounge-mcp")
+        } else {
+            None
+        }
+    })
 }
 
 fn classify_entry(
@@ -480,7 +527,7 @@ fn classify_entry(
 
     if has_command {
         let command = raw.command.as_deref().unwrap_or("");
-        if !command_looks_like_lounge_mcp(command) {
+        if !command_is_exact_lounge_mcp(command) {
             return entry_base(
                 client,
                 AgentMcpStatus::NonCanonical,
@@ -491,7 +538,6 @@ fn classify_entry(
                 Some("command is not lounge-mcp".into()),
             );
         }
-        // Canonical stdio shape prefers LOUNGE_MCP_URL in env (docs/mcp.md).
         let has_url_env = raw.env_keys.iter().any(|k| k == "LOUNGE_MCP_URL");
         if !has_url_env && !has_url {
             return entry_base(
@@ -505,8 +551,7 @@ fn classify_entry(
             );
         }
 
-        let cmd_path = PathBuf::from(command);
-        if !cmd_path.is_file() {
+        let Some(cmd_path) = resolve_lounge_mcp_command(command) else {
             return entry_base(
                 client,
                 AgentMcpStatus::NonCanonical,
@@ -514,9 +559,9 @@ fn classify_entry(
                 Some(command.into()),
                 None,
                 expected,
-                Some("configured lounge-mcp binary path missing".into()),
+                Some("configured lounge-mcp binary not found on PATH".into()),
             );
-        }
+        };
 
         let configured_sha = sha256_file_hex(&cmd_path).ok();
         let configured_version = extract_embedded_version(&cmd_path);
@@ -530,7 +575,6 @@ fn classify_entry(
         );
     }
 
-    // URL-only remote entry under canonical key — accepted as ok (no local binary).
     entry_base(
         client,
         AgentMcpStatus::Ok,
@@ -578,8 +622,6 @@ fn compare_versions(
             e
         }
         SemverCmp::Equal | SemverCmp::Higher => {
-            // Same major.minor.patch with different SHA → hash_mismatch (info).
-            // Higher version: treat as ok (ahead of this build).
             let sha_mismatch = matches!(
                 (&configured_sha, &expected.sha256),
                 (Some(a), Some(b))
@@ -667,7 +709,37 @@ fn entry_base(
         expected_version: Some(expected.version.clone()),
         configured_sha256: configured_sha,
         expected_sha256: expected.sha256.clone(),
-        detail,
+        // Mask absolute home prefixes inside free-form error text (not only whole paths).
+        detail: detail.map(|d| mask_home_in_text(&d)),
+    }
+}
+
+/// Replace HOME/USERPROFILE prefixes that appear inside arbitrary detail strings.
+fn mask_home_in_text(text: &str) -> String {
+    let mut out = text.replace('\\', "/");
+    let mut homes: Vec<String> = Vec::new();
+    for key in ["HOME", "USERPROFILE"] {
+        if let Ok(v) = std::env::var(key) {
+            let n = v.replace('\\', "/").trim_end_matches('/').to_string();
+            if !n.is_empty() {
+                homes.push(n);
+            }
+        }
+    }
+    homes.sort_by_key(|h| std::cmp::Reverse(h.len()));
+    homes.dedup();
+    for home in homes {
+        if out.contains(&home) {
+            out = out.replace(&home, "~");
+        }
+    }
+    // Also handle a whole-path detail.
+    if out.starts_with("~/") || !out.contains('/') {
+        out
+    } else if out.starts_with('/') || (out.len() > 2 && out.as_bytes()[1] == b':') {
+        mask_home_path(&out)
+    } else {
+        out
     }
 }
 
@@ -699,7 +771,6 @@ pub fn extract_embedded_version_from_bytes(bytes: &[u8]) -> Option<String> {
             return Some(ver);
         }
     }
-    // Fallback: "Agent Lounge OS MCP 0.1.0"
     const NEEDLE: &str = "Agent Lounge OS MCP ";
     if let Some(idx) = text.find(NEEDLE) {
         let rest = &text[idx + NEEDLE.len()..];
@@ -714,6 +785,79 @@ pub fn extract_embedded_version_from_bytes(bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Strip `//` / `/* */` comments and trailing commas (VS Code / Windsurf / Cursor JSONC).
+pub fn strip_jsonc(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < chars.len() {
+            if chars[i + 1] == '/' {
+                i += 2;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if chars[i + 1] == '*' {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    // Remove trailing commas before } or ]
+    let mut cleaned = String::with_capacity(out.len());
+    let oc: Vec<char> = out.chars().collect();
+    let mut j = 0;
+    while j < oc.len() {
+        if oc[j] == ',' {
+            let mut k = j + 1;
+            while k < oc.len() && oc[k].is_whitespace() {
+                k += 1;
+            }
+            if k < oc.len() && (oc[k] == '}' || oc[k] == ']') {
+                j += 1;
+                continue;
+            }
+        }
+        cleaned.push(oc[j]);
+        j += 1;
+    }
+    cleaned
+}
+
+pub fn parse_jsonc(input: &str) -> Result<Value, String> {
+    let cleaned = strip_jsonc(input);
+    serde_json::from_str(&cleaned).map_err(|e| e.to_string())
+}
+
 /// Pure classify helper for unit tests (no filesystem install probes).
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn check_client_for_test(
@@ -722,18 +866,22 @@ pub fn check_client_for_test(
     paths: Vec<PathBuf>,
     expected: &ExpectedLoungeMcp,
 ) -> AgentHealthEntry {
-    check_client(
-        client,
-        installed,
-        paths,
-        &AgentHealthRoots {
-            home: PathBuf::from("/tmp"),
-            appdata: None,
-            xdg_config: None,
-            workspace: PathBuf::from("/tmp"),
-        },
-        expected,
-    )
+    let allow_jsonc = matches!(client, "cursor" | "vscode" | "windsurf");
+    check_client_entries(client, installed, paths, allow_jsonc, expected)
+        .into_iter()
+        .next()
+        .expect("at least one health entry")
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn check_client_entries_for_test(
+    client: &str,
+    installed: bool,
+    paths: Vec<PathBuf>,
+    allow_jsonc: bool,
+    expected: &ExpectedLoungeMcp,
+) -> Vec<AgentHealthEntry> {
+    check_client_entries(client, installed, paths, allow_jsonc, expected)
 }
 
 #[cfg(test)]
@@ -813,14 +961,53 @@ mod tests {
         }
     }
 
+    fn assert_paths_masked(entry: &AgentHealthEntry) {
+        for field in [
+            entry.config_path.as_deref(),
+            entry.command.as_deref(),
+            entry.detail.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                !field.contains("/home/")
+                    && !field.contains("\\Users\\")
+                    && !field.contains("/Users/"),
+                "unmasked home path in health field: {field}"
+            );
+            // Absolute unix roots that look like homes should be ~/…
+            if field.starts_with("~/") || field == "~/" || !field.starts_with('/') {
+                continue;
+            }
+            // Windows drive letters without home are ok; reject USERPROFILE-style leaks.
+            assert!(
+                !field.to_ascii_lowercase().contains("userprofile"),
+                "leaked profile in {field}"
+            );
+        }
+    }
+
     #[test]
     fn t3_fake_configs_per_client_byte_unchanged() {
         let _guard = ENV_LOCK.lock().unwrap();
         let (roots, base) = temp_roots("all");
-        let bin_ok = base.join("bin/lounge-mcp-ok");
-        let bin_stale = base.join("bin/lounge-mcp-stale");
+        // Exact basename lounge-mcp (no substring); separate dirs for ok/stale/hash.
+        let bin_ok = base.join("bin/ok/lounge-mcp");
+        let bin_stale = base.join("bin/stale/lounge-mcp");
         let sha_ok = fake_binary(&bin_ok, "0.1.0");
         let _sha_stale = fake_binary(&bin_stale, "0.0.9");
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+        let prev_appdata = std::env::var_os("APPDATA");
+        unsafe {
+            std::env::set_var("HOME", &roots.home);
+            std::env::set_var("USERPROFILE", &roots.home);
+            if let Some(ref ad) = roots.appdata {
+                std::env::set_var("APPDATA", ad);
+            }
+        }
 
         let expected = ExpectedLoungeMcp {
             version: "0.1.0".into(),
@@ -844,24 +1031,23 @@ mod tests {
             })
         };
 
-        // Cursor ok
+        // Cursor ok (user) — also write project stale for multi-config report
         let cursor_cfg = roots.home.join(".cursor/mcp.json");
         write_json(&cursor_cfg, &canonical(&bin_ok));
+        let cursor_proj = roots.workspace.join(".cursor/mcp.json");
+        write_json(&cursor_proj, &canonical(&bin_stale));
 
-        // Claude Desktop stale
         let claude_cfg = roots
             .os_config_dir("Claude")
             .join("claude_desktop_config.json");
         write_json(&claude_cfg, &canonical(&bin_stale));
 
-        // Antigravity missing entry
         let anti_cfg = roots.home.join(".gemini/config/mcp_config.json");
         write_json(
             &anti_cfg,
             &json!({ "mcpServers": { "other": { "command": "npx" } } }),
         );
 
-        // Claude Code non_canonical (wrong command)
         let code_cfg = roots.workspace.join(".mcp.json");
         write_json(
             &code_cfg,
@@ -876,51 +1062,102 @@ mod tests {
             }),
         );
 
-        // Grok unreadable
-        let grok_cfg = roots.os_config_dir("Grok").join("mcp.json");
+        // Grok unreadable — path under home; detail must be masked
+        let grok_cfg = roots.home.join(".grok/mcp.json");
         fs::create_dir_all(grok_cfg.parent().unwrap()).unwrap();
         fs::write(&grok_cfg, "{ not json").unwrap();
 
-        // VS Code servers key + ok
+        // VS Code JSONC with comments + trailing comma
         let vscode_cfg = roots.workspace.join(".vscode/mcp.json");
-        write_json(
+        fs::create_dir_all(vscode_cfg.parent().unwrap()).unwrap();
+        fs::write(
             &vscode_cfg,
-            &json!({
-                "servers": {
-                    "agent-lounge-os": {
-                        "command": bin_ok.to_string_lossy(),
-                        "args": [],
-                        "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }
-                    }
-                }
-            }),
-        );
+            format!(
+                r#"{{
+  // lounge health jsonc fixture
+  "servers": {{
+    "agent-lounge-os": {{
+      "command": "{}",
+      "args": [],
+      "env": {{ "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }},
+    }},
+  }},
+}}"#,
+                bin_ok.display()
+            ),
+        )
+        .unwrap();
 
-        // Windsurf hash_mismatch (same version, different bytes)
-        let bin_hash = base.join("bin/lounge-mcp-hash");
+        // Exact basename lounge-mcp; different content → HashMismatch at equal semver.
+        let bin_hash = base.join("bin/hash/lounge-mcp");
         fake_binary(&bin_hash, "0.1.0");
-        // Append extra byte so SHA differs while version matches.
         {
-            use std::io::Write;
             let mut f = fs::OpenOptions::new().append(true).open(&bin_hash).unwrap();
             writeln!(f, "# pad").unwrap();
         }
         let wind_cfg = roots.home.join(".codeium/windsurf/mcp_config.json");
         write_json(&wind_cfg, &canonical(&bin_hash));
 
+        // Claude Code ~/.claude.json with per-project mcpServers
+        let claude_json = roots.home.join(".claude.json");
+        let proj_path = roots.workspace.join("proj-a");
+        fs::create_dir_all(&proj_path).unwrap();
+        write_json(
+            &claude_json,
+            &json!({
+                "mcpServers": {},
+                "projects": {
+                    proj_path.to_string_lossy().to_string(): {
+                        "mcpServers": {
+                            "agent-lounge-os": {
+                                "command": bin_ok.to_string_lossy(),
+                                "args": [],
+                                "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+
         let watched = vec![
             cursor_cfg.clone(),
+            cursor_proj.clone(),
             claude_cfg.clone(),
             anti_cfg.clone(),
             code_cfg.clone(),
             grok_cfg.clone(),
             vscode_cfg.clone(),
             wind_cfg.clone(),
+            claude_json.clone(),
         ];
         let before = snapshot_files(&watched);
 
-        // Force "installed" via check_client_for_test for each.
-        let cursor = check_client_for_test("cursor", true, vec![cursor_cfg.clone()], &expected);
+        let cursor_entries = check_client_entries_for_test(
+            "cursor",
+            true,
+            vec![cursor_cfg.clone(), cursor_proj.clone()],
+            true,
+            &expected,
+        );
+        assert_eq!(
+            cursor_entries.len(),
+            2,
+            "both cursor configs reported: {cursor_entries:?}"
+        );
+        assert!(
+            cursor_entries
+                .iter()
+                .any(|e| e.status == AgentMcpStatus::Ok),
+            "want Ok in {cursor_entries:?}"
+        );
+        assert!(
+            cursor_entries
+                .iter()
+                .any(|e| e.status == AgentMcpStatus::Stale),
+            "want Stale in {cursor_entries:?}"
+        );
+
         let claude =
             check_client_for_test("claude_desktop", true, vec![claude_cfg.clone()], &expected);
         let anti = check_client_for_test("antigravity", true, vec![anti_cfg.clone()], &expected);
@@ -929,22 +1166,45 @@ mod tests {
         let grok = check_client_for_test("grok_bot", true, vec![grok_cfg.clone()], &expected);
         let vscode = check_client_for_test("vscode", true, vec![vscode_cfg.clone()], &expected);
         let wind = check_client_for_test("windsurf", true, vec![wind_cfg.clone()], &expected);
+        let claude_proj_entries = check_client_entries_for_test(
+            "claude_code",
+            true,
+            vec![claude_json.clone()],
+            false,
+            &expected,
+        );
 
-        assert_eq!(cursor.status, AgentMcpStatus::Ok);
         assert_eq!(claude.status, AgentMcpStatus::Stale);
-        assert_eq!(claude.severity, "warning");
         assert_eq!(anti.status, AgentMcpStatus::Missing);
         assert_eq!(claude_code.status, AgentMcpStatus::NonCanonical);
         assert_eq!(grok.status, AgentMcpStatus::Unreadable);
-        assert_eq!(vscode.status, AgentMcpStatus::Ok);
+        assert_eq!(vscode.status, AgentMcpStatus::Ok, "JSONC must parse");
         assert_eq!(wind.status, AgentMcpStatus::HashMismatch);
-        assert_eq!(wind.severity, "info");
+        assert!(
+            claude_proj_entries
+                .iter()
+                .any(|e| e.status == AgentMcpStatus::Ok
+                    && e.detail
+                        .as_deref()
+                        .is_some_and(|d| d.contains("project scope"))),
+            "claude.json projects.<path>.mcpServers scanned: {claude_proj_entries:?}"
+        );
 
-        // Full check_all also must not write.
+        // Blocker 1: unreadable detail must not leak absolute home path
+        let detail = grok.detail.as_deref().unwrap_or("");
+        assert!(
+            !detail.contains(roots.home.to_string_lossy().as_ref()),
+            "detail leaked home: {detail}"
+        );
+        assert_paths_masked(&grok);
+        assert_paths_masked(&vscode);
+        for e in &cursor_entries {
+            assert_paths_masked(e);
+        }
+
         let _ = check_all_agents(&roots, &expected);
         assert_unchanged(&before);
 
-        // not_installed when no files and not installed
         let none = check_client_for_test(
             "cursor",
             false,
@@ -953,7 +1213,97 @@ mod tests {
         );
         assert_eq!(none.status, AgentMcpStatus::NotInstalled);
 
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match prev_appdata {
+                Some(v) => std::env::set_var("APPDATA", v),
+                None => std::env::remove_var("APPDATA"),
+            }
+        }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bare_lounge_mcp_on_path_is_ok_not_non_canonical() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (roots, base) = temp_roots("path");
+        let bin_dir = base.join("pathbin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join(if cfg!(windows) {
+            "lounge-mcp.exe"
+        } else {
+            "lounge-mcp"
+        });
+        let sha = fake_binary(&bin, "0.1.0");
+        let expected = ExpectedLoungeMcp {
+            version: "0.1.0".into(),
+            sha256: Some(sha),
+            path: Some(bin.clone()),
+        };
+
+        let prev_path = std::env::var_os("PATH");
+        let mut new_path = bin_dir.display().to_string();
+        if let Some(ref p) = prev_path {
+            new_path.push(if cfg!(windows) { ';' } else { ':' });
+            new_path.push_str(&p.to_string_lossy());
+        }
+        unsafe { std::env::set_var("PATH", &new_path) };
+
+        let cfg = roots.home.join(".cursor/mcp.json");
+        write_json(
+            &cfg,
+            &json!({
+                "mcpServers": {
+                    "agent-lounge-os": {
+                        "command": "lounge-mcp",
+                        "args": [],
+                        "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }
+                    }
+                }
+            }),
+        );
+        let before = fs::read(&cfg).unwrap();
+        let entry = check_client_for_test("cursor", true, vec![cfg.clone()], &expected);
+        assert_eq!(
+            entry.status,
+            AgentMcpStatus::Ok,
+            "bare PATH command should resolve: {:?}",
+            entry.detail
+        );
+        assert_eq!(fs::read(&cfg).unwrap(), before);
+
+        // Substring must NOT match
+        assert!(!command_is_exact_lounge_mcp("my-lounge-mcp-wrapper"));
+        assert!(!command_is_exact_lounge_mcp("lounge-mcp-extra"));
+        assert!(command_is_exact_lounge_mcp("lounge-mcp"));
+        assert!(command_is_exact_lounge_mcp("/opt/bin/lounge-mcp"));
+
+        unsafe {
+            match prev_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn jsonc_strip_comments_and_trailing_commas() {
+        let raw = r#"{
+          // comment
+          "a": 1,
+          "b": [1, 2,],
+        }"#;
+        let v = parse_jsonc(raw).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"][1], 2);
     }
 
     #[test]

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/lounge_health_report.schema.json",
   "title": "LoungeHealthReport",
-  "description": "Versioned Health-1b lounge_health response (schema_version 1.0.0).",
+  "description": "Versioned Health-1b lounge_health response (schema_version 1.0.0). Process-local fields: title.queue_backlog and title.last_error_type reflect the calling process only — standalone lounge-mcp reports 0/null; use the Tauri lounge_health command for app-worker values. title.db_backlog / give_ups are durable SQLite.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -72,10 +72,17 @@
         "model"
       ],
       "properties": {
-        "queue_backlog": { "type": "integer", "minimum": 0 },
+        "queue_backlog": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "In-process title worker queue depth. Always 0 in standalone lounge-mcp (separate process)."
+        },
         "db_backlog": { "type": "integer", "minimum": 0 },
         "give_ups": { "type": "integer", "minimum": 0 },
-        "last_error_type": { "type": ["string", "null"] },
+        "last_error_type": {
+          "type": ["string", "null"],
+          "description": "Last TitleError kind in this process (timeout|http|connect|other). Always null in standalone lounge-mcp."
+        },
         "lmr_reachable": { "type": "boolean" },
         "model_installed": { "type": "boolean" },
         "model": { "type": "string" },
