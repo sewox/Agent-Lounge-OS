@@ -594,6 +594,10 @@ impl McpServer {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
             },
+            "lounge_health" => match self.tool_lounge_health(&args).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
             "lounge_list_my_tasks" => match self.tool_list_my_tasks(&args, client).await {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
@@ -1195,6 +1199,22 @@ impl McpServer {
         self.orchestrator.skips_nats()
     }
 
+    async fn tool_lounge_health(&self, args: &Value) -> Result<Value> {
+        let args = if args.is_null() {
+            json!({})
+        } else {
+            args.clone()
+        };
+        validate_schema(SchemaKind::McpLoungeHealth, &args).map_err(|e| anyhow!(e))?;
+        let report = crate::services::collect_lounge_health(&self.store).await;
+        let value = serde_json::to_value(&report).context("lounge_health serialize")?;
+        // Soft-validate response shape (snapshot lock).
+        if let Err(err) = validate_schema(SchemaKind::LoungeHealthReport, &value) {
+            log::warn!("lounge_health report schema: {err}");
+        }
+        Ok(value)
+    }
+
     async fn tool_status(&self, args: &Value, client: &ClientCtx) -> Result<Value> {
         let args = if args.is_null() {
             json!({})
@@ -1516,6 +1536,11 @@ yoksa ADR boş kalır (UI: No ADR). `tags` ajan etiketleridir (normalize edilir;
             "Bağlı ajanlar + NATS/LMR/MCP HTTP sağlık + timeout_limit. Ayar değiştirmez. Yanıtta `_meta.pending_results` piggyback olabilir.",
             include_schema("mcp_status.schema.json"),
         ),
+        tool_def(
+            "lounge_health",
+            "Health-1b birleşik sağlık (şema 1.0.0): dead symbols, ajan lounge-mcp config (salt okunur), title/LMR backlog, CBM daemon + 18749 pollution tespiti (düzeltmez). Ev yolları ~/… maskeli. Ayar/config yazmaz.",
+            include_schema("mcp_lounge_health.schema.json"),
+        ),
     ]
 }
 
@@ -1548,6 +1573,9 @@ fn include_schema(file: &str) -> Value {
         }
         "mcp_list_my_tasks.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_list_my_tasks.schema.json")
+        }
+        "mcp_lounge_health.schema.json" => {
+            include_str!("../../../shared/lounge_protocol/schemas/mcp_lounge_health.schema.json")
         }
         other => panic!("bilinmeyen schema: {other}"),
     };
@@ -2538,6 +2566,54 @@ mod tests {
             .all(|row| row["project_id"] == expected_b));
 
         let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    /// T5: MCP probe — `lounge_health` tools/call returns versioned schema.
+    #[tokio::test]
+    async fn t5_lounge_health_mcp_tool_call() {
+        let store = ExperienceStore::memory().expect("db");
+        let server = McpServer::new(store, "nats://127.0.0.1:9");
+        let mut client = ClientCtx {
+            name: "mcp-probe".into(),
+            version: "0.1".into(),
+            initialized: true,
+            session_id: "sess-health".into(),
+            workspace_path: String::new(),
+        };
+        let resp = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"lounge_health","arguments":{}}}"#,
+                &mut client,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&resp).unwrap();
+        assert!(v["error"].is_null(), "unexpected error: {v}");
+        let body = &v["result"]["structuredContent"];
+        assert_eq!(body["schema_version"], "1.0.0");
+        assert!(body["agents"].is_array());
+        assert!(body["title"].is_object());
+        assert!(body["dead_symbols"].is_object());
+        assert!(body["cbm"].is_object());
+        assert!(body["platform"].is_object());
+        validate_schema(SchemaKind::LoungeHealthReport, body).expect("report schema");
+
+        // tools/list advertises lounge_health
+        let listed = server
+            .handle_line_for(
+                r#"{"jsonrpc":"2.0","id":43,"method":"tools/list","params":{}}"#,
+                &mut client,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let list_v: Value = serde_json::from_str(&listed).unwrap();
+        let tools = list_v["result"]["tools"].as_array().unwrap();
+        assert!(
+            tools.iter().any(|t| t["name"] == "lounge_health"),
+            "lounge_health missing from tools/list"
+        );
     }
 
     #[tokio::test]

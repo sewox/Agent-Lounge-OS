@@ -32,6 +32,11 @@ schema!(mcp_call_agent_validator, "mcp_call_agent.schema.json");
 schema!(mcp_wait_task_validator, "mcp_wait_task.schema.json");
 schema!(mcp_yield_result_validator, "mcp_yield_result.schema.json");
 schema!(mcp_list_my_tasks_validator, "mcp_list_my_tasks.schema.json");
+schema!(mcp_lounge_health_validator, "mcp_lounge_health.schema.json");
+schema!(
+    lounge_health_report_validator,
+    "lounge_health_report.schema.json"
+);
 
 #[derive(Debug, Clone, Copy)]
 pub enum SchemaKind {
@@ -46,6 +51,8 @@ pub enum SchemaKind {
     McpWaitTask,
     McpYieldResult,
     McpListMyTasks,
+    McpLoungeHealth,
+    LoungeHealthReport,
 }
 
 /// `instance` verilen şemaya uymuyorsa insan-okur hata metni döner.
@@ -62,6 +69,8 @@ pub fn validate(kind: SchemaKind, instance: &Value) -> Result<(), String> {
         SchemaKind::McpWaitTask => mcp_wait_task_validator(),
         SchemaKind::McpYieldResult => mcp_yield_result_validator(),
         SchemaKind::McpListMyTasks => mcp_list_my_tasks_validator(),
+        SchemaKind::McpLoungeHealth => mcp_lounge_health_validator(),
+        SchemaKind::LoungeHealthReport => lounge_health_report_validator(),
     };
     let Ok(()) = validator.validate(instance) else {
         let errors: Vec<String> = validator
@@ -207,5 +216,55 @@ mod tests {
             "created_at": "2026-09-18T12:00:00.000Z"
         });
         validate(SchemaKind::Task, &good).expect("legacy task");
+    }
+
+    /// T5: schema snapshot — args empty object + report shape locked to 1.0.0.
+    #[test]
+    fn t5_lounge_health_schema_snapshot() {
+        validate(SchemaKind::McpLoungeHealth, &json!({})).expect("empty args");
+        assert!(validate(SchemaKind::McpLoungeHealth, &json!({ "x": 1 })).is_err());
+
+        let report = json!({
+            "schema_version": "1.0.0",
+            "checked_at": "2026-10-16T00:00:00.000Z",
+            "platform": {
+                "os": "linux",
+                "arch": "x86_64",
+                "distro_id": "ubuntu",
+                "distro_id_like": "debian",
+                "package_manager": "apt"
+            },
+            "agents": [{
+                "client": "cursor",
+                "status": "ok",
+                "severity": "ok"
+            }],
+            "title": {
+                "queue_backlog": 0,
+                "db_backlog": 0,
+                "give_ups": 0,
+                "lmr_reachable": false,
+                "model_installed": false,
+                "model": "gemma-2-2b-it"
+            },
+            "dead_symbols": {
+                "kritik": 0,
+                "potansiyel": 0,
+                "total": 0,
+                "ignored": 0
+            },
+            "cbm": {
+                "daemon_mode": false,
+                "polluted_18749": false
+            },
+            "expected_lounge_mcp_version": "0.1.0",
+            "expected_lounge_mcp_sha256": null
+        });
+        validate(SchemaKind::LoungeHealthReport, &report).expect("report snapshot");
+
+        let raw_args = include_str!("../schemas/mcp_lounge_health.schema.json");
+        let raw_report = include_str!("../schemas/lounge_health_report.schema.json");
+        assert!(raw_args.contains("mcp_lounge_health"));
+        assert!(raw_report.contains("\"const\": \"1.0.0\""));
     }
 }

@@ -16,11 +16,25 @@ use std::process::ExitCode;
 use app_lib::bridge::mcp_server::{resolve_db_path, resolve_nats_url, run_stdio, workspace_root};
 use app_lib::db::ExperienceStore;
 
+/// Embedded for Health-1b read-only version/SHA probes (must remain in the binary).
+#[used]
+static LOUNGE_MCP_VERSION_EMBED: &str =
+    concat!("LOUNGE_MCP_VERSION=", env!("CARGO_PKG_VERSION"));
+
 fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    if args.any(|a| a == "--version" || a == "-V") {
+        // Keep embed live for scanners even on --version fast-path.
+        let _ = LOUNGE_MCP_VERSION_EMBED;
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
     eprintln!(
         "[lounge-mcp] Agent Lounge OS MCP {} — stdio shim",
         env!("CARGO_PKG_VERSION")
     );
+    let _ = LOUNGE_MCP_VERSION_EMBED;
 
     let db_path = resolve_db_path(workspace_root());
     let nats_url = resolve_nats_url();

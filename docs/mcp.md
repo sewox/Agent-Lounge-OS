@@ -113,6 +113,7 @@ Lounge’un codebase-memory-mcp **3D Graph UI** dinleme portu Antigravity cbm va
 | `lounge_dispatch_task` | `mcp_dispatch_task.schema.json` | Fire-and-forget (yeni A2A altyapısı); sonuç → `lounge_wait_task` |
 | `lounge_ask_agent` | aynı | Dispatch alias |
 | `lounge_status` | `mcp_status.schema.json` | Bağlı ajanlar + sağlık + `timeout_limit_secs` |
+| `lounge_health` | `mcp_lounge_health.schema.json` | Health-1b birleşik rapor (şema `1.0.0`): ajan MCP config (salt okunur), title/LMR backlog, dead symbols, CBM daemon + 18749 pollution **tespiti** (düzeltmez). Ev yolları `~/…` |
 
 Serbest biçim / `additionalProperties` → net MCP `isError` yanıtı.
 
