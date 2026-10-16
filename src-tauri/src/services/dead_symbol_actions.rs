@@ -133,6 +133,7 @@ mod tests {
             line: Some(10),
             detail: None,
             last_ref: None,
+            ..DeadSymbol::default()
         });
         store.save_project_index(graph).await.expect("save");
 
@@ -144,6 +145,7 @@ mod tests {
             line: Some(1),
             detail: None,
             last_ref: None,
+            ..DeadSymbol::default()
         };
         let err = store.resolve_dead_symbol(spoof).await;
         assert!(

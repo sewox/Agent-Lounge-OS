@@ -17,9 +17,9 @@ use kernel::{
 use lounge_protocol::LoungeMessage;
 use models::{
     merge_project_summaries, AstNode, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
-    DiscoveryReport, IndexSnapshot, LoungeExperience, LoungeTask, ProjectPageList, ProjectSummary,
-    QuotaState, RecommendedModels, RoutingPolicy, RoutingVote, SemanticMap, ServiceReport,
-    TaskKind, ToolQuota, VaultProjectAggregate, TASK_REQUESTED,
+    DiscoveryReport, HealthScanResult, IndexSnapshot, LoungeExperience, LoungeTask,
+    ProjectPageList, ProjectSummary, QuotaState, RecommendedModels, RoutingPolicy, RoutingVote,
+    SemanticMap, ServiceReport, TaskKind, ToolQuota, VaultProjectAggregate, TASK_REQUESTED,
 };
 use services::autodiscover::discovery_report;
 use services::{
@@ -32,9 +32,10 @@ use services::{
     placement_for_window, record_dead_snapshot, record_whisper_injection,
     resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
     spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence, EfficiencyReportQuery,
-    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus, IndexJob,
-    IndexProgress, IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
-    SharedServices, WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
+    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus,
+    HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus,
+    MemoryBridge, ModelManager, ServiceManager, SharedServices, WorkspaceScanResult,
+    GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -206,6 +207,13 @@ pub fn run_with_start_route(start_route: &'static str) {
             let index_queue = IndexQueue::new(memory.clone(), store.clone());
             index_queue.ensure_worker(app.handle().clone());
 
+            let health_scan_queue = HealthScanQueue::new(memory.clone(), store.clone());
+            health_scan_queue.ensure_worker(app.handle().clone());
+            let health_for_install = health_scan_queue.clone();
+            tauri::async_runtime::spawn(async move {
+                services::install_health_scan_queue(health_for_install).await;
+            });
+
             app.manage(services.clone());
             app.manage(dispatcher.clone());
             app.manage(workers);
@@ -216,6 +224,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(graph_ui);
             app.manage(memory.clone());
             app.manage(index_queue);
+            app.manage(health_scan_queue);
 
             // Graph UI port — settings'ten MemoryBridge + mode yükle (process-global yok).
             // Also run one-time shared CBM config.json pollution migration.
@@ -350,6 +359,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_index_jobs,
             cancel_index_job,
             cancel_all_index_jobs,
+            start_health_scan,
+            cancel_health_scan,
+            list_health_scans,
+            get_health_scan,
             get_dead_symbols,
             get_semantic_map,
             list_vault_projects,
@@ -554,7 +567,54 @@ async fn index_workspace(
             log::warn!("dead snapshot: {err}");
         }
     }
+    // Health-1a: background full dead scan (concurrency 1) after manual index too.
+    let repo = graph.repo_path.clone();
+    let hint = snapshot.project.clone();
+    tauri::async_runtime::spawn(async move {
+        services::enqueue_after_index(&repo, &hint).await;
+    });
     Ok(snapshot)
+}
+
+/// Health-1a: manually trigger a full dead-symbol scan for a repo.
+#[tauri::command]
+async fn start_health_scan(
+    queue: tauri::State<'_, std::sync::Arc<HealthScanQueue>>,
+    repo_path: String,
+    project_id: Option<String>,
+) -> Result<HealthScanJob, String> {
+    let hint = project_id.unwrap_or_default();
+    queue
+        .enqueue(repo_path.trim(), hint.trim())
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn cancel_health_scan(
+    app: tauri::AppHandle,
+    queue: tauri::State<'_, std::sync::Arc<HealthScanQueue>>,
+    job_id: String,
+) -> Result<bool, String> {
+    Ok(queue.cancel_job(&app, job_id.trim()).await)
+}
+
+#[tauri::command]
+async fn list_health_scans(
+    queue: tauri::State<'_, std::sync::Arc<HealthScanQueue>>,
+) -> Result<Vec<HealthScanJob>, String> {
+    Ok(queue.list_jobs().await)
+}
+
+#[tauri::command]
+async fn get_health_scan(
+    queue: tauri::State<'_, std::sync::Arc<HealthScanQueue>>,
+    project_id: String,
+) -> Result<Option<HealthScanResult>, String> {
+    Ok(queue
+        .latest_for_project(project_id.trim())
+        .await
+        .and_then(|job| job.result))
 }
 
 /// Çalışma alanını tara → projeleri keşfet/import et → arka plan indeks kuyruğuna al.

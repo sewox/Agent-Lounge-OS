@@ -79,6 +79,71 @@ pub struct DeadSymbol {
     /// Last known reference site (`file:line`) from index edges; absent when unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_ref: Option<String>,
+    /// Health-1a: `Kritik` | `Potansiyel` (absent on pre-Health rows / ignored list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    /// Health-1a rule id that produced this finding (e.g. `broken-missing-target`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+/// Health-1a full dead-symbol scan outcome (backend; no UI contract yet).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HealthScanResult {
+    /// Canonical Project-ID-Core key.
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub repo_path: String,
+    /// Real index timestamp written into `project_index.indexed_at`.
+    #[serde(default)]
+    pub indexed_at: String,
+    #[serde(default)]
+    pub symbols_scanned: u64,
+    #[serde(default)]
+    pub edges_scanned: u64,
+    #[serde(default)]
+    pub expected_symbols: u64,
+    #[serde(default)]
+    pub expected_edges: u64,
+    #[serde(default)]
+    pub pages: u64,
+    #[serde(default)]
+    pub page_size: u64,
+    /// True when cancel / abort / count mismatch cut the scan short.
+    #[serde(default)]
+    pub partial: bool,
+    /// Why the scan is partial (`cancelled`, `count_mismatch`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub kritik: Vec<DeadSymbol>,
+    #[serde(default)]
+    pub potansiyel: Vec<DeadSymbol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Per-page progress emitted during Health-1a scanning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HealthScanProgress {
+    #[serde(default)]
+    pub job_id: String,
+    #[serde(default)]
+    pub project_id: String,
+    /// `Function` | `Method` | `CALLS`
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub page_index: u64,
+    #[serde(default)]
+    pub page_rows: u64,
+    #[serde(default)]
+    pub symbols_so_far: u64,
+    #[serde(default)]
+    pub edges_so_far: u64,
+    #[serde(default)]
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

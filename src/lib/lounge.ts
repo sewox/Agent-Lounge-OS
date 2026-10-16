@@ -1593,6 +1593,42 @@ export type DeadSymbol = {
   detail?: string | null;
   project_id?: string | null;
   last_ref?: string | null;
+  /** Health-1a: Kritik | Potansiyel */
+  severity?: string | null;
+  /** Health-1a rule id that flagged the finding */
+  rule?: string | null;
+};
+
+/** Health-1a full dead-symbol scan outcome (backend; no UI contract yet). */
+export type HealthScanResult = {
+  project_id: string;
+  repo_path: string;
+  indexed_at: string;
+  symbols_scanned: number;
+  edges_scanned: number;
+  expected_symbols: number;
+  expected_edges: number;
+  pages: number;
+  page_size: number;
+  partial: boolean;
+  /** Why the scan is partial (`cancelled`, `count_mismatch`, …). */
+  reason?: string | null;
+  kritik: DeadSymbol[];
+  potansiyel: DeadSymbol[];
+  error?: string | null;
+};
+
+/** Per-page progress emitted during Health-1a scanning. */
+export type HealthScanProgress = {
+  job_id: string;
+  project_id: string;
+  /** Function | Method | CALLS */
+  label: string;
+  page_index: number;
+  page_rows: number;
+  symbols_so_far: number;
+  edges_so_far: number;
+  partial: boolean;
 };
 
 export type AstNode = {

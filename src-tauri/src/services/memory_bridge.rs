@@ -17,6 +17,9 @@ use crate::models::{
 
 /// Read-only tool hard timeout (CLI + HTTP).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Extra seconds per 1000 Cypher rows for Health-1a paged `query_graph` calls.
+/// 2000-row pages → READ_TIMEOUT + 30s (not a test-only bump — production scale).
+pub const HEALTH_PAGE_TIMEOUT_PER_1000: u64 = 15;
 /// Index / write tools — large repos must not die at 15s.
 pub const MUTATING_TIMEOUT: Duration = Duration::from_secs(300);
 pub const UI_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -31,8 +34,11 @@ pub const DEFAULT_GRAPH_UI_PORT: u16 = GRAPH_UI_PORT_BAND_START;
 pub const LIST_PROJECTS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Semantic map UI için üst sınır — viewport kilitli listede sayfalama var.
+/// Health-1a full dead scan does **not** use these; see [`HEALTH_SCAN_PAGE_SIZE`].
 const SEMANTIC_NODE_LIMIT: u32 = 400;
 const SEMANTIC_CALL_LIMIT: u32 = 800;
+/// Health-1a paged Cypher scan page size (Function+Method / CALLS).
+pub const HEALTH_SCAN_PAGE_SIZE: u32 = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransportMode {
@@ -202,16 +208,9 @@ impl MemoryBridge {
             .canonicalize()
             .with_context(|| format!("repo_path çözümlenemedi: {trimmed}"))?;
         let repo = repo_path.to_str().context("repo_path UTF-8 değil")?;
+        // CBM v0.11+: JSON via `cli --json` (run_cli), not tool-level `--format`.
         let stdout = self
-            .run_tool(&[
-                "index_repository",
-                "--repo-path",
-                repo,
-                "--mode",
-                "fast",
-                "--format",
-                "json",
-            ])
+            .run_tool(&["index_repository", "--repo-path", repo, "--mode", "fast"])
             .await?;
         // Index başarılı → list_projects cache bayat.
         self.invalidate_list_cache().await;
@@ -246,14 +245,8 @@ impl MemoryBridge {
         }
 
         apply_ref_counts(&mut graph.nodes, &graph.references);
-        if graph.dead.is_empty() && (!graph.nodes.is_empty() || !graph.references.is_empty()) {
-            graph.dead = derive_dead(&graph.nodes, &graph.references, project);
-            for item in &mut graph.dead {
-                if item.project_id.is_none() {
-                    item.project_id = Some(project.to_string());
-                }
-            }
-        }
+        // Health-1a: do not derive dead from SEMANTIC_* LIMIT samples.
+        // Full paged scan + SQLite JOIN owns dead/broken (background after index).
         // EX-14: truncated LIMIT lists must not overwrite real graph totals.
         if let Ok((nodes, edges)) = self.fetch_graph_totals(project).await {
             if nodes > 0 {
@@ -291,6 +284,7 @@ impl MemoryBridge {
     }
 
     async fn fetch_ast_nodes(&self, project: &str) -> Result<Vec<AstNode>> {
+        // Semantic map viewport sample only — Health-1a uses fetch_ast_nodes_page.
         let mut nodes = Vec::new();
         for (label, kind) in [("Function", "function"), ("Method", "method")] {
             let query = format!(
@@ -308,6 +302,7 @@ impl MemoryBridge {
     }
 
     async fn fetch_call_edges(&self, project: &str) -> Result<Vec<CodeReference>> {
+        // Semantic map viewport sample only — Health-1a uses fetch_call_edges_page.
         let query = format!(
             "MATCH (caller)-[r:CALLS]->(callee) \
              RETURN caller.name AS caller, callee.name AS callee, \
@@ -318,17 +313,153 @@ impl MemoryBridge {
         Ok(call_edges_from_query(&payload))
     }
 
+    /// Health-1a: one page of Function or Method symbols (ORDER BY for stable boundaries).
+    ///
+    /// Paging uses CBM v0.11 `--offset` / `--max-rows` only (default max-rows is 200).
+    /// Cypher must **not** also contain `SKIP`/`LIMIT` — real CBM applies both and
+    /// double-skips. Test stubs parse `--offset`. Callers must advance `skip` by
+    /// **returned row count** (token truncation can yield fewer than `limit`).
+    pub async fn fetch_ast_nodes_page(
+        &self,
+        project: &str,
+        label: &str,
+        kind: &str,
+        skip: u64,
+        limit: u32,
+    ) -> Result<Vec<AstNode>> {
+        let query = format!(
+            "MATCH (f:{label}) RETURN f.name AS name, f.qualified_name AS id, \
+             f.file_path AS file, f.start_line AS line \
+             ORDER BY f.qualified_name"
+        );
+        let timeout = health_page_timeout(&self.config(), limit);
+        let payload = self
+            .query_graph_page_with_timeout(project, &query, skip, limit, timeout)
+            .await?;
+        Ok(ast_nodes_from_query(&payload, kind))
+    }
+
+    /// Health-1a: one page of CALLS edges.
+    pub async fn fetch_call_edges_page(
+        &self,
+        project: &str,
+        skip: u64,
+        limit: u32,
+    ) -> Result<Vec<CodeReference>> {
+        let query = "MATCH (caller)-[r:CALLS]->(callee) \
+             RETURN caller.name AS caller, callee.name AS callee, \
+             caller.qualified_name AS from_id, callee.qualified_name AS to_id, \
+             caller.file_path AS file, r.line AS line \
+             ORDER BY caller.qualified_name, callee.qualified_name, r.line"
+            .to_string();
+        let timeout = health_page_timeout(&self.config(), limit);
+        let payload = self
+            .query_graph_page_with_timeout(project, &query, skip, limit, timeout)
+            .await?;
+        Ok(call_edges_from_query(&payload))
+    }
+
+    /// Health-1a: Cypher COUNT for a Function/Method label (paging guard).
+    pub async fn fetch_label_count(&self, project: &str, label: &str) -> Result<u64> {
+        let query = format!("MATCH (f:{label}) RETURN count(f) AS c");
+        let payload = self.query_graph_json(project, &query).await?;
+        Ok(count_from_query(&payload))
+    }
+
+    /// Health-1a: Cypher COUNT for CALLS edges.
+    pub async fn fetch_calls_count(&self, project: &str) -> Result<u64> {
+        let payload = self
+            .query_graph_json(project, "MATCH ()-[r:CALLS]->() RETURN count(r) AS c")
+            .await?;
+        Ok(count_from_query(&payload))
+    }
+
+    /// Best-effort CBM project name for query_graph (basename / list_projects match).
+    pub async fn resolve_cbm_project_name(&self, repo_path: &str) -> Option<String> {
+        let want = PathBuf::from(repo_path);
+        let want_canon = want.canonicalize().unwrap_or(want);
+        if let Ok(projects) = self.list_projects().await {
+            for row in projects {
+                if let Some(root) = row.root_path.as_deref() {
+                    let root_path = PathBuf::from(root);
+                    let root_canon = root_path.canonicalize().unwrap_or(root_path);
+                    if root_canon == want_canon && !row.name.trim().is_empty() {
+                        return Some(row.name);
+                    }
+                }
+            }
+        }
+        Path::new(repo_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+    }
+
     async fn query_graph_json(&self, project: &str, query: &str) -> Result<Value> {
+        let timeout = tool_timeout_for(&self.config(), "query_graph");
+        self.query_graph_json_with_timeout(project, query, timeout)
+            .await
+    }
+
+    async fn query_graph_json_with_timeout(
+        &self,
+        project: &str,
+        query: &str,
+        timeout: Duration,
+    ) -> Result<Value> {
         let stdout = self
-            .run_tool(&[
-                "query_graph",
-                "--project",
-                project,
-                "--query",
-                query,
-                "--format",
-                "json",
-            ])
+            .run_tool_with_timeout(
+                &[
+                    "query_graph",
+                    "--project",
+                    project,
+                    "--query",
+                    query,
+                    "--format",
+                    "json",
+                    // Raise CBM v0.11 default max-rows=200 so COUNT / small queries are intact.
+                    "--max-rows",
+                    "99998",
+                ],
+                timeout,
+            )
+            .await?;
+        parse_cli_json(&stdout)
+    }
+
+    async fn query_graph_page_with_timeout(
+        &self,
+        project: &str,
+        query: &str,
+        offset: u64,
+        max_rows: u32,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let offset_s = offset.to_string();
+        let max_s = max_rows.to_string();
+        // CBM v0.11 silently truncates large pages on the default token budget
+        // (`truncated: true` with far fewer than max-rows). Raise the ceiling so a
+        // 2000-row Function page fits.
+        const MAX_OUTPUT_TOKENS: &str = "2000000";
+        let stdout = self
+            .run_tool_with_timeout(
+                &[
+                    "query_graph",
+                    "--project",
+                    project,
+                    "--query",
+                    query,
+                    "--format",
+                    "json",
+                    "--offset",
+                    &offset_s,
+                    "--max-rows",
+                    &max_s,
+                    "--max-output-tokens",
+                    MAX_OUTPUT_TOKENS,
+                ],
+                timeout,
+            )
             .await?;
         parse_cli_json(&stdout)
     }
@@ -422,8 +553,17 @@ impl MemoryBridge {
     /// HTTP `/rpc` (Auto + UI up) veya CLI. Mutating tool'da timeout sonrası CLI yok.
     pub async fn run_tool(&self, tool_args: &[&str]) -> Result<String> {
         let tool_name = tool_args.first().copied().unwrap_or("");
-        let cfg = self.config();
-        let timeout = tool_timeout_for(&cfg, tool_name);
+        let timeout = tool_timeout_for(&self.config(), tool_name);
+        self.run_tool_with_timeout(tool_args, timeout).await
+    }
+
+    /// Like [`Self::run_tool`] but with an explicit timeout (Health-1a page scale).
+    pub async fn run_tool_with_timeout(
+        &self,
+        tool_args: &[&str],
+        timeout: Duration,
+    ) -> Result<String> {
+        let tool_name = tool_args.first().copied().unwrap_or("");
         let mutating = is_mutating_tool(tool_name);
 
         match self.select_transport().await {
@@ -494,7 +634,9 @@ impl MemoryBridge {
         }
 
         let binary = self.binary.clone();
-        let args: Vec<String> = tool_args.iter().map(|arg| (*arg).to_string()).collect();
+        // CBM v0.11: JSON via `cli --json`. Drop tool-level `--format json` which
+        // index_repository rejects; query_graph still accepts `--format`.
+        let args: Vec<String> = strip_cli_format_json(tool_args);
         let pid = Arc::new(AtomicU32::new(0));
         let pid_for_child = pid.clone();
 
@@ -502,6 +644,7 @@ impl MemoryBridge {
         let wait = tokio::task::spawn_blocking(move || {
             let mut command = GuardedCommand::new(&binary)
                 .arg("cli")
+                .arg("--json")
                 .args(&args)
                 .internal_daemon()
                 .into_std_command()
@@ -552,6 +695,31 @@ impl MemoryBridge {
     }
 }
 
+/// Build CLI argv after `cli --json`: keep `--format` only for tools that accept it.
+fn strip_cli_format_json(tool_args: &[&str]) -> Vec<String> {
+    let Some((name, rest)) = tool_args.split_first() else {
+        return Vec::new();
+    };
+    let keep_format = matches!(
+        *name,
+        "query_graph" | "get_dead_symbols" | "dead_symbols" | "list_projects"
+    );
+    let mut out = vec![(*name).to_string()];
+    let mut i = 0usize;
+    while i < rest.len() {
+        if !keep_format && rest[i] == "--format" {
+            i += 1;
+            if i < rest.len() {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(rest[i].to_string());
+        i += 1;
+    }
+    out
+}
+
 /// Index / yazma araçları — uzun timeout; HTTP timeout sonrası CLI yok.
 pub fn is_mutating_tool(name: &str) -> bool {
     matches!(
@@ -571,6 +739,12 @@ pub fn tool_timeout_for(config: &MemoryBridgeConfig, tool_name: &str) -> Duratio
     } else {
         config.read_timeout
     }
+}
+
+/// Timeout for one Health-1a paged `query_graph` call, scaled by page size.
+pub fn health_page_timeout(config: &MemoryBridgeConfig, page_size: u32) -> Duration {
+    let chunks = ((page_size as u64).saturating_add(999)) / 1000;
+    config.read_timeout + Duration::from_secs(chunks.saturating_mul(HEALTH_PAGE_TIMEOUT_PER_1000))
 }
 
 /// Mutating tool: yalnızca connection refused / port closed → CLI.
@@ -921,6 +1095,13 @@ fn count_from_query(payload: &Value) -> u64 {
     {
         return n;
     }
+    // Columnar shape: { "columns": ["c"], "rows": [[N]] } (CBM / Health stubs).
+    let maps = query_graph_maps(payload);
+    if let Some(first) = maps.first() {
+        if let Some(n) = row_i64(first, &["c", "count"]).and_then(|v| u64::try_from(v).ok()) {
+            return n;
+        }
+    }
     // Common shapes: { "rows": [ { "c": N } ] } or [ { "c": N } ]
     if let Some(rows) = payload
         .get("rows")
@@ -932,6 +1113,13 @@ fn count_from_query(payload: &Value) -> u64 {
             if let Some(n) = json_u64_at(first, &["c"])
                 .or_else(|| json_u64_at(first, &["count"]))
                 .or_else(|| json_u64(first))
+                .or_else(|| {
+                    // Bare [[N]] without usable columns.
+                    first
+                        .as_array()
+                        .and_then(|cells| cells.first())
+                        .and_then(json_u64)
+                })
             {
                 return n;
             }
@@ -1202,6 +1390,8 @@ fn dead_symbol_from_value(value: &Value, default_kind: &str) -> Option<DeadSymbo
         detail: json_str(value, &["detail", "reason", "message"]),
         project_id: json_str(value, &["project_id", "project"]),
         last_ref: json_str(value, &["last_ref", "lastRef", "reference"]),
+        severity: json_str(value, &["severity"]),
+        rule: json_str(value, &["rule"]),
     })
 }
 
@@ -1256,6 +1446,8 @@ pub fn derive_dead(
             detail: Some(format!("{} → {} hedefi yok", edge.from_id, edge.to_id)),
             project_id: Some(project.to_string()),
             last_ref: None,
+            severity: None,
+            rule: None,
         });
     }
 
@@ -1276,6 +1468,8 @@ pub fn derive_dead(
                 detail: Some("gelen referans yok".into()),
                 project_id: Some(project.to_string()),
                 last_ref: None,
+                severity: None,
+                rule: None,
             });
         }
     }
@@ -1323,6 +1517,7 @@ fn json_u64(value: &Value) -> Option<u64> {
         .as_u64()
         .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
         .or_else(|| value.as_f64().map(|n| n as u64))
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 fn extract_json_slice(stdout: &str) -> Option<&str> {
@@ -1742,6 +1937,10 @@ exit /b 0
         assert_eq!(tool_timeout_for(&cfg, "query_graph"), READ_TIMEOUT);
         assert!(is_mutating_tool("index_repository"));
         assert!(!is_mutating_tool("list_projects"));
+        assert_eq!(
+            health_page_timeout(&cfg, 2000),
+            READ_TIMEOUT + Duration::from_secs(30)
+        );
     }
 
     #[test]

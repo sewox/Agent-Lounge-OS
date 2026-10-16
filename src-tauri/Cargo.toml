@@ -73,6 +73,13 @@ windows-sys = { version = "0.59", features = [
 candle-core = { version = "0.11.0", default-features = false, features = ["metal"] }
 candle-nn = { version = "0.11.0", default-features = false, features = ["metal"] }
 
+[dev-dependencies]
+# Health-1a real-CBM test only: download + extract pinned v0.11.0 archives.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
 [features]
 default = []
 # Real Hugging Face Laya weights inference (nightly). Not enabled in PR CI.

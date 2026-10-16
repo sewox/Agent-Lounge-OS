@@ -10,6 +10,8 @@ pub mod dead_symbol_actions;
 pub mod experience_title;
 pub mod graph_ui;
 pub mod hardware;
+pub mod health_filters;
+pub mod health_scan;
 pub mod hf_catalog;
 pub mod index_queue;
 #[cfg(feature = "test-helpers")]
@@ -73,6 +75,11 @@ pub use graph_ui::{
     select_graph_ui_port, spawn_graph_ui_on_port, GraphUiPortMode, GraphUiState, GraphUiStatus,
     GRAPH_WINDOW_LABEL,
 };
+pub use health_scan::{
+    enqueue_after_index, install_health_scan_queue, run_health_scan, HealthScanEvent,
+    HealthScanJob, HealthScanPhase, HealthScanQueue, HEALTH_SCAN_CONCURRENCY, HEALTH_SCAN_EVENT,
+    HEALTH_SCAN_PROGRESS_EVENT,
+};
 pub use index_queue::{
     IndexJob, IndexJobEvent, IndexJobPhase, IndexProgress, IndexQueue, WorkspaceScanResult,
     INDEX_CONCURRENCY, INDEX_JOB_EVENT,
@@ -88,8 +95,9 @@ pub use lounge_auth::{
     remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
 };
 pub use memory_bridge::{
-    probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode, DEFAULT_GRAPH_UI_PORT,
-    GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, LEGACY_GRAPH_UI_PORT,
+    health_page_timeout, probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode,
+    DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, HEALTH_SCAN_PAGE_SIZE,
+    LEGACY_GRAPH_UI_PORT,
 };
 pub use model_manager::{LayaEnginePhase, LayaEngineStatus, ModelManager, LAYA_ENGINE_EVENT};
 pub use nats_manager::{spawn_event_pump, NatsConfig, NatsService};

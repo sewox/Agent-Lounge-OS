@@ -146,6 +146,7 @@ async fn dead_symbol_actions_scaffolding() {
         line: Some(10),
         detail: None,
         last_ref: None,
+        ..DeadSymbol::default()
     });
     store.save_project_index(graph).await.expect("index");
     let dead = store
