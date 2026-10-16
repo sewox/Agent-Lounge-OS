@@ -1,5 +1,6 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
+pub mod agent_health;
 pub mod approval_notify;
 pub mod approval_sound;
 pub mod auto_archive;
@@ -9,30 +10,29 @@ pub mod cbm_ui_config;
 pub mod dead_symbol_actions;
 pub mod experience_title;
 pub mod graph_ui;
-pub mod agent_health;
 pub mod hardware;
 pub mod health_filters;
 pub mod health_scan;
 pub mod hf_catalog;
-pub mod lounge_health;
-pub mod os_release;
-pub mod title_health;
 pub mod index_queue;
 #[cfg(feature = "test-helpers")]
 pub mod listen_handoff;
 pub mod lmr_runtime;
 pub mod lounge_auth;
+pub mod lounge_health;
 pub mod memory_bridge;
 pub mod model_manager;
 pub mod nats_manager;
 pub mod ollama;
 pub mod open_editor;
+pub mod os_release;
 pub mod plugin;
 mod probe;
 pub mod quota_manager;
 pub mod subscription_usage;
 pub mod supervisor;
 pub mod telemetry;
+pub mod title_health;
 pub mod window_geometry;
 pub mod workspace_scan;
 
@@ -73,9 +73,6 @@ pub use experience_title::{
     last_title_error_type, record_last_title_error, title_backlog_count, title_model_name,
     TitleError, TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT, TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
 };
-pub use lounge_health::{
-    cached_lounge_health, collect_lounge_health, run_startup_lounge_health,
-};
 pub use graph_ui::{
     classify_port_status, default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless,
     graph_ui_status, load_port_from_store, load_port_preference_from_store, on_main_window_closed,
@@ -102,6 +99,7 @@ pub use lounge_auth::{
     lounge_token, nats_auth_active, nats_ingress_source_verified, remote_access_info,
     remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
 };
+pub use lounge_health::{cached_lounge_health, collect_lounge_health, run_startup_lounge_health};
 pub use memory_bridge::{
     health_page_timeout, probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode,
     DEFAULT_GRAPH_UI_PORT, GRAPH_UI_PORT_BAND_END, GRAPH_UI_PORT_BAND_START, HEALTH_SCAN_PAGE_SIZE,

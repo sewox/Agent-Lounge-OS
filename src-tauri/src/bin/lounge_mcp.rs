@@ -18,8 +18,7 @@ use app_lib::db::ExperienceStore;
 
 /// Embedded for Health-1b read-only version/SHA probes (must remain in the binary).
 #[used]
-static LOUNGE_MCP_VERSION_EMBED: &str =
-    concat!("LOUNGE_MCP_VERSION=", env!("CARGO_PKG_VERSION"));
+static LOUNGE_MCP_VERSION_EMBED: &str = concat!("LOUNGE_MCP_VERSION=", env!("CARGO_PKG_VERSION"));
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

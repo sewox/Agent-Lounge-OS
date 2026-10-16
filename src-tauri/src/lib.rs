@@ -25,18 +25,18 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, apply_placement_show, build_agent_efficiency_report,
-    collect_quota_state_with_keys, data_root, enable_graph_ui,
+    collect_lounge_health, collect_quota_state_with_keys, data_root, enable_graph_ui,
     fix_dead_symbol_with_agent as publish_fix_dead_symbol, flush_session, graph_ui_status,
     handle_window_event, load_port_from_store, load_port_preference_from_store,
     on_main_window_closed, open_dead_symbol_in_editor as open_indexed_dead_symbol,
     open_or_focus_graph_window, open_path_in_editor, persist_port, persist_port_preference,
     placement_for_window, record_dead_snapshot, record_whisper_injection,
-    resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence, EfficiencyReportQuery,
-    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus,
-    collect_lounge_health, run_startup_lounge_health, HealthScanJob, HealthScanQueue, IndexJob,
-    IndexProgress, IndexQueue, LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager,
-    SharedServices, WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
+    resolve_data_root_for_app, run_startup_lounge_health, spawn_auto_archive, spawn_event_pump,
+    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence,
+    EfficiencyReportQuery, FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState,
+    GraphUiStatus, HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue,
+    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;

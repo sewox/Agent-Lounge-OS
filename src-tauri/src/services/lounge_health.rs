@@ -124,7 +124,7 @@ async fn cbm_health_detect(store: &ExperienceStore, probe_daemon: bool) -> CbmHe
     }
 
     if probe_daemon {
-        // Best-effort: reuse MemoryBridge discovery binary when available via store path? 
+        // Best-effort: reuse MemoryBridge discovery binary when available via store path?
         // Probe only if we can resolve codebase-memory-mcp without mutating anything.
         if let Ok(bridge) = crate::services::MemoryBridge::discover() {
             match probe_daemon_status(bridge.binary_path()) {

@@ -64,10 +64,7 @@ fn last_title_error_slot() -> &'static std::sync::Mutex<Option<String>> {
 }
 
 pub fn last_title_error_type() -> Option<String> {
-    last_title_error_slot()
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
+    last_title_error_slot().lock().ok().and_then(|g| g.clone())
 }
 
 pub fn record_last_title_error(err: &TitleError) {

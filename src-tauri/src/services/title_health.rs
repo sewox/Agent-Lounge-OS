@@ -4,23 +4,20 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::probe::lounge_ollama_endpoint;
+use super::quota_manager::lmr_endpoint_up;
 use crate::db::ExperienceStore;
 use crate::models::TitleHealthReport;
 use crate::services::experience_title::{
     last_title_error_type, title_backlog_count, title_model_name, TITLE_LMR_TIMEOUT,
 };
-use super::probe::lounge_ollama_endpoint;
-use super::quota_manager::lmr_endpoint_up;
 
 /// Collect title/LMR health against the Lounge LMR endpoint.
 pub async fn collect_title_health(store: &ExperienceStore) -> TitleHealthReport {
     collect_title_health_at(store, &lounge_ollama_endpoint()).await
 }
 
-pub async fn collect_title_health_at(
-    store: &ExperienceStore,
-    endpoint: &str,
-) -> TitleHealthReport {
+pub async fn collect_title_health_at(store: &ExperienceStore, endpoint: &str) -> TitleHealthReport {
     let model = title_model_name();
     let queue_backlog = title_backlog_count();
     let db_backlog = store.count_title_backlog().await.unwrap_or(0);
@@ -50,11 +47,7 @@ pub struct LmrTitleProbe {
 }
 
 /// Probe LMR: TCP/HTTP reachability + whether `model` appears in `/api/tags`.
-pub async fn probe_lmr_title(
-    endpoint: &str,
-    model: &str,
-    timeout: Duration,
-) -> LmrTitleProbe {
+pub async fn probe_lmr_title(endpoint: &str, model: &str, timeout: Duration) -> LmrTitleProbe {
     // Closed port / connect failures → not reachable.
     if !lmr_endpoint_up(endpoint).await {
         return LmrTitleProbe {
@@ -176,12 +169,7 @@ mod tests {
         let addr: SocketAddr = listener.local_addr().unwrap();
         let app = Router::new().route(
             "/api/tags",
-            get(move || async move {
-                (
-                    axum::http::StatusCode::from_u16(code).unwrap(),
-                    "err",
-                )
-            }),
+            get(move || async move { (axum::http::StatusCode::from_u16(code).unwrap(), "err") }),
         );
         tokio::spawn(async move {
             axum::serve(listener, app)
@@ -196,11 +184,8 @@ mod tests {
 
     #[tokio::test]
     async fn t4_stub_lmr_success() {
-        let (url, stop) = serve_tags(
-            json!({ "models": [{ "name": "gemma-2-2b-it" }] }),
-            None,
-        )
-        .await;
+        let (url, stop) =
+            serve_tags(json!({ "models": [{ "name": "gemma-2-2b-it" }] }), None).await;
         let probe = probe_lmr_title(&url, "gemma-2-2b-it", Duration::from_secs(2)).await;
         assert!(probe.reachable);
         assert!(probe.model_installed);

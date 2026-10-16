@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::probe::find_executable;
 use crate::models::{AgentHealthEntry, AgentMcpStatus};
 use crate::services::autodiscover::{
     find_antigravity, find_claude_cli, find_claude_desktop, find_cursor_app, find_grok_bot,
 };
 use crate::services::health_filters::mask_home_path;
-use super::probe::find_executable;
 
 /// Canonical MCP server key for Agent Lounge OS.
 pub const LOUNGE_MCP_SERVER_KEY: &str = "agent-lounge-os";
@@ -100,7 +100,10 @@ fn resolve_expected_lounge_mcp_path() -> Option<PathBuf> {
 }
 
 /// Scan all first-class clients under `roots`.
-pub fn check_all_agents(roots: &AgentHealthRoots, expected: &ExpectedLoungeMcp) -> Vec<AgentHealthEntry> {
+pub fn check_all_agents(
+    roots: &AgentHealthRoots,
+    expected: &ExpectedLoungeMcp,
+) -> Vec<AgentHealthEntry> {
     vec![
         check_client(
             "antigravity",
@@ -385,10 +388,7 @@ fn find_lounge_entry_in_value(value: &Value) -> Option<RawLoungeEntry> {
         }
         // Fallback: any entry whose command looks like lounge-mcp.
         for (name, spec) in obj {
-            let command = spec
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let command = spec.get("command").and_then(Value::as_str).unwrap_or("");
             if command_looks_like_lounge_mcp(command) {
                 return Some(raw_from_spec(name, spec));
             }
@@ -459,7 +459,10 @@ fn classify_entry(
             raw.command.clone(),
             None,
             expected,
-            Some(format!("server key {:?} is not {LOUNGE_MCP_SERVER_KEY}", raw.key)),
+            Some(format!(
+                "server key {:?} is not {LOUNGE_MCP_SERVER_KEY}",
+                raw.key
+            )),
         );
     }
 
@@ -612,7 +615,9 @@ fn compare_versions(
             command,
             configured_sha,
             expected,
-            Some(format!("invalid semver configured={cfg_ver} expected={expected_ver}")),
+            Some(format!(
+                "invalid semver configured={cfg_ver} expected={expected_ver}"
+            )),
         ),
     }
 }
@@ -717,12 +722,18 @@ pub fn check_client_for_test(
     paths: Vec<PathBuf>,
     expected: &ExpectedLoungeMcp,
 ) -> AgentHealthEntry {
-    check_client(client, installed, paths, &AgentHealthRoots {
-        home: PathBuf::from("/tmp"),
-        appdata: None,
-        xdg_config: None,
-        workspace: PathBuf::from("/tmp"),
-    }, expected)
+    check_client(
+        client,
+        installed,
+        paths,
+        &AgentHealthRoots {
+            home: PathBuf::from("/tmp"),
+            appdata: None,
+            xdg_config: None,
+            workspace: PathBuf::from("/tmp"),
+        },
+        expected,
+    )
 }
 
 #[cfg(test)]
@@ -794,7 +805,8 @@ mod tests {
         for (path, bytes) in before {
             let after = fs::read(path).unwrap();
             assert_eq!(
-                &after, bytes,
+                &after,
+                bytes,
                 "config must be byte-for-byte unchanged: {}",
                 path.display()
             );
@@ -909,12 +921,8 @@ mod tests {
 
         // Force "installed" via check_client_for_test for each.
         let cursor = check_client_for_test("cursor", true, vec![cursor_cfg.clone()], &expected);
-        let claude = check_client_for_test(
-            "claude_desktop",
-            true,
-            vec![claude_cfg.clone()],
-            &expected,
-        );
+        let claude =
+            check_client_for_test("claude_desktop", true, vec![claude_cfg.clone()], &expected);
         let anti = check_client_for_test("antigravity", true, vec![anti_cfg.clone()], &expected);
         let claude_code =
             check_client_for_test("claude_code", true, vec![code_cfg.clone()], &expected);

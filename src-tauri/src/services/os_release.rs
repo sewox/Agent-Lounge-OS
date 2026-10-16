@@ -55,7 +55,11 @@ pub fn package_manager_from_ids(id: Option<&str>, id_like: Option<&str>) -> Opti
 }
 
 fn pm_from_single_id(id: &str) -> Option<&'static str> {
-    let id = id.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase();
+    let id = id
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase();
     if id.is_empty() {
         return None;
     }
@@ -122,10 +126,7 @@ fn which_exists(name: &str) -> bool {
 }
 
 /// Build [`OsReleaseInfo`] from os-release file contents + optional PATH probes.
-pub fn detect_from_os_release_text(
-    text: Option<&str>,
-    probe_path: bool,
-) -> OsReleaseInfo {
+pub fn detect_from_os_release_text(text: Option<&str>, probe_path: bool) -> OsReleaseInfo {
     let (id, id_like) = match text {
         Some(t) => parse_os_release(t),
         None => (None, None),
@@ -213,46 +214,18 @@ mod tests {
     use super::*;
 
     const FIXTURES: &[(&str, &str, &str)] = &[
-        (
-            "debian",
-            "ID=debian\nID_LIKE=debian\n",
-            "apt",
-        ),
-        (
-            "ubuntu",
-            "ID=ubuntu\nID_LIKE=debian\n",
-            "apt",
-        ),
-        (
-            "fedora",
-            "ID=fedora\nID_LIKE=\"rhel fedora\"\n",
-            "dnf",
-        ),
-        (
-            "centos",
-            "ID=\"centos\"\nID_LIKE=\"rhel fedora\"\n",
-            "dnf",
-        ),
+        ("debian", "ID=debian\nID_LIKE=debian\n", "apt"),
+        ("ubuntu", "ID=ubuntu\nID_LIKE=debian\n", "apt"),
+        ("fedora", "ID=fedora\nID_LIKE=\"rhel fedora\"\n", "dnf"),
+        ("centos", "ID=\"centos\"\nID_LIKE=\"rhel fedora\"\n", "dnf"),
         (
             "opensuse",
             "ID=\"opensuse-tumbleweed\"\nID_LIKE=\"suse opensuse\"\n",
             "zypper",
         ),
-        (
-            "arch",
-            "ID=arch\nID_LIKE=archlinux\n",
-            "pacman",
-        ),
-        (
-            "alpine",
-            "ID=alpine\nID_LIKE=alpine\n",
-            "apk",
-        ),
-        (
-            "unknown",
-            "ID=exoticdistro\nNAME=Exotic\n",
-            "unknown",
-        ),
+        ("arch", "ID=arch\nID_LIKE=archlinux\n", "pacman"),
+        ("alpine", "ID=alpine\nID_LIKE=alpine\n", "apk"),
+        ("unknown", "ID=exoticdistro\nNAME=Exotic\n", "unknown"),
     ];
 
     #[test]
@@ -306,10 +279,9 @@ mod tests {
 
     #[test]
     fn platform_health_with_fixture_on_linux_shape() {
-        let report = platform_health_with(|_| detect_from_os_release_text(
-            Some("ID=ubuntu\nID_LIKE=debian\n"),
-            false,
-        ));
+        let report = platform_health_with(|_| {
+            detect_from_os_release_text(Some("ID=ubuntu\nID_LIKE=debian\n"), false)
+        });
         assert!(!report.os.is_empty());
         assert!(!report.arch.is_empty());
         if cfg!(target_os = "linux") {
