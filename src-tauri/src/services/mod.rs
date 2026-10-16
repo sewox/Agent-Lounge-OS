@@ -1,5 +1,6 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
+pub mod agent_health;
 pub mod approval_notify;
 pub mod approval_sound;
 pub mod auto_archive;
@@ -18,17 +19,20 @@ pub mod index_queue;
 pub mod listen_handoff;
 pub mod lmr_runtime;
 pub mod lounge_auth;
+pub mod lounge_health;
 pub mod memory_bridge;
 pub mod model_manager;
 pub mod nats_manager;
 pub mod ollama;
 pub mod open_editor;
+pub mod os_release;
 pub mod plugin;
 mod probe;
 pub mod quota_manager;
 pub mod subscription_usage;
 pub mod supervisor;
 pub mod telemetry;
+pub mod title_health;
 pub mod window_geometry;
 pub mod workspace_scan;
 
@@ -65,8 +69,9 @@ pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
 };
 pub use experience_title::{
-    backfill_missing_titles, enqueue_title, ensure_title_worker, title_backlog_count, TitleError,
-    TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT, TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
+    backfill_missing_titles, clear_last_title_error, enqueue_title, ensure_title_worker,
+    last_title_error_type, record_last_title_error, title_backlog_count, title_model_name,
+    TitleError, TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT, TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
 };
 pub use graph_ui::{
     classify_port_status, default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless,
@@ -93,6 +98,10 @@ pub use lounge_auth::{
     add_allowed_origin, auth_required, authorize_mcp_headers, connect as nats_connect,
     lounge_token, nats_auth_active, nats_ingress_source_verified, remote_access_info,
     remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
+};
+pub use lounge_health::{
+    build_lounge_health, cached_lounge_health, collect_lounge_health, run_startup_lounge_health,
+    LoungeHealthOptions,
 };
 pub use memory_bridge::{
     health_page_timeout, probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode,

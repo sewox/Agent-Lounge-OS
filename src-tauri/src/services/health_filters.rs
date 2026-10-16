@@ -624,14 +624,20 @@ fn is_trait_impl_header(line: &str) -> bool {
 /// [`crate::db::canonicalize_repo_path`] (strips `\\?\`, resolves short names,
 /// case-folds on Windows) before the prefix compare.
 pub fn mask_home_path(path: &str) -> String {
+    mask_home_path_with(path, &home_env_candidates())
+}
+
+/// Like [`mask_home_path`], but uses explicit home candidates (no process env read).
+/// Prefer this in injectable health/tests so parallel suites never race on HOME.
+pub fn mask_home_path_with(path: &str, homes: &[String]) -> String {
     let display = display_normalize_path(path);
     let path_key = path_home_compare_key(path);
     if path_key.is_empty() {
         return display;
     }
 
-    for home_raw in home_env_candidates() {
-        let home_key = path_home_compare_key(&home_raw);
+    for home_raw in homes {
+        let home_key = path_home_compare_key(home_raw);
         if home_key.is_empty() {
             continue;
         }
@@ -645,6 +651,90 @@ pub fn mask_home_path(path: &str) -> String {
         }
     }
     display
+}
+
+/// Mask HOME prefixes inside free-form error/detail text (boundary-aware).
+/// Does not mangle `/home/user2` when HOME is `/home/user`. Also accepts
+/// slash-normalized and `//?/` / `\\?\` lexical forms of each candidate.
+pub fn mask_home_in_text(text: &str, homes: &[String]) -> String {
+    let mut out = crate::db::strip_windows_extended_prefix(text).replace('\\', "/");
+    let mut forms: Vec<String> = Vec::new();
+    for home in homes {
+        let n = crate::db::strip_windows_extended_prefix(home)
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        if n.is_empty() {
+            continue;
+        }
+        forms.push(n.clone());
+        if cfg!(windows) {
+            forms.push(n.to_ascii_lowercase());
+        }
+        // Lexical verbatim-style prefix sometimes appears in Display of io errors.
+        if !n.starts_with("//?/") {
+            let verbatim = format!("//?/{n}");
+            forms.push(verbatim.clone());
+            if cfg!(windows) {
+                forms.push(verbatim.to_ascii_lowercase());
+            }
+        }
+    }
+    forms.sort_by_key(|h| std::cmp::Reverse(h.len()));
+    forms.dedup();
+
+    for home in &forms {
+        out = replace_path_prefix_boundary(&out, home, "~");
+    }
+
+    if out.starts_with("~/") || !out.contains('/') {
+        out
+    } else if out.starts_with('/') || (out.len() > 2 && out.as_bytes().get(1) == Some(&b':')) {
+        mask_home_path_with(&out, homes)
+    } else {
+        out
+    }
+}
+
+/// Replace `home` with `repl` only at path-segment boundaries (not `/home/user` inside `/home/user2`).
+fn replace_path_prefix_boundary(text: &str, home: &str, repl: &str) -> String {
+    if home.is_empty() {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    let home_lower = home.to_ascii_lowercase();
+    while !rest.is_empty() {
+        let found = if cfg!(windows) {
+            rest.to_ascii_lowercase().find(&home_lower)
+        } else {
+            rest.find(home)
+        };
+        let Some(idx) = found else {
+            result.push_str(rest);
+            break;
+        };
+        let matched_len = home.len();
+        let after = &rest[idx + matched_len..];
+        let before_ok = idx == 0 || {
+            let b = rest.as_bytes()[idx - 1];
+            !b.is_ascii_alphanumeric() && b != b'_'
+        };
+        let after_ok = after.is_empty()
+            || after.starts_with('/')
+            || after.chars().next().is_some_and(|c| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | ')' | ']')
+            });
+        if before_ok && after_ok {
+            result.push_str(&rest[..idx]);
+            result.push_str(repl);
+            rest = after;
+        } else {
+            result.push_str(&rest[..idx + matched_len]);
+            rest = after;
+        }
+    }
+    result
 }
 
 /// Display form when not masked: strip `\\?\`, unify slashes (no case fold).
@@ -1060,6 +1150,25 @@ impl Foo {
         // Must not mangle a different user path that merely contains the home string.
         let other = format!("{home}2/extra/src/lib.rs");
         assert_eq!(mask_home_path(&other), other.replace('\\', "/"));
+    }
+
+    #[test]
+    fn mask_home_in_text_is_boundary_aware() {
+        let homes = vec!["/home/user".into()];
+        assert_eq!(
+            mask_home_in_text("read failed: /home/user/.grok/mcp.json", &homes),
+            "read failed: ~/.grok/mcp.json"
+        );
+        // Must not mangle /home/user2 when HOME is /home/user.
+        assert_eq!(
+            mask_home_in_text("path=/home/user2/x", &homes),
+            "path=/home/user2/x"
+        );
+        let win_homes = vec![r"C:\Users\runner".into()];
+        assert_eq!(
+            mask_home_in_text(r"err C:\Users\runner\AppData\x", &win_homes),
+            "err ~/AppData/x"
+        );
     }
 
     #[test]

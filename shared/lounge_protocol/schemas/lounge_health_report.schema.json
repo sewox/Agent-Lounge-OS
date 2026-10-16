@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-lounge-os.local/schemas/lounge_health_report.schema.json",
+  "title": "LoungeHealthReport",
+  "description": "Versioned Health-1b lounge_health response (schema_version 1.0.0). Process-local fields: title.queue_backlog and title.last_error_type reflect the calling process only — standalone lounge-mcp reports 0/null; use the Tauri lounge_health command for app-worker values. title.db_backlog / give_ups are durable SQLite.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "checked_at",
+    "platform",
+    "agents",
+    "title",
+    "dead_symbols",
+    "cbm"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0.0" },
+    "checked_at": { "type": "string", "minLength": 1 },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "arch", "package_manager"],
+      "properties": {
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "distro_id": { "type": ["string", "null"] },
+        "distro_id_like": { "type": ["string", "null"] },
+        "package_manager": { "type": "string" }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["client", "status", "severity"],
+        "properties": {
+          "client": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "missing",
+              "stale",
+              "hash_mismatch",
+              "non_canonical",
+              "unreadable",
+              "not_installed"
+            ]
+          },
+          "severity": { "type": "string" },
+          "config_path": { "type": ["string", "null"] },
+          "command": { "type": ["string", "null"] },
+          "configured_version": { "type": ["string", "null"] },
+          "expected_version": { "type": ["string", "null"] },
+          "configured_sha256": { "type": ["string", "null"] },
+          "expected_sha256": { "type": ["string", "null"] },
+          "detail": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "title": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queue_backlog",
+        "db_backlog",
+        "give_ups",
+        "lmr_reachable",
+        "model_installed",
+        "model"
+      ],
+      "properties": {
+        "queue_backlog": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "In-process title worker queue depth. Always 0 in standalone lounge-mcp (separate process)."
+        },
+        "db_backlog": { "type": "integer", "minimum": 0 },
+        "give_ups": { "type": "integer", "minimum": 0 },
+        "last_error_type": {
+          "type": ["string", "null"],
+          "description": "Last TitleError kind in this process (timeout|http|connect|other). Always null in standalone lounge-mcp."
+        },
+        "lmr_reachable": { "type": "boolean" },
+        "model_installed": { "type": "boolean" },
+        "model": { "type": "string" },
+        "lmr_endpoint": { "type": ["string", "null"] },
+        "probe_error_type": { "type": ["string", "null"] }
+      }
+    },
+    "dead_symbols": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kritik", "potansiyel", "total", "ignored"],
+      "properties": {
+        "kritik": { "type": "integer", "minimum": 0 },
+        "potansiyel": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "ignored": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "cbm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["daemon_mode", "polluted_18749"],
+      "properties": {
+        "daemon_mode": { "type": "boolean" },
+        "daemon_presence": { "type": ["string", "null"] },
+        "polluted_18749": { "type": "boolean" },
+        "config_path": { "type": ["string", "null"] },
+        "ui_enabled": { "type": ["boolean", "null"] },
+        "ui_port": { "type": ["integer", "null"] }
+      }
+    },
+    "expected_lounge_mcp_version": { "type": ["string", "null"] },
+    "expected_lounge_mcp_sha256": { "type": ["string", "null"] }
+  }
+}

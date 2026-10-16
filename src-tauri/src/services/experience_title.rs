@@ -51,6 +51,40 @@ fn title_model() -> String {
     std::env::var("LOUNGE_TITLE_MODEL").unwrap_or_else(|_| TITLE_MODEL_DEFAULT.into())
 }
 
+/// Public alias for Health-1b title/LMR probes.
+pub fn title_model_name() -> String {
+    title_model()
+}
+
+/// Last title-generation error kind for Health-1b (`timeout` | `http` | `connect` | `other`).
+static LAST_TITLE_ERROR: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
+
+fn last_title_error_slot() -> &'static std::sync::Mutex<Option<String>> {
+    LAST_TITLE_ERROR.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn last_title_error_type() -> Option<String> {
+    last_title_error_slot().lock().ok().and_then(|g| g.clone())
+}
+
+pub fn record_last_title_error(err: &TitleError) {
+    let kind = match err {
+        TitleError::Timeout => "timeout".into(),
+        TitleError::Http(_) => "http".into(),
+        TitleError::Connect(_) => "connect".into(),
+        TitleError::Other(_) => "other".into(),
+    };
+    if let Ok(mut g) = last_title_error_slot().lock() {
+        *g = Some(kind);
+    }
+}
+
+pub fn clear_last_title_error() {
+    if let Ok(mut g) = last_title_error_slot().lock() {
+        *g = None;
+    }
+}
+
 thread_local! {
     static TEST_BACKOFF_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
@@ -309,6 +343,7 @@ async fn generate_and_apply(store: &ExperienceStore, endpoint: &str, job: &Title
     for attempt in 0..TITLE_MAX_RETRIES {
         match title_pipeline_at(endpoint, &job.content).await {
             Ok((title, source)) => {
+                clear_last_title_error();
                 store
                     .set_experience_title(job.id.clone(), title, source, false)
                     .await?;
@@ -316,6 +351,7 @@ async fn generate_and_apply(store: &ExperienceStore, endpoint: &str, job: &Title
                 return Ok(());
             }
             Err(err) => {
+                record_last_title_error(&err);
                 let next = chrono::Utc::now()
                     + chrono::Duration::from_std(next_retry_delay(attempt))
                         .unwrap_or_else(|_| chrono::Duration::seconds(15));

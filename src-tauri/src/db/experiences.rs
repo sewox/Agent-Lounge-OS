@@ -172,6 +172,17 @@ impl ExperienceStore {
         .context("count_title_backlog join")?
     }
 
+    /// Health-1b: experiences that permanently gave up on LLM titles.
+    pub async fn count_title_give_ups(&self) -> Result<u64> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            count_title_give_ups_blocking(&conn)
+        })
+        .await
+        .context("count_title_give_ups join")?
+    }
+
     pub async fn settings_flag_done(&self, key: String) -> Result<bool> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -869,6 +880,18 @@ fn count_title_backlog_blocking(conn: &Connection) -> Result<u64> {
             title IS NULL OR trim(title) = ''
             OR lower(COALESCE(title_source, 'fallback')) = 'fallback'
           )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(n.max(0) as u64)
+}
+
+fn count_title_give_ups_blocking(conn: &Connection) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM experiences
+        WHERE COALESCE(title_give_up, 0) != 0
         "#,
         [],
         |row| row.get(0),

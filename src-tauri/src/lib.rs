@@ -17,25 +17,26 @@ use kernel::{
 use lounge_protocol::LoungeMessage;
 use models::{
     merge_project_summaries, AstNode, ConnectedTool, DeadSymbol, DeviceProfile, DiscoveredTool,
-    DiscoveryReport, HealthScanResult, IndexSnapshot, LoungeExperience, LoungeTask,
-    ProjectPageList, ProjectSummary, QuotaState, RecommendedModels, RoutingPolicy, RoutingVote,
-    SemanticMap, ServiceReport, TaskKind, ToolQuota, VaultProjectAggregate, TASK_REQUESTED,
+    DiscoveryReport, HealthScanResult, IndexSnapshot, LoungeExperience, LoungeHealthReport,
+    LoungeTask, ProjectPageList, ProjectSummary, QuotaState, RecommendedModels, RoutingPolicy,
+    RoutingVote, SemanticMap, ServiceReport, TaskKind, ToolQuota, VaultProjectAggregate,
+    TASK_REQUESTED,
 };
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, apply_placement_show, build_agent_efficiency_report,
-    collect_quota_state_with_keys, data_root, enable_graph_ui,
+    collect_lounge_health, collect_quota_state_with_keys, data_root, enable_graph_ui,
     fix_dead_symbol_with_agent as publish_fix_dead_symbol, flush_session, graph_ui_status,
     handle_window_event, load_port_from_store, load_port_preference_from_store,
     on_main_window_closed, open_dead_symbol_in_editor as open_indexed_dead_symbol,
     open_or_focus_graph_window, open_path_in_editor, persist_port, persist_port_preference,
     placement_for_window, record_dead_snapshot, record_whisper_injection,
-    resolve_data_root_for_app, spawn_auto_archive, spawn_event_pump, spawn_quota_pump,
-    spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence, EfficiencyReportQuery,
-    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus,
-    HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus,
-    MemoryBridge, ModelManager, ServiceManager, SharedServices, WorkspaceScanResult,
-    GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
+    resolve_data_root_for_app, run_startup_lounge_health, spawn_auto_archive, spawn_event_pump,
+    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence,
+    EfficiencyReportQuery, FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState,
+    GraphUiStatus, HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue,
+    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -324,6 +325,11 @@ pub fn run_with_start_route(start_route: &'static str) {
                         .await;
                     crate::services::experience_title::backfill_missing_titles(&title_store).await;
                 });
+                // Health-1b: one-shot read-only health at start (never periodic).
+                let health_store = store.clone();
+                tauri::async_runtime::spawn(async move {
+                    run_startup_lounge_health(health_store).await;
+                });
                 spawn_event_pump(handle);
                 tauri::async_runtime::spawn(async move { bus.run().await });
                 let workflow_listen = workflow.clone();
@@ -363,6 +369,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             cancel_health_scan,
             list_health_scans,
             get_health_scan,
+            lounge_health,
             get_dead_symbols,
             get_semantic_map,
             list_vault_projects,
@@ -615,6 +622,14 @@ async fn get_health_scan(
         .latest_for_project(project_id.trim())
         .await
         .and_then(|job| job.result))
+}
+
+/// Health-1b unified read-only health (agents / title / dead / CBM / platform).
+#[tauri::command]
+async fn lounge_health(
+    store: tauri::State<'_, ExperienceStore>,
+) -> Result<LoungeHealthReport, String> {
+    Ok(collect_lounge_health(store.inner()).await)
 }
 
 /// Çalışma alanını tara → projeleri keşfet/import et → arka plan indeks kuyruğuna al.

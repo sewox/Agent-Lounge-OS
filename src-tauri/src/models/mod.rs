@@ -1,6 +1,7 @@
 //! Domain modelleri ve mesaj şemaları.
 
 mod discovery;
+mod health;
 mod hf;
 mod memory;
 mod policy;
@@ -11,6 +12,10 @@ mod service;
 pub use discovery::{
     access_mode_for, format_host_labels, host_display_name, sqlite_tool_type, tool_id,
     ConnectedTool, DiscoveredTool, DiscoveryReport, DiscoverySource, SystemTool,
+};
+pub use health::{
+    AgentHealthEntry, AgentMcpStatus, CbmHealthReport, DeadSymbolHealthSummary, LoungeHealthReport,
+    PlatformHealthReport, TitleHealthReport, LOUNGE_HEALTH_SCHEMA_VERSION,
 };
 pub use hf::{DeviceProfile, HfModelOffer, PullProgress, RecommendedModels, MODEL_PULL_EVENT};
 pub use memory::{
