@@ -165,8 +165,16 @@ pub fn detect_from_os_release_text(text: Option<&str>, probe_path: bool) -> OsRe
 }
 
 /// Read `/etc/os-release` (or `path`) and detect package manager.
+/// When `path` is missing, falls back to `/usr/lib/os-release` (FHS).
 pub fn detect_linux_os_release(path: &Path) -> OsReleaseInfo {
-    let text = std::fs::read_to_string(path).ok();
+    let fallback = Path::new("/usr/lib/os-release");
+    let text = std::fs::read_to_string(path).ok().or_else(|| {
+        if path != fallback {
+            std::fs::read_to_string(fallback).ok()
+        } else {
+            None
+        }
+    });
     detect_from_os_release_text(text.as_deref(), true)
 }
 

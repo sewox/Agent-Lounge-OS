@@ -9,25 +9,27 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::probe::find_executable;
+use super::probe::{find_executable, find_executable_in_dirs};
 use crate::models::{AgentHealthEntry, AgentMcpStatus};
 use crate::services::autodiscover::{
     find_antigravity, find_claude_cli, find_claude_desktop, find_cursor_app, find_grok_bot,
 };
-use crate::services::health_filters::mask_home_path;
+use crate::services::health_filters::{mask_home_in_text, mask_home_path_with};
 
 /// Canonical MCP server key for Agent Lounge OS.
 pub const LOUNGE_MCP_SERVER_KEY: &str = "agent-lounge-os";
 /// Embedded version marker scanned from lounge-mcp binaries (tests + release).
 pub const LOUNGE_MCP_VERSION_MARKER_PREFIX: &str = "LOUNGE_MCP_VERSION=";
 
-/// Env / path roots for injectable tests (temp HOME / APPDATA).
+/// Env / path roots for injectable checks (no process-env mutation required).
 #[derive(Debug, Clone)]
 pub struct AgentHealthRoots {
     pub home: PathBuf,
     pub appdata: Option<PathBuf>,
     pub xdg_config: Option<PathBuf>,
     pub workspace: PathBuf,
+    /// Extra dirs searched before the process PATH for bare `lounge-mcp` commands.
+    pub path_dirs: Vec<PathBuf>,
 }
 
 impl AgentHealthRoots {
@@ -43,7 +45,23 @@ impl AgentHealthRoots {
             appdata,
             xdg_config,
             workspace,
+            path_dirs: Vec::new(),
         }
+    }
+
+    /// Home candidates used for `~/…` masking (injectable; no env read).
+    pub fn mask_homes(&self) -> Vec<String> {
+        let mut out = vec![self.home.to_string_lossy().into_owned()];
+        if let Some(ad) = &self.appdata {
+            // Roaming appdata is usually under the profile; include parent profile if distinct.
+            if let Some(parent) = ad.parent().and_then(|p| p.parent()) {
+                let s = parent.to_string_lossy().into_owned();
+                if !s.is_empty() && !out.iter().any(|h| h.eq_ignore_ascii_case(&s)) {
+                    out.push(s);
+                }
+            }
+        }
+        out
     }
 
     fn os_config_dir(&self, app: &str) -> PathBuf {
@@ -112,6 +130,7 @@ pub fn check_all_agents(
         antigravity_config_paths(roots),
         false,
         expected,
+        roots,
     ));
     out.extend(check_client_entries(
         "cursor",
@@ -119,6 +138,7 @@ pub fn check_all_agents(
         cursor_config_paths(roots),
         true, // JSONC
         expected,
+        roots,
     ));
     out.extend(check_client_entries(
         "claude_desktop",
@@ -126,6 +146,7 @@ pub fn check_all_agents(
         vec![claude_desktop_config_path(roots)],
         false,
         expected,
+        roots,
     ));
     out.extend(check_client_entries(
         "claude_code",
@@ -133,6 +154,7 @@ pub fn check_all_agents(
         claude_code_config_paths(roots),
         false,
         expected,
+        roots,
     ));
     out.extend(check_client_entries(
         "grok_bot",
@@ -140,6 +162,7 @@ pub fn check_all_agents(
         grok_config_paths(roots),
         false,
         expected,
+        roots,
     ));
     out.extend(check_client_entries(
         "vscode",
@@ -147,6 +170,7 @@ pub fn check_all_agents(
         vscode_config_paths(roots),
         true, // JSONC
         expected,
+        roots,
     ));
     out.extend(check_client_entries(
         "windsurf",
@@ -154,6 +178,7 @@ pub fn check_all_agents(
         windsurf_config_paths(roots),
         true, // JSONC
         expected,
+        roots,
     ));
     out
 }
@@ -273,13 +298,17 @@ fn windsurf_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
 }
 
 /// Report every existing config path for this client (no healthy-mask-stale).
+///
+/// Masking and bare-command PATH resolution use `roots` only — never mutate process env.
 pub fn check_client_entries(
     client: &str,
     installed: bool,
     paths: Vec<PathBuf>,
     allow_jsonc: bool,
     expected: &ExpectedLoungeMcp,
+    roots: &AgentHealthRoots,
 ) -> Vec<AgentHealthEntry> {
+    let homes = roots.mask_homes();
     let mut entries = Vec::new();
     let mut any_file = false;
 
@@ -298,13 +327,15 @@ pub fn check_client_entries(
                     None,
                     expected,
                     Some("lounge-mcp entry absent".into()),
+                    &homes,
                 ));
             }
             Ok(found) => {
                 for (scope, raw) in found {
-                    let mut entry = classify_entry(client, path, &raw, expected);
+                    let mut entry = classify_entry(client, path, &raw, expected, roots, &homes);
                     if let Some(scope) = scope {
-                        let note = format!("project scope: {}", mask_home_path(&scope));
+                        let note =
+                            format!("project scope: {}", mask_home_path_with(&scope, &homes));
                         entry.detail = Some(match entry.detail {
                             Some(d) => format!("{d}; {note}"),
                             None => note,
@@ -322,6 +353,7 @@ pub fn check_client_entries(
                     None,
                     expected,
                     Some(err),
+                    &homes,
                 ));
             }
         }
@@ -337,6 +369,7 @@ pub fn check_client_entries(
                 None,
                 expected,
                 Some("client not detected".into()),
+                &homes,
             ));
         } else {
             entries.push(entry_base(
@@ -347,6 +380,7 @@ pub fn check_client_entries(
                 None,
                 expected,
                 Some("lounge-mcp entry absent".into()),
+                &homes,
             ));
         }
     }
@@ -455,7 +489,8 @@ pub fn command_is_exact_lounge_mcp(command: &str) -> bool {
 }
 
 /// Resolve absolute/relative path or bare PATH name to a file.
-pub fn resolve_lounge_mcp_command(command: &str) -> Option<PathBuf> {
+/// `extra_path_dirs` are searched before the process PATH (injectable for tests).
+pub fn resolve_lounge_mcp_command(command: &str, extra_path_dirs: &[PathBuf]) -> Option<PathBuf> {
     let command = command.trim();
     if command.is_empty() {
         return None;
@@ -464,18 +499,21 @@ pub fn resolve_lounge_mcp_command(command: &str) -> Option<PathBuf> {
     if as_path.is_file() {
         return Some(as_path);
     }
-    // Bare name or PATH-relative: look up via PATH.
+    // Bare name or PATH-relative: look up via injected dirs, then process PATH.
     let base = as_path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(command);
-    find_executable(base).or_else(|| {
-        if command_is_exact_lounge_mcp(base) {
-            find_executable("lounge-mcp")
-        } else {
-            None
-        }
-    })
+    find_executable_in_dirs(base, extra_path_dirs)
+        .or_else(|| find_executable(base))
+        .or_else(|| {
+            if command_is_exact_lounge_mcp(base) {
+                find_executable_in_dirs("lounge-mcp", extra_path_dirs)
+                    .or_else(|| find_executable("lounge-mcp"))
+            } else {
+                None
+            }
+        })
 }
 
 fn classify_entry(
@@ -483,6 +521,8 @@ fn classify_entry(
     path: &Path,
     raw: &RawLoungeEntry,
     expected: &ExpectedLoungeMcp,
+    roots: &AgentHealthRoots,
+    homes: &[String],
 ) -> AgentHealthEntry {
     let canonical_key = raw.key == LOUNGE_MCP_SERVER_KEY;
     let has_command = raw
@@ -510,6 +550,7 @@ fn classify_entry(
                 "server key {:?} is not {LOUNGE_MCP_SERVER_KEY}",
                 raw.key
             )),
+            homes,
         );
     }
 
@@ -522,6 +563,7 @@ fn classify_entry(
             None,
             expected,
             Some("entry missing command and url".into()),
+            homes,
         );
     }
 
@@ -536,6 +578,7 @@ fn classify_entry(
                 None,
                 expected,
                 Some("command is not lounge-mcp".into()),
+                homes,
             );
         }
         let has_url_env = raw.env_keys.iter().any(|k| k == "LOUNGE_MCP_URL");
@@ -548,10 +591,11 @@ fn classify_entry(
                 None,
                 expected,
                 Some("stdio entry missing LOUNGE_MCP_URL env".into()),
+                homes,
             );
         }
 
-        let Some(cmd_path) = resolve_lounge_mcp_command(command) else {
+        let Some(cmd_path) = resolve_lounge_mcp_command(command, &roots.path_dirs) else {
             return entry_base(
                 client,
                 AgentMcpStatus::NonCanonical,
@@ -560,6 +604,7 @@ fn classify_entry(
                 None,
                 expected,
                 Some("configured lounge-mcp binary not found on PATH".into()),
+                homes,
             );
         };
 
@@ -572,6 +617,7 @@ fn classify_entry(
             configured_version,
             configured_sha,
             expected,
+            homes,
         );
     }
 
@@ -583,6 +629,7 @@ fn classify_entry(
         None,
         expected,
         Some("url-only remote entry".into()),
+        homes,
     )
 }
 
@@ -593,6 +640,7 @@ fn compare_versions(
     configured_version: Option<String>,
     configured_sha: Option<String>,
     expected: &ExpectedLoungeMcp,
+    homes: &[String],
 ) -> AgentHealthEntry {
     let Some(cfg_ver) = configured_version.clone() else {
         return entry_base(
@@ -603,6 +651,7 @@ fn compare_versions(
             configured_sha,
             expected,
             Some("could not read embedded lounge-mcp version".into()),
+            homes,
         );
     };
 
@@ -617,6 +666,7 @@ fn compare_versions(
                 configured_sha,
                 expected,
                 Some(format!("configured {cfg_ver} < expected {expected_ver}")),
+                homes,
             );
             e.configured_version = Some(cfg_ver);
             e
@@ -646,6 +696,7 @@ fn compare_versions(
                 configured_sha,
                 expected,
                 detail,
+                homes,
             );
             e.configured_version = Some(cfg_ver);
             e
@@ -660,6 +711,7 @@ fn compare_versions(
             Some(format!(
                 "invalid semver configured={cfg_ver} expected={expected_ver}"
             )),
+            homes,
         ),
     }
 }
@@ -690,6 +742,7 @@ fn strip_v(s: &str) -> &str {
     s.trim().strip_prefix('v').unwrap_or(s.trim())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn entry_base(
     client: &str,
     status: AgentMcpStatus,
@@ -698,48 +751,19 @@ fn entry_base(
     configured_sha: Option<String>,
     expected: &ExpectedLoungeMcp,
     detail: Option<String>,
+    homes: &[String],
 ) -> AgentHealthEntry {
     AgentHealthEntry {
         client: client.into(),
         status,
         severity: status.severity().into(),
-        config_path: config_path.map(|p| mask_home_path(&p.to_string_lossy())),
-        command: command.map(|c| mask_home_path(&c)),
+        config_path: config_path.map(|p| mask_home_path_with(&p.to_string_lossy(), homes)),
+        command: command.map(|c| mask_home_path_with(&c, homes)),
         configured_version: None,
         expected_version: Some(expected.version.clone()),
         configured_sha256: configured_sha,
         expected_sha256: expected.sha256.clone(),
-        // Mask absolute home prefixes inside free-form error text (not only whole paths).
-        detail: detail.map(|d| mask_home_in_text(&d)),
-    }
-}
-
-/// Replace HOME/USERPROFILE prefixes that appear inside arbitrary detail strings.
-fn mask_home_in_text(text: &str) -> String {
-    let mut out = text.replace('\\', "/");
-    let mut homes: Vec<String> = Vec::new();
-    for key in ["HOME", "USERPROFILE"] {
-        if let Ok(v) = std::env::var(key) {
-            let n = v.replace('\\', "/").trim_end_matches('/').to_string();
-            if !n.is_empty() {
-                homes.push(n);
-            }
-        }
-    }
-    homes.sort_by_key(|h| std::cmp::Reverse(h.len()));
-    homes.dedup();
-    for home in homes {
-        if out.contains(&home) {
-            out = out.replace(&home, "~");
-        }
-    }
-    // Also handle a whole-path detail.
-    if out.starts_with("~/") || !out.contains('/') {
-        out
-    } else if out.starts_with('/') || (out.len() > 2 && out.as_bytes()[1] == b':') {
-        mask_home_path(&out)
-    } else {
-        out
+        detail: detail.map(|d| mask_home_in_text(&d, homes)),
     }
 }
 
@@ -865,9 +889,10 @@ pub fn check_client_for_test(
     installed: bool,
     paths: Vec<PathBuf>,
     expected: &ExpectedLoungeMcp,
+    roots: &AgentHealthRoots,
 ) -> AgentHealthEntry {
     let allow_jsonc = matches!(client, "cursor" | "vscode" | "windsurf");
-    check_client_entries(client, installed, paths, allow_jsonc, expected)
+    check_client_entries(client, installed, paths, allow_jsonc, expected, roots)
         .into_iter()
         .next()
         .expect("at least one health entry")
@@ -880,8 +905,9 @@ pub fn check_client_entries_for_test(
     paths: Vec<PathBuf>,
     allow_jsonc: bool,
     expected: &ExpectedLoungeMcp,
+    roots: &AgentHealthRoots,
 ) -> Vec<AgentHealthEntry> {
-    check_client_entries(client, installed, paths, allow_jsonc, expected)
+    check_client_entries(client, installed, paths, allow_jsonc, expected, roots)
 }
 
 #[cfg(test)]
@@ -889,15 +915,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_json(path: &Path, value: &Value) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
+    }
+
+    /// Slash-normalized absolute path safe to embed in JSON/JSONC string literals
+    /// (Windows backslashes would be interpreted as escapes).
+    fn json_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
     }
 
     fn fake_binary(path: &Path, version: &str) -> String {
@@ -937,6 +966,7 @@ mod tests {
             appdata: Some(appdata),
             xdg_config: Some(base.join("xdg")),
             workspace,
+            path_dirs: Vec::new(),
         };
         (roots, base)
     }
@@ -961,7 +991,9 @@ mod tests {
         }
     }
 
-    fn assert_paths_masked(entry: &AgentHealthEntry) {
+    fn assert_paths_masked(entry: &AgentHealthEntry, home: &Path) {
+        let home_s = home.to_string_lossy();
+        let home_slash = home_s.replace('\\', "/");
         for field in [
             entry.config_path.as_deref(),
             entry.command.as_deref(),
@@ -971,43 +1003,30 @@ mod tests {
         .flatten()
         {
             assert!(
-                !field.contains("/home/")
-                    && !field.contains("\\Users\\")
-                    && !field.contains("/Users/"),
-                "unmasked home path in health field: {field}"
+                !field.contains(home_s.as_ref()) && !field.contains(home_slash.as_str()),
+                "unmasked injectable home in health field: {field}"
             );
-            // Absolute unix roots that look like homes should be ~/…
-            if field.starts_with("~/") || field == "~/" || !field.starts_with('/') {
-                continue;
+            // Config paths under the injectable home must be ~/…
+            if let Some(cp) = entry.config_path.as_deref() {
+                if field == cp {
+                    assert!(
+                        cp.starts_with("~/") || !cp.contains('/'),
+                        "config_path should be masked: {cp}"
+                    );
+                }
             }
-            // Windows drive letters without home are ok; reject USERPROFILE-style leaks.
-            assert!(
-                !field.to_ascii_lowercase().contains("userprofile"),
-                "leaked profile in {field}"
-            );
         }
     }
 
     #[test]
     fn t3_fake_configs_per_client_byte_unchanged() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // No process-env mutation: roots.home / path_dirs are injected.
         let (roots, base) = temp_roots("all");
         // Exact basename lounge-mcp (no substring); separate dirs for ok/stale/hash.
         let bin_ok = base.join("bin/ok/lounge-mcp");
         let bin_stale = base.join("bin/stale/lounge-mcp");
         let sha_ok = fake_binary(&bin_ok, "0.1.0");
         let _sha_stale = fake_binary(&bin_stale, "0.0.9");
-
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        let prev_appdata = std::env::var_os("APPDATA");
-        unsafe {
-            std::env::set_var("HOME", &roots.home);
-            std::env::set_var("USERPROFILE", &roots.home);
-            if let Some(ref ad) = roots.appdata {
-                std::env::set_var("APPDATA", ad);
-            }
-        }
 
         let expected = ExpectedLoungeMcp {
             version: "0.1.0".into(),
@@ -1019,7 +1038,7 @@ mod tests {
             json!({
                 "mcpServers": {
                     "agent-lounge-os": {
-                        "command": cmd.to_string_lossy(),
+                        "command": json_path(cmd),
                         "args": [],
                         "env": {
                             "LOUNGE_MCP_URL": "http://127.0.0.1:18791",
@@ -1062,14 +1081,17 @@ mod tests {
             }),
         );
 
-        // Grok unreadable — path under home; detail must be masked
+        // Grok unreadable — path under home; detail must be masked via injected homes
         let grok_cfg = roots.home.join(".grok/mcp.json");
         fs::create_dir_all(grok_cfg.parent().unwrap()).unwrap();
         fs::write(&grok_cfg, "{ not json").unwrap();
 
-        // VS Code JSONC with comments + trailing comma
+        // VS Code JSONC with comments + trailing comma.
+        // Use forward-slash path (and JSON-escaped via serde for the command string)
+        // so Windows backslashes cannot break JSONC parsing.
         let vscode_cfg = roots.workspace.join(".vscode/mcp.json");
         fs::create_dir_all(vscode_cfg.parent().unwrap()).unwrap();
+        let cmd_json = serde_json::to_string(&json_path(&bin_ok)).unwrap();
         fs::write(
             &vscode_cfg,
             format!(
@@ -1077,13 +1099,12 @@ mod tests {
   // lounge health jsonc fixture
   "servers": {{
     "agent-lounge-os": {{
-      "command": "{}",
+      "command": {cmd_json},
       "args": [],
       "env": {{ "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }},
     }},
   }},
-}}"#,
-                bin_ok.display()
+}}"#
             ),
         )
         .unwrap();
@@ -1107,10 +1128,10 @@ mod tests {
             &json!({
                 "mcpServers": {},
                 "projects": {
-                    proj_path.to_string_lossy().to_string(): {
+                    json_path(&proj_path): {
                         "mcpServers": {
                             "agent-lounge-os": {
-                                "command": bin_ok.to_string_lossy(),
+                                "command": json_path(&bin_ok),
                                 "args": [],
                                 "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }
                             }
@@ -1139,6 +1160,7 @@ mod tests {
             vec![cursor_cfg.clone(), cursor_proj.clone()],
             true,
             &expected,
+            &roots,
         );
         assert_eq!(
             cursor_entries.len(),
@@ -1158,27 +1180,52 @@ mod tests {
             "want Stale in {cursor_entries:?}"
         );
 
-        let claude =
-            check_client_for_test("claude_desktop", true, vec![claude_cfg.clone()], &expected);
-        let anti = check_client_for_test("antigravity", true, vec![anti_cfg.clone()], &expected);
-        let claude_code =
-            check_client_for_test("claude_code", true, vec![code_cfg.clone()], &expected);
-        let grok = check_client_for_test("grok_bot", true, vec![grok_cfg.clone()], &expected);
-        let vscode = check_client_for_test("vscode", true, vec![vscode_cfg.clone()], &expected);
-        let wind = check_client_for_test("windsurf", true, vec![wind_cfg.clone()], &expected);
+        let claude = check_client_for_test(
+            "claude_desktop",
+            true,
+            vec![claude_cfg.clone()],
+            &expected,
+            &roots,
+        );
+        let anti = check_client_for_test(
+            "antigravity",
+            true,
+            vec![anti_cfg.clone()],
+            &expected,
+            &roots,
+        );
+        let claude_code = check_client_for_test(
+            "claude_code",
+            true,
+            vec![code_cfg.clone()],
+            &expected,
+            &roots,
+        );
+        let grok =
+            check_client_for_test("grok_bot", true, vec![grok_cfg.clone()], &expected, &roots);
+        let vscode =
+            check_client_for_test("vscode", true, vec![vscode_cfg.clone()], &expected, &roots);
+        let wind =
+            check_client_for_test("windsurf", true, vec![wind_cfg.clone()], &expected, &roots);
         let claude_proj_entries = check_client_entries_for_test(
             "claude_code",
             true,
             vec![claude_json.clone()],
             false,
             &expected,
+            &roots,
         );
 
         assert_eq!(claude.status, AgentMcpStatus::Stale);
         assert_eq!(anti.status, AgentMcpStatus::Missing);
         assert_eq!(claude_code.status, AgentMcpStatus::NonCanonical);
         assert_eq!(grok.status, AgentMcpStatus::Unreadable);
-        assert_eq!(vscode.status, AgentMcpStatus::Ok, "JSONC must parse");
+        assert_eq!(
+            vscode.status,
+            AgentMcpStatus::Ok,
+            "JSONC must parse (Windows-safe path escaping): {:?}",
+            vscode.detail
+        );
         assert_eq!(wind.status, AgentMcpStatus::HashMismatch);
         assert!(
             claude_proj_entries
@@ -1190,16 +1237,16 @@ mod tests {
             "claude.json projects.<path>.mcpServers scanned: {claude_proj_entries:?}"
         );
 
-        // Blocker 1: unreadable detail must not leak absolute home path
+        // Unreadable detail must not leak absolute home path (injected mask homes).
         let detail = grok.detail.as_deref().unwrap_or("");
         assert!(
             !detail.contains(roots.home.to_string_lossy().as_ref()),
             "detail leaked home: {detail}"
         );
-        assert_paths_masked(&grok);
-        assert_paths_masked(&vscode);
+        assert_paths_masked(&grok, &roots.home);
+        assert_paths_masked(&vscode, &roots.home);
         for e in &cursor_entries {
-            assert_paths_masked(e);
+            assert_paths_masked(e, &roots.home);
         }
 
         let _ = check_all_agents(&roots, &expected);
@@ -1210,30 +1257,17 @@ mod tests {
             false,
             vec![roots.home.join(".cursor/missing.json")],
             &expected,
+            &roots,
         );
         assert_eq!(none.status, AgentMcpStatus::NotInstalled);
 
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match prev_appdata {
-                Some(v) => std::env::set_var("APPDATA", v),
-                None => std::env::remove_var("APPDATA"),
-            }
-        }
         let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn bare_lounge_mcp_on_path_is_ok_not_non_canonical() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let (roots, base) = temp_roots("path");
+        // Inject path_dirs instead of mutating process PATH.
+        let (mut roots, base) = temp_roots("path");
         let bin_dir = base.join("pathbin");
         fs::create_dir_all(&bin_dir).unwrap();
         let bin = bin_dir.join(if cfg!(windows) {
@@ -1247,14 +1281,7 @@ mod tests {
             sha256: Some(sha),
             path: Some(bin.clone()),
         };
-
-        let prev_path = std::env::var_os("PATH");
-        let mut new_path = bin_dir.display().to_string();
-        if let Some(ref p) = prev_path {
-            new_path.push(if cfg!(windows) { ';' } else { ':' });
-            new_path.push_str(&p.to_string_lossy());
-        }
-        unsafe { std::env::set_var("PATH", &new_path) };
+        roots.path_dirs = vec![bin_dir];
 
         let cfg = roots.home.join(".cursor/mcp.json");
         write_json(
@@ -1270,11 +1297,11 @@ mod tests {
             }),
         );
         let before = fs::read(&cfg).unwrap();
-        let entry = check_client_for_test("cursor", true, vec![cfg.clone()], &expected);
+        let entry = check_client_for_test("cursor", true, vec![cfg.clone()], &expected, &roots);
         assert_eq!(
             entry.status,
             AgentMcpStatus::Ok,
-            "bare PATH command should resolve: {:?}",
+            "bare PATH command should resolve via roots.path_dirs: {:?}",
             entry.detail
         );
         assert_eq!(fs::read(&cfg).unwrap(), before);
@@ -1285,13 +1312,35 @@ mod tests {
         assert!(command_is_exact_lounge_mcp("lounge-mcp"));
         assert!(command_is_exact_lounge_mcp("/opt/bin/lounge-mcp"));
 
-        unsafe {
-            match prev_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn jsonc_accepts_windows_style_escaped_command_path() {
+        // Regression: raw `C:\Users\...` inside a JSONC string is Unreadable on Windows.
+        let raw = r#"{
+  // comment
+  "servers": {
+    "agent-lounge-os": {
+      "command": "C:/Temp/bin/ok/lounge-mcp",
+      "args": [],
+      "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" },
+    },
+  },
+}"#;
+        let v = parse_jsonc(raw).expect("forward-slash path JSONC");
+        assert_eq!(
+            v["servers"]["agent-lounge-os"]["command"],
+            "C:/Temp/bin/ok/lounge-mcp"
+        );
+
+        // Unescaped backslashes must fail (documents why T3 uses json_path).
+        let bad =
+            r#"{ "servers": { "agent-lounge-os": { "command": "C:\Temp\bin\lounge-mcp" } } }"#;
+        assert!(
+            parse_jsonc(bad).is_err(),
+            "raw Windows backslashes in JSON string must not silently parse"
+        );
     }
 
     #[test]

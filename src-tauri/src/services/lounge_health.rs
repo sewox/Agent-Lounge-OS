@@ -16,7 +16,7 @@ use crate::services::cbm_daemon::{probe_daemon_status, CbmDaemonPresence};
 use crate::services::cbm_ui_config::{
     cbm_ui_config_path, looks_like_lounge_pollution, read_cbm_ui_config,
 };
-use crate::services::health_filters::mask_home_path;
+use crate::services::health_filters::mask_home_path_with;
 use crate::services::os_release::platform_health;
 use crate::services::plugin::lounge_workspace;
 use crate::services::title_health::collect_title_health;
@@ -102,9 +102,12 @@ pub async fn build_lounge_health(
     let title = collect_title_health(store).await;
     let dead_symbols = dead_symbol_summary(store).await;
 
-    let cbm = tokio::task::spawn_blocking(move || cbm_health_detect_sync(cbm_path, probe_daemon))
-        .await
-        .unwrap_or_default();
+    let mask_homes = roots.mask_homes();
+    let cbm = tokio::task::spawn_blocking(move || {
+        cbm_health_detect_sync(cbm_path, probe_daemon, &mask_homes)
+    })
+    .await
+    .unwrap_or_default();
 
     let platform = platform_health();
 
@@ -145,11 +148,15 @@ async fn dead_symbol_summary(store: &ExperienceStore) -> DeadSymbolHealthSummary
     }
 }
 
-fn cbm_health_detect_sync(config_path: Option<PathBuf>, probe_daemon: bool) -> CbmHealthReport {
+fn cbm_health_detect_sync(
+    config_path: Option<PathBuf>,
+    probe_daemon: bool,
+    mask_homes: &[String],
+) -> CbmHealthReport {
     let mut report = CbmHealthReport::default();
 
     if let Some(path) = config_path {
-        report.config_path = Some(mask_home_path(&path.to_string_lossy()));
+        report.config_path = Some(mask_home_path_with(&path.to_string_lossy(), mask_homes));
         match read_cbm_ui_config(&path) {
             Ok(Some((cfg, _))) => {
                 report.ui_enabled = cfg.ui_enabled;
@@ -198,27 +205,16 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // ENV_LOCK serializes HOME mutation for the whole test.
     async fn lounge_health_masks_home_and_detects_pollution_only() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // Inject roots + cbm path — never mutate process HOME/PATH.
         let dir = std::env::temp_dir().join(format!("lounge-health-h5-{}", uuid::Uuid::new_v4()));
         let home = dir.join("home");
         fs::create_dir_all(&home).unwrap();
         let db = ExperienceStore::open(dir.join("t.sqlite")).unwrap();
 
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-        }
-
-        // Pollution fixture under HOME so masking is assertable.
+        // Pollution fixture under injectable home so masking is assertable.
         let cache = home.join(".cache/codebase-memory-mcp");
         fs::create_dir_all(&cache).unwrap();
         let cfg_path = cache.join("config.json");
@@ -230,7 +226,7 @@ mod tests {
         fs::write(&cfg_path, serde_json::to_string(&polluted).unwrap()).unwrap();
         let before = fs::read(&cfg_path).unwrap();
 
-        // Agent config under same HOME with absolute command path.
+        // Agent config under same HOME with absolute command path (slash-normalized for JSON).
         let bin = home.join("bin/lounge-mcp");
         fs::create_dir_all(bin.parent().unwrap()).unwrap();
         {
@@ -246,12 +242,13 @@ mod tests {
         }
         let cursor_cfg = home.join(".cursor/mcp.json");
         fs::create_dir_all(cursor_cfg.parent().unwrap()).unwrap();
+        let bin_json = bin.to_string_lossy().replace('\\', "/");
         fs::write(
             &cursor_cfg,
             serde_json::to_string_pretty(&json!({
                 "mcpServers": {
                     "agent-lounge-os": {
-                        "command": bin.to_string_lossy(),
+                        "command": bin_json,
                         "args": [],
                         "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }
                     }
@@ -266,6 +263,7 @@ mod tests {
             appdata: None,
             xdg_config: Some(home.join(".config")),
             workspace: dir.join("ws"),
+            path_dirs: Vec::new(),
         };
         fs::create_dir_all(&roots.workspace).unwrap();
 
@@ -299,11 +297,13 @@ mod tests {
         assert_eq!(fs::read(&cfg_path).unwrap(), before);
 
         let home_s = home.to_string_lossy();
+        let home_slash = home_s.replace('\\', "/");
         // Every path-ish field masked.
         for agent in &report.agents {
             if let Some(p) = &agent.config_path {
                 assert!(p.starts_with("~/"), "agent config_path not masked: {p}");
                 assert!(!p.contains(home_s.as_ref()), "leaked home in {p}");
+                assert!(!p.contains(&home_slash), "leaked home slash-form in {p}");
             }
             if let Some(c) = &agent.command {
                 assert!(
@@ -319,18 +319,7 @@ mod tests {
             assert!(p.starts_with("~/"), "cbm config_path not masked: {p}");
         }
 
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_userprofile {
-                Some(v) => std::env::set_var("USERPROFILE", v),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-        }
         let _ = fs::remove_dir_all(&dir);
-        let _ = json!({});
     }
 
     #[test]

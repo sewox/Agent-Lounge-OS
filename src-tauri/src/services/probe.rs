@@ -310,12 +310,17 @@ pub fn executable_search_dirs() -> Vec<PathBuf> {
 }
 
 pub fn find_executable(name: &str) -> Option<PathBuf> {
+    find_executable_in_dirs(name, &executable_search_dirs())
+}
+
+/// Resolve `name` against an explicit directory list (injectable PATH for tests).
+pub fn find_executable_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     let name = name.trim();
     if name.is_empty() {
         return None;
     }
     let candidates = executable_name_candidates(name);
-    for dir in executable_search_dirs() {
+    for dir in dirs {
         for file_name in &candidates {
             let candidate = dir.join(file_name);
             if candidate.is_file() {

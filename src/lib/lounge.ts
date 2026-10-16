@@ -1618,6 +1618,72 @@ export type HealthScanResult = {
   error?: string | null;
 };
 
+/** Health-1b `lounge_health` report (schema_version 1.0.0). No UI wiring in 1b. */
+export type AgentMcpStatus =
+  | "ok"
+  | "missing"
+  | "stale"
+  | "hash_mismatch"
+  | "non_canonical"
+  | "unreadable"
+  | "not_installed";
+
+export type AgentHealthEntry = {
+  client: string;
+  status: AgentMcpStatus;
+  severity: string;
+  config_path?: string | null;
+  command?: string | null;
+  configured_version?: string | null;
+  expected_version?: string | null;
+  configured_sha256?: string | null;
+  expected_sha256?: string | null;
+  detail?: string | null;
+};
+
+export type TitleHealthReport = {
+  queue_backlog: number;
+  db_backlog: number;
+  give_ups: number;
+  /** Process-local; always null in standalone lounge-mcp. */
+  last_error_type?: string | null;
+  lmr_reachable: boolean;
+  model_installed: boolean;
+  model: string;
+  lmr_endpoint?: string | null;
+  probe_error_type?: string | null;
+};
+
+export type LoungeHealthReport = {
+  schema_version: "1.0.0";
+  checked_at: string;
+  platform: {
+    os: string;
+    arch: string;
+    distro_id?: string | null;
+    distro_id_like?: string | null;
+    package_manager: string;
+  };
+  agents: AgentHealthEntry[];
+  title: TitleHealthReport;
+  dead_symbols: {
+    kritik: number;
+    potansiyel: number;
+    total: number;
+    ignored: number;
+  };
+  cbm: {
+    daemon_mode: boolean;
+    daemon_presence?: string | null;
+    polluted_18749: boolean;
+    config_path?: string | null;
+    ui_enabled?: boolean | null;
+    ui_port?: number | null;
+  };
+  expected_lounge_mcp_version?: string | null;
+  expected_lounge_mcp_sha256?: string | null;
+};
+
 /** Per-page progress emitted during Health-1a scanning. */
 export type HealthScanProgress = {
   job_id: string;
