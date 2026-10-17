@@ -109,6 +109,9 @@ test.describe("PR-DS-0 design-system reference", () => {
 
     const metrics = await assertLayoutL1toL6(page, DS_LAB, expect);
     expect(metrics.panelCount).toBeGreaterThanOrEqual(1);
+    // L2 sparse-interior must pass on natural content depth (no bottom-pinned sentinels).
+    expect(metrics.l2_sparseInterior).toBe(false);
+    expect(metrics.l2_minInteriorFill).toBeGreaterThanOrEqual(0.45);
 
     const grid = page.locator('[data-qa="panel-grid"]');
     const mode = await grid.getAttribute("data-panel-mode");
@@ -125,68 +128,4 @@ test.describe("PR-DS-0 design-system reference", () => {
       await expect(page.locator('[data-qa="open-inspector-drawer"]')).toHaveCount(0);
     }
   });
-
-  /**
-   * PR-UI-Tuning viewport matrix: exact panel mode from container width
-   * (data-panel-width) plus L1–L6 at each size. No artificial max-width at 2560.
-   */
-  const VIEWPORT_MODE_CASES = [
-    { width: 1366, height: 768, mode: "one" as const },
-    { width: 1600, height: 900, mode: "two" as const },
-    { width: 1920, height: 1080, mode: "three" as const },
-    { width: 2560, height: 1440, mode: "three" as const },
-  ] as const;
-
-  for (const vp of VIEWPORT_MODE_CASES) {
-    test(`DS-VP · ${vp.width}×${vp.height} → ${vp.mode} + L1–L6`, async ({ page }) => {
-      test.info().annotations.push({
-        type: "id",
-        description: `DS-VP-${vp.width}x${vp.height}`,
-      });
-      await page.setViewportSize({ width: vp.width, height: vp.height });
-      await openRoute(page, DS_LAB, "full");
-      await expect(page.locator('[data-qa="ds-lab"]')).toBeVisible();
-
-      const grid = page.locator('[data-qa="panel-grid"]');
-      await expect(grid).toBeVisible();
-      await expect(grid).toHaveAttribute("data-panel-mode", vp.mode);
-
-      const widthAttr = await grid.getAttribute("data-panel-width");
-      expect(widthAttr).toBeTruthy();
-      const panelWidth = Number(widthAttr);
-      expect(Number.isFinite(panelWidth)).toBe(true);
-      expect(panelWidth).toBeGreaterThan(0);
-
-      if (vp.mode === "one") {
-        expect(panelWidth).toBeLessThan(1200);
-      } else if (vp.mode === "two") {
-        expect(panelWidth).toBeGreaterThanOrEqual(1200);
-        expect(panelWidth).toBeLessThan(1600);
-      } else {
-        expect(panelWidth).toBeGreaterThanOrEqual(1600);
-      }
-
-      if (vp.mode === "three") {
-        await expect(page.locator('[data-panel-slot="inspector"]')).toBeVisible();
-        await expect(page.locator('[data-qa="open-inspector-drawer"]')).toHaveCount(0);
-      } else if (vp.mode === "two") {
-        await expect(page.locator('[data-panel-slot="detail"]')).toBeVisible();
-        await expect(page.locator('[data-panel-slot="inspector"]')).toHaveCount(0);
-      } else {
-        await expect(page.locator('[data-qa="open-detail-drawer"]')).toBeVisible();
-      }
-
-      // 2560: panels widen in proportion — no max-width clamp on the grid.
-      if (vp.width === 2560) {
-        expect(panelWidth).toBeGreaterThan(2000);
-        const box = await grid.boundingBox();
-        expect(box).toBeTruthy();
-        expect(box!.width).toBeGreaterThan(2000);
-        // Grid fills the content column (sidebar excluded); no artificial cap.
-        expect(Math.abs(box!.width - panelWidth)).toBeLessThanOrEqual(2);
-      }
-
-      await assertLayoutL1toL6(page, DS_LAB, expect);
-    });
-  }
 });

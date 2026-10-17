@@ -119,7 +119,7 @@ Shared assert API: `assertLayoutL1toL6(page, route, expect)` — usable from any
 ## Testing
 
 - Unit: grid breakpoint resolver + StatsStrip filter clicks (`src/components/design-system/*.test.ts`)
-- E2E: `e2e/tests/design-system.spec.ts` uses L1–L6 helpers at D1/D2/D3, asserts exact `three` + inline inspector on D2 (1920×1080), and covers the 1366/1600/1920/2560 viewport matrix
+- E2E: `e2e/tests/design-system.spec.ts` uses L1–L6 at D0–D3 and asserts exact `three` + inline inspector on D2 (1920×1080). Viewport matrix (1366/1600/1920/2560) lives in `e2e/tests/design-system-viewports.spec.ts` (D0 project only)
 
 ## Out of scope (this PR)
 
