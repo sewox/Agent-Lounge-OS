@@ -2,6 +2,10 @@
 
 import type { AgentMcpStatus, AgentHealthEntry } from "@/lib/lounge";
 import type { StatusTone } from "@/components/design-system";
+import {
+  approvalKindIcon,
+  SOURCE_UNVERIFIED_APPROVAL_ICON as APPROVAL_SOURCE_UNVERIFIED_ICON,
+} from "@/lib/approvals-chrome";
 
 export const AGENT_MCP_STATUSES: readonly AgentMcpStatus[] = [
   "ok",
@@ -15,11 +19,10 @@ export const AGENT_MCP_STATUSES: readonly AgentMcpStatus[] = [
 ] as const;
 
 /**
- * Approval chrome for `source_unverified` uses the warning glyph language
- * (banner text), never the remote-link `link-off` icon used for agent MCP
- * `unverified`.
+ * Approval chrome icon for `source_unverified` — same glyph the shell banner
+ * renders (`approvalKindIcon`), never the remote-link `link-off` agent icon.
  */
-export const SOURCE_UNVERIFIED_APPROVAL_ICON = "warn";
+export const SOURCE_UNVERIFIED_APPROVAL_ICON = APPROVAL_SOURCE_UNVERIFIED_ICON;
 
 /** i18n keys under `health.status.*` — one distinct label per status. */
 export function statusLabelKey(status: AgentMcpStatus): string {
@@ -67,22 +70,49 @@ export function isPathLike(raw: string): boolean {
   return false;
 }
 
+/** Home path sits after `scheme://host[:port]` — leave URL path segments alone. */
+function isUrlPathContext(text: string, index: number): boolean {
+  const before = text.slice(0, index);
+  return /[a-z][a-z0-9+.-]*:\/\/[^\s]*$/i.test(before);
+}
+
+/** Allow mid-string mask only after start / whitespace / `= : " ' ( ,`. */
+function isBoundaryBefore(text: string, index: number): boolean {
+  if (index === 0) return true;
+  return /[\s=:\"'(,]/.test(text.charAt(index - 1));
+}
+
 /**
- * Second-line defence for **path-like** fields only.
- * Prefix home roots → `~/…`. Does not rewrite URLs or free-text mid-string.
+ * Second-line defence (HO-4): mask home roots in path fields **and** free text.
+ * Boundary-aware mid-string match for `/Users/<n>`, `/home/<n>`, `X:\Users\<n>`.
+ * Does **not** rewrite URL path segments (`http://host/home/...`).
  */
 export function maskHomePathForUi(raw: string | null | undefined): string {
   if (raw == null || raw === "") return "";
-  let out = raw.replace(/\\/g, "/");
-  if (out.startsWith("~/") || out === "~") {
-    return out;
+  if (raw.startsWith("~/") || raw === "~") {
+    return raw.replace(/\\/g, "/");
   }
-  if (!isPathLike(out)) {
-    return raw;
+
+  const patterns: RegExp[] = [
+    /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi,
+    /\/Users\/[^/\s"']+/gi,
+    /\/home\/[^/\s"']+/gi,
+  ];
+
+  let out = raw;
+  for (const re of patterns) {
+    out = out.replace(re, (match, offset: number) => {
+      if (typeof offset !== "number") return match;
+      if (isUrlPathContext(out, offset)) return match;
+      if (!isBoundaryBefore(out, offset)) return match;
+      return "~";
+    });
   }
-  out = out.replace(/^[A-Za-z]:\/Users\/[^/]+/i, "~");
-  out = out.replace(/^\/Users\/[^/]+/i, "~");
-  out = out.replace(/^\/home\/[^/]+/i, "~");
+
+  out = out.replace(/\\/g, "/");
+  // After replacing a Windows home root, `~\AppData` → `~/AppData`.
+  out = out.replace(/~(?![/\s]|$)/g, "~/");
+  out = out.replace(/~\/+/g, "~/");
   return out;
 }
 
@@ -95,16 +125,19 @@ export function containsUnmaskedHome(text: string): boolean {
   );
 }
 
-/** Mask only path-like fields on an agent entry (not detail free text / URLs). */
+/** Mask path fields and free-text detail (second-line HO-4 defence). */
 export function maskAgentEntryForUi(entry: AgentHealthEntry): AgentHealthEntry {
   return {
     ...entry,
     config_path:
       entry.config_path != null ? maskHomePathForUi(entry.config_path) : entry.config_path,
     command: entry.command != null ? maskHomePathForUi(entry.command) : entry.command,
-    // detail / versions / sha stay as-is (not path fields).
+    detail: entry.detail != null ? maskHomePathForUi(entry.detail) : entry.detail,
   };
 }
+
+/** Re-export for tests that assert against the live approval icon wiring. */
+export { approvalKindIcon };
 
 export type DeadConfidenceFilter = "all" | "Kritik" | "Potansiyel";
 export type DeadCategoryFilter = "all" | "unused" | "broken" | "partial";

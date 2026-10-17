@@ -122,13 +122,11 @@ export function AgentsHealthPanel() {
       const result = await probeAgentMcpUrl(selected.entry.client, pathId);
       setProbe(result);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       setProbe({
-        outcome: /config|missing|not found/i.test(message)
-          ? "config_missing"
-          : "unreachable",
+        outcome: "unreachable",
         elapsed_ms: 0,
       });
+      void error;
     } finally {
       setProbing(false);
     }
@@ -525,7 +523,7 @@ function AgentDetail({
       />
       <Field
         label={t("agents.fieldDetail")}
-        value={entry.detail?.trim() ? entry.detail : "—"}
+        value={maskHomePathForUi(entry.detail) || "—"}
       />
       {showProbe ? (
         <div className="space-y-2 border-t border-outline-variant/40 pt-3">
@@ -593,7 +591,7 @@ function TitleDetail({
       <Field label={t("agents.titleModelName")} value={title.model || "—"} />
       <Field
         label={t("agents.titleEndpoint")}
-        value={title.lmr_endpoint?.trim() ? title.lmr_endpoint : "—"}
+        value={maskHomePathForUi(title.lmr_endpoint) || "—"}
       />
     </>
   );

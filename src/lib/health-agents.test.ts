@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { approvalKindIcon } from "./approvals-chrome.ts";
 import {
   AGENT_MCP_STATUSES,
   containsUnmaskedHome,
@@ -14,7 +15,6 @@ import {
   maskAgentEntryForUi,
   maskHomePathForUi,
   severityToTone,
-  SOURCE_UNVERIFIED_APPROVAL_ICON,
   statusIconName,
   statusLabelKey,
 } from "./health-agents.ts";
@@ -44,9 +44,10 @@ describe("health-agents status mapping", () => {
     assert.equal(statusIconName("unverified"), "link-off");
     assert.notEqual(statusIconName("unverified"), statusIconName("ok"));
     assert.notEqual(statusIconName("unverified"), statusIconName("missing"));
+    // Compare against the real approval chrome icon (shell banner wiring).
     assert.notEqual(
       statusIconName("unverified"),
-      SOURCE_UNVERIFIED_APPROVAL_ICON,
+      approvalKindIcon("source_unverified"),
       "unverified agent icon must differ from source_unverified approval icon",
     );
   });
@@ -70,7 +71,7 @@ describe("health-agents status mapping", () => {
 });
 
 describe("health-agents path masking", () => {
-  it("masks path-like home prefixes only", () => {
+  it("masks home prefixes and boundary-delimited homes in free text", () => {
     assert.equal(maskHomePathForUi("/Users/sercan/.cursor/mcp.json"), "~/.cursor/mcp.json");
     assert.equal(maskHomePathForUi("/home/sercan/.grok/mcp.json"), "~/.grok/mcp.json");
     assert.equal(
@@ -78,21 +79,32 @@ describe("health-agents path masking", () => {
       "~/AppData/Roaming/Claude/x.json",
     );
     assert.equal(maskHomePathForUi("~/already/masked"), "~/already/masked");
-    // Free text / URLs are not path-like — leave untouched (no mid-string rewrite).
+    // Prose / key=value free text — homes ARE masked (HO-4 second line).
     assert.equal(
       maskHomePathForUi("url-only; path=/Users/sercan/.cursor/mcp.json"),
-      "url-only; path=/Users/sercan/.cursor/mcp.json",
+      "url-only; path=~/.cursor/mcp.json",
     );
+    assert.equal(
+      maskHomePathForUi("missing under /home/sercan/.grok"),
+      "missing under ~/.grok",
+    );
+    assert.equal(isPathLike("/Users/a/b"), true);
+    assert.equal(isPathLike("http://h/home/a"), false);
+  });
+
+  it("leaves URL path segments with /home/ or /Users/ intact", () => {
     assert.equal(
       maskHomePathForUi("http://127.0.0.1:18790/home/sercan/mcp"),
       "http://127.0.0.1:18790/home/sercan/mcp",
     );
-    assert.equal(isPathLike("/Users/a/b"), true);
+    assert.equal(
+      maskHomePathForUi("https://example.com/Users/sercan/file"),
+      "https://example.com/Users/sercan/file",
+    );
     assert.equal(isPathLike("http://h/home/a"), false);
-    assert.equal(isPathLike("missing under /home/a"), false);
   });
 
-  it("maskAgentEntryForUi masks path fields only, not detail free text", () => {
+  it("maskAgentEntryForUi masks path fields and detail free text", () => {
     const masked = maskAgentEntryForUi({
       client: "cursor",
       status: "unverified",
@@ -103,10 +115,10 @@ describe("health-agents path masking", () => {
     });
     assert.equal(masked.config_path, "~/.cursor/mcp.json");
     assert.ok(masked.command?.startsWith("~/"));
+    assert.equal(masked.detail, "under ~/.cursor");
     assert.ok(!containsUnmaskedHome(masked.config_path ?? ""));
     assert.ok(!containsUnmaskedHome(masked.command ?? ""));
-    // detail is free text — not rewritten.
-    assert.equal(masked.detail, "under /home/sercan/.cursor");
+    assert.ok(!containsUnmaskedHome(masked.detail ?? ""));
   });
 });
 
