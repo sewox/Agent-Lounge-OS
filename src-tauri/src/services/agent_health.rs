@@ -623,12 +623,12 @@ fn classify_entry(
 
     entry_base(
         client,
-        AgentMcpStatus::Ok,
+        AgentMcpStatus::Unverified,
         Some(path.to_path_buf()),
         None,
         None,
         expected,
-        Some("url-only remote entry".into()),
+        Some("url-only entry, not probed".into()),
         homes,
     )
 }
@@ -1260,6 +1260,132 @@ mod tests {
             &roots,
         );
         assert_eq!(none.status, AgentMcpStatus::NotInstalled);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn url_only_entries_are_unverified_not_ok() {
+        let (roots, base) = temp_roots("url-only");
+        let expected = ExpectedLoungeMcp {
+            version: "0.1.0".into(),
+            sha256: None,
+            path: None,
+        };
+
+        let url_cfg = roots.home.join(".cursor/mcp.json");
+        write_json(
+            &url_cfg,
+            &json!({
+                "mcpServers": {
+                    "agent-lounge-os": {
+                        "url": "http://127.0.0.1:18791/mcp"
+                    }
+                }
+            }),
+        );
+        let url_entry =
+            check_client_for_test("cursor", true, vec![url_cfg.clone()], &expected, &roots);
+        assert_eq!(url_entry.status, AgentMcpStatus::Unverified);
+        assert_eq!(url_entry.status.as_str(), "unverified");
+        assert_eq!(url_entry.severity, "info");
+        assert_eq!(
+            url_entry.detail.as_deref(),
+            Some("url-only entry, not probed")
+        );
+        assert!(url_entry.command.is_none());
+
+        let server_url_cfg = roots.home.join(".claude/mcp.json");
+        write_json(
+            &server_url_cfg,
+            &json!({
+                "mcpServers": {
+                    "agent-lounge-os": {
+                        "serverUrl": "https://example.invalid/mcp"
+                    }
+                }
+            }),
+        );
+        let server_url_entry = check_client_for_test(
+            "claude_desktop",
+            true,
+            vec![server_url_cfg.clone()],
+            &expected,
+            &roots,
+        );
+        assert_eq!(server_url_entry.status, AgentMcpStatus::Unverified);
+        assert_eq!(server_url_entry.severity, "info");
+        assert_eq!(
+            server_url_entry.detail.as_deref(),
+            Some("url-only entry, not probed")
+        );
+
+        let before = snapshot_files(&[url_cfg.clone(), server_url_cfg.clone()]);
+        let _ = check_all_agents(&roots, &expected);
+        assert_unchanged(&before);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn command_plus_url_keeps_local_binary_check() {
+        let (roots, base) = temp_roots("cmd-url");
+        let bin_ok = base.join("bin/ok/lounge-mcp");
+        let bin_stale = base.join("bin/stale/lounge-mcp");
+        let sha_ok = fake_binary(&bin_ok, "0.1.0");
+        let _sha_stale = fake_binary(&bin_stale, "0.0.9");
+        let expected = ExpectedLoungeMcp {
+            version: "0.1.0".into(),
+            sha256: Some(sha_ok.clone()),
+            path: Some(bin_ok.clone()),
+        };
+
+        let with_both = |cmd: &Path| {
+            json!({
+                "mcpServers": {
+                    "agent-lounge-os": {
+                        "command": json_path(cmd),
+                        "url": "http://127.0.0.1:18791/mcp",
+                        "args": [],
+                        "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791" }
+                    }
+                }
+            })
+        };
+
+        let ok_cfg = roots.home.join(".cursor/mcp.json");
+        write_json(&ok_cfg, &with_both(&bin_ok));
+        let ok_entry =
+            check_client_for_test("cursor", true, vec![ok_cfg.clone()], &expected, &roots);
+        assert_eq!(
+            ok_entry.status,
+            AgentMcpStatus::Ok,
+            "command+url must use local binary check: {:?}",
+            ok_entry.detail
+        );
+
+        let stale_cfg = roots.home.join(".claude/mcp.json");
+        write_json(&stale_cfg, &with_both(&bin_stale));
+        let stale_entry = check_client_for_test(
+            "claude_desktop",
+            true,
+            vec![stale_cfg.clone()],
+            &expected,
+            &roots,
+        );
+        assert_eq!(stale_entry.status, AgentMcpStatus::Stale);
+
+        let bin_hash = base.join("bin/hash/lounge-mcp");
+        fake_binary(&bin_hash, "0.1.0");
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&bin_hash).unwrap();
+            writeln!(f, "# pad").unwrap();
+        }
+        let hash_cfg = roots.home.join(".codeium/windsurf/mcp_config.json");
+        write_json(&hash_cfg, &with_both(&bin_hash));
+        let hash_entry =
+            check_client_for_test("windsurf", true, vec![hash_cfg.clone()], &expected, &roots);
+        assert_eq!(hash_entry.status, AgentMcpStatus::HashMismatch);
 
         let _ = fs::remove_dir_all(&base);
     }

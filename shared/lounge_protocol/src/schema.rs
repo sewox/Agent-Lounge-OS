@@ -218,14 +218,14 @@ mod tests {
         validate(SchemaKind::Task, &good).expect("legacy task");
     }
 
-    /// T5: schema snapshot — args empty object + report shape locked to 1.0.0.
+    /// T5: schema snapshot — args empty object + report shape locked to 1.1.0.
     #[test]
     fn t5_lounge_health_schema_snapshot() {
         validate(SchemaKind::McpLoungeHealth, &json!({})).expect("empty args");
         assert!(validate(SchemaKind::McpLoungeHealth, &json!({ "x": 1 })).is_err());
 
         let report = json!({
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "checked_at": "2026-10-16T00:00:00.000Z",
             "platform": {
                 "os": "linux",
@@ -265,6 +265,49 @@ mod tests {
         let raw_args = include_str!("../schemas/mcp_lounge_health.schema.json");
         let raw_report = include_str!("../schemas/lounge_health_report.schema.json");
         assert!(raw_args.contains("mcp_lounge_health"));
-        assert!(raw_report.contains("\"const\": \"1.0.0\""));
+        assert!(
+            raw_args.contains("1.1.0"),
+            "mcp_lounge_health description must mention schema 1.1.0"
+        );
+        assert!(raw_report.contains("\"const\": \"1.1.0\""));
+        assert!(
+            raw_report.contains("\"unverified\""),
+            "status enum must include unverified"
+        );
+
+        let unverified = json!({
+            "schema_version": "1.1.0",
+            "checked_at": "2026-10-16T00:00:00.000Z",
+            "platform": {
+                "os": "linux",
+                "arch": "x86_64",
+                "package_manager": "apt"
+            },
+            "agents": [{
+                "client": "cursor",
+                "status": "unverified",
+                "severity": "info",
+                "detail": "url-only entry, not probed"
+            }],
+            "title": {
+                "queue_backlog": 0,
+                "db_backlog": 0,
+                "give_ups": 0,
+                "lmr_reachable": false,
+                "model_installed": false,
+                "model": "gemma-2-2b-it"
+            },
+            "dead_symbols": {
+                "kritik": 0,
+                "potansiyel": 0,
+                "total": 0,
+                "ignored": 0
+            },
+            "cbm": {
+                "daemon_mode": false,
+                "polluted_18749": false
+            }
+        });
+        validate(SchemaKind::LoungeHealthReport, &unverified).expect("unverified status");
     }
 }

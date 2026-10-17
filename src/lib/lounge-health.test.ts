@@ -11,6 +11,9 @@ import {
   isRestartLimited,
   optionalMissingServiceNames,
   resolveDegradedRestart,
+  type AgentHealthEntry,
+  type AgentMcpStatus,
+  type LoungeHealthReport,
   type ServiceHealth,
   type ServiceReport,
 } from "./lounge.ts";
@@ -182,5 +185,51 @@ describe("lounge health helpers", () => {
       isRestartLimited(health("ollama", "LMR", false, { error: "port closed" })),
       false,
     );
+  });
+});
+
+describe("lounge_health AgentMcpStatus unverified (schema 1.1.0)", () => {
+  it("accepts unverified status with info severity for url-only entries", () => {
+    const status: AgentMcpStatus = "unverified";
+    const entry: AgentHealthEntry = {
+      client: "cursor",
+      status,
+      severity: "info",
+      detail: "url-only entry, not probed",
+    };
+    assert.equal(entry.status, "unverified");
+    assert.equal(entry.severity, "info");
+    assert.equal(entry.detail, "url-only entry, not probed");
+
+    const report: LoungeHealthReport = {
+      schema_version: "1.1.0",
+      checked_at: "2026-10-17T00:00:00.000Z",
+      platform: {
+        os: "linux",
+        arch: "x86_64",
+        package_manager: "apt",
+      },
+      agents: [entry],
+      title: {
+        queue_backlog: 0,
+        db_backlog: 0,
+        give_ups: 0,
+        lmr_reachable: false,
+        model_installed: false,
+        model: "gemma-2-2b-it",
+      },
+      dead_symbols: {
+        kritik: 0,
+        potansiyel: 0,
+        total: 0,
+        ignored: 0,
+      },
+      cbm: {
+        daemon_mode: false,
+        polluted_18749: false,
+      },
+    };
+    assert.equal(report.schema_version, "1.1.0");
+    assert.equal(report.agents[0]?.status, "unverified");
   });
 });
