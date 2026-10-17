@@ -318,7 +318,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     () => buildCriticalAlerts({ quotas, amberAlert, amberTools, approval, degradedNames }),
     [quotas, amberAlert, amberTools, approval, degradedNames],
   );
+  const haltChrome = haltState.halted && !onboarding;
   const statusBanner =
+    haltChrome ||
     serviceDegraded ||
     optionalMissing.length > 0 ||
     (approval && !securityHold && !quotaHold) ||
@@ -351,6 +353,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => ro.disconnect();
   }, [
     statusBanner,
+    haltChrome,
+    haltState.reason,
+    haltState.at,
     serviceDegraded,
     approval,
     indexing,
@@ -529,7 +534,25 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      {indexing || indexProgressActive(indexProgress) ? (
+      {haltChrome ? (
+        <div ref={attachBannerRef} className={`${bannerPos} px-3 py-2`}>
+          <HaltedBanner title={t("haltedBannerTitle")} className="w-full">
+            <div className="space-y-1" data-qa="halted-banner-details">
+              <p className="font-semibold text-on-surface">{t("haltedBannerLead")}</p>
+              <p>
+                {haltState.reason
+                  ? t("haltedReason", { reason: haltState.reason })
+                  : t("haltedReasonNone")}
+              </p>
+              <p>
+                {t("haltedBy", { by: haltState.by || "ui" })}
+                {haltState.at ? ` · ${t("haltedAt", { at: haltState.at })}` : null}
+              </p>
+              <p className="text-on-surface-variant">{t("haltedDoesNotStop")}</p>
+            </div>
+          </HaltedBanner>
+        </div>
+      ) : indexing || indexProgressActive(indexProgress) ? (
         <div
           ref={attachBannerRef}
           className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
@@ -1140,23 +1163,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         }`}
         style={bannerHeight > 0 ? { paddingTop: `calc(0.875rem + ${bannerHeight}px)` } : undefined}
       >
-        {haltState.halted && !onboarding ? (
-          <HaltedBanner title={t("haltedBannerTitle")} className="w-full shrink-0">
-            <div className="space-y-1" data-qa="halted-banner-details">
-              <p className="font-semibold text-on-surface">{t("haltedBannerLead")}</p>
-              <p>
-                {haltState.reason
-                  ? t("haltedReason", { reason: haltState.reason })
-                  : t("haltedReasonNone")}
-              </p>
-              <p>
-                {t("haltedBy", { by: haltState.by || "ui" })}
-                {haltState.at ? ` · ${t("haltedAt", { at: haltState.at })}` : null}
-              </p>
-              <p className="text-on-surface-variant">{t("haltedDoesNotStop")}</p>
-            </div>
-          </HaltedBanner>
-        ) : null}
         <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">{children}</div>
       </main>
 
