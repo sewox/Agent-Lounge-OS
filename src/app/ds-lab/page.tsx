@@ -194,6 +194,9 @@ export default function DesignSystemLabPage() {
               <p>StatsStrip clicks set the list filter; active chip uses aria-pressed.</p>
               <p>Halted hatch is distinct from solid error chrome.</p>
             </div>
+            <p className="mt-auto shrink-0 pt-6 font-body text-meta text-on-surface-variant">
+              Detail footer · layout fill sentinel
+            </p>
           </div>
         }
         inspector={
@@ -217,6 +220,26 @@ export default function DesignSystemLabPage() {
                 <dd className="text-on-surface">{mode}</dd>
               </div>
             </dl>
+            {/* Fill interior so L2 sparse-interior passes when inspector is inline (three). */}
+            <div className="mt-4 space-y-2 font-body text-body text-on-surface-variant">
+              <p>Probe · mock://inspector/{selected.id}</p>
+              <p>Last sample · {selected.category === "running" ? "ok" : "n/a"}</p>
+              <p>Queue depth · 0</p>
+              <p>Backpressure · none</p>
+              <p>Affinity · local</p>
+              <p>Policy · default</p>
+              <p>Schema · panel-grid slots</p>
+              <p>Wide (≥1600 container) shows inspector inline.</p>
+              <p>Medium (1200–1599) keeps inspector in a drawer.</p>
+              <p>Narrow (&lt;1200) opens detail and inspector as drawers.</p>
+              <p>Portrait stacks list above detail with a splitter.</p>
+              <p>No max-width clamp — panels grow with the content column.</p>
+              <p>L1–L6 layout gates apply on every ds-lab viewport proof.</p>
+              <p>Reference surface only — not a production route migration.</p>
+            </div>
+            <p className="mt-auto shrink-0 pt-6 font-body text-meta text-on-surface-variant">
+              Inspector footer · layout fill sentinel
+            </p>
           </div>
         }
       />
