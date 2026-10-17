@@ -273,8 +273,10 @@ test.describe("Health-UI-2 agents + dead", () => {
   test("HU-07 · axe + badges not colour-alone", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "HU-07" });
 
+    // Scope to main health content (not shell chrome). No disableRules —
+    // color-contrast must be real coverage for agents/dead surfaces.
     const runAxe = async (label: string) => {
-      const results = await new AxeBuilder({ page }).analyze();
+      const results = await new AxeBuilder({ page }).include("main").analyze();
       expect(
         results.violations,
         `${label}: ${JSON.stringify(results.violations, null, 2)}`,
