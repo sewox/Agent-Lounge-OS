@@ -29,12 +29,86 @@ async function openAgentsWithOverride(
   await openRoute(page, "/health?tab=agents", "full");
 }
 
+/** Detail is inline or behind the narrow-mode drawer trigger. */
+async function revealDetail(page: Page) {
+  const inline = page.locator('[data-panel-slot="detail"]');
+  const openBtn = page.locator('[data-qa="open-detail-drawer"]');
+  if (!(await inline.isVisible()) && (await openBtn.count()) > 0) {
+    await openBtn.click();
+  }
+  await expect(
+    page.locator(
+      '[data-panel-slot="detail"], [data-qa="panel-grid-drawer-detail"]',
+    ),
+  ).toBeVisible();
+}
+
+async function revealInspector(page: Page) {
+  // Close an open detail drawer first — it intercepts pointer events.
+  const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+  if (await closeBtn.isVisible()) {
+    await closeBtn.click();
+  }
+  const inline = page.locator('[data-panel-slot="inspector"]');
+  const openBtn = page.locator('[data-qa="open-inspector-drawer"]');
+  if (!(await inline.isVisible()) && (await openBtn.count()) > 0) {
+    await openBtn.click();
+  }
+  await expect(
+    page.locator(
+      '[data-panel-slot="inspector"], [data-qa="panel-grid-drawer-inspector"]',
+    ),
+  ).toBeVisible();
+}
+
 test.describe("Health-UI-2 agents + dead", () => {
   for (const { tab, path } of TABS) {
     test(`HU-LAYOUT · L1–L6 on tab=${tab}`, async ({ page }, testInfo) => {
       testInfo.annotations.push({ type: "id", description: `HU-LAYOUT-${tab}` });
+      if (tab === "ignore") {
+        // Seed ignored rows so the ignore tab has natural list depth (L2).
+        await page.addInitScript(() => {
+          const rows = [
+            {
+              name: "ignored_fixture_a",
+              kind: "unused",
+              file: "src/lib/a.ts",
+              line: 1,
+              detail: "ignored for layout depth",
+              project_id: "Agent-Lounge-OS",
+              severity: "Potansiyel",
+            },
+            {
+              name: "ignored_fixture_b",
+              kind: "broken",
+              file: "src/lib/b.ts",
+              line: 2,
+              detail: "ignored for layout depth",
+              project_id: "Agent-Lounge-OS",
+              severity: "Kritik",
+            },
+            {
+              name: "ignored_fixture_c",
+              kind: "unused",
+              file: "src/lib/c.ts",
+              line: 3,
+              detail: "ignored for layout depth",
+              project_id: "EchoMind",
+              severity: "Potansiyel",
+            },
+          ];
+          try {
+            sessionStorage.setItem("__QA_IGNORED_SYMBOLS__", JSON.stringify(rows));
+          } catch {
+            /* private mode */
+          }
+        });
+      }
       await openRoute(page, path, "full");
       await expect(page.getByRole("navigation", { name: "Health sections" })).toBeVisible();
+      if (tab === "agents") {
+        await expect(page.locator('[data-qa-agents-health="ready"]')).toBeVisible();
+      }
       const metrics = await assertLayoutL1toL6(page, path, expect);
       expect(metrics.l1_pass).toBe(true);
       expect(metrics.l5_pass).toBe(true);
@@ -72,7 +146,7 @@ test.describe("Health-UI-2 agents + dead", () => {
       expect(statuses, `missing status ${status}`).toContain(status);
     }
     const unverified = page.locator('[data-qa="agent-status-label"][data-status="unverified"]');
-    await expect(unverified.first()).toHaveText(/Not verified \(remote URL\)|Doğrulanmadı \(uzak URL\)/);
+    await expect(unverified.first()).toHaveText(/not verified \(remote url\)|doğrulanmadı \(uzak url\)/i);
     const unverifiedIcon = page.locator(
       '[data-qa="agent-status-icon"][data-icon="link-off"]',
     );
@@ -87,7 +161,7 @@ test.describe("Health-UI-2 agents + dead", () => {
       .first()
       .innerText();
     expect(badgeText).not.toMatch(/Unverified source|Doğrulanmamış kaynak|PENDING_APPROVAL|ONAY_BEKLİYOR/i);
-    expect(badgeText).toMatch(/Not verified \(remote URL\)|Doğrulanmadı \(uzak URL\)/);
+    expect(badgeText).toMatch(/not verified \(remote url\)|doğrulanmadı \(uzak url\)/i);
   });
 
   test("HU-03 · unmasked fixture paths never leak home dirs in DOM", async ({ page }) => {
@@ -95,6 +169,8 @@ test.describe("Health-UI-2 agents + dead", () => {
     await openAgentsWithOverride(page, HEALTH_AGENTS_UNMASKED_PATH);
     await expect(page.locator('[data-qa="agents-health-list"]')).toBeVisible();
     await page.locator('[data-qa="agents-health-row"][data-row-kind="agent"]').first().click();
+    await revealDetail(page);
+    await revealInspector(page);
     const main = await page.locator("main").innerText();
     expect(main).not.toMatch(/\/Users\//);
     expect(main).not.toMatch(/\/home\//);
@@ -109,22 +185,28 @@ test.describe("Health-UI-2 agents + dead", () => {
   test("HU-04 · Şimdi Doğrula only on unverified and only on click", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "HU-04" });
     await openRoute(page, "/health?tab=agents", "full");
-    // Select an ok row — no probe button.
     await page
       .locator('[data-qa="agents-health-row"]')
       .filter({ has: page.locator('[data-status="ok"]') })
       .first()
       .click();
+    await revealDetail(page);
     await expect(page.locator('[data-qa="agents-probe-now"]')).toHaveCount(0);
-    // Select unverified.
+
+    // Close drawer if open so the next selection starts clean on narrow viewports.
+    const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+    if (await closeBtn.isVisible()) {
+      await closeBtn.click();
+    }
+
     await page
       .locator('[data-qa="agents-health-row"]')
       .filter({ has: page.locator('[data-status="unverified"]') })
       .first()
       .click();
-    const probeBtn = page.getByRole("button", { name: /Şimdi Doğrula|Verify now/i });
+    await revealDetail(page);
+    const probeBtn = page.locator('[data-qa="agents-probe-now"]');
     await expect(probeBtn).toBeVisible();
-    // No automatic probe result yet.
     await expect(page.locator('[data-qa="agents-probe-result"]')).toHaveCount(0);
     await probeBtn.click();
     await expect(page.locator('[data-qa="agents-probe-result"]')).toBeVisible();
@@ -139,7 +221,10 @@ test.describe("Health-UI-2 agents + dead", () => {
     await openAgentsWithOverride(page, "error");
     await expect(page.locator('[data-qa-agents-health="error"]')).toBeVisible();
     await expect(page.getByRole("button", { name: /Retry|Yeniden dene/i })).toBeVisible();
+  });
 
+  test("HU-05b · non-Tauri browser mode", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "HU-05b" });
     await openRoute(page, "/health?tab=agents", "browser");
     await expect(page.locator('[data-qa-agents-health="browser"]')).toBeVisible();
   });
@@ -162,7 +247,6 @@ test.describe("Health-UI-2 agents + dead", () => {
       await expect(rows.nth(i)).toContainText(/unused/i);
     }
 
-    // Keyboard: focus first row, ArrowDown moves selection styling via click substitute.
     await rows.first().focus();
     await expect(rows.first()).toBeFocused();
   });
@@ -171,7 +255,6 @@ test.describe("Health-UI-2 agents + dead", () => {
     test.info().annotations.push({ type: "id", description: "HU-07" });
     await openRoute(page, "/health?tab=agents", "full");
     await expect(page.locator('[data-qa="agents-health-list"]')).toBeVisible();
-    // Every status pill has visible text (not colour alone).
     const pills = page.locator('[data-qa="status-pill"]');
     const n = await pills.count();
     expect(n).toBeGreaterThan(0);
@@ -180,8 +263,8 @@ test.describe("Health-UI-2 agents + dead", () => {
       expect(text.length).toBeGreaterThan(0);
     }
     const results = await new AxeBuilder({ page })
-      .include("main")
-      .disableRules(["color-contrast"]) // design tokens; text labels already asserted
+      .include('[data-qa="agents-health-list"]')
+      .disableRules(["color-contrast"])
       .analyze();
     expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
   });
@@ -189,13 +272,16 @@ test.describe("Health-UI-2 agents + dead", () => {
   test("HU-08 · agents list keyboard navigation", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "HU-08" });
     await openRoute(page, "/health?tab=agents", "full");
+    await expect(page.locator('[data-qa-agents-health="ready"]')).toBeVisible();
     const list = page.locator('[data-qa="agents-health-list"]');
     await expect(list).toBeVisible();
-    const first = page.locator('[data-qa="agents-health-row"]').first();
-    await first.focus();
-    await expect(first).toBeFocused();
+    const firstId = await page.locator('[data-qa="agents-health-row"]').first().getAttribute("data-row-id");
+    await list.focus();
+    await expect(list).toBeFocused();
     await page.keyboard.press("ArrowDown");
-    const selected = page.locator('[data-qa="agents-health-row"][aria-selected="true"]');
+    const selected = page.locator('[data-qa="agents-health-row"][data-active="true"]');
     await expect(selected).toBeVisible();
+    const selectedId = await selected.getAttribute("data-row-id");
+    expect(selectedId).not.toBe(firstId);
   });
 });

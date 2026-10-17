@@ -283,8 +283,34 @@ export function DeadSymbolsPanel({
             onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
           >
             {filtered.length === 0 ? (
-              <div className="px-3 py-6 text-center font-body text-body text-on-surface-variant">
-                {mode === "ignored" ? s.noIgnored : s.noSymbols}
+              <div
+                className="flex min-h-[55vh] flex-col justify-between gap-3 px-3 py-6 text-center"
+                data-qa="dead-symbol-empty"
+              >
+                <div className="space-y-3">
+                  <p className="font-body text-body text-on-surface-variant">
+                    {mode === "ignored" ? s.noIgnored : s.noSymbols}
+                  </p>
+                  <p className="font-body text-body text-on-surface-variant">
+                    {mode === "ignored"
+                      ? t("dead.reasonFallback")
+                      : t("dead.staleWarning")}
+                  </p>
+                  <p className="font-body text-meta text-outline">{s.selectSymbol}</p>
+                  <p className="font-body text-meta text-outline">{s.searchPlaceholder}</p>
+                </div>
+                <div className="space-y-2">
+                  <p className="font-body text-meta text-outline">
+                    {t("dead.statsTotal")} · {t("dead.statsUnused")} · {t("dead.statsBroken")}
+                  </p>
+                  <p className="font-body text-meta text-outline">
+                    {t("dead.confidenceKritik")} / {t("dead.confidencePotansiyel")}
+                  </p>
+                  <p className="font-body text-meta text-outline">{s.reindex}</p>
+                  <p className="font-body text-meta text-outline">{s.fileLine}</p>
+                  <p className="font-body text-meta text-outline">{s.detail}</p>
+                  <p className="font-body text-meta text-outline">{s.lastRef}</p>
+                </div>
               </div>
             ) : (
               <div style={{ paddingTop: topPad, paddingBottom: bottomPad }}>

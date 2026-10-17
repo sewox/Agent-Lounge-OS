@@ -252,10 +252,11 @@ export function AgentsHealthPanel() {
                 {t("agents.checkedAt")}: {report!.checked_at}
               </p>
             </div>
-            <ul
-              role="listbox"
+            <div
+              role="group"
               tabIndex={0}
               aria-labelledby={listLabelId}
+              aria-label={t("agents.listTitle")}
               data-qa="agents-health-list"
               className="min-h-0 flex-1 overflow-auto font-mono text-body focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary"
               onKeyDown={(event) => {
@@ -280,7 +281,7 @@ export function AgentsHealthPanel() {
                   t={t}
                 />
               ))}
-            </ul>
+            </div>
           </div>
         }
         detail={
@@ -325,7 +326,7 @@ function EmptyList({
       >
         {message}
       </p>
-      <ul data-qa="agents-health-list" className="min-h-0 flex-1 overflow-auto">
+      <div role="group" data-qa="agents-health-list" className="min-h-0 flex-1 overflow-auto">
         {systemItems
           .filter((i) => i.kind !== "agent")
           .map((item) => (
@@ -337,7 +338,7 @@ function EmptyList({
               t={t}
             />
           ))}
-      </ul>
+      </div>
     </div>
   );
 }
@@ -374,25 +375,24 @@ function ListRow({
   }
 
   return (
-    <li>
-      <button
-        type="button"
-        role="option"
-        aria-selected={active}
-        data-qa="agents-health-row"
-        data-row-id={item.id}
-        data-row-kind={item.kind}
-        onClick={onSelect}
-        className={`flex w-full items-center justify-between gap-2 border-b border-outline-variant/40 px-3 py-2.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary ${
-          active
-            ? "bg-primary-container/20 text-primary"
-            : "text-on-surface hover:bg-surface-container-high"
-        }`}
-      >
-        <span className="min-w-0 truncate font-mono text-body">{title}</span>
-        {badge}
-      </button>
-    </li>
+    <button
+      type="button"
+      aria-pressed={active}
+      aria-current={active ? "true" : undefined}
+      data-qa="agents-health-row"
+      data-row-id={item.id}
+      data-row-kind={item.kind}
+      data-active={active ? "true" : "false"}
+      onClick={onSelect}
+      className={`flex w-full items-center justify-between gap-2 border-b border-outline-variant/40 px-3 py-2.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary ${
+        active
+          ? "bg-primary-container/20 text-primary"
+          : "text-on-surface hover:bg-surface-container-high"
+      }`}
+    >
+      <span className="min-w-0 truncate font-mono text-body">{title}</span>
+      {badge}
+    </button>
   );
 }
 

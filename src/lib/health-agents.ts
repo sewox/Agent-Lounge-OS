@@ -58,22 +58,17 @@ export function statusIconName(status: AgentMcpStatus): string {
 export function maskHomePathForUi(raw: string | null | undefined): string {
   if (raw == null || raw === "") return "";
   let out = raw;
-  // Already masked — leave alone.
-  if (out.startsWith("~/") || out === "~") {
-    return out.replace(/\\/g, "/");
-  }
-  // Windows: C:\Users\<name>\… or C:/Users/<name>/…
-  out = out.replace(/^[A-Za-z]:[\\/]+Users[\\/]+[^\\/]+/i, "~");
+  // Windows: C:\Users\<name>\… or C:/Users/<name>/… (prefix or mid-string)
+  out = out.replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi, "~");
   // macOS /Users/<name>
-  out = out.replace(/^\/Users\/[^/]+/i, "~");
+  out = out.replace(/\/Users\/[^/\s"']+/gi, "~");
   // Linux /home/<name>
-  out = out.replace(/^\/home\/[^/]+/i, "~");
+  out = out.replace(/\/home\/[^/\s"']+/gi, "~");
   // Normalize separators after mask.
   out = out.replace(/\\/g, "/");
-  // Collapse leftover "~\" style
-  if (out.startsWith("~\\")) {
-    out = `~/${out.slice(2)}`;
-  }
+  // Collapse leftover "~\" or "~foo" → "~/foo" when we replaced a home root.
+  out = out.replace(/~(?![/\s]|$)/g, "~/");
+  out = out.replace(/~\/+/g, "~/");
   return out;
 }
 

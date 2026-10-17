@@ -71,6 +71,10 @@ describe("health-agents path masking", () => {
       "~/AppData/Roaming/Claude/x.json",
     );
     assert.equal(maskHomePathForUi("~/already/masked"), "~/already/masked");
+    assert.equal(
+      maskHomePathForUi("url-only; path=/Users/sercan/.cursor/mcp.json"),
+      "url-only; path=~/.cursor/mcp.json",
+    );
   });
 
   it("maskAgentEntryForUi is a second defence on unmasked fixtures", () => {
@@ -86,6 +90,7 @@ describe("health-agents path masking", () => {
     assert.ok(masked.command?.startsWith("~/"));
     assert.ok(!containsUnmaskedHome(masked.config_path ?? ""));
     assert.ok(!containsUnmaskedHome(masked.command ?? ""));
+    assert.ok(!containsUnmaskedHome(masked.detail ?? ""));
   });
 });
 

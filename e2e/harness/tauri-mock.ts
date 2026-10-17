@@ -37,8 +37,12 @@ declare global {
 export async function installTauriMock(page: Page, fixtureName: FixtureName = "full") {
   if (fixtureName === "browser") {
     // No __TAURI_INTERNALS__ — exercise browser / ?demo= paths.
+    // Clear any TAURI stubs left by earlier addInitScript calls on this page.
     await page.addInitScript(() => {
       window.__QA_IPC_LOG__ = [];
+      delete window.__TAURI_INTERNALS__;
+      delete window.__TAURI_EVENT_PLUGIN_INTERNALS__;
+      delete window.__QA_LOUNGE_HEALTH__;
     });
     return;
   }
