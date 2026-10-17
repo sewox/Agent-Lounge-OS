@@ -9,7 +9,7 @@ Foundation every later UI PR uses: principles, primitives, states, viewport rule
 3. **Shell chrome is fixed.** Top status bar + left rail + content. Content owns scroll; chrome does not introduce horizontal overflow (L5).
 4. **One composition per surface.** Prefer list | detail | inspector over stacked card dashboards.
 5. **Honest state language.** Halted ≠ error. Empty ≠ loading. Prefer explicit StatusPill / banner affordances.
-6. **Keyboard & a11y first.** Stats, filters, and drawers are operable with keyboard; interactive numbers have visible active state and aria labels.
+6. **Keyboard & a11y first.** Stats, filters, and drawers are operable with keyboard; interactive numbers have visible active state and accessible names.
 7. **Motion respects preference.** Decorative motion (hatch shimmer, pulses) yields to `prefers-reduced-motion: reduce`.
 
 ## Shell
@@ -49,7 +49,7 @@ Additional viewport proofs (ds-lab e2e; container ≈ viewport − sidebar − m
 Component: `StatsStrip`. Every number is a **button** that sets the active list/FilterBar category (`onFilterChange`). Requirements:
 
 - Keyboard focusable; Enter/Space activate
-- `aria-pressed` / `aria-label` reflecting category + count
+- Accessible name from the visible label + count (WCAG 2.5.3); filter state via `aria-pressed` (no overriding `aria-label`)
 - Visible active state (border/background), not color alone
 
 Wire to a FilterBar (documented below) or local list filter until FilterBar ships.
@@ -70,10 +70,13 @@ Halt **logic** is PR-Control-1. This package ships visual state only.
 | Tone | Use |
 |------|-----|
 | `ok` | Healthy / running |
+| `info` | Informational (e.g. agent MCP `hash_mismatch` / `unverified`) |
 | `warn` | Degraded / limited |
 | `error` | Failure / crash |
 | `halted` | Deliberately stopped |
 | `neutral` | Idle / unknown |
+
+Health agents UI: see `docs/health.md` (Health-UI-2).
 
 ## Documented primitives (not built in PR-DS-0)
 
@@ -123,4 +126,4 @@ Shared assert API: `assertLayoutL1toL6(page, route, expect)` — usable from any
 
 ## Out of scope (this PR)
 
-Halt control logic, review queue, Vault card, dead-code screen, timeline UI, i18n/left-menu responsiveness (PR-i18n-Platform-1).
+Halt control logic, review queue, Vault card, timeline UI, i18n/left-menu responsiveness (PR-i18n-Platform-1). Dead-code + agents health screens: Health-UI-2 (`docs/health.md`).

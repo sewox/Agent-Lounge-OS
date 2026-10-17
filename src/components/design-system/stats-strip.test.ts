@@ -91,7 +91,12 @@ describe("StatsStrip", () => {
     assert.equal(halted.getAttribute("aria-pressed"), "true");
     assert.equal(halted.getAttribute("data-active"), "true");
     assert.equal(all.getAttribute("aria-pressed"), "false");
-    assert.match(halted.getAttribute("aria-label") || "", /Halted: 2/);
+    // Accessible name from visible content (WCAG 2.5.3) — no overriding aria-label.
+    assert.equal(halted.getAttribute("aria-label"), null);
+    assert.match(halted.textContent || "", /Halted/);
+    assert.match(halted.textContent || "", /2/);
+    assert.equal(halted.getAttribute("title"), "Active filter");
+    assert.equal(all.getAttribute("title"), "Set filter");
   });
 
   it("clicking a number calls onFilterChange with that category id", () => {

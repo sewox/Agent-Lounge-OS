@@ -56,18 +56,32 @@ pub async fn collect_lounge_health(store: &ExperienceStore) -> LoungeHealthRepor
     report
 }
 
+/// Count agents whose severity is exactly `warning` (N1 / HU5).
+pub fn count_agents_warn(agents: &[crate::models::AgentHealthEntry]) -> usize {
+    agents
+        .iter()
+        .filter(|a| a.severity.as_str() == "warning")
+        .count()
+}
+
+/// Count agents whose severity is exactly `info` (hash_mismatch, unverified).
+pub fn count_agents_info(agents: &[crate::models::AgentHealthEntry]) -> usize {
+    agents
+        .iter()
+        .filter(|a| a.severity.as_str() == "info")
+        .count()
+}
+
 /// Startup: one read-only check (never starts a timer).
 pub async fn run_startup_lounge_health(store: ExperienceStore) {
     let report = collect_lounge_health(&store).await;
-    let warn_agents = report
-        .agents
-        .iter()
-        .filter(|a| a.status.as_str() != "ok" && a.status.as_str() != "not_installed")
-        .count();
+    let warn_agents = count_agents_warn(&report.agents);
+    let info_agents = count_agents_info(&report.agents);
     log::info!(
-        "lounge_health schema={} agents_warn={} title_backlog={} give_ups={} cbm_polluted={} daemon={}",
+        "lounge_health schema={} agents_warn={} agents_info={} title_backlog={} give_ups={} cbm_polluted={} daemon={}",
         report.schema_version,
         warn_agents,
+        info_agents,
         report.title.db_backlog,
         report.title.give_ups,
         report.cbm.polluted_18749,
@@ -330,6 +344,93 @@ mod tests {
             path: None,
         };
         assert_eq!(e.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn agents_warn_counts_only_warning_severity() {
+        use crate::models::{AgentHealthEntry, AgentMcpStatus};
+        let agents = vec![
+            AgentHealthEntry {
+                client: "a".into(),
+                status: AgentMcpStatus::Ok,
+                severity: "ok".into(),
+                config_path: None,
+                command: None,
+                configured_version: None,
+                expected_version: None,
+                configured_sha256: None,
+                expected_sha256: None,
+                detail: None,
+            },
+            AgentHealthEntry {
+                client: "b".into(),
+                status: AgentMcpStatus::NotInstalled,
+                severity: "warning".into(),
+                config_path: None,
+                command: None,
+                configured_version: None,
+                expected_version: None,
+                configured_sha256: None,
+                expected_sha256: None,
+                detail: None,
+            },
+            AgentHealthEntry {
+                client: "c".into(),
+                status: AgentMcpStatus::Stale,
+                severity: "warning".into(),
+                config_path: None,
+                command: None,
+                configured_version: None,
+                expected_version: None,
+                configured_sha256: None,
+                expected_sha256: None,
+                detail: None,
+            },
+            AgentHealthEntry {
+                client: "d".into(),
+                status: AgentMcpStatus::HashMismatch,
+                severity: "info".into(),
+                config_path: None,
+                command: None,
+                configured_version: None,
+                expected_version: None,
+                configured_sha256: None,
+                expected_sha256: None,
+                detail: None,
+            },
+            AgentHealthEntry {
+                client: "e".into(),
+                status: AgentMcpStatus::Unverified,
+                severity: "info".into(),
+                config_path: None,
+                command: None,
+                configured_version: None,
+                expected_version: None,
+                configured_sha256: None,
+                expected_sha256: None,
+                detail: None,
+            },
+            AgentHealthEntry {
+                client: "f".into(),
+                status: AgentMcpStatus::Missing,
+                severity: "warning".into(),
+                config_path: None,
+                command: None,
+                configured_version: None,
+                expected_version: None,
+                configured_sha256: None,
+                expected_sha256: None,
+                detail: None,
+            },
+        ];
+        // Old N1 bug counted everything except ok/not_installed → would be 4.
+        // HU5: warn = severity warning only; info = severity info.
+        assert_eq!(count_agents_warn(&agents), 3);
+        assert_eq!(count_agents_info(&agents), 2);
+        assert_eq!(AgentMcpStatus::HashMismatch.severity(), "info");
+        assert_eq!(AgentMcpStatus::Unverified.severity(), "info");
+        assert_eq!(AgentMcpStatus::Stale.severity(), "warning");
+        assert_eq!(AgentMcpStatus::NotInstalled.severity(), "warning");
     }
 
     #[test]

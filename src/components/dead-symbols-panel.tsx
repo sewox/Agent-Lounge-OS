@@ -2,18 +2,27 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useLounge } from "@/components/lounge-provider";
 import { IndexEmptyState } from "@/components/index-empty-state";
 import { Icon } from "@/components/icons";
+import { StatsStrip } from "@/components/design-system";
 import {
   deadSymbolKey,
-  filterDeadSymbols,
   formatSymbolFileLine,
   formatSymbolFullPathLine,
   sortDeadSymbols,
   type DeadSymbolSort,
 } from "@/lib/dead-symbols";
-import { hasIndexedWorkspace, type DeadSymbol } from "@/lib/lounge";
+import {
+  countDeadByCategory,
+  deadSymbolReason,
+  filterDeadSymbolsUi,
+  isScanStale,
+  type DeadCategoryFilter,
+  type DeadConfidenceFilter,
+} from "@/lib/health-agents";
+import { hasIndexedWorkspace, isTauri, type DeadSymbol } from "@/lib/lounge";
 import { deadSymbolStrings as s } from "@/lib/strings/dead-symbols";
 
 const ROW_HEIGHT_PX = 52;
@@ -24,10 +33,16 @@ type DeadSymbolsPanelProps = {
   mode?: "dead" | "ignored";
 };
 
+type ScanMeta = {
+  partial: boolean;
+  indexed_at: string | null;
+};
+
 export function DeadSymbolsPanel({
   projectFilter = null,
   mode = "dead",
 }: DeadSymbolsPanelProps) {
+  const { t } = useTranslation("health");
   const {
     deadSymbols,
     ignoredSymbols,
@@ -46,22 +61,86 @@ export function DeadSymbolsPanel({
   const source = mode === "ignored" ? ignoredSymbols : deadSymbols;
   const indexed = hasIndexedWorkspace({ lastIndex, projects, semanticMap });
   const [query, setQuery] = useState("");
-  const [kind, setKind] = useState<"all" | "unused" | "broken">("all");
+  const [category, setCategory] = useState<DeadCategoryFilter>("all");
+  const [confidence, setConfidence] = useState<DeadConfidenceFilter>("all");
   const [sort, setSort] = useState<DeadSymbolSort>("name");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(320);
+  const [scanMeta, setScanMeta] = useState<ScanMeta>({ partial: false, indexed_at: null });
   const listRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadScanMeta() {
+      // Prefer QA fixture override (e2e partial scan), then Tauri list_health_scans.
+      const qa = (typeof window !== "undefined"
+        ? (window as Window & { __QA_HEALTH_SCAN_META__?: ScanMeta }).__QA_HEALTH_SCAN_META__
+        : undefined) ?? null;
+      if (qa) {
+        if (!cancelled) setScanMeta(qa);
+        return;
+      }
+      if (!isTauri()) {
+        if (!cancelled) setScanMeta({ partial: false, indexed_at: null });
+        return;
+      }
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const jobs = await invoke<
+          {
+            result?: { partial?: boolean; indexed_at?: string | null; project_id?: string } | null;
+          }[]
+        >("list_health_scans");
+        const match =
+          (projectFilter
+            ? jobs.find((j) => j.result?.project_id === projectFilter)
+            : undefined) ?? jobs[0];
+        const result = match?.result;
+        if (!cancelled) {
+          setScanMeta({
+            partial: Boolean(result?.partial),
+            indexed_at: result?.indexed_at ?? null,
+          });
+        }
+      } catch {
+        if (!cancelled) setScanMeta({ partial: false, indexed_at: null });
+      }
+    }
+    void loadScanMeta();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectFilter, indexed, source.length]);
+
+  const scoped = useMemo(() => {
+    if (!projectFilter) return source;
+    return source.filter((row) => !row.project_id || row.project_id === projectFilter);
+  }, [source, projectFilter]);
+
+  const counts = useMemo(() => countDeadByCategory(scoped), [scoped]);
+
   const filtered = useMemo(
-    () => sortDeadSymbols(filterDeadSymbols(source, query, kind, projectFilter), sort),
-    [source, query, kind, projectFilter, sort],
+    () =>
+      sortDeadSymbols(
+        filterDeadSymbolsUi(scoped, {
+          query,
+          category,
+          confidence,
+          projectId: null,
+          partial: scanMeta.partial,
+        }),
+        sort,
+      ),
+    [scoped, query, category, confidence, sort, scanMeta.partial],
   );
 
   const selected = useMemo(
     () => filtered.find((row) => deadSymbolKey(row) === selectedKey) ?? filtered[0] ?? null,
     [filtered, selectedKey],
   );
+
+  const stale = isScanStale(scanMeta);
 
   useEffect(() => {
     const el = listRef.current;
@@ -80,6 +159,17 @@ export function DeadSymbolsPanel({
   const windowed = filtered.slice(windowStart, windowStart + windowCount);
   const topPad = windowStart * ROW_HEIGHT_PX;
   const bottomPad = Math.max(0, (filtered.length - windowStart - windowed.length) * ROW_HEIGHT_PX);
+
+  const statsItems = [
+    { id: "all", label: t("dead.statsTotal"), value: counts.total },
+    { id: "unused", label: t("dead.statsUnused"), value: counts.unused },
+    { id: "broken", label: t("dead.statsBroken"), value: counts.broken },
+    {
+      id: "partial",
+      label: t("dead.statsPartial"),
+      value: scanMeta.partial ? t("dead.partialYes") : t("dead.partialNo"),
+    },
+  ];
 
   if (!indexed) {
     return (
@@ -101,6 +191,66 @@ export function DeadSymbolsPanel({
       className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
     >
       <PanelHeader mode={mode} total={filtered.length} projectFilter={projectFilter} />
+      {mode === "dead" ? (
+        <div className="shrink-0 space-y-2 border-b border-outline-variant/40 px-2.5 py-2">
+          <StatsStrip
+            items={statsItems}
+            activeId={category === "all" ? "all" : category}
+            onFilterChange={(id) => {
+              if (id === "all" || id === "unused" || id === "broken" || id === "partial") {
+                setCategory(id);
+              }
+            }}
+          />
+          {stale ? (
+            <div
+              role="status"
+              data-qa="dead-stale-warning"
+              className="rounded border border-tertiary/50 bg-surface-container-highest px-2.5 py-2 font-body text-body text-on-surface"
+            >
+              {t("dead.staleWarning")}
+            </div>
+          ) : null}
+          <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={t("dead.categoryChipAll")}>
+            {(
+              [
+                ["all", t("dead.categoryChipAll")],
+                ["unused", t("kindUnused")],
+                ["broken", t("kindBroken")],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                data-qa="dead-category-chip"
+                data-chip={id}
+                aria-pressed={category === id}
+                onClick={() => setCategory(id)}
+                className={`min-h-8 rounded border px-2 py-1 font-body text-meta focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
+                  category === id
+                    ? "border-primary bg-primary-container text-on-primary-container"
+                    : "border-outline-variant bg-surface-container text-on-surface hover:bg-surface-container-high"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            <select
+              value={confidence}
+              onChange={(event) =>
+                setConfidence(event.target.value as DeadConfidenceFilter)
+              }
+              className="min-h-8 rounded border border-outline-variant bg-surface-container px-2 font-body text-meta"
+              aria-label={t("dead.confidenceAll")}
+              data-qa="dead-confidence-filter"
+            >
+              <option value="all">{t("dead.confidenceAll")}</option>
+              <option value="Kritik">{t("dead.confidenceKritik")}</option>
+              <option value="Potansiyel">{t("dead.confidencePotansiyel")}</option>
+            </select>
+          </div>
+        </div>
+      ) : null}
       {deadSymbolNotice ? (
         <div
           role="status"
@@ -122,10 +272,8 @@ export function DeadSymbolsPanel({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded border border-outline-variant/50 bg-surface-container-low/50">
           <Toolbar
             query={query}
-            kind={kind}
             sort={sort}
             onQuery={setQuery}
-            onKind={setKind}
             onSort={setSort}
           />
           <div
@@ -135,8 +283,18 @@ export function DeadSymbolsPanel({
             onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
           >
             {filtered.length === 0 ? (
-              <div className="px-3 py-6 text-center font-body text-body text-on-surface-variant">
-                {mode === "ignored" ? s.noIgnored : s.noSymbols}
+              <div
+                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 py-8 text-center"
+                data-qa="dead-symbol-empty"
+              >
+                <p className="max-w-sm font-body text-body text-on-surface">
+                  {mode === "ignored" ? s.noIgnored : s.noSymbols}
+                </p>
+                <p className="max-w-sm font-body text-meta text-on-surface-variant">
+                  {mode === "ignored"
+                    ? t("dead.emptyIgnoredHint")
+                    : t("dead.emptySymbolsHint")}
+                </p>
               </div>
             ) : (
               <div style={{ paddingTop: topPad, paddingBottom: bottomPad }}>
@@ -150,7 +308,7 @@ export function DeadSymbolsPanel({
                       data-qa="dead-symbol-row"
                       onClick={() => setSelectedKey(key)}
                       style={{ minHeight: ROW_HEIGHT_PX }}
-                      className={`flex w-full items-start justify-between gap-2 border-b border-outline-variant/30 px-2.5 py-2 text-left transition-colors ${
+                      className={`flex w-full items-start justify-between gap-2 border-b border-outline-variant/30 px-2.5 py-2 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary ${
                         active
                           ? "bg-primary-container/30"
                           : "hover:bg-surface-container-high/60"
@@ -180,6 +338,18 @@ export function DeadSymbolsPanel({
           onIgnore={() => selected && void ignoreDeadSymbol(selected)}
           onUnignore={() => selected && void unignoreDeadSymbol(selected)}
           onFix={() => selected && void fixDeadSymbolWithAgent(selected)}
+          reason={
+            selected
+              ? deadSymbolReason(selected, {
+                  unused: t("dead.reasonUnused"),
+                  broken: t("dead.reasonBroken"),
+                  kritik: t("dead.reasonKritik"),
+                  potansiyel: t("dead.reasonPotansiyel"),
+                  fallback: t("dead.reasonFallback"),
+                })
+              : ""
+          }
+          reasonLabel={t("dead.reasonLabel")}
         />
       </div>
     </section>
@@ -223,17 +393,13 @@ function PanelHeader({
 
 function Toolbar({
   query,
-  kind,
   sort,
   onQuery,
-  onKind,
   onSort,
 }: {
   query: string;
-  kind: "all" | "unused" | "broken";
   sort: DeadSymbolSort;
   onQuery: (value: string) => void;
-  onKind: (value: "all" | "unused" | "broken") => void;
   onSort: (value: DeadSymbolSort) => void;
 }) {
   return (
@@ -246,16 +412,6 @@ function Toolbar({
         className="min-h-8 min-w-[10rem] flex-1 rounded border border-outline-variant bg-surface-container px-2 font-body text-body text-on-surface"
         aria-label={s.searchPlaceholder}
       />
-      <select
-        value={kind}
-        onChange={(event) => onKind(event.target.value as "all" | "unused" | "broken")}
-        className="min-h-8 rounded border border-outline-variant bg-surface-container px-2 font-body text-meta"
-        aria-label="Filter kind"
-      >
-        <option value="all">{s.kindAll}</option>
-        <option value="unused">{s.kindUnused}</option>
-        <option value="broken">{s.kindBroken}</option>
-      </select>
       <select
         value={sort}
         onChange={(event) => onSort(event.target.value as DeadSymbolSort)}
@@ -278,6 +434,8 @@ function SymbolDetail({
   onIgnore,
   onUnignore,
   onFix,
+  reason,
+  reasonLabel,
 }: {
   symbol: DeadSymbol | null;
   mode: "dead" | "ignored";
@@ -286,6 +444,8 @@ function SymbolDetail({
   onIgnore: () => void;
   onUnignore: () => void;
   onFix: () => void;
+  reason: string;
+  reasonLabel: string;
 }) {
   return (
     <div
@@ -293,8 +453,9 @@ function SymbolDetail({
       className="flex min-h-[12rem] min-w-0 flex-1 flex-col overflow-hidden rounded border border-outline-variant/50 bg-surface-container-high/40 p-2.5 lg:min-w-[18rem] lg:max-w-[28rem]"
     >
       {!symbol ? (
-        <div className="flex flex-1 items-center justify-center text-center font-body text-body text-on-surface-variant">
-          {s.selectSymbol}
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-2 text-center">
+          <p className="font-body text-body text-on-surface-variant">{s.selectSymbol}</p>
+          <p className="font-body text-meta text-outline">{s.searchPlaceholder}</p>
         </div>
       ) : (
         <>
@@ -308,6 +469,7 @@ function SymbolDetail({
             <DetailRow label={s.project} value={symbol.project_id ?? "—"} />
             <DetailRow label={s.fileLine} value={formatSymbolFullPathLine(symbol)} />
             <DetailRow label={s.detail} value={symbol.detail ?? "—"} />
+            <DetailRow label={reasonLabel} value={reason || "—"} />
             <DetailRow
               label={s.lastRef}
               value={symbol.last_ref?.trim() ? symbol.last_ref : s.noLastRef}

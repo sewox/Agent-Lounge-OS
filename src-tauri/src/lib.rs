@@ -30,13 +30,14 @@ use services::{
     handle_window_event, load_port_from_store, load_port_preference_from_store,
     on_main_window_closed, open_dead_symbol_in_editor as open_indexed_dead_symbol,
     open_or_focus_graph_window, open_path_in_editor, persist_port, persist_port_preference,
-    placement_for_window, record_dead_snapshot, record_whisper_injection,
-    resolve_data_root_for_app, run_startup_lounge_health, spawn_auto_archive, spawn_event_pump,
-    spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, CbmDaemonPresence,
-    EfficiencyReportQuery, FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState,
-    GraphUiStatus, HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue,
-    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
-    WorkspaceScanResult, GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
+    placement_for_window, probe_agent_mcp_url as probe_agent_mcp_url_svc, record_dead_snapshot,
+    record_whisper_injection, resolve_data_root_for_app, run_startup_lounge_health,
+    spawn_auto_archive, spawn_event_pump, spawn_quota_pump, spawn_supervisor,
+    AgentEfficiencyReport, AgentMcpProbeResult, CbmDaemonPresence, EfficiencyReportQuery,
+    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus,
+    HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus,
+    MemoryBridge, ModelManager, ServiceManager, SharedServices, WorkspaceScanResult,
+    GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -370,6 +371,7 @@ pub fn run_with_start_route(start_route: &'static str) {
             list_health_scans,
             get_health_scan,
             lounge_health,
+            probe_agent_mcp_url,
             get_dead_symbols,
             get_semantic_map,
             list_vault_projects,
@@ -630,6 +632,16 @@ async fn lounge_health(
     store: tauri::State<'_, ExperienceStore>,
 ) -> Result<LoungeHealthReport, String> {
     Ok(collect_lounge_health(store.inner()).await)
+}
+
+/// HU4: on-demand loopback-only URL probe. URL is re-read from config on disk —
+/// never accepted from the UI. Report status stays `unverified`.
+#[tauri::command]
+async fn probe_agent_mcp_url(
+    client: String,
+    config_path_id: String,
+) -> Result<AgentMcpProbeResult, String> {
+    probe_agent_mcp_url_svc(&client, &config_path_id).await
 }
 
 /// Çalışma alanını tara → projeleri keşfet/import et → arka plan indeks kuyruğuna al.

@@ -14,6 +14,7 @@ import {
   type QuotaBadgeLinkProps,
 } from "@/components/quota-header-badge";
 import { daemonLabel, daemonTone, Pip } from "@/components/ui";
+import { approvalKindIcon } from "@/lib/approvals-chrome";
 import {
   AMBER_THRESHOLD,
   isSecurityApproval,
@@ -632,6 +633,19 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
               <span className="font-semibold tracking-label text-error-dim uppercase">
+                {isSourceUnverifiedApproval(approval.kind) ? (
+                  <span
+                    className="mr-1 inline-flex align-text-bottom"
+                    aria-hidden
+                    data-qa="approval-kind-icon"
+                    data-icon={approvalKindIcon(approval.kind)}
+                  >
+                    <Icon
+                      name={approvalKindIcon(approval.kind)}
+                      className="h-3 w-3 text-error-dim"
+                    />
+                  </span>
+                ) : null}
                 {isSourceUnverifiedApproval(approval.kind)
                   ? ta("sourceUnverified")
                   : ta("routingApproval")}

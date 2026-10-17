@@ -220,7 +220,7 @@ export function PanelGrid({
           role="presentation"
           onClick={() => setDrawer(null)}
         >
-          <aside
+          <div
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
@@ -244,7 +244,7 @@ export function PanelGrid({
             <div className="min-h-0 flex-1 overflow-auto p-3">
               {openDrawer === "detail" ? detail : inspector}
             </div>
-          </aside>
+          </div>
         </div>
       ) : null}
     </div>

@@ -882,6 +882,65 @@ pub fn parse_jsonc(input: &str) -> Result<Value, String> {
     serde_json::from_str(&cleaned).map_err(|e| e.to_string())
 }
 
+/// Config paths + JSONC flag for a known agent client id.
+fn config_paths_for_client(client: &str, roots: &AgentHealthRoots) -> Option<(Vec<PathBuf>, bool)> {
+    match client {
+        "antigravity" => Some((antigravity_config_paths(roots), false)),
+        "cursor" => Some((cursor_config_paths(roots), true)),
+        "claude_desktop" => Some((vec![claude_desktop_config_path(roots)], false)),
+        "claude_code" => Some((claude_code_config_paths(roots), false)),
+        "grok_bot" => Some((grok_config_paths(roots), false)),
+        "vscode" => Some((vscode_config_paths(roots), true)),
+        "windsurf" => Some((windsurf_config_paths(roots), true)),
+        _ => None,
+    }
+}
+
+/// Re-read lounge-mcp URL from disk for `client` + masked `config_path_id`.
+///
+/// Used by the on-demand probe — never accepts a URL from the UI. Returns
+/// `Ok(None)` when the config/path/entry is missing or has no URL field.
+pub fn lookup_agent_mcp_url(
+    client: &str,
+    config_path_id: &str,
+    roots: &AgentHealthRoots,
+) -> Result<Option<String>, String> {
+    let Some((paths, allow_jsonc)) = config_paths_for_client(client, roots) else {
+        return Ok(None);
+    };
+    let homes = roots.mask_homes();
+    let want = config_path_id.trim().replace('\\', "/");
+    if want.is_empty() {
+        return Ok(None);
+    }
+    let scan_claude = client == "claude_code";
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        let masked = mask_home_path_with(&path.to_string_lossy(), &homes).replace('\\', "/");
+        if masked != want {
+            continue;
+        }
+        let entries = read_lounge_entries(&path, allow_jsonc, scan_claude)?;
+        for (_scope, raw) in entries {
+            let has_command = raw
+                .command
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            let url = raw.url.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            // Probe is URL-only — refuse entries that also declare a command.
+            if let (Some(url), false) = (url, has_command) {
+                return Ok(Some(url.to_string()));
+            }
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
 /// Pure classify helper for unit tests (no filesystem install probes).
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn check_client_for_test(
