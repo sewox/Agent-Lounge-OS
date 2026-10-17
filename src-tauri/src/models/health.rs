@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version for [`LoungeHealthReport`].
-pub const LOUNGE_HEALTH_SCHEMA_VERSION: &str = "1.0.0";
+pub const LOUNGE_HEALTH_SCHEMA_VERSION: &str = "1.1.0";
 
 /// lounge-mcp entry status (H3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +16,8 @@ pub enum AgentMcpStatus {
     NonCanonical,
     Unreadable,
     NotInstalled,
+    /// URL-only remote entry — not probed (no local binary to verify).
+    Unverified,
 }
 
 impl AgentMcpStatus {
@@ -28,14 +30,15 @@ impl AgentMcpStatus {
             Self::NonCanonical => "non_canonical",
             Self::Unreadable => "unreadable",
             Self::NotInstalled => "not_installed",
+            Self::Unverified => "unverified",
         }
     }
 
-    /// stale → warning; hash_mismatch → info; problems → warning; ok → ok.
+    /// stale → warning; hash_mismatch/unverified → info; problems → warning; ok → ok.
     pub fn severity(self) -> &'static str {
         match self {
             Self::Ok => "ok",
-            Self::HashMismatch => "info",
+            Self::HashMismatch | Self::Unverified => "info",
             Self::Stale
             | Self::Missing
             | Self::NonCanonical

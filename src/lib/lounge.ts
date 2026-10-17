@@ -1618,7 +1618,7 @@ export type HealthScanResult = {
   error?: string | null;
 };
 
-/** Health-1b `lounge_health` report (schema_version 1.0.0). No UI wiring in 1b. */
+/** Health-1b `lounge_health` report (schema_version 1.1.0). No UI wiring in 1b. */
 export type AgentMcpStatus =
   | "ok"
   | "missing"
@@ -1626,7 +1626,8 @@ export type AgentMcpStatus =
   | "hash_mismatch"
   | "non_canonical"
   | "unreadable"
-  | "not_installed";
+  | "not_installed"
+  | "unverified";
 
 export type AgentHealthEntry = {
   client: string;
@@ -1655,7 +1656,7 @@ export type TitleHealthReport = {
 };
 
 export type LoungeHealthReport = {
-  schema_version: "1.0.0";
+  schema_version: "1.1.0";
   checked_at: string;
   platform: {
     os: string;
