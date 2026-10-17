@@ -11,11 +11,13 @@ export type StatusPillProps = {
 };
 
 function toneClasses(tone: StatusTone): string {
+  // Solid (or near-solid) containers + on-* / fixed tokens so meta-size
+  // uppercase labels meet WCAG AA (≥4.5:1) without axe disableRules.
   switch (tone) {
     case "ok":
-      return "border-secondary/50 bg-secondary-container/40 text-secondary-dim";
+      return "border-secondary/50 bg-secondary-container text-secondary-fixed-dim";
     case "info":
-      return "border-primary/40 bg-primary-container/25 text-primary";
+      return "border-primary/40 bg-primary-container text-on-primary-container";
     case "warn":
       return "border-tertiary/40 bg-surface-container-highest text-tertiary";
     case "error":
@@ -24,7 +26,7 @@ function toneClasses(tone: StatusTone): string {
       return "border-error ds-halted-hatch text-on-error-container";
     case "neutral":
     default:
-      return "border-outline-variant bg-surface-container-high text-on-surface-variant";
+      return "border-outline-variant bg-surface-container-high text-on-surface";
   }
 }
 

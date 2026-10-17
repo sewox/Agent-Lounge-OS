@@ -122,11 +122,13 @@ export function AgentsHealthPanel() {
       const result = await probeAgentMcpUrl(selected.entry.client, pathId);
       setProbe(result);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       setProbe({
-        outcome: "unreachable",
+        outcome: /config|missing|not found/i.test(message)
+          ? "config_missing"
+          : "unreachable",
         elapsed_ms: 0,
       });
-      void error;
     } finally {
       setProbing(false);
     }
@@ -523,7 +525,7 @@ function AgentDetail({
       />
       <Field
         label={t("agents.fieldDetail")}
-        value={maskHomePathForUi(entry.detail) || "—"}
+        value={entry.detail?.trim() ? entry.detail : "—"}
       />
       {showProbe ? (
         <div className="space-y-2 border-t border-outline-variant/40 pt-3">
@@ -533,7 +535,7 @@ function AgentDetail({
             data-qa="agents-probe-now"
             disabled={probing}
             onClick={onProbe}
-            className="min-h-8 rounded border border-primary/40 bg-primary-container/20 px-3 py-1 font-body text-body font-medium text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-60"
+            className="min-h-8 rounded border border-primary/40 bg-primary-container px-3 py-1 font-body text-body font-medium text-on-primary-container focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:opacity-60"
           >
             {probing ? t("agents.probeRunning") : t("agents.probeNow")}
           </button>
@@ -557,6 +559,8 @@ function ProbeNote({
     text = t("agents.probeReachable", { ms });
   } else if (probe.outcome === "not_probed_remote") {
     text = t("agents.probeNotProbedRemote");
+  } else if (probe.outcome === "config_missing") {
+    text = t("agents.probeConfigMissing");
   }
   return (
     <p data-qa="agents-probe-result" data-outcome={probe.outcome} className="font-body text-meta text-on-surface">
@@ -589,7 +593,7 @@ function TitleDetail({
       <Field label={t("agents.titleModelName")} value={title.model || "—"} />
       <Field
         label={t("agents.titleEndpoint")}
-        value={maskHomePathForUi(title.lmr_endpoint) || "—"}
+        value={title.lmr_endpoint?.trim() ? title.lmr_endpoint : "—"}
       />
     </>
   );
@@ -692,7 +696,7 @@ function InspectorPane({
           </div>
           <pre
             data-qa="agents-health-raw"
-            className="mt-1 min-h-[12rem] overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface"
+            className="mt-1 overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface"
           >
             {raw ? JSON.stringify(raw, null, 2) : "—"}
           </pre>

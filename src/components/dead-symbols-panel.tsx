@@ -206,7 +206,7 @@ export function DeadSymbolsPanel({
             <div
               role="status"
               data-qa="dead-stale-warning"
-              className="rounded border border-tertiary/50 bg-surface-container-highest px-2.5 py-2 font-body text-body text-tertiary"
+              className="rounded border border-tertiary/50 bg-surface-container-highest px-2.5 py-2 font-body text-body text-on-surface"
             >
               {t("dead.staleWarning")}
             </div>
@@ -228,8 +228,8 @@ export function DeadSymbolsPanel({
                 onClick={() => setCategory(id)}
                 className={`min-h-8 rounded border px-2 py-1 font-body text-meta focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
                   category === id
-                    ? "border-primary bg-primary-container/25 text-primary"
-                    : "border-outline-variant text-on-surface-variant hover:bg-surface-container-high"
+                    ? "border-primary bg-primary-container text-on-primary-container"
+                    : "border-outline-variant bg-surface-container text-on-surface hover:bg-surface-container-high"
                 }`}
               >
                 {label}
@@ -284,33 +284,17 @@ export function DeadSymbolsPanel({
           >
             {filtered.length === 0 ? (
               <div
-                className="flex min-h-[55vh] flex-col justify-between gap-3 px-3 py-6 text-center"
+                className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 py-8 text-center"
                 data-qa="dead-symbol-empty"
               >
-                <div className="space-y-3">
-                  <p className="font-body text-body text-on-surface-variant">
-                    {mode === "ignored" ? s.noIgnored : s.noSymbols}
-                  </p>
-                  <p className="font-body text-body text-on-surface-variant">
-                    {mode === "ignored"
-                      ? t("dead.reasonFallback")
-                      : t("dead.staleWarning")}
-                  </p>
-                  <p className="font-body text-meta text-outline">{s.selectSymbol}</p>
-                  <p className="font-body text-meta text-outline">{s.searchPlaceholder}</p>
-                </div>
-                <div className="space-y-2">
-                  <p className="font-body text-meta text-outline">
-                    {t("dead.statsTotal")} · {t("dead.statsUnused")} · {t("dead.statsBroken")}
-                  </p>
-                  <p className="font-body text-meta text-outline">
-                    {t("dead.confidenceKritik")} / {t("dead.confidencePotansiyel")}
-                  </p>
-                  <p className="font-body text-meta text-outline">{s.reindex}</p>
-                  <p className="font-body text-meta text-outline">{s.fileLine}</p>
-                  <p className="font-body text-meta text-outline">{s.detail}</p>
-                  <p className="font-body text-meta text-outline">{s.lastRef}</p>
-                </div>
+                <p className="max-w-sm font-body text-body text-on-surface">
+                  {mode === "ignored" ? s.noIgnored : s.noSymbols}
+                </p>
+                <p className="max-w-sm font-body text-meta text-on-surface-variant">
+                  {mode === "ignored"
+                    ? t("dead.emptyIgnoredHint")
+                    : t("dead.emptySymbolsHint")}
+                </p>
               </div>
             ) : (
               <div style={{ paddingTop: topPad, paddingBottom: bottomPad }}>
@@ -469,8 +453,9 @@ function SymbolDetail({
       className="flex min-h-[12rem] min-w-0 flex-1 flex-col overflow-hidden rounded border border-outline-variant/50 bg-surface-container-high/40 p-2.5 lg:min-w-[18rem] lg:max-w-[28rem]"
     >
       {!symbol ? (
-        <div className="flex flex-1 items-center justify-center text-center font-body text-body text-on-surface-variant">
-          {s.selectSymbol}
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-2 text-center">
+          <p className="font-body text-body text-on-surface-variant">{s.selectSymbol}</p>
+          <p className="font-body text-meta text-outline">{s.searchPlaceholder}</p>
         </div>
       ) : (
         <>

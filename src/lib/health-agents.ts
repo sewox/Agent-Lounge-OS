@@ -14,6 +14,13 @@ export const AGENT_MCP_STATUSES: readonly AgentMcpStatus[] = [
   "unverified",
 ] as const;
 
+/**
+ * Approval chrome for `source_unverified` uses the warning glyph language
+ * (banner text), never the remote-link `link-off` icon used for agent MCP
+ * `unverified`.
+ */
+export const SOURCE_UNVERIFIED_APPROVAL_ICON = "warn";
+
 /** i18n keys under `health.status.*` — one distinct label per status. */
 export function statusLabelKey(status: AgentMcpStatus): string {
   return `status.${status}`;
@@ -44,31 +51,38 @@ export function statusIconName(status: AgentMcpStatus): string {
     case "unreadable":
       return "rule";
     case "unverified":
-      // Distinct from source_unverified approval (banner text, no remote-link glyph).
       return "link-off";
     default:
       return "health";
   }
 }
 
+/** True when a string looks like a filesystem path (not a URL or free text). */
+export function isPathLike(raw: string): boolean {
+  const v = raw.trim();
+  if (!v) return false;
+  if (v.startsWith("~/") || v === "~") return true;
+  if (/^[A-Za-z]:[\\/]/.test(v)) return true;
+  if (v.startsWith("/") && !v.startsWith("//")) return true;
+  return false;
+}
+
 /**
- * Second-line defence: mask absolute home prefixes the backend may have missed.
- * Never expands `~/…`. Replaces `/Users/…`, `/home/…`, `C:\Users\…` forms.
+ * Second-line defence for **path-like** fields only.
+ * Prefix home roots → `~/…`. Does not rewrite URLs or free-text mid-string.
  */
 export function maskHomePathForUi(raw: string | null | undefined): string {
   if (raw == null || raw === "") return "";
-  let out = raw;
-  // Windows: C:\Users\<name>\… or C:/Users/<name>/… (prefix or mid-string)
-  out = out.replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi, "~");
-  // macOS /Users/<name>
-  out = out.replace(/\/Users\/[^/\s"']+/gi, "~");
-  // Linux /home/<name>
-  out = out.replace(/\/home\/[^/\s"']+/gi, "~");
-  // Normalize separators after mask.
-  out = out.replace(/\\/g, "/");
-  // Collapse leftover "~\" or "~foo" → "~/foo" when we replaced a home root.
-  out = out.replace(/~(?![/\s]|$)/g, "~/");
-  out = out.replace(/~\/+/g, "~/");
+  let out = raw.replace(/\\/g, "/");
+  if (out.startsWith("~/") || out === "~") {
+    return out;
+  }
+  if (!isPathLike(out)) {
+    return raw;
+  }
+  out = out.replace(/^[A-Za-z]:\/Users\/[^/]+/i, "~");
+  out = out.replace(/^\/Users\/[^/]+/i, "~");
+  out = out.replace(/^\/home\/[^/]+/i, "~");
   return out;
 }
 
@@ -81,12 +95,14 @@ export function containsUnmaskedHome(text: string): boolean {
   );
 }
 
+/** Mask only path-like fields on an agent entry (not detail free text / URLs). */
 export function maskAgentEntryForUi(entry: AgentHealthEntry): AgentHealthEntry {
   return {
     ...entry,
-    config_path: entry.config_path != null ? maskHomePathForUi(entry.config_path) : entry.config_path,
+    config_path:
+      entry.config_path != null ? maskHomePathForUi(entry.config_path) : entry.config_path,
     command: entry.command != null ? maskHomePathForUi(entry.command) : entry.command,
-    detail: entry.detail != null ? maskHomePathForUi(entry.detail) : entry.detail,
+    // detail / versions / sha stay as-is (not path fields).
   };
 }
 
@@ -98,7 +114,6 @@ export type DeadSymbolFilterInput = {
   category: DeadCategoryFilter;
   confidence: DeadConfidenceFilter;
   projectId?: string | null;
-  /** When category=partial, caller already decided the set is partial — still apply other filters. */
   partial?: boolean;
 };
 
@@ -143,8 +158,6 @@ export function filterDeadSymbolsUi<
     if (input.category === "unused" || input.category === "broken") {
       if (symbol.kind !== input.category) return false;
     }
-    // `partial` is a scan-level filter; when active we still show all rows
-    // (the strip just signals staleness). No per-row partial flag.
     if (input.confidence !== "all") {
       if (normalizeConfidence(symbol.severity) !== input.confidence) return false;
     }
@@ -165,7 +178,6 @@ export function filterDeadSymbolsUi<
   });
 }
 
-/** Plain-language reason from kind + severity + detail/rule. */
 export function deadSymbolReason(
   symbol: {
     kind?: string | null;
@@ -185,7 +197,6 @@ export function deadSymbolReason(
   return parts.length > 0 ? parts.join(" · ") : labels.fallback;
 }
 
-/** Stale when partial OR indexed_at older than `maxAgeMs` (default 7d). */
 export function isScanStale(
   meta: { partial?: boolean; indexed_at?: string | null } | null | undefined,
   nowMs = Date.now(),

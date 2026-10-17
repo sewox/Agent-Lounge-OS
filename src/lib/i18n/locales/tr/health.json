@@ -76,7 +76,9 @@
     "probeReachable": "Az önce: erişilebilir ({{ms}} ms)",
     "probeUnreachable": "Az önce: erişilemez ({{ms}} ms)",
     "probeNotProbedRemote": "Uzak URL — yoklanmadı (SSRF politikası)",
+    "probeConfigMissing": "Config veya yalnızca-URL girdisi bulunamadı — yoklanmadı",
     "probeHint": "Yalnızca loopback adresler yoklanır. Rapor durumu unverified kalır.",
+    "tauriUnavailable": "Tauri kullanılamıyor",
     "titleQueue": "Kuyruk birikimi",
     "titleDb": "DB birikimi",
     "titleGiveUps": "Vazgeçmeler",
@@ -116,6 +118,8 @@
     "reasonFallback": "Sağlık taraması tarafından işaretlendi",
     "reasonLabel": "Neden",
     "staleWarning": "Bu tarama bayat olabilir — kısmi sonuç veya eski indeks. Bulguları güncel saymadan önce çalışma alanını yeniden indeksleyin.",
+    "emptySymbolsHint": "Proje bağladıktan sonra çalışma alanını yeniden indeksleyin; eşleşme bekliyorsanız filtreleri temizleyin.",
+    "emptyIgnoredHint": "Bulgulardan gizlemek için Dead Symbols sekmesinden bir sembolü Ignore edin; yok sayılanlar burada görünür.",
     "partialYes": "Evet",
     "partialNo": "Hayır"
   }

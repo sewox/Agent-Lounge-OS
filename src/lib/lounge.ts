@@ -1686,7 +1686,11 @@ export type LoungeHealthReport = {
 };
 
 /** HU4 transient probe outcome — does not mutate lounge_health report status. */
-export type AgentMcpProbeOutcome = "reachable" | "unreachable" | "not_probed_remote";
+export type AgentMcpProbeOutcome =
+  | "reachable"
+  | "unreachable"
+  | "not_probed_remote"
+  | "config_missing";
 
 export type AgentMcpProbeResult = {
   outcome: AgentMcpProbeOutcome | string;
@@ -2324,10 +2328,16 @@ export function formatExperienceTime(iso: string): string {
   return istanbulClockParts(date);
 }
 
+async function tauriUnavailableError(): Promise<Error> {
+  const { i18n, initI18n } = await import("@/lib/i18n/config");
+  initI18n();
+  return new Error(i18n.t("agents.tauriUnavailable", { ns: "health" }));
+}
+
 /** Health-UI-2: fetch unified lounge_health report (Tauri only). */
 export async function fetchLoungeHealth(): Promise<LoungeHealthReport> {
   if (!isTauri()) {
-    throw new Error("Tauri yok");
+    throw await tauriUnavailableError();
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<LoungeHealthReport>("lounge_health");
@@ -2342,7 +2352,7 @@ export async function probeAgentMcpUrl(
   configPathId: string,
 ): Promise<AgentMcpProbeResult> {
   if (!isTauri()) {
-    throw new Error("Tauri yok");
+    throw await tauriUnavailableError();
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<AgentMcpProbeResult>("probe_agent_mcp_url", {

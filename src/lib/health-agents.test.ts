@@ -9,10 +9,12 @@ import {
   countDeadByCategory,
   deadSymbolReason,
   filterDeadSymbolsUi,
+  isPathLike,
   isScanStale,
   maskAgentEntryForUi,
   maskHomePathForUi,
   severityToTone,
+  SOURCE_UNVERIFIED_APPROVAL_ICON,
   statusIconName,
   statusLabelKey,
 } from "./health-agents.ts";
@@ -42,6 +44,11 @@ describe("health-agents status mapping", () => {
     assert.equal(statusIconName("unverified"), "link-off");
     assert.notEqual(statusIconName("unverified"), statusIconName("ok"));
     assert.notEqual(statusIconName("unverified"), statusIconName("missing"));
+    assert.notEqual(
+      statusIconName("unverified"),
+      SOURCE_UNVERIFIED_APPROVAL_ICON,
+      "unverified agent icon must differ from source_unverified approval icon",
+    );
   });
 
   it("unverified i18n label differs from source_unverified approval label (EN+TR)", () => {
@@ -63,7 +70,7 @@ describe("health-agents status mapping", () => {
 });
 
 describe("health-agents path masking", () => {
-  it("masks macOS / Linux / Windows home prefixes", () => {
+  it("masks path-like home prefixes only", () => {
     assert.equal(maskHomePathForUi("/Users/sercan/.cursor/mcp.json"), "~/.cursor/mcp.json");
     assert.equal(maskHomePathForUi("/home/sercan/.grok/mcp.json"), "~/.grok/mcp.json");
     assert.equal(
@@ -71,13 +78,21 @@ describe("health-agents path masking", () => {
       "~/AppData/Roaming/Claude/x.json",
     );
     assert.equal(maskHomePathForUi("~/already/masked"), "~/already/masked");
+    // Free text / URLs are not path-like — leave untouched (no mid-string rewrite).
     assert.equal(
       maskHomePathForUi("url-only; path=/Users/sercan/.cursor/mcp.json"),
-      "url-only; path=~/.cursor/mcp.json",
+      "url-only; path=/Users/sercan/.cursor/mcp.json",
     );
+    assert.equal(
+      maskHomePathForUi("http://127.0.0.1:18790/home/sercan/mcp"),
+      "http://127.0.0.1:18790/home/sercan/mcp",
+    );
+    assert.equal(isPathLike("/Users/a/b"), true);
+    assert.equal(isPathLike("http://h/home/a"), false);
+    assert.equal(isPathLike("missing under /home/a"), false);
   });
 
-  it("maskAgentEntryForUi is a second defence on unmasked fixtures", () => {
+  it("maskAgentEntryForUi masks path fields only, not detail free text", () => {
     const masked = maskAgentEntryForUi({
       client: "cursor",
       status: "unverified",
@@ -90,7 +105,8 @@ describe("health-agents path masking", () => {
     assert.ok(masked.command?.startsWith("~/"));
     assert.ok(!containsUnmaskedHome(masked.config_path ?? ""));
     assert.ok(!containsUnmaskedHome(masked.command ?? ""));
-    assert.ok(!containsUnmaskedHome(masked.detail ?? ""));
+    // detail is free text — not rewritten.
+    assert.equal(masked.detail, "under /home/sercan/.cursor");
   });
 });
 

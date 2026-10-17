@@ -114,7 +114,10 @@ export const HEALTH_AGENTS_ALL_STATUSES: LoungeHealthReportFixture = {
   expected_lounge_mcp_sha256: "aaa",
 };
 
-/** Fixture with an *unmasked* home path — UI must still mask in the DOM. */
+/**
+ * Fixture with *unmasked* home paths on path-like fields only.
+ * Free-text `detail` stays free of absolute homes (UI masks paths, not prose).
+ */
 export const HEALTH_AGENTS_UNMASKED_PATH: LoungeHealthReportFixture = {
   ...HEALTH_AGENTS_ALL_STATUSES,
   agents: [
@@ -123,7 +126,7 @@ export const HEALTH_AGENTS_UNMASKED_PATH: LoungeHealthReportFixture = {
       status: "unverified",
       severity: "info",
       config_path: "/Users/sercan/.cursor/mcp.json",
-      detail: "url-only; path=/Users/sercan/.cursor/mcp.json",
+      detail: "url-only entry, not probed",
     },
     {
       client: "claude_desktop",
@@ -139,7 +142,7 @@ export const HEALTH_AGENTS_UNMASKED_PATH: LoungeHealthReportFixture = {
       status: "missing",
       severity: "warning",
       config_path: "/home/sercan/.grok/mcp.json",
-      detail: "missing under /home/sercan/.grok",
+      detail: "lounge-mcp entry absent",
     },
   ],
   cbm: {

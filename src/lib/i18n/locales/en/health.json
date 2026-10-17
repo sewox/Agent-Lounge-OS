@@ -76,7 +76,9 @@
     "probeReachable": "Just now: reachable ({{ms}} ms)",
     "probeUnreachable": "Just now: unreachable ({{ms}} ms)",
     "probeNotProbedRemote": "Remote URL — not probed (SSRF policy)",
+    "probeConfigMissing": "Config or URL-only entry not found — not probed",
     "probeHint": "Probes only loopback addresses. Report status stays unverified.",
+    "tauriUnavailable": "Tauri is not available",
     "titleQueue": "Queue backlog",
     "titleDb": "DB backlog",
     "titleGiveUps": "Give-ups",
@@ -116,6 +118,8 @@
     "reasonFallback": "Flagged by health scan",
     "reasonLabel": "Why",
     "staleWarning": "This scan may be stale — partial results or an old index. Re-index the workspace before treating findings as current.",
+    "emptySymbolsHint": "Re-index the workspace after connecting a project, or clear filters if you expected matches.",
+    "emptyIgnoredHint": "Ignore a dead symbol from the Dead Symbols tab to hide it from findings; ignored rows appear here.",
     "partialYes": "Yes",
     "partialNo": "No"
   }

@@ -61,48 +61,52 @@ async function revealInspector(page: Page) {
   ).toBeVisible();
 }
 
+async function seedIgnoredRows(page: Page) {
+  await page.addInitScript(() => {
+    const rows = [
+      {
+        name: "ignored_fixture_a",
+        kind: "unused",
+        file: "src/lib/a.ts",
+        line: 1,
+        detail: "ignored for layout depth",
+        project_id: "Agent-Lounge-OS",
+        severity: "Potansiyel",
+      },
+      {
+        name: "ignored_fixture_b",
+        kind: "broken",
+        file: "src/lib/b.ts",
+        line: 2,
+        detail: "ignored for layout depth",
+        project_id: "Agent-Lounge-OS",
+        severity: "Kritik",
+      },
+      {
+        name: "ignored_fixture_c",
+        kind: "unused",
+        file: "src/lib/c.ts",
+        line: 3,
+        detail: "ignored for layout depth",
+        project_id: "EchoMind",
+        severity: "Potansiyel",
+      },
+    ];
+    try {
+      sessionStorage.setItem("__QA_IGNORED_SYMBOLS__", JSON.stringify(rows));
+    } catch {
+      /* private mode */
+    }
+  });
+}
+
 test.describe("Health-UI-2 agents + dead", () => {
   for (const { tab, path } of TABS) {
     test(`HU-LAYOUT · L1–L6 on tab=${tab}`, async ({ page }, testInfo) => {
       testInfo.annotations.push({ type: "id", description: `HU-LAYOUT-${tab}` });
       if (tab === "ignore") {
-        // Seed ignored rows so the ignore tab has natural list depth (L2).
-        await page.addInitScript(() => {
-          const rows = [
-            {
-              name: "ignored_fixture_a",
-              kind: "unused",
-              file: "src/lib/a.ts",
-              line: 1,
-              detail: "ignored for layout depth",
-              project_id: "Agent-Lounge-OS",
-              severity: "Potansiyel",
-            },
-            {
-              name: "ignored_fixture_b",
-              kind: "broken",
-              file: "src/lib/b.ts",
-              line: 2,
-              detail: "ignored for layout depth",
-              project_id: "Agent-Lounge-OS",
-              severity: "Kritik",
-            },
-            {
-              name: "ignored_fixture_c",
-              kind: "unused",
-              file: "src/lib/c.ts",
-              line: 3,
-              detail: "ignored for layout depth",
-              project_id: "EchoMind",
-              severity: "Potansiyel",
-            },
-          ];
-          try {
-            sessionStorage.setItem("__QA_IGNORED_SYMBOLS__", JSON.stringify(rows));
-          } catch {
-            /* private mode */
-          }
-        });
+        // Seeded rows for natural list depth (L2); empty ignore is layout-tested separately.
+        await seedIgnoredRows(page);
       }
       await openRoute(page, path, "full");
       await expect(page.getByRole("navigation", { name: "Health sections" })).toBeVisible();
@@ -123,6 +127,17 @@ test.describe("Health-UI-2 agents + dead", () => {
       }
     });
   }
+
+  test("HU-LAYOUT · L1–L6 on real empty ignore state", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "HU-LAYOUT-ignore-empty" });
+    // No seeded rows — honest empty state (no min-h / justify-between spacers).
+    await openRoute(page, "/health?tab=ignore", "full");
+    await expect(page.locator('[data-qa="dead-symbol-empty"]')).toBeVisible();
+    const metrics = await assertLayoutL1toL6(page, "/health?tab=ignore", expect);
+    expect(metrics.l1_pass).toBe(true);
+    expect(metrics.l2_pass).toBe(true);
+    expect(metrics.l5_pass).toBe(true);
+  });
 
   test("HU-01 · agents tab lists all 8 statuses with distinct labels", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "HU-01" });
@@ -171,15 +186,19 @@ test.describe("Health-UI-2 agents + dead", () => {
     await page.locator('[data-qa="agents-health-row"][data-row-kind="agent"]').first().click();
     await revealDetail(page);
     await revealInspector(page);
+    const assertNoHomeLeak = (text: string, label: string) => {
+      expect(text, label).not.toMatch(/\/Users\//);
+      expect(text, label).not.toMatch(/\/home\//);
+      expect(text, label).not.toMatch(/C:\\Users/i);
+      expect(text, label).not.toMatch(/C:\/Users/i);
+    };
     const main = await page.locator("main").innerText();
-    expect(main).not.toMatch(/\/Users\//);
-    expect(main).not.toMatch(/\/home\//);
-    expect(main).not.toMatch(/C:\\Users/i);
-    expect(main).not.toMatch(/C:\/Users/i);
+    assertNoHomeLeak(main, "main.innerText");
     const raw = await page.locator('[data-qa="agents-health-raw"]').innerText();
-    expect(raw).not.toMatch(/\/Users\//);
-    expect(raw).not.toMatch(/\/home\//);
-    expect(raw).not.toMatch(/C:\\Users/i);
+    assertNoHomeLeak(raw, "agents-health-raw");
+    // Full HTML covers attributes (title/aria) and hidden drawers.
+    const html = await page.content();
+    assertNoHomeLeak(html, "page.content()");
   });
 
   test("HU-04 · Şimdi Doğrula only on unverified and only on click", async ({ page }) => {
@@ -253,6 +272,16 @@ test.describe("Health-UI-2 agents + dead", () => {
 
   test("HU-07 · axe + badges not colour-alone", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "HU-07" });
+
+    const runAxe = async (label: string) => {
+      const results = await new AxeBuilder({ page }).analyze();
+      expect(
+        results.violations,
+        `${label}: ${JSON.stringify(results.violations, null, 2)}`,
+      ).toEqual([]);
+    };
+
+    // Agents: list + detail + inspector (reveal drawers on narrow viewports).
     await openRoute(page, "/health?tab=agents", "full");
     await expect(page.locator('[data-qa="agents-health-list"]')).toBeVisible();
     const pills = page.locator('[data-qa="status-pill"]');
@@ -262,11 +291,23 @@ test.describe("Health-UI-2 agents + dead", () => {
       const text = (await pills.nth(i).innerText()).trim();
       expect(text.length).toBeGreaterThan(0);
     }
-    const results = await new AxeBuilder({ page })
-      .include('[data-qa="agents-health-list"]')
-      .disableRules(["color-contrast"])
-      .analyze();
-    expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
+    await revealDetail(page);
+    await revealInspector(page);
+    await runAxe("agents ready");
+
+    // Agents empty + error states.
+    await openAgentsWithOverride(page, HEALTH_AGENTS_EMPTY);
+    await expect(page.locator('[data-qa="agents-health-empty-message"]')).toBeVisible();
+    await runAxe("agents empty");
+
+    await openAgentsWithOverride(page, "error");
+    await expect(page.locator('[data-qa-agents-health="error"]')).toBeVisible();
+    await runAxe("agents error");
+
+    // Dead tab (stats + list + detail).
+    await openRoute(page, "/health?tab=dead", "full");
+    await expect(page.locator('[data-qa="stats-strip"]')).toBeVisible();
+    await runAxe("dead tab");
   });
 
   test("HU-08 · agents list keyboard navigation", async ({ page }) => {
