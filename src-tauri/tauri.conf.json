@@ -63,5 +63,12 @@
         "startMenuFolder": "Agent Lounge OS"
       }
     }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["agentlounge"]
+      }
+    }
   }
 }

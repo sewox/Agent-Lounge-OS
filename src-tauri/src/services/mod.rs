@@ -8,8 +8,10 @@ pub mod autodiscover;
 pub mod cbm_daemon;
 pub mod cbm_ui_config;
 pub mod dead_symbol_actions;
+pub mod deep_link;
 pub mod experience_title;
 pub mod graph_ui;
+pub mod halt;
 pub mod hardware;
 pub mod health_filters;
 pub mod health_scan;
@@ -68,6 +70,11 @@ pub use cbm_ui_config::{
 pub use dead_symbol_actions::{
     fix_dead_symbol_with_agent, open_dead_symbol_in_editor, FixDeadSymbolResult,
 };
+pub use deep_link::{
+    log_rejection as log_deep_link_rejection, parse_deep_link, DeepLinkAction, DeepLinkReject,
+    DEEP_LINK_OPEN_EVENT, DEEP_LINK_SOURCE_AGENT, EXTERNAL_TRIGGER_REASON,
+    SCHEME as DEEP_LINK_SCHEME,
+};
 pub use experience_title::{
     backfill_missing_titles, clear_last_title_error, enqueue_title, ensure_title_worker,
     last_title_error_type, record_last_title_error, title_backlog_count, title_model_name,
@@ -79,6 +86,10 @@ pub use graph_ui::{
     open_or_focus_graph_window, persist_port, persist_port_preference, resolve_cbm_project_name,
     select_graph_ui_port, spawn_graph_ui_on_port, GraphUiPortMode, GraphUiState, GraphUiStatus,
     GRAPH_WINDOW_LABEL,
+};
+pub use halt::{
+    halt as engage_halt, halted_error_payload, is_halted, load_halt_state, resume as resume_halt,
+    HaltState, HALTED_ERROR_CODE, HALTED_ERROR_MESSAGE, HALT_BY_UI, HALT_CHANGED_EVENT,
 };
 pub use health_scan::{
     enqueue_after_index, install_health_scan_queue, run_health_scan, HealthScanEvent,

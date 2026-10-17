@@ -6,6 +6,8 @@
   "switchLocal": "Yerel modele geç",
   "routingApproval": "Yönlendirme onayı",
   "sourceUnverified": "Doğrulanmamış kaynak · ONAY_BEKLİYOR",
+  "externalTrigger": "Dış Kaynaklı Tetikleme",
+  "externalTriggerDetail": "Bu görev bir işletim sistemi deep link’i (agentlounge://) ile açıldı. Onaylamadan önce dikkatle inceleyin.",
   "securityPending": "Güvenlik · {{level}} · ONAY_BEKLİYOR",
   "quotaBlocked": "Kota uyarısı · KOTA_BLOKE",
   "noPending": "Bekleyen onay yok",

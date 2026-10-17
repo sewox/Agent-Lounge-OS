@@ -146,6 +146,14 @@ if ! printf '%s\n' "$install_out" | grep -Eq 'Uninstall: curl -fsSL .*\| sh -s -
   exit 1
 fi
 
+# Static assert: Windows NSIS fixture template registers agentlounge:// (runs on all hosts).
+NSI="$ROOT/scripts/install/fixture-nsis/lounge-fixture.nsi"
+[[ -f "$NSI" ]] || { echo "FAIL: NSIS fixture missing: $NSI" >&2; exit 1; }
+grep -q 'Software\\Classes\\agentlounge' "$NSI" \
+  || { echo "FAIL: NSIS fixture missing HKCU Software\\Classes\\agentlounge" >&2; exit 1; }
+grep -q 'URL Protocol' "$NSI" \
+  || { echo "FAIL: NSIS fixture missing URL Protocol" >&2; exit 1; }
+
 CLI="$PREFIX/bin/agent-lounge-os"
 ICON="$PREFIX/share/icons/hicolor/128x128/apps/agent-lounge-os.png"
 DESKTOP="$PREFIX/share/applications/agent-lounge-os.desktop"
@@ -170,9 +178,17 @@ if [[ "$(uname -s)" = Linux ]]; then
   [[ -n "$icon_field" ]] || { echo "FAIL: desktop has no Icon=" >&2; exit 1; }
   [[ -f "$icon_field" ]] || { echo "FAIL: desktop Icon= path does not resolve: $icon_field" >&2; exit 1; }
   [[ "$icon_field" = "$ICON" ]] || { echo "FAIL: Icon= ($icon_field) != $ICON" >&2; exit 1; }
+  grep -q 'MimeType=.*x-scheme-handler/agentlounge' "$DESKTOP" \
+    || { echo "FAIL: .desktop missing MimeType x-scheme-handler/agentlounge" >&2; exit 1; }
 elif [[ "$(uname -s)" = Darwin ]]; then
   [[ -d "$PREFIX/Applications/Agent Lounge OS.app" ]] \
     || { echo "FAIL: macOS .app missing under LOUNGE_MAC_APP_DIR" >&2; exit 1; }
+  PLIST="$PREFIX/Applications/Agent Lounge OS.app/Contents/Info.plist"
+  [[ -f "$PLIST" ]] || { echo "FAIL: Info.plist missing" >&2; exit 1; }
+  grep -q 'CFBundleURLTypes' "$PLIST" \
+    || { echo "FAIL: Info.plist missing CFBundleURLTypes" >&2; exit 1; }
+  grep -q 'agentlounge' "$PLIST" \
+    || { echo "FAIL: Info.plist missing agentlounge URL scheme" >&2; exit 1; }
 fi
 
 echo "== --version =="

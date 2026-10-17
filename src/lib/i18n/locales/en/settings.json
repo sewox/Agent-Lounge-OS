@@ -80,5 +80,12 @@
   "diagnosticsNatsLog": "NATS server log",
   "diagnosticsLmrBinary": "Expected LMR binary",
   "diagnosticsBrowser": "Log paths are available in the desktop app (Tauri).",
-  "diagnosticsLoading": "Resolving log paths…"
+  "diagnosticsLoading": "Resolving log paths…",
+  "desktopIntegrationTitle": "Desktop integration",
+  "desktopIntegrationDesc": "Register the agentlounge:// URL scheme so OS links can open Lounge. Packaged macOS/Windows/deb installers register at install time. AppImage needs an explicit enable. Dev mode (tauri dev) does not register the scheme.",
+  "desktopIntegrationEnable": "Enable desktop integration",
+  "desktopIntegrationEnabled": "agentlounge:// is registered for this user",
+  "desktopIntegrationUnavailable": "Runtime registration is available on Linux and Windows. macOS uses Info.plist CFBundleURLTypes from the packaged app.",
+  "desktopIntegrationFailed": "Could not register the URL scheme",
+  "desktopIntegrationBrowser": "Desktop integration requires the packaged desktop app."
 }

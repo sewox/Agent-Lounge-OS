@@ -47,6 +47,19 @@ try {
     throw "Start Menu shortcut missing: $StartMenuShortcut"
   }
 
+  $DeepLinkKey = 'HKCU:\Software\Classes\agentlounge'
+  if (-not (Test-Path -LiteralPath $DeepLinkKey)) {
+    throw "HKCU deep-link key missing: $DeepLinkKey"
+  }
+  $urlProtocol = (Get-ItemProperty -LiteralPath $DeepLinkKey).'URL Protocol'
+  if ($null -eq $urlProtocol) {
+    throw "agentlounge URL Protocol value missing"
+  }
+  $openCmd = (Get-ItemProperty -LiteralPath "$DeepLinkKey\shell\open\command").'(default)'
+  if ("$openCmd" -notmatch 'agent-lounge-os\.exe') {
+    throw "agentlounge open command unexpected: $openCmd"
+  }
+
   $Cli = Join-Path $Prefix 'bin\agent-lounge-os.cmd'
   if (-not (Test-Path -LiteralPath $Cli)) { throw "missing CLI shim $Cli" }
 
@@ -129,6 +142,9 @@ try {
   }
   if (Test-Path -LiteralPath $StartMenuDir) {
     throw "Start Menu folder still present after uninstall"
+  }
+  if (Test-Path -LiteralPath $DeepLinkKey) {
+    throw "HKCU deep-link key still present after uninstall: $DeepLinkKey"
   }
 
   Write-Host 'ALL OK (windows real NSIS installer fixture)'

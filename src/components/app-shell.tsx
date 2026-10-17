@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import type { ComponentType, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BrandMark } from "@/components/brand";
+import { HaltedBanner, StatusPill } from "@/components/design-system";
 import { Icon } from "@/components/icons";
 import { LocaleSwitch } from "@/components/locale-switch";
 import { useLounge } from "@/components/lounge-provider";
@@ -19,6 +20,7 @@ import {
   isSecurityApproval,
   isQuotaApproval,
   isSourceUnverifiedApproval,
+  isDeepLinkExternalTrigger,
   approvalRemainingSecs,
   SECURITY_OVERLAY_PROMPT,
   QUOTA_ALERT_PROMPT,
@@ -29,8 +31,14 @@ import {
   resolveDegradedRestart,
   indexProgressActive,
   isTauri,
+  getHaltState,
+  haltLounge,
+  resumeLounge,
+  HALT_CHANGED_EVENT,
+  DEEP_LINK_OPEN_EVENT,
   type ApprovalRequest,
   type DecisionGateStatus,
+  type HaltState,
   type ServiceHealth,
   type ToolQuota,
 } from "@/lib/lounge";
@@ -66,6 +74,7 @@ const NAV: { id: NavId; href: string; labelKey: string; icon: string }[] = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { t } = useTranslation("shell");
   const { t: ta } = useTranslation("approvals");
   const {
@@ -108,12 +117,70 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [alertOpen, setAlertOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [daemonsChecked, setDaemonsChecked] = useState(false);
+  const [haltState, setHaltState] = useState<HaltState>({ halted: false });
+  const [haltDialog, setHaltDialog] = useState<"halt" | "resume" | null>(null);
+  const [haltReason, setHaltReason] = useState("");
+  const [haltBusy, setHaltBusy] = useState(false);
+  const [haltError, setHaltError] = useState<string | null>(null);
   const platform = usePlatform();
   const shortcutLabel = paletteShortcutLabel(platform);
   const alertRef = useRef<HTMLDivElement | null>(null);
   const destructiveDialogRef = useRef<HTMLDivElement | null>(null);
   const destructivePreviousFocus = useRef<HTMLElement | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    let cancelled = false;
+    void getHaltState()
+      .then((state) => {
+        if (!cancelled) setHaltState(state);
+      })
+      .catch(() => undefined);
+    let unlistenHalt: (() => void) | undefined;
+    let unlistenDeep: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      void listen<HaltState>(HALT_CHANGED_EVENT, (event) => {
+        setHaltState(event.payload);
+      }).then((fn) => {
+        unlistenHalt = fn;
+      });
+      void listen<{ route?: string }>(DEEP_LINK_OPEN_EVENT, (event) => {
+        const route = event.payload?.route;
+        if (typeof route === "string" && route.startsWith("/")) {
+          router.push(route);
+        }
+      }).then((fn) => {
+        unlistenDeep = fn;
+      });
+    });
+    return () => {
+      cancelled = true;
+      unlistenHalt?.();
+      unlistenDeep?.();
+    };
+  }, [router]);
+
+  const confirmHaltAction = useCallback(async () => {
+    if (haltBusy || !haltDialog) return;
+    setHaltBusy(true);
+    setHaltError(null);
+    try {
+      const next =
+        haltDialog === "halt"
+          ? await haltLounge(haltReason.trim() || null)
+          : await resumeLounge();
+      setHaltState(next);
+      setHaltDialog(null);
+      setHaltReason("");
+    } catch {
+      setHaltError(t("haltFailed"));
+    } finally {
+      setHaltBusy(false);
+    }
+  }, [haltBusy, haltDialog, haltReason, t]);
 
   useEffect(() => {
     const id = window.setTimeout(() => setDaemonsChecked(true), 400);
@@ -631,6 +698,18 @@ export function AppShell({ children }: { children: ReactNode }) {
             className="flex min-w-0 flex-wrap items-start justify-between gap-2 px-4 font-body text-body outline-none focus-visible:ring-2 focus-visible:ring-primary"
           >
             <div className="min-w-0 flex-1 whitespace-normal break-words text-on-surface leading-normal">
+              {isSourceUnverifiedApproval(approval.kind) &&
+              isDeepLinkExternalTrigger(approval.from_agent, approval.reason) ? (
+                <div
+                  data-qa="external-trigger-warning"
+                  className="mb-1 rounded border border-error bg-error-container/40 px-2 py-1 font-semibold tracking-label text-on-error-container uppercase"
+                >
+                  {ta("externalTrigger")}
+                  <span className="ml-2 font-normal normal-case tracking-normal text-on-error-container/90">
+                    {ta("externalTriggerDetail")}
+                  </span>
+                </div>
+              ) : null}
               <span className="font-semibold tracking-label text-error-dim uppercase">
                 {isSourceUnverifiedApproval(approval.kind)
                   ? ta("sourceUnverified")
@@ -807,6 +886,22 @@ export function AppShell({ children }: { children: ReactNode }) {
             <>
               <button
                 type="button"
+                data-qa="halt-toggle"
+                onClick={() => setHaltDialog(haltState.halted ? "resume" : "halt")}
+                className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold ${
+                  haltState.halted
+                    ? "border-error bg-error-container text-on-error-container hover:bg-error/20"
+                    : "border-outline-variant bg-surface-container-high text-on-surface hover:border-error hover:text-error-dim"
+                }`}
+                title={haltState.halted ? t("resume") : t("halt")}
+                aria-label={haltState.halted ? t("resume") : t("halt")}
+              >
+                <span className="whitespace-nowrap">
+                  {haltState.halted ? t("resume") : t("halt")}
+                </span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setOpenCommandPalette(true)}
                 className="flex shrink-0 items-center rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 hover:border-primary"
                 title="Command Palette"
@@ -953,6 +1048,15 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <div className="space-y-3 border-t border-outline-variant/60 pt-3 pb-10">
+          {haltState.halted ? (
+            <div
+              className="flex items-center justify-between gap-2 px-1"
+              data-qa="halt-status-strip"
+              role="status"
+            >
+              <StatusPill tone="halted">{t("haltedStatus")}</StatusPill>
+            </div>
+          ) : null}
           {serviceDegraded ? (
             <div
               className="rounded border border-error-container/70 bg-error-container/15 px-2 py-1.5 font-mono text-meta text-error-dim"
@@ -1036,8 +1140,92 @@ export function AppShell({ children }: { children: ReactNode }) {
         }`}
         style={bannerHeight > 0 ? { paddingTop: `calc(0.875rem + ${bannerHeight}px)` } : undefined}
       >
+        {haltState.halted && !onboarding ? (
+          <HaltedBanner title={t("haltedBannerTitle")} className="w-full shrink-0">
+            <div className="space-y-1" data-qa="halted-banner-details">
+              <p className="font-semibold text-on-surface">{t("haltedBannerLead")}</p>
+              <p>
+                {haltState.reason
+                  ? t("haltedReason", { reason: haltState.reason })
+                  : t("haltedReasonNone")}
+              </p>
+              <p>
+                {t("haltedBy", { by: haltState.by || "ui" })}
+                {haltState.at ? ` · ${t("haltedAt", { at: haltState.at })}` : null}
+              </p>
+              <p className="text-on-surface-variant">{t("haltedDoesNotStop")}</p>
+            </div>
+          </HaltedBanner>
+        ) : null}
         <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">{children}</div>
       </main>
+
+      {haltDialog ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-scrim/50 p-4"
+          role="presentation"
+          data-qa="halt-dialog-backdrop"
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="halt-dialog-title"
+            data-qa={haltDialog === "halt" ? "halt-confirm-dialog" : "resume-confirm-dialog"}
+            className="w-full max-w-md rounded-lg border border-outline-variant bg-surface-container p-4 shadow-lg"
+          >
+            <h2
+              id="halt-dialog-title"
+              className="font-body text-panel font-semibold tracking-label text-on-surface uppercase"
+            >
+              {haltDialog === "halt" ? t("haltConfirmTitle") : t("resumeConfirmTitle")}
+            </h2>
+            <p className="mt-2 font-body text-body leading-normal text-on-surface-variant">
+              {haltDialog === "halt" ? t("haltConfirmBody") : t("resumeConfirmBody")}
+            </p>
+            <p className="mt-1 font-body text-meta text-outline">{t("haltLogged")}</p>
+            {haltDialog === "halt" ? (
+              <label className="mt-3 block space-y-1 font-body text-meta text-on-surface-variant">
+                {t("haltReasonLabel")}
+                <input
+                  data-qa="halt-reason-input"
+                  value={haltReason}
+                  onChange={(event) => setHaltReason(event.target.value)}
+                  placeholder={t("haltReasonPlaceholder")}
+                  className="w-full rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-body text-body text-on-surface"
+                />
+              </label>
+            ) : null}
+            {haltError ? (
+              <p className="mt-2 font-body text-body text-error-dim" role="alert">
+                {haltError}
+              </p>
+            ) : null}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                data-qa="halt-dialog-cancel"
+                onClick={() => {
+                  setHaltDialog(null);
+                  setHaltError(null);
+                }}
+                disabled={haltBusy}
+                className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface`}
+              >
+                {haltDialog === "halt" ? t("haltCancel") : t("resumeCancel")}
+              </button>
+              <button
+                type="button"
+                data-qa="halt-dialog-confirm"
+                onClick={() => void confirmHaltAction()}
+                disabled={haltBusy}
+                className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container`}
+              >
+                {haltDialog === "halt" ? t("haltConfirm") : t("resumeConfirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

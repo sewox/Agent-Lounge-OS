@@ -30,6 +30,12 @@ Section "Install"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
 
+  ; Deep link: agentlounge:// (PR-Control-1)
+  WriteRegStr HKCU "Software\Classes\agentlounge" "" "URL:Agent Lounge OS Protocol"
+  WriteRegStr HKCU "Software\Classes\agentlounge" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\agentlounge\DefaultIcon" "" "$INSTDIR\${MAINBINARYNAME}.exe,0"
+  WriteRegStr HKCU "Software\Classes\agentlounge\shell\open\command" "" '"$INSTDIR\${MAINBINARYNAME}.exe" "%1"'
+
   CreateDirectory "$SMPROGRAMS\${PRODUCTNAME}"
   CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
 SectionEnd
@@ -42,5 +48,6 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${PRODUCTNAME}\${PRODUCTNAME}.lnk"
   RMDir "$SMPROGRAMS\${PRODUCTNAME}"
 
+  DeleteRegKey HKCU "Software\Classes\agentlounge"
   DeleteRegKey HKCU "${UNINSTKEY}"
 SectionEnd

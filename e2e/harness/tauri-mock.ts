@@ -79,6 +79,13 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       ttlDays: 90,
       useCountThreshold: 0,
     };
+    let qaHaltState: {
+      halted: boolean;
+      reason: string | null;
+      by: string | null;
+      at: string | null;
+    } = { halted: false, reason: null, by: null, at: null };
+    let qaDeepLinkRegistered = false;
     const qaDestructiveQueue: QaDestructiveRow[] = [];
 
     type ListenerMap = Map<string, number[]>;
@@ -567,6 +574,36 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           qaSettings.useCountThreshold = Math.max(0, Number(args?.threshold ?? 0));
           return qaSettings.useCountThreshold;
         }
+        case "get_halt_state":
+          return { ...qaHaltState };
+        case "halt": {
+          qaHaltState = {
+            halted: true,
+            reason:
+              args?.reason != null && String(args.reason).trim()
+                ? String(args.reason).trim()
+                : null,
+            by: "ui",
+            at: new Date().toISOString(),
+          };
+          emitPluginEvent("lounge://halt-changed", { ...qaHaltState });
+          return { ...qaHaltState };
+        }
+        case "resume": {
+          qaHaltState = {
+            halted: false,
+            reason: null,
+            by: "ui",
+            at: new Date().toISOString(),
+          };
+          emitPluginEvent("lounge://halt-changed", { ...qaHaltState });
+          return { ...qaHaltState };
+        }
+        case "register_desktop_deep_link":
+          qaDeepLinkRegistered = true;
+          return true;
+        case "is_desktop_deep_link_registered":
+          return qaDeepLinkRegistered;
         case "resolve_routing": {
           const taskId = String(args?.taskId ?? "");
           f.pendingApprovals = f.pendingApprovals.filter((a) => a.task_id !== taskId);

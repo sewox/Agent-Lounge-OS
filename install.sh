@@ -453,10 +453,11 @@ EOF
 Type=Application
 Name=${APP_NAME}
 Comment=Local multi-agent orchestration layer
-Exec=${target}
+Exec=${target} %u
 Icon=${ICON_PATH}
 Terminal=false
 Categories=Development;
+MimeType=x-scheme-handler/agentlounge;
 EOF
 
   [ -f "$ICON_PATH" ] || fail "icon file missing after install: $ICON_PATH"

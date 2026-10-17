@@ -10,6 +10,7 @@ import { useLounge } from "@/components/lounge-provider";
 import { ExperienceDrawer } from "@/components/experience-drawer";
 import { LocaleSwitch } from "@/components/locale-switch";
 import { ApprovalSoundSettingsPanel } from "@/components/approval-sound-settings";
+import { DesktopIntegrationSettingsPanel } from "@/components/desktop-integration-settings";
 import { DestructiveGateSettingsPanel } from "@/components/destructive-gate-settings";
 import { EditorSettingsPanel } from "@/components/editor-settings-panel";
 import { RemoteAccessCard } from "@/components/remote-access-card";
@@ -1762,6 +1763,7 @@ export function SettingsPanel() {
       <ExperienceGovernanceSettingsPanel />
       <ApprovalSoundSettingsPanel />
       <DestructiveGateSettingsPanel />
+      <DesktopIntegrationSettingsPanel />
       <GraphUiSettings />
       <DiagnosticsSettingsPanel />
       <div className="rounded-lg border border-outline-variant bg-surface-container">

@@ -8,6 +8,9 @@
   "permissions": [
     "core:default",
     "dialog:default",
-    "notification:default"
+    "notification:default",
+    "deep-link:default",
+    "deep-link:allow-register",
+    "deep-link:allow-is-registered"
   ]
 }
