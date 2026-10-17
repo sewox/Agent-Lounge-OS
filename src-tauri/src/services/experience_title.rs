@@ -1161,9 +1161,13 @@ mod tests {
 
         // Let the first job start, then Halt — remaining jobs must park (not drop).
         tokio::time::sleep(Duration::from_millis(40)).await;
-        crate::services::halt::halt(&store, Some("title-park".into()), crate::services::halt::HALT_BY_UI)
-            .await
-            .unwrap();
+        crate::services::halt::halt(
+            &store,
+            Some("title-park".into()),
+            crate::services::halt::HALT_BY_UI,
+        )
+        .await
+        .unwrap();
 
         let after_halt = requests.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -1213,9 +1217,13 @@ mod tests {
     async fn starting_halted_defers_worker_until_resume_hook() {
         clear_startup_title_deferred_for_tests();
         let store = ExperienceStore::memory().unwrap();
-        crate::services::halt::halt(&store, Some("boot".into()), crate::services::halt::HALT_BY_UI)
-            .await
-            .unwrap();
+        crate::services::halt::halt(
+            &store,
+            Some("boot".into()),
+            crate::services::halt::HALT_BY_UI,
+        )
+        .await
+        .unwrap();
         mark_startup_title_deferred();
         assert!(startup_title_deferred_for_tests());
 

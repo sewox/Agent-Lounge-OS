@@ -2700,7 +2700,10 @@ mod tests {
             err.contains("registered") || err.contains("not a registered"),
             "unexpected: {err}"
         );
-        assert!(!err.contains("not-a-real-agent"), "must not log agent id: {err}");
+        assert!(
+            !err.contains("not-a-real-agent"),
+            "must not log agent id: {err}"
+        );
 
         let mut tool = DiscoveredTool::host_app("cursor", "Cursor");
         tool.id = "cursor".into();

@@ -212,11 +212,12 @@ mod tests {
 
     #[test]
     fn load_error_fails_closed_as_halted() {
-        assert!(halted_from_load_result(Err(anyhow::anyhow!("sqlite locked"))));
+        assert!(halted_from_load_result(Err(anyhow::anyhow!(
+            "sqlite locked"
+        ))));
         assert!(!halted_from_load_result(Ok(HaltState::default())));
         assert!(halted_from_load_result(Ok(HaltState::active(
-            None,
-            HALT_BY_UI
+            None, HALT_BY_UI
         ))));
     }
 

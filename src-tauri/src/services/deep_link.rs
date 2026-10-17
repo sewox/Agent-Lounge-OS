@@ -407,8 +407,7 @@ mod tests {
         );
         // LRO (U+202D)
         assert_eq!(
-            parse_deep_link("agentlounge://dispatch?agent=cursor&text=%E2%80%ADspoof")
-                .unwrap_err(),
+            parse_deep_link("agentlounge://dispatch?agent=cursor&text=%E2%80%ADspoof").unwrap_err(),
             DeepLinkReject::ControlCharacter
         );
         // BOM / ZWNBSP (U+FEFF) in agent
