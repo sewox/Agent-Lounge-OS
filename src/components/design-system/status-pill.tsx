@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 
-export type StatusTone = "ok" | "warn" | "error" | "halted" | "neutral";
+export type StatusTone = "ok" | "info" | "warn" | "error" | "halted" | "neutral";
 
 export type StatusPillProps = {
   tone: StatusTone;
@@ -14,6 +14,8 @@ function toneClasses(tone: StatusTone): string {
   switch (tone) {
     case "ok":
       return "border-secondary/50 bg-secondary-container/40 text-secondary-dim";
+    case "info":
+      return "border-primary/40 bg-primary-container/25 text-primary";
     case "warn":
       return "border-tertiary/40 bg-surface-container-highest text-tertiary";
     case "error":

@@ -22,6 +22,9 @@ export const deadSymbolStrings = {
   get ignoreTab() {
     return t("ignoreTab");
   },
+  get agentsTab() {
+    return t("agentsTab");
+  },
   get searchPlaceholder() {
     return t("searchPlaceholder");
   },

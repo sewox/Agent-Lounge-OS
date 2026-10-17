@@ -1,6 +1,7 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
 pub mod agent_health;
+pub mod agent_mcp_probe;
 pub mod approval_notify;
 pub mod approval_sound;
 pub mod auto_archive;
@@ -45,6 +46,7 @@ use tokio::sync::Mutex;
 
 use crate::models::ServiceReport;
 
+pub use agent_mcp_probe::{probe_agent_mcp_url, AgentMcpProbeResult};
 pub use approval_notify::{
     clear_pending_approval_if_matches, emit_approval_pending, emit_approval_resolved,
     focus_app_for_approval, install_destructive_approval_emitter,
@@ -100,8 +102,8 @@ pub use lounge_auth::{
     remove_allowed_origin, rotate_lounge_token, RemoteAccessInfo, HDR_LOUNGE_TOKEN,
 };
 pub use lounge_health::{
-    build_lounge_health, cached_lounge_health, collect_lounge_health, run_startup_lounge_health,
-    LoungeHealthOptions,
+    build_lounge_health, cached_lounge_health, collect_lounge_health, count_agents_info,
+    count_agents_warn, run_startup_lounge_health, LoungeHealthOptions,
 };
 pub use memory_bridge::{
     health_page_timeout, probe_ui_config, MemoryBridge, MemoryBridgeConfig, TransportMode,

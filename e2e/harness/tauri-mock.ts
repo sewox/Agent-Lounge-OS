@@ -21,6 +21,10 @@ declare global {
     __QA_IPC_LOG__?: { cmd: string; args: unknown }[];
     __QA_FIXTURE__?: FixtureDataset;
     __QA_SEED_DESTRUCTIVE__?: (rows: QaDestructiveRow[]) => void;
+    /** Health-UI-2: override lounge_health payload, or `"error"` to throw. */
+    __QA_LOUNGE_HEALTH__?: FixtureDataset["loungeHealth"] | "error";
+    /** Health-UI-2: dead-symbols scan freshness override. */
+    __QA_HEALTH_SCAN_META__?: { partial: boolean; indexed_at: string | null };
     __TAURI_INTERNALS__?: Record<string, unknown>;
     __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
   }
@@ -48,6 +52,9 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
   await page.addInitScript(({ data, rejectQuotaExperience }: { data: FixtureDataset; rejectQuotaExperience: boolean }) => {
     window.__QA_IPC_LOG__ = [];
     window.__QA_FIXTURE__ = data;
+    if (data.healthScanMeta) {
+      window.__QA_HEALTH_SCAN_META__ = data.healthScanMeta;
+    }
     (window as Window & { __QA_REJECT_QUOTA__?: boolean }).__QA_REJECT_QUOTA__ =
       rejectQuotaExperience;
     (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
@@ -923,6 +930,87 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           const name = String(args?.defaultName ?? "agent-efficiency.md");
           return `/tmp/AgentLounge-qa/reports/${name.endsWith(".md") ? name : `${name}.md`}`;
         }
+        // Health-UI-2 — append-only (shared with parallel PR-Control-1).
+        case "lounge_health": {
+          const override = window.__QA_LOUNGE_HEALTH__;
+          if (override === "error") {
+            throw new Error("lounge_health fixture error");
+          }
+          if (override) {
+            return override;
+          }
+          return (
+            f.loungeHealth ?? {
+              schema_version: "1.1.0",
+              checked_at: new Date().toISOString(),
+              platform: {
+                os: "linux",
+                arch: "x86_64",
+                distro_id: null,
+                distro_id_like: null,
+                package_manager: "unknown",
+              },
+              agents: [],
+              title: {
+                queue_backlog: 0,
+                db_backlog: 0,
+                give_ups: 0,
+                lmr_reachable: false,
+                model_installed: false,
+                model: "",
+              },
+              dead_symbols: { kritik: 0, potansiyel: 0, total: 0, ignored: 0 },
+              cbm: { daemon_mode: false, polluted_18749: false },
+            }
+          );
+        }
+        case "probe_agent_mcp_url": {
+          const client = String(args?.client ?? "");
+          const pathId = String(args?.configPathId ?? args?.config_path_id ?? "");
+          window.__QA_IPC_LOG__!.push({
+            cmd: "probe_agent_mcp_url:meta",
+            args: { client, configPathId: pathId, note: "url-not-from-ui" },
+          });
+          // Mock: remote-looking ids → not_probed_remote; else reachable.
+          if (/remote|example\.com/i.test(pathId) || /remote/i.test(client)) {
+            return { outcome: "not_probed_remote", elapsed_ms: 0 };
+          }
+          return { outcome: "reachable", elapsed_ms: 12 };
+        }
+        case "list_health_scans": {
+          const meta =
+            window.__QA_HEALTH_SCAN_META__ ??
+            f.healthScanMeta ?? { partial: false, indexed_at: null };
+          return [
+            {
+              id: "scan-fixture-1",
+              project_id: "Agent-Lounge-OS",
+              repo_path: "~/dev/Agent-Lounge-OS",
+              status: "done",
+              result: {
+                project_id: "Agent-Lounge-OS",
+                repo_path: "~/dev/Agent-Lounge-OS",
+                indexed_at: meta.indexed_at ?? new Date().toISOString(),
+                symbols_scanned: f.deadSymbols.length,
+                edges_scanned: 0,
+                expected_symbols: f.deadSymbols.length,
+                expected_edges: 0,
+                pages: 1,
+                page_size: 100,
+                partial: Boolean(meta.partial),
+                kritik: [],
+                potansiyel: [],
+              },
+              enqueued_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          ];
+        }
+        case "get_health_scan":
+          return null;
+        case "start_health_scan":
+        case "cancel_health_scan":
+          return null;
         // PR-4+ stubs — returning errors surfaces missing UX.
         case "delete_experience":
         case "approve_experience":

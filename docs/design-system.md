@@ -70,10 +70,13 @@ Halt **logic** is PR-Control-1. This package ships visual state only.
 | Tone | Use |
 |------|-----|
 | `ok` | Healthy / running |
+| `info` | Informational (e.g. agent MCP `hash_mismatch` / `unverified`) |
 | `warn` | Degraded / limited |
 | `error` | Failure / crash |
 | `halted` | Deliberately stopped |
 | `neutral` | Idle / unknown |
+
+Health agents UI: see `docs/health.md` (Health-UI-2).
 
 ## Documented primitives (not built in PR-DS-0)
 
@@ -123,4 +126,4 @@ Shared assert API: `assertLayoutL1toL6(page, route, expect)` — usable from any
 
 ## Out of scope (this PR)
 
-Halt control logic, review queue, Vault card, dead-code screen, timeline UI, i18n/left-menu responsiveness (PR-i18n-Platform-1).
+Halt control logic, review queue, Vault card, timeline UI, i18n/left-menu responsiveness (PR-i18n-Platform-1). Dead-code + agents health screens: Health-UI-2 (`docs/health.md`).

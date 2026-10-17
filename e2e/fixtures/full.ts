@@ -1,4 +1,5 @@
 import type { FixtureDataset } from "./types";
+import { HEALTH_AGENTS_ALL_STATUSES, HEALTH_SCAN_PARTIAL } from "./health-agents";
 
 const mkHealth = (
   id: string,
@@ -25,6 +26,7 @@ const deadSymbols: FixtureDataset["deadSymbols"] = [
     detail: "fn never referenced",
     project_id: "Agent-Lounge-OS",
     last_ref: "src-tauri/src/kernel/workflow_engine.rs:168",
+    severity: "Kritik",
   },
   {
     name: "stale_bridge_helper",
@@ -33,6 +35,7 @@ const deadSymbols: FixtureDataset["deadSymbols"] = [
     line: 88,
     detail: "call site missing",
     project_id: "Agent-Lounge-OS",
+    severity: "Potansiyel",
   },
   {
     name: "legacy_embed",
@@ -41,6 +44,7 @@ const deadSymbols: FixtureDataset["deadSymbols"] = [
     line: 41,
     detail: "dead import",
     project_id: "EchoMind",
+    severity: "Potansiyel",
   },
   {
     name: "unused_indexer_flag",
@@ -524,4 +528,6 @@ export const FULL_FIXTURE: FixtureDataset = {
       updated_at: "2026-10-05T12:03:00.000Z",
     },
   ],
+  loungeHealth: HEALTH_AGENTS_ALL_STATUSES,
+  healthScanMeta: HEALTH_SCAN_PARTIAL,
 };

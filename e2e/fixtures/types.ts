@@ -229,4 +229,71 @@ export type FixtureDataset = {
     target_agent?: string | null;
     updated_at?: string;
   }[];
+  /** Health-UI-2 lounge_health report (optional — agents tab). */
+  loungeHealth?: LoungeHealthReportFixture | null;
+  /** Health-1a scan meta for dead-symbols stale/partial warning. */
+  healthScanMeta?: { partial: boolean; indexed_at: string | null } | null;
+};
+
+export type AgentMcpStatusFixture =
+  | "ok"
+  | "missing"
+  | "stale"
+  | "hash_mismatch"
+  | "non_canonical"
+  | "unreadable"
+  | "not_installed"
+  | "unverified";
+
+export type AgentHealthEntryFixture = {
+  client: string;
+  status: AgentMcpStatusFixture;
+  severity: string;
+  config_path?: string | null;
+  command?: string | null;
+  configured_version?: string | null;
+  expected_version?: string | null;
+  configured_sha256?: string | null;
+  expected_sha256?: string | null;
+  detail?: string | null;
+};
+
+export type LoungeHealthReportFixture = {
+  schema_version: "1.1.0";
+  checked_at: string;
+  platform: {
+    os: string;
+    arch: string;
+    distro_id?: string | null;
+    distro_id_like?: string | null;
+    package_manager: string;
+  };
+  agents: AgentHealthEntryFixture[];
+  title: {
+    queue_backlog: number;
+    db_backlog: number;
+    give_ups: number;
+    last_error_type?: string | null;
+    lmr_reachable: boolean;
+    model_installed: boolean;
+    model: string;
+    lmr_endpoint?: string | null;
+    probe_error_type?: string | null;
+  };
+  dead_symbols: {
+    kritik: number;
+    potansiyel: number;
+    total: number;
+    ignored: number;
+  };
+  cbm: {
+    daemon_mode: boolean;
+    daemon_presence?: string | null;
+    polluted_18749: boolean;
+    config_path?: string | null;
+    ui_enabled?: boolean | null;
+    ui_port?: number | null;
+  };
+  expected_lounge_mcp_version?: string | null;
+  expected_lounge_mcp_sha256?: string | null;
 };

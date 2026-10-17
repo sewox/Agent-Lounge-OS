@@ -1,0 +1,205 @@
+/** Health-UI-2: agent status mapping, path masking, dead-symbol filters. */
+
+import type { AgentMcpStatus, AgentHealthEntry } from "@/lib/lounge";
+import type { StatusTone } from "@/components/design-system";
+
+export const AGENT_MCP_STATUSES: readonly AgentMcpStatus[] = [
+  "ok",
+  "missing",
+  "stale",
+  "hash_mismatch",
+  "non_canonical",
+  "unreadable",
+  "not_installed",
+  "unverified",
+] as const;
+
+/** i18n keys under `health.status.*` — one distinct label per status. */
+export function statusLabelKey(status: AgentMcpStatus): string {
+  return `status.${status}`;
+}
+
+/** Map report severity → StatusPill tone (ok / info / warning). */
+export function severityToTone(severity: string): StatusTone {
+  const s = severity.trim().toLowerCase();
+  if (s === "ok") return "ok";
+  if (s === "info") return "info";
+  if (s === "warning" || s === "warn") return "warn";
+  return "neutral";
+}
+
+/** Distinct icon name for agent-MCP status (must differ from approval chrome). */
+export function statusIconName(status: AgentMcpStatus): string {
+  switch (status) {
+    case "ok":
+      return "health";
+    case "missing":
+    case "not_installed":
+      return "folder";
+    case "stale":
+      return "tune";
+    case "hash_mismatch":
+      return "chip";
+    case "non_canonical":
+    case "unreadable":
+      return "rule";
+    case "unverified":
+      // Distinct from source_unverified approval (banner text, no remote-link glyph).
+      return "link-off";
+    default:
+      return "health";
+  }
+}
+
+/**
+ * Second-line defence: mask absolute home prefixes the backend may have missed.
+ * Never expands `~/…`. Replaces `/Users/…`, `/home/…`, `C:\Users\…` forms.
+ */
+export function maskHomePathForUi(raw: string | null | undefined): string {
+  if (raw == null || raw === "") return "";
+  let out = raw;
+  // Already masked — leave alone.
+  if (out.startsWith("~/") || out === "~") {
+    return out.replace(/\\/g, "/");
+  }
+  // Windows: C:\Users\<name>\… or C:/Users/<name>/…
+  out = out.replace(/^[A-Za-z]:[\\/]+Users[\\/]+[^\\/]+/i, "~");
+  // macOS /Users/<name>
+  out = out.replace(/^\/Users\/[^/]+/i, "~");
+  // Linux /home/<name>
+  out = out.replace(/^\/home\/[^/]+/i, "~");
+  // Normalize separators after mask.
+  out = out.replace(/\\/g, "/");
+  // Collapse leftover "~\" style
+  if (out.startsWith("~\\")) {
+    out = `~/${out.slice(2)}`;
+  }
+  return out;
+}
+
+/** True when a display string still contains an absolute home leak. */
+export function containsUnmaskedHome(text: string): boolean {
+  return (
+    /\/Users\//i.test(text) ||
+    /\/home\//i.test(text) ||
+    /[A-Za-z]:[\\/]+Users[\\/]/i.test(text)
+  );
+}
+
+export function maskAgentEntryForUi(entry: AgentHealthEntry): AgentHealthEntry {
+  return {
+    ...entry,
+    config_path: entry.config_path != null ? maskHomePathForUi(entry.config_path) : entry.config_path,
+    command: entry.command != null ? maskHomePathForUi(entry.command) : entry.command,
+    detail: entry.detail != null ? maskHomePathForUi(entry.detail) : entry.detail,
+  };
+}
+
+export type DeadConfidenceFilter = "all" | "Kritik" | "Potansiyel";
+export type DeadCategoryFilter = "all" | "unused" | "broken" | "partial";
+
+export type DeadSymbolFilterInput = {
+  query: string;
+  category: DeadCategoryFilter;
+  confidence: DeadConfidenceFilter;
+  projectId?: string | null;
+  /** When category=partial, caller already decided the set is partial — still apply other filters. */
+  partial?: boolean;
+};
+
+export function normalizeConfidence(raw: string | null | undefined): "Kritik" | "Potansiyel" {
+  if (raw === "Kritik") return "Kritik";
+  return "Potansiyel";
+}
+
+export function countDeadByCategory<T extends { kind?: string | null; severity?: string | null }>(
+  symbols: T[],
+): { total: number; unused: number; broken: number; kritik: number; potansiyel: number } {
+  let unused = 0;
+  let broken = 0;
+  let kritik = 0;
+  let potansiyel = 0;
+  for (const s of symbols) {
+    if (s.kind === "unused") unused += 1;
+    else if (s.kind === "broken") broken += 1;
+    if (normalizeConfidence(s.severity) === "Kritik") kritik += 1;
+    else potansiyel += 1;
+  }
+  return { total: symbols.length, unused, broken, kritik, potansiyel };
+}
+
+export function filterDeadSymbolsUi<
+  T extends {
+    name: string;
+    kind?: string | null;
+    file?: string | null;
+    detail?: string | null;
+    project_id?: string | null;
+    last_ref?: string | null;
+    severity?: string | null;
+    rule?: string | null;
+  },
+>(symbols: T[], input: DeadSymbolFilterInput): T[] {
+  const q = input.query.trim().toLowerCase();
+  return symbols.filter((symbol) => {
+    if (input.projectId && symbol.project_id && symbol.project_id !== input.projectId) {
+      return false;
+    }
+    if (input.category === "unused" || input.category === "broken") {
+      if (symbol.kind !== input.category) return false;
+    }
+    // `partial` is a scan-level filter; when active we still show all rows
+    // (the strip just signals staleness). No per-row partial flag.
+    if (input.confidence !== "all") {
+      if (normalizeConfidence(symbol.severity) !== input.confidence) return false;
+    }
+    if (!q) return true;
+    const hay = [
+      symbol.name,
+      symbol.kind ?? "",
+      symbol.file ?? "",
+      symbol.detail ?? "",
+      symbol.project_id ?? "",
+      symbol.last_ref ?? "",
+      symbol.severity ?? "",
+      symbol.rule ?? "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+/** Plain-language reason from kind + severity + detail/rule. */
+export function deadSymbolReason(
+  symbol: {
+    kind?: string | null;
+    severity?: string | null;
+    detail?: string | null;
+    rule?: string | null;
+  },
+  labels: { unused: string; broken: string; kritik: string; potansiyel: string; fallback: string },
+): string {
+  const parts: string[] = [];
+  if (symbol.kind === "unused") parts.push(labels.unused);
+  else if (symbol.kind === "broken") parts.push(labels.broken);
+  const conf = normalizeConfidence(symbol.severity);
+  parts.push(conf === "Kritik" ? labels.kritik : labels.potansiyel);
+  const detail = (symbol.detail ?? symbol.rule ?? "").trim();
+  if (detail) parts.push(detail);
+  return parts.length > 0 ? parts.join(" · ") : labels.fallback;
+}
+
+/** Stale when partial OR indexed_at older than `maxAgeMs` (default 7d). */
+export function isScanStale(
+  meta: { partial?: boolean; indexed_at?: string | null } | null | undefined,
+  nowMs = Date.now(),
+  maxAgeMs = 7 * 24 * 60 * 60 * 1000,
+): boolean {
+  if (!meta) return false;
+  if (meta.partial) return true;
+  if (!meta.indexed_at) return false;
+  const t = Date.parse(meta.indexed_at);
+  if (!Number.isFinite(t)) return false;
+  return nowMs - t > maxAgeMs;
+}
