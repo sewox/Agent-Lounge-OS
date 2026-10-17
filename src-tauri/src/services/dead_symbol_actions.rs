@@ -76,6 +76,9 @@ pub async fn fix_dead_symbol_with_agent_gated<F>(
 where
     F: Fn() -> bool,
 {
+    if crate::services::halt::is_halted(store).await {
+        bail!("{}", crate::services::halt::HALTED_ERROR_MESSAGE);
+    }
     if !fleet_has_agent() {
         bail!("No agent available — connect Grok Bot or another worker in Fleet");
     }
@@ -235,6 +238,64 @@ mod tests {
         assert!(err.is_err());
         let msg = format!("{}", err.unwrap_err());
         assert!(msg.contains("No agent available"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn fix_with_agent_refuses_while_halted_without_publish() {
+        let store = ExperienceStore::memory().expect("memory db");
+        let mut graph = IndexGraph {
+            project: "lounge".into(),
+            repo_path: "/tmp/lounge".into(),
+            ..Default::default()
+        };
+        graph.dead.push(DeadSymbol {
+            project_id: Some("lounge".into()),
+            name: "unused_fn".into(),
+            kind: "unused".into(),
+            file: Some("src/x.rs".into()),
+            line: Some(10),
+            ..Default::default()
+        });
+        store.save_project_index(graph).await.expect("save");
+        crate::services::halt::halt(
+            &store,
+            Some("dead-symbol".into()),
+            crate::services::halt::HALT_BY_UI,
+        )
+        .await
+        .unwrap();
+
+        let published = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let published_flag = published.clone();
+        let err = fix_dead_symbol_with_agent_gated(
+            &store,
+            // Unreachable — if Halt failed open we would attempt NATS and set the flag below.
+            "nats://127.0.0.1:9",
+            DeadSymbol {
+                project_id: Some("lounge".into()),
+                name: "unused_fn".into(),
+                kind: "unused".into(),
+                file: Some("src/x.rs".into()),
+                line: Some(10),
+                ..Default::default()
+            },
+            move || {
+                published_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            },
+        )
+        .await;
+        assert!(err.is_err());
+        let msg = format!("{}", err.unwrap_err());
+        assert_eq!(
+            msg,
+            crate::services::halt::HALTED_ERROR_MESSAGE,
+            "unexpected: {msg}"
+        );
+        assert!(
+            !published.load(std::sync::atomic::Ordering::SeqCst),
+            "fleet/publish path must not run while halted"
+        );
     }
 
     #[test]

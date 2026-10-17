@@ -1405,7 +1405,7 @@ async fn search_index_nodes(
         .map_err(|err| err.to_string())
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct GrokTestResult {
     task_id: String,
     subject: String,
@@ -1421,12 +1421,30 @@ async fn trigger_grok_test(
     bus: tauri::State<'_, BusManager>,
     project_id: Option<String>,
 ) -> Result<GrokTestResult, String> {
-    use kernel::workflow_engine::{grok_bot_in_fleet, GROK_BOT_WORKER};
+    use kernel::workflow_engine::grok_bot_in_fleet;
+    trigger_grok_test_impl(
+        store.inner(),
+        bus.nats_url(),
+        project_id,
+        grok_bot_in_fleet(),
+    )
+    .await
+}
 
-    if is_halted(store.inner()).await {
+/// Testable body for [`trigger_grok_test`] (Halt gate before any NATS publish).
+#[allow(deprecated)]
+async fn trigger_grok_test_impl(
+    store: &ExperienceStore,
+    bus_url: &str,
+    project_id: Option<String>,
+    fleet_has_grok: bool,
+) -> Result<GrokTestResult, String> {
+    use kernel::workflow_engine::GROK_BOT_WORKER;
+
+    if is_halted(store).await {
         return Err(crate::services::halt::HALTED_ERROR_MESSAGE.into());
     }
-    if !grok_bot_in_fleet() {
+    if !fleet_has_grok {
         return Err("Grok Bot fleet'te yok — test tetiklenemedi".into());
     }
 
@@ -1441,7 +1459,7 @@ async fn trigger_grok_test(
     let chain = format!("{project} -> Triggered Manual Grok Test");
     task.workflow_chain = Some(chain.clone());
 
-    let url = bus.nats_url().to_string();
+    let url = bus_url.to_string();
     let subject = TASK_REQUESTED.to_string();
     let bytes = serde_json::to_vec(&task).map_err(|err| err.to_string())?;
     let subject_err = subject.clone();
@@ -1999,5 +2017,29 @@ mod kernel_log_config_tests {
         }
         // Plugin defaults (tauri-plugin-log 2.10.0): 40_000 bytes + KeepOne.
         assert!(max_size > 40_000);
+    }
+}
+
+#[cfg(test)]
+mod halt_ui_dispatch_tests {
+    use super::trigger_grok_test_impl;
+    use crate::db::ExperienceStore;
+    use crate::services::halt::{self, HALTED_ERROR_MESSAGE, HALT_BY_UI};
+
+    #[tokio::test]
+    async fn trigger_grok_test_refuses_while_halted_without_publish() {
+        let store = ExperienceStore::memory().unwrap();
+        halt::halt(&store, Some("grok".into()), HALT_BY_UI)
+            .await
+            .unwrap();
+        // Unreachable NATS — Halt must return before connect/publish.
+        let err = trigger_grok_test_impl(&store, "nats://127.0.0.1:9", None, true)
+            .await
+            .unwrap_err();
+        assert_eq!(err, HALTED_ERROR_MESSAGE, "unexpected: {err}");
+        assert!(
+            !err.contains("NATS") && !err.contains("publish") && !err.contains("bağlant"),
+            "must not reach NATS while halted: {err}"
+        );
     }
 }

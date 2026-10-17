@@ -159,4 +159,60 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
     // Halt banner remains after acting on the approval.
     await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
   });
+
+  test("CTL-04 · get_halt_state reject → fail-closed UI + Resume reachable", async ({
+    page,
+  }) => {
+    test.info().annotations.push({ type: "id", description: "CTL-04" });
+    // Seed before mock init so the first get_halt_state rejects.
+    await page.addInitScript(() => {
+      sessionStorage.setItem("__QA_REJECT_HALT_STATE__", "halt_state JSON parse failed");
+    });
+    await openRoute(page, "/dashboard", "full");
+
+    await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('[data-qa="halt-load-error"]')).toBeVisible();
+    await expect(page.locator('[data-qa="halt-load-error"]')).toContainText(
+      /Could not read Halt state|Durdurma durumu okunamadı|fail-closed/i,
+    );
+    await expect(page.locator('[data-qa="halt-load-error-strip"]')).toBeVisible();
+    await expect(page.locator('[data-qa="halt-status-strip"] [data-qa="status-pill"]')).toHaveAttribute(
+      "data-tone",
+      "halted",
+    );
+    const haltBtn = page.locator('[data-qa="halt-toggle"]');
+    await expect(haltBtn).toHaveText(/Resume|Devam/i);
+
+    await haltBtn.click();
+    const resumeDialog = page.locator('[data-qa="resume-confirm-dialog"]');
+    await expect(resumeDialog).toBeVisible();
+    await page.locator('[data-qa="halt-dialog-confirm"]').click();
+    await expect(page.locator('[data-qa="halted-banner"]')).toHaveCount(0);
+    await expect(haltBtn).toHaveText(/Halt|Durdur/i);
+  });
+
+  test("CTL-05 · Halt dialog Tab / Shift+Tab focus wrap", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "CTL-05" });
+    await openRoute(page, "/dashboard", "full");
+    await page.locator('[data-qa="halt-toggle"]').click();
+    const dialog = page.locator('[data-qa="halt-confirm-dialog"]');
+    await expect(dialog).toBeVisible();
+
+    const reason = page.locator('[data-qa="halt-reason-input"]');
+    const cancel = page.locator('[data-qa="halt-dialog-cancel"]');
+    const confirm = page.locator('[data-qa="halt-dialog-confirm"]');
+
+    await reason.focus();
+    await expect(reason).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(cancel).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(confirm).toBeFocused();
+    // Wrap forward: last → first
+    await page.keyboard.press("Tab");
+    await expect(reason).toBeFocused();
+    // Wrap backward: first → last
+    await page.keyboard.press("Shift+Tab");
+    await expect(confirm).toBeFocused();
+  });
 });

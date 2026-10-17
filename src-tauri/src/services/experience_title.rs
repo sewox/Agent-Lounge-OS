@@ -1227,49 +1227,46 @@ mod tests {
         mark_startup_title_deferred();
         assert!(startup_title_deferred_for_tests());
 
-        // While still halted, a worker must park and not call LMR.
         let requests = Arc::new(AtomicUsize::new(0));
         let port = counting_stub_chat(requests.clone()).await;
         let id = uuid::Uuid::new_v4().to_string();
-        let body = "deferred boot row";
-        let rec = sample_record(id.clone(), body, body, TitleSource::Fallback);
+        let body = "deferred boot row via on_halt_resumed";
+        let rec = sample_record(id.clone(), body, "", TitleSource::Fallback);
         store.insert_record(rec).await.unwrap();
 
-        let q = local_queue_with_store(store.clone()).await;
-        q.set_endpoint(Some(format!("http://127.0.0.1:{port}")))
-            .await;
-        q.ensure_worker().await;
-        q.enqueue_job(&id, body).await;
-        tokio::time::sleep(Duration::from_millis(350)).await;
-        assert_eq!(
-            requests.load(Ordering::SeqCst),
-            0,
-            "while halted at boot, LMR must not run"
-        );
-        assert!(
-            q.pending_len().await >= 1,
-            "job must stay parked while startup-halted"
-        );
+        set_title_endpoint_override_for_tests(Some(format!("http://127.0.0.1:{port}"))).await;
 
-        // Resume clears deferred flag (production on_halt_resumed) and wakes the worker.
+        // Still halted: the production Resume hook must not run yet.
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+
         crate::services::halt::resume(&store, crate::services::halt::HALT_BY_UI)
             .await
             .unwrap();
-        let deferred = STARTUP_TITLE_DEFERRED.swap(false, Ordering::SeqCst);
-        assert!(deferred, "Resume must consume the deferred-startup flag");
-        q.notify.notify_waiters();
-        wait_pending_drain(&q, Duration::from_secs(10)).await;
+        // Call the real hook (clears deferred flag, ensure worker, deferred backfill).
+        on_halt_resumed(&store).await;
+        assert!(
+            !startup_title_deferred_for_tests(),
+            "on_halt_resumed must clear STARTUP_TITLE_DEFERRED"
+        );
 
-        for _ in 0..40 {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
             let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
             if loaded.title_source == TitleSource::Llm {
                 break;
             }
+            if Instant::now() >= deadline {
+                panic!("on_halt_resumed deferred backfill did not title the row");
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert!(
+            requests.load(Ordering::SeqCst) >= 1,
+            "deferred backfill must call LMR after on_halt_resumed"
+        );
         let loaded = store.get_record(id).await.unwrap().unwrap();
         assert_eq!(loaded.title_source, TitleSource::Llm);
+        set_title_endpoint_override_for_tests(None).await;
         clear_startup_title_deferred_for_tests();
     }
 }

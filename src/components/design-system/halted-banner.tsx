@@ -57,7 +57,7 @@ export function HaltedBanner({
       </div>
       <div
         data-qa="halted-hatch"
-        className={`min-h-0 px-3 py-1.5 font-body text-body text-on-surface ${
+        className={`min-h-10 px-3 py-2 font-body text-body text-on-surface ${
           reducedMotion ? "ds-halted-hatch" : "ds-halted-hatch ds-halted-hatch-animate"
         }`}
       >

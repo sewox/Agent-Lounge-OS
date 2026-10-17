@@ -21,6 +21,8 @@ declare global {
     __QA_IPC_LOG__?: { cmd: string; args: unknown }[];
     __QA_FIXTURE__?: FixtureDataset;
     __QA_SEED_DESTRUCTIVE__?: (rows: QaDestructiveRow[]) => void;
+    /** Make the next `get_halt_state` reject (fail-closed Halt UI). */
+    __QA_REJECT_HALT_STATE__?: (message?: string) => void;
     __TAURI_INTERNALS__?: Record<string, unknown>;
     __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
   }
@@ -85,7 +87,24 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       by: string | null;
       at: string | null;
     } = { halted: false, reason: null, by: null, at: null };
+    /** When set, `get_halt_state` rejects (fail-closed UI path). Cleared on halt/resume. */
+    let qaHaltStateError: string | null = null;
+    try {
+      const bootReject = sessionStorage.getItem("__QA_REJECT_HALT_STATE__");
+      if (bootReject != null) {
+        qaHaltStateError = bootReject.trim() || "halt_state unreadable";
+        sessionStorage.removeItem("__QA_REJECT_HALT_STATE__");
+      }
+    } catch {
+      /* private mode */
+    }
     let qaDeepLinkRegistered = false;
+    window.__QA_REJECT_HALT_STATE__ = (message?: string) => {
+      qaHaltStateError =
+        message != null && String(message).trim()
+          ? String(message)
+          : "halt_state unreadable";
+    };
     const qaDestructiveQueue: QaDestructiveRow[] = [];
 
     type ListenerMap = Map<string, number[]>;
@@ -575,8 +594,13 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return qaSettings.useCountThreshold;
         }
         case "get_halt_state":
+          if (qaHaltStateError) {
+            const msg = qaHaltStateError;
+            throw new Error(msg);
+          }
           return { ...qaHaltState };
         case "halt": {
+          qaHaltStateError = null;
           qaHaltState = {
             halted: true,
             reason:
@@ -590,6 +614,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return { ...qaHaltState };
         }
         case "resume": {
+          qaHaltStateError = null;
           qaHaltState = {
             halted: false,
             reason: null,

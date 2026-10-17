@@ -407,52 +407,8 @@ export function AppShell({ children }: { children: ReactNode }) {
     indexNotice ||
     layaBanner ||
     Boolean(approvalError);
-  const statusBanner =
-    haltChrome ||
-    chainBanner ||
-    destructiveHold;
-  const bannerRef = useRef<HTMLDivElement | null>(null);
-  const [bannerHeight, setBannerHeight] = useState(0);
-  const attachBannerRef = useCallback((node: HTMLDivElement | null) => {
-    bannerRef.current = node;
-  }, []);
-
-  const degradedKey = degradedNames.join(",");
-  useEffect(() => {
-    if (!statusBanner) {
-      const clearId = window.setTimeout(() => setBannerHeight(0), 0);
-      return () => window.clearTimeout(clearId);
-    }
-    const el = bannerRef.current;
-    if (!el) {
-      return;
-    }
-    const measure = () => setBannerHeight(el.getBoundingClientRect().height);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [
-    statusBanner,
-    haltChrome,
-    chainBanner,
-    haltState.reason,
-    haltState.at,
-    haltLoadError,
-    serviceDegraded,
-    approval,
-    indexing,
-    indexProgress,
-    indexJobs,
-    indexNotice,
-    approvalError,
-    layaBanner,
-    decisionGate,
-    countdownLabel,
-    degradedKey,
-    optionalMissing.length,
-  ]);
-
+  // Fixed status banners overlay content (no paddingTop reservation) so page
+  // panels keep filling the viewport — L1–L6 must pass with unchanged layout.ts.
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-[55] pointer-events-auto"
     : "fixed top-12 right-0 left-[var(--sidebar-w)] z-[55] pointer-events-auto";
@@ -619,7 +575,6 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {haltChrome || chainBanner ? (
         <div
-          ref={attachBannerRef}
           className={`${bannerPos} flex flex-col`}
           data-qa="status-banner-stack"
           data-halt-chrome={haltChrome ? "true" : "false"}
@@ -627,28 +582,27 @@ export function AppShell({ children }: { children: ReactNode }) {
           data-has-approval={approval && !securityHold && !quotaHold ? "true" : "false"}
         >
           {haltChrome ? (
-            <div className="px-3 py-1.5" data-qa="halted-banner-slot">
+            <div className="px-3 py-2" data-qa="halted-banner-slot">
               <HaltedBanner title={t("haltedBannerTitle")} className="w-full">
-                <div
-                  className="flex min-w-0 flex-col gap-0.5 text-meta leading-snug"
-                  data-qa="halted-banner-details"
-                >
+                <div className="space-y-1" data-qa="halted-banner-details">
                   {haltLoadError ? (
                     <p className="font-semibold text-error-dim" role="alert" data-qa="halt-load-error">
                       {t("haltLoadFailed")}
                     </p>
                   ) : null}
-                  <p className="min-w-0 truncate text-on-surface">
-                    <span className="font-semibold">{t("haltedBannerLead")}</span>
-                    {" · "}
+                  <p className="font-semibold text-on-surface">{t("haltedBannerLead")}</p>
+                  <p className="whitespace-normal break-words text-on-surface">
                     {haltState.reason
                       ? t("haltedReason", { reason: haltState.reason })
                       : t("haltedReasonNone")}
-                    {" · "}
+                  </p>
+                  <p className="whitespace-normal break-words text-on-surface">
                     {t("haltedBy", { by: haltState.by || "ui" })}
                     {haltState.at ? ` · ${t("haltedAt", { at: haltState.at })}` : null}
                   </p>
-                  <p className="min-w-0 text-on-surface-variant">{t("haltedDoesNotStop")}</p>
+                  <p className="whitespace-normal break-words text-on-surface-variant">
+                    {t("haltedDoesNotStop")}
+                  </p>
                 </div>
               </HaltedBanner>
             </div>
@@ -1006,17 +960,17 @@ export function AppShell({ children }: { children: ReactNode }) {
               <button
                 type="button"
                 data-qa="halt-toggle"
-                onClick={() => setHaltDialog(haltState.halted ? "resume" : "halt")}
+                onClick={() => setHaltDialog(haltChrome ? "resume" : "halt")}
                 className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold ${
-                  haltState.halted
+                  haltChrome
                     ? "border-error bg-error-container text-on-error-container hover:bg-error/20"
                     : "border-outline-variant bg-surface-container-high text-on-surface hover:border-error hover:text-error-dim"
                 }`}
-                title={haltState.halted ? t("resume") : t("halt")}
-                aria-label={haltState.halted ? t("resume") : t("halt")}
+                title={haltChrome ? t("resume") : t("halt")}
+                aria-label={haltChrome ? t("resume") : t("halt")}
               >
                 <span className="whitespace-nowrap">
-                  {haltState.halted ? t("resume") : t("halt")}
+                  {haltChrome ? t("resume") : t("halt")}
                 </span>
               </button>
               <button
@@ -1262,7 +1216,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             ? "ml-0 w-full"
             : "ml-[var(--sidebar-w)] w-[calc(100%-var(--sidebar-w))]"
         }`}
-        style={bannerHeight > 0 ? { paddingTop: `calc(0.875rem + ${bannerHeight}px)` } : undefined}
       >
         <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">{children}</div>
       </main>

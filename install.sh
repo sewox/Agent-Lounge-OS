@@ -220,11 +220,33 @@ remove_path_loud() {
   fi
 }
 
+uninstall_scheme_default() {
+  # Undo install-time `xdg-mime default … x-scheme-handler/agentlounge` when possible.
+  mimeapps="${XDG_CONFIG_HOME:-${HOME}/.config}/mimeapps.list"
+  if ! command -v xdg-mime >/dev/null 2>&1; then
+    printf 'note: xdg-mime not found — skipping x-scheme-handler/agentlounge default removal\n'
+    return 0
+  fi
+  if [ ! -f "$mimeapps" ]; then
+    printf 'note: mimeapps.list not found — skipping x-scheme-handler/agentlounge default removal\n'
+    return 0
+  fi
+  if grep -q 'x-scheme-handler/agentlounge=' "$mimeapps"; then
+    tmp="${mimeapps}.lounge-uninstall.$$"
+    grep -v 'x-scheme-handler/agentlounge=' "$mimeapps" >"$tmp"
+    mv -f "$tmp" "$mimeapps"
+    printf 'Removed x-scheme-handler/agentlounge default from %s\n' "$mimeapps"
+  else
+    printf 'note: no x-scheme-handler/agentlounge default in %s — nothing to remove\n' "$mimeapps"
+  fi
+}
+
 uninstall() {
   man="$(manifest_path)"
   if [ ! -f "$man" ]; then
     fail "uninstall failed: no install manifest at $man (nothing this installer recorded). Refusing best-effort wipe."
   fi
+  uninstall_scheme_default
   while IFS= read -r path || [ -n "$path" ]; do
     [ -n "$path" ] || continue
     [ "$path" = "$man" ] && continue
