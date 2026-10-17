@@ -1,4 +1,5 @@
 import type { FixtureDataset } from "./types";
+import { HEALTH_AGENTS_EMPTY } from "./health-agents";
 
 const mkHealth = (
   id: string,
@@ -104,4 +105,6 @@ export const EMPTY_FIXTURE: FixtureDataset = {
   workers: [],
   agentSessions: [],
   backgroundTasks: [],
+  loungeHealth: HEALTH_AGENTS_EMPTY,
+  healthScanMeta: { partial: false, indexed_at: null },
 };

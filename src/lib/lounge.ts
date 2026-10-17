@@ -1618,7 +1618,7 @@ export type HealthScanResult = {
   error?: string | null;
 };
 
-/** Health-1b `lounge_health` report (schema_version 1.1.0). No UI wiring in 1b. */
+/** Health-1b `lounge_health` report (schema_version 1.1.0). Health-UI-2 wires the agents tab. */
 export type AgentMcpStatus =
   | "ok"
   | "missing"
@@ -1683,6 +1683,18 @@ export type LoungeHealthReport = {
   };
   expected_lounge_mcp_version?: string | null;
   expected_lounge_mcp_sha256?: string | null;
+};
+
+/** HU4 transient probe outcome — does not mutate lounge_health report status. */
+export type AgentMcpProbeOutcome =
+  | "reachable"
+  | "unreachable"
+  | "not_probed_remote"
+  | "config_missing";
+
+export type AgentMcpProbeResult = {
+  outcome: AgentMcpProbeOutcome | string;
+  elapsed_ms: number;
 };
 
 /** Per-page progress emitted during Health-1a scanning. */
@@ -2314,6 +2326,39 @@ export function formatExperienceTime(iso: string): string {
     return iso.slice(11, 16) || iso;
   }
   return istanbulClockParts(date);
+}
+
+async function tauriUnavailableError(): Promise<Error> {
+  const { i18n, initI18n } = await import("@/lib/i18n/config");
+  initI18n();
+  return new Error(i18n.t("agents.tauriUnavailable", { ns: "health" }));
+}
+
+/** Health-UI-2: fetch unified lounge_health report (Tauri only). */
+export async function fetchLoungeHealth(): Promise<LoungeHealthReport> {
+  if (!isTauri()) {
+    throw await tauriUnavailableError();
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<LoungeHealthReport>("lounge_health");
+}
+
+/**
+ * HU4: on-demand loopback probe. Passes client + masked config_path_id only —
+ * never a URL. Result is transient; report status stays unverified.
+ */
+export async function probeAgentMcpUrl(
+  client: string,
+  configPathId: string,
+): Promise<AgentMcpProbeResult> {
+  if (!isTauri()) {
+    throw await tauriUnavailableError();
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<AgentMcpProbeResult>("probe_agent_mcp_url", {
+    client,
+    configPathId,
+  });
 }
 
 // --- PR-Control-1: Halt v1 + deep-link helpers (append-only) ---

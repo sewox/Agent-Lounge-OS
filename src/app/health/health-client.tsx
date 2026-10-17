@@ -2,14 +2,15 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { AgentsHealthPanel } from "@/components/health/agents-health-panel";
 import { DeadSymbolsPanel } from "@/components/dead-symbols-panel";
 import { HealthPanel } from "@/components/panels";
 import { deadSymbolStrings as s } from "@/lib/strings/dead-symbols";
 
-type HealthTab = "health" | "dead" | "ignore";
+type HealthTab = "health" | "agents" | "dead" | "ignore";
 
 function parseTab(raw: string | null): HealthTab {
-  if (raw === "dead" || raw === "ignore") {
+  if (raw === "dead" || raw === "ignore" || raw === "agents") {
     return raw;
   }
   return "health";
@@ -27,12 +28,15 @@ export default function HealthPageClient() {
         className="flex shrink-0 flex-wrap items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-low p-1"
       >
         <HealthTabLink href="/health?tab=health" active={tab === "health"} label={s.healthTab} />
+        <HealthTabLink href="/health?tab=agents" active={tab === "agents"} label={s.agentsTab} />
         <HealthTabLink href="/health?tab=dead" active={tab === "dead"} label={s.deadTab} />
         <HealthTabLink href="/health?tab=ignore" active={tab === "ignore"} label={s.ignoreTab} />
       </nav>
       <div className="min-h-0 flex-1">
         {tab === "health" ? (
           <HealthPanel />
+        ) : tab === "agents" ? (
+          <AgentsHealthPanel />
         ) : tab === "ignore" ? (
           <DeadSymbolsPanel mode="ignored" projectFilter={project} />
         ) : (

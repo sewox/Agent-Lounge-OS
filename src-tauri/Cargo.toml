@@ -59,6 +59,7 @@ socket2 = { version = "0.6", optional = true }
 regex = "1"
 # Pin: 2.6.x breaks against rust-ini ParseOption fields in this lockfile.
 tauri-plugin-deep-link = "=2.4.5"
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

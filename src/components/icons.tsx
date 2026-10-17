@@ -122,6 +122,15 @@ export function Icon({ name, className = "h-3.5 w-3.5" }: { name: string; classN
           <path d="M8 6.2v3.2M8 11.4h.01" />
         </svg>
       );
+    case "link-off":
+      // Agent-MCP "unverified" (remote URL) — distinct from source_unverified approval chrome.
+      return (
+        <svg viewBox="0 0 16 16" className={className} aria-hidden {...stroke}>
+          <path d="M6.2 9.8 4.5 11.5a2.2 2.2 0 0 1-3.1-3.1L3.2 6.6" />
+          <path d="M9.8 6.2 11.5 4.5a2.2 2.2 0 0 1 3.1 3.1L12.8 9.4" />
+          <path d="m2 2 12 12" />
+        </svg>
+      );
     default:
       return null;
   }
