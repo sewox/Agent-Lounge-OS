@@ -220,25 +220,38 @@ remove_path_loud() {
   fi
 }
 
-uninstall_scheme_default() {
-  # Undo install-time `xdg-mime default … x-scheme-handler/agentlounge` when possible.
-  mimeapps="${XDG_CONFIG_HOME:-${HOME}/.config}/mimeapps.list"
-  if ! command -v xdg-mime >/dev/null 2>&1; then
-    printf 'note: xdg-mime not found — skipping x-scheme-handler/agentlounge default removal\n'
-    return 0
-  fi
+strip_scheme_default_from_mimeapps() {
+  # Remove x-scheme-handler/agentlounge= lines from a mimeapps.list.
+  # Safe under `set -e`: empty output after grep -v (file held only that line) is OK.
+  mimeapps="$1"
   if [ ! -f "$mimeapps" ]; then
-    printf 'note: mimeapps.list not found — skipping x-scheme-handler/agentlounge default removal\n'
+    printf 'note: mimeapps.list not found at %s — skipping x-scheme-handler/agentlounge default removal\n' "$mimeapps"
     return 0
   fi
-  if grep -q 'x-scheme-handler/agentlounge=' "$mimeapps"; then
-    tmp="${mimeapps}.lounge-uninstall.$$"
-    grep -v 'x-scheme-handler/agentlounge=' "$mimeapps" >"$tmp"
-    mv -f "$tmp" "$mimeapps"
-    printf 'Removed x-scheme-handler/agentlounge default from %s\n' "$mimeapps"
-  else
+  if ! grep -q 'x-scheme-handler/agentlounge=' "$mimeapps"; then
     printf 'note: no x-scheme-handler/agentlounge default in %s — nothing to remove\n' "$mimeapps"
+    return 0
   fi
+  tmp="${mimeapps}.lounge-uninstall.$$"
+  # grep exits 1 when every line matched -v (file becomes empty) — do not abort uninstall.
+  set +e
+  grep -v 'x-scheme-handler/agentlounge=' "$mimeapps" >"$tmp"
+  greprc=$?
+  set -e
+  if [ "$greprc" -ne 0 ] && [ "$greprc" -ne 1 ]; then
+    rm -f "$tmp"
+    fail "uninstall failed: could not filter $mimeapps (grep exit $greprc)"
+  fi
+  mv -f "$tmp" "$mimeapps"
+  printf 'Removed x-scheme-handler/agentlounge default from %s\n' "$mimeapps"
+}
+
+uninstall_scheme_default() {
+  # Undo install-time scheme default entries. Does not require xdg-mime on PATH —
+  # we edit mimeapps.list directly (xdg-mime may be absent in minimal containers).
+  strip_scheme_default_from_mimeapps "${XDG_CONFIG_HOME:-${HOME}/.config}/mimeapps.list"
+  # Legacy location still consulted by some desktops / older xdg-utils.
+  strip_scheme_default_from_mimeapps "${HOME}/.local/share/applications/mimeapps.list"
 }
 
 uninstall() {

@@ -124,13 +124,20 @@ pub fn mark_startup_title_deferred() {
 
 /// After UI Resume: wake the title worker; if startup was deferred, start worker + backfill.
 pub async fn on_halt_resumed(store: &ExperienceStore) {
+    on_halt_resumed_on(global_queue(), store).await;
+}
+
+/// Testable Resume hook that operates on an injected queue (avoids the process-global
+/// `OnceLock` queue raced by other unit tests).
+async fn on_halt_resumed_on(q: &Arc<TitleQueue>, store: &ExperienceStore) {
     let deferred = STARTUP_TITLE_DEFERRED.swap(false, Ordering::SeqCst);
-    ensure_title_worker(store.clone()).await;
+    q.attach_store(store.clone()).await;
+    q.ensure_worker().await;
     if deferred {
         log::info!("halt resumed — running deferred title backfill");
-        backfill_missing_titles(store).await;
+        backfill_on_queue(store, q).await;
     }
-    global_queue().notify.notify_waiters();
+    q.notify.notify_waiters();
 }
 
 /// Test helper: whether startup title work is currently deferred.
@@ -213,8 +220,11 @@ impl TitleQueue {
             return;
         }
         let q = Arc::clone(self);
+        // Build the clear-guard *before* spawn so an unpolled task still resets
+        // `started` when the runtime drops it (current-thread tests often never poll).
+        let clear = ClearStartedOnDrop(Arc::clone(&q));
         tokio::spawn(async move {
-            let _clear = ClearStartedOnDrop(Arc::clone(&q));
+            let _clear = clear;
             // Re-enqueue persisted retries (including future next_retry_at) after restart.
             if let Some(store) = q.store.lock().await.clone() {
                 resume_pending_retries(&q, &store).await;
@@ -1227,6 +1237,7 @@ mod tests {
         mark_startup_title_deferred();
         assert!(startup_title_deferred_for_tests());
 
+        // Isolated local queue — never touch the process-global OnceLock queue.
         let requests = Arc::new(AtomicUsize::new(0));
         let port = counting_stub_chat(requests.clone()).await;
         let id = uuid::Uuid::new_v4().to_string();
@@ -1234,20 +1245,33 @@ mod tests {
         let rec = sample_record(id.clone(), body, "", TitleSource::Fallback);
         store.insert_record(rec).await.unwrap();
 
-        set_title_endpoint_override_for_tests(Some(format!("http://127.0.0.1:{port}"))).await;
-
-        // Still halted: the production Resume hook must not run yet.
-        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        let q = local_queue_with_store(store.clone()).await;
+        q.set_endpoint(Some(format!("http://127.0.0.1:{port}")))
+            .await;
+        q.ensure_worker().await;
+        // Also enqueue explicitly so the worker has a parked job while halted.
+        q.enqueue_job(&id, body).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "while halted at boot, LMR must not run"
+        );
+        assert!(
+            q.pending_len().await >= 1,
+            "job must stay parked while startup-halted"
+        );
 
         crate::services::halt::resume(&store, crate::services::halt::HALT_BY_UI)
             .await
             .unwrap();
-        // Call the real hook (clears deferred flag, ensure worker, deferred backfill).
-        on_halt_resumed(&store).await;
+        // Injected-queue Resume hook: clears deferred flag + deferred backfill.
+        on_halt_resumed_on(&q, &store).await;
         assert!(
             !startup_title_deferred_for_tests(),
-            "on_halt_resumed must clear STARTUP_TITLE_DEFERRED"
+            "on_halt_resumed_on must clear STARTUP_TITLE_DEFERRED"
         );
+        wait_pending_drain(&q, Duration::from_secs(10)).await;
 
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
@@ -1266,7 +1290,31 @@ mod tests {
         );
         let loaded = store.get_record(id).await.unwrap().unwrap();
         assert_eq!(loaded.title_source, TitleSource::Llm);
-        set_title_endpoint_override_for_tests(None).await;
         clear_startup_title_deferred_for_tests();
+    }
+
+    #[test]
+    fn ensure_worker_clears_started_when_spawn_never_polled() {
+        let q = Arc::new(TitleQueue::new());
+        {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                q.ensure_worker().await;
+                assert!(
+                    q.started.load(Ordering::SeqCst),
+                    "ensure_worker must set started"
+                );
+                // Return without polling the spawned worker — current-thread
+                // runtimes drop unpolled tasks on shutdown.
+            });
+            drop(rt);
+        }
+        assert!(
+            !q.started.load(Ordering::SeqCst),
+            "ClearStartedOnDrop must reset started even if the worker never ran"
+        );
     }
 }

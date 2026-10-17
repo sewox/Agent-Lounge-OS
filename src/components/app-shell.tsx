@@ -407,8 +407,49 @@ export function AppShell({ children }: { children: ReactNode }) {
     indexNotice ||
     layaBanner ||
     Boolean(approvalError);
-  // Fixed status banners overlay content (no paddingTop reservation) so page
-  // panels keep filling the viewport — L1–L6 must pass with unchanged layout.ts.
+  const statusBanner = haltChrome || chainBanner || destructiveHold;
+  const bannerRef = useRef<HTMLDivElement | null>(null);
+  const [bannerHeight, setBannerHeight] = useState(0);
+  const attachBannerRef = useCallback((node: HTMLDivElement | null) => {
+    bannerRef.current = node;
+  }, []);
+
+  const degradedKey = degradedNames.join(",");
+  useEffect(() => {
+    if (!statusBanner) {
+      const clearId = window.setTimeout(() => setBannerHeight(0), 0);
+      return () => window.clearTimeout(clearId);
+    }
+    const el = bannerRef.current;
+    if (!el) {
+      return;
+    }
+    const measure = () => setBannerHeight(el.getBoundingClientRect().height);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [
+    statusBanner,
+    haltChrome,
+    chainBanner,
+    haltState.reason,
+    haltState.at,
+    haltLoadError,
+    serviceDegraded,
+    approval,
+    indexing,
+    indexProgress,
+    indexJobs,
+    indexNotice,
+    approvalError,
+    layaBanner,
+    decisionGate,
+    countdownLabel,
+    degradedKey,
+    optionalMissing.length,
+  ]);
+
   const bannerPos = onboarding
     ? "fixed inset-x-0 top-12 z-[55] pointer-events-auto"
     : "fixed top-12 right-0 left-[var(--sidebar-w)] z-[55] pointer-events-auto";
@@ -575,6 +616,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {haltChrome || chainBanner ? (
         <div
+          ref={attachBannerRef}
           className={`${bannerPos} flex flex-col`}
           data-qa="status-banner-stack"
           data-halt-chrome={haltChrome ? "true" : "false"}
@@ -1216,6 +1258,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             ? "ml-0 w-full"
             : "ml-[var(--sidebar-w)] w-[calc(100%-var(--sidebar-w))]"
         }`}
+        style={bannerHeight > 0 ? { paddingTop: `calc(0.875rem + ${bannerHeight}px)` } : undefined}
       >
         <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">{children}</div>
       </main>
