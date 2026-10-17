@@ -241,7 +241,38 @@ fn from_hex(b: u8) -> Result<u8, DeepLinkReject> {
 }
 
 fn contains_control_chars(s: &str) -> bool {
-    s.chars().any(|c| c.is_control())
+    s.chars().any(is_control_or_format)
+}
+
+/// Reject Cc (control) and Cf (format) — zero-width, bidi overrides, BOM, etc.
+/// Trojan-Source style spoofing in approval summaries must not pass through.
+fn is_control_or_format(c: char) -> bool {
+    if c.is_control() {
+        return true;
+    }
+    // Unicode General Category Cf (Format) — common spoofing / bidi ranges.
+    matches!(
+        c,
+        '\u{00AD}' // soft hyphen
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}' // ZWSP..RLM
+            | '\u{202A}'..='\u{202E}' // LRE..RLO
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}' // LRI..NADS
+            | '\u{FEFF}' // BOM / ZWNBSP
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 /// Log a rejection **without** including any parameter values.
@@ -358,6 +389,37 @@ mod tests {
             parse_deep_link("agentlounge://dispatch?agent=cursor&text=hi%00x").unwrap_err(),
             DeepLinkReject::ControlCharacter
         );
+    }
+
+    #[test]
+    fn rejects_unicode_format_and_bidi() {
+        // Zero-width space in text
+        assert_eq!(
+            parse_deep_link("agentlounge://dispatch?agent=cursor&text=hi%E2%80%8Bthere")
+                .unwrap_err(),
+            DeepLinkReject::ControlCharacter
+        );
+        // RLO (U+202E) bidi override
+        assert_eq!(
+            parse_deep_link("agentlounge://dispatch?agent=cursor&text=ok%E2%80%AEevil")
+                .unwrap_err(),
+            DeepLinkReject::ControlCharacter
+        );
+        // LRO (U+202D)
+        assert_eq!(
+            parse_deep_link("agentlounge://dispatch?agent=cursor&text=%E2%80%ADspoof")
+                .unwrap_err(),
+            DeepLinkReject::ControlCharacter
+        );
+        // BOM / ZWNBSP (U+FEFF) in agent
+        assert_eq!(
+            parse_deep_link("agentlounge://dispatch?agent=%EF%BB%BFcursor&text=hi").unwrap_err(),
+            DeepLinkReject::ControlCharacter
+        );
+        assert!(is_control_or_format('\u{200B}'));
+        assert!(is_control_or_format('\u{202E}'));
+        assert!(is_control_or_format('\u{FEFF}'));
+        assert!(!is_control_or_format('a'));
     }
 
     #[test]

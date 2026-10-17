@@ -24,18 +24,21 @@ Event: `lounge://halt-changed` (payload = `HaltState`).
 
 Halt and Resume **cannot** be triggered via deep link or MCP — only the local UI after confirmation. Both actions are logged (reason presence only; no secrets).
 
+**Fail-closed:** any storage or parse error reading `halt_state` is treated as halted (gates refuse dispatch). `get_halt_state` returns the error to the UI, which shows a load-error chrome instead of “not halted”.
+
 ### While halted
 
 | Action | Behavior |
 |--------|----------|
-| New dispatch (NATS / MCP `lounge_dispatch_task` / `lounge_call_agent` / …) | Refused |
+| New dispatch (NATS / MCP `lounge_dispatch_task` / `lounge_call_agent` / …) | Refused (before LMR embedding) |
 | MCP write tools (`lounge_record_*`) | Refused with structured `halted` error |
-| LMR title backfill / automatic background health scans | Not started |
+| LMR title worker / backfill | Parks jobs (not dropped); Resume wakes worker and runs deferred startup backfill |
+| Automatic background health scans | Not started |
 | Read tools (`lounge_status`, `lounge_health`, search) | Keep working |
 | In-flight / pending tasks | **Not cancelled** (NATS cancel is v2) |
 | External agent sessions (Cursor, Antigravity, Claude Desktop, Grok Bot) | **Not stopped** |
 
-UI: Halt/Resume in the top bar on every page; full-width `HaltedBanner` (reason, who, when, what does not stop); status strip uses the halted colour (`StatusPill tone="halted"`).
+UI: Halt/Resume in the top bar on every page; full-width `HaltedBanner` stacked **above** the existing approval / degraded / indexing banner chain (so SourceUnverified Approve/Deny stays visible); status strip uses the halted colour (`StatusPill tone="halted"`).
 
 ### MCP `halted` error
 
@@ -57,8 +60,8 @@ Allowed `open` routes: `/`, `/dashboard`, `/stream`, `/vault`, `/health`, `/flee
 Rejected (logged **without** parameter values):
 
 - Unknown actions (`halt`, `resume`, `shell`, `exec`, …) or unknown query params (e.g. `task=rm -rf /`)
-- Over-length `text`, empty required fields, control characters, malformed percent-encoding
-- Dispatch while Halt is active
+- Over-length `text`, empty required fields, control characters, Unicode format/bidi (Cf) characters, malformed percent-encoding
+- Dispatch while Halt is active; unregistered or disabled agent ids
 
 No deep link may run a shell command, execute a path, write config, or Halt/Resume.
 

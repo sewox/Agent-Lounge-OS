@@ -34,6 +34,7 @@ import {
   getHaltState,
   haltLounge,
   resumeLounge,
+  isAllowedDeepLinkOpenRoute,
   HALT_CHANGED_EVENT,
   DEEP_LINK_OPEN_EVENT,
   type ApprovalRequest,
@@ -122,11 +123,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [haltReason, setHaltReason] = useState("");
   const [haltBusy, setHaltBusy] = useState(false);
   const [haltError, setHaltError] = useState<string | null>(null);
+  const [haltLoadError, setHaltLoadError] = useState<string | null>(null);
   const platform = usePlatform();
   const shortcutLabel = paletteShortcutLabel(platform);
   const alertRef = useRef<HTMLDivElement | null>(null);
   const destructiveDialogRef = useRef<HTMLDivElement | null>(null);
   const destructivePreviousFocus = useRef<HTMLElement | null>(null);
+  const haltDialogRef = useRef<HTMLDivElement | null>(null);
+  const haltPreviousFocus = useRef<HTMLElement | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
 
   useEffect(() => {
@@ -136,20 +140,30 @@ export function AppShell({ children }: { children: ReactNode }) {
     let cancelled = false;
     void getHaltState()
       .then((state) => {
-        if (!cancelled) setHaltState(state);
+        if (!cancelled) {
+          setHaltLoadError(null);
+          setHaltState(state);
+        }
       })
-      .catch(() => undefined);
+      .catch((err: unknown) => {
+        // Fail-closed: show the load error and treat as halted (never "not halted").
+        if (!cancelled) {
+          setHaltLoadError(err instanceof Error ? err.message : String(err));
+          setHaltState({ halted: true });
+        }
+      });
     let unlistenHalt: (() => void) | undefined;
     let unlistenDeep: (() => void) | undefined;
     void import("@tauri-apps/api/event").then(({ listen }) => {
       void listen<HaltState>(HALT_CHANGED_EVENT, (event) => {
+        setHaltLoadError(null);
         setHaltState(event.payload);
       }).then((fn) => {
         unlistenHalt = fn;
       });
       void listen<{ route?: string }>(DEEP_LINK_OPEN_EVENT, (event) => {
         const route = event.payload?.route;
-        if (typeof route === "string" && route.startsWith("/")) {
+        if (typeof route === "string" && isAllowedDeepLinkOpenRoute(route)) {
           router.push(route);
         }
       }).then((fn) => {
@@ -310,6 +324,71 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [destructiveHold, headDestructive, resolveDestructive]);
 
+  // Halt/Resume alertdialog: Escape closes, Tab focus trap.
+  useEffect(() => {
+    if (!haltDialog) {
+      return;
+    }
+    haltPreviousFocus.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    function focusableNodes(): HTMLElement[] {
+      if (!haltDialogRef.current) {
+        return [];
+      }
+      return [
+        ...haltDialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ].filter((node) => !node.hasAttribute("disabled") && node.tabIndex !== -1);
+    }
+
+    const boot = window.setTimeout(() => {
+      const cancelBtn = haltDialogRef.current?.querySelector<HTMLElement>(
+        '[data-qa="halt-dialog-cancel"]',
+      );
+      const input = haltDialogRef.current?.querySelector<HTMLElement>(
+        '[data-qa="halt-reason-input"]',
+      );
+      (input ?? cancelBtn ?? haltDialogRef.current?.querySelector<HTMLElement>("button"))?.focus();
+    }, 0);
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!haltBusy) {
+          setHaltDialog(null);
+          setHaltError(null);
+        }
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = focusableNodes();
+      if (focusable.length === 0) {
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.clearTimeout(boot);
+      window.removeEventListener("keydown", onKeyDown, true);
+      haltPreviousFocus.current?.focus();
+    };
+  }, [haltDialog, haltBusy]);
+
   const serviceDegraded = coreServicesDegraded(report);
   const degradedNames = degradedCoreServiceNames(report);
   const optionalMissing = useMemo(() => optionalMissingServiceNames(report), [report]);
@@ -318,18 +397,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     () => buildCriticalAlerts({ quotas, amberAlert, amberTools, approval, degradedNames }),
     [quotas, amberAlert, amberTools, approval, degradedNames],
   );
-  const haltChrome = haltState.halted && !onboarding;
-  const statusBanner =
-    haltChrome ||
+  const haltChrome = (haltState.halted || Boolean(haltLoadError)) && !onboarding;
+  const chainBanner =
     serviceDegraded ||
     optionalMissing.length > 0 ||
     (approval && !securityHold && !quotaHold) ||
-    destructiveHold ||
     indexing ||
     indexProgressActive(indexProgress) ||
     indexNotice ||
     layaBanner ||
     Boolean(approvalError);
+  const statusBanner =
+    haltChrome ||
+    chainBanner ||
+    destructiveHold;
   const bannerRef = useRef<HTMLDivElement | null>(null);
   const [bannerHeight, setBannerHeight] = useState(0);
   const attachBannerRef = useCallback((node: HTMLDivElement | null) => {
@@ -354,8 +435,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [
     statusBanner,
     haltChrome,
+    chainBanner,
     haltState.reason,
     haltState.at,
+    haltLoadError,
     serviceDegraded,
     approval,
     indexing,
@@ -534,28 +617,45 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      {haltChrome ? (
-        <div ref={attachBannerRef} className={`${bannerPos} px-3 py-2`}>
-          <HaltedBanner title={t("haltedBannerTitle")} className="w-full">
-            <div className="space-y-1" data-qa="halted-banner-details">
-              <p className="font-semibold text-on-surface">{t("haltedBannerLead")}</p>
-              <p>
-                {haltState.reason
-                  ? t("haltedReason", { reason: haltState.reason })
-                  : t("haltedReasonNone")}
-              </p>
-              <p>
-                {t("haltedBy", { by: haltState.by || "ui" })}
-                {haltState.at ? ` · ${t("haltedAt", { at: haltState.at })}` : null}
-              </p>
-              <p className="text-on-surface-variant">{t("haltedDoesNotStop")}</p>
-            </div>
-          </HaltedBanner>
-        </div>
-      ) : indexing || indexProgressActive(indexProgress) ? (
+      {haltChrome || chainBanner ? (
         <div
           ref={attachBannerRef}
-          className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
+          className={`${bannerPos} flex flex-col`}
+          data-qa="status-banner-stack"
+          data-halt-chrome={haltChrome ? "true" : "false"}
+          data-chain-banner={chainBanner ? "true" : "false"}
+          data-has-approval={approval && !securityHold && !quotaHold ? "true" : "false"}
+        >
+          {haltChrome ? (
+            <div className="px-3 py-1.5" data-qa="halted-banner-slot">
+              <HaltedBanner title={t("haltedBannerTitle")} className="w-full">
+                <div
+                  className="flex min-w-0 flex-col gap-0.5 text-meta leading-snug"
+                  data-qa="halted-banner-details"
+                >
+                  {haltLoadError ? (
+                    <p className="font-semibold text-error-dim" role="alert" data-qa="halt-load-error">
+                      {t("haltLoadFailed")}
+                    </p>
+                  ) : null}
+                  <p className="min-w-0 truncate text-on-surface">
+                    <span className="font-semibold">{t("haltedBannerLead")}</span>
+                    {" · "}
+                    {haltState.reason
+                      ? t("haltedReason", { reason: haltState.reason })
+                      : t("haltedReasonNone")}
+                    {" · "}
+                    {t("haltedBy", { by: haltState.by || "ui" })}
+                    {haltState.at ? ` · ${t("haltedAt", { at: haltState.at })}` : null}
+                  </p>
+                  <p className="min-w-0 text-on-surface-variant">{t("haltedDoesNotStop")}</p>
+                </div>
+              </HaltedBanner>
+            </div>
+          ) : null}
+          {indexing || indexProgressActive(indexProgress) ? (
+        <div
+          className="border-b border-outline-variant bg-surface-container-low py-2 px-4"
           data-qa="index-progress-banner"
         >
           <div className="flex min-w-0 flex-col gap-1 px-4 font-body text-body text-on-surface">
@@ -606,8 +706,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : indexNotice ? (
         <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b py-2 px-4 ${
+          className={`border-b py-2 px-4 ${
             indexNotice.tone === "error"
               ? "border-error-container bg-error-container/20"
               : "border-secondary-container bg-secondary-container/30"
@@ -629,8 +728,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : serviceDegraded && degradedRestart ? (
         <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b border-error-container bg-error-container/25 py-2 px-4`}
+          className="border-b border-error-container bg-error-container/25 py-2 px-4"
           role="status"
           aria-live="polite"
           data-qa="service-degraded-banner"
@@ -681,8 +779,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : optionalMissing.length > 0 ? (
         <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b border-outline-variant bg-surface-container-low py-2 px-4`}
+          className="border-b border-outline-variant bg-surface-container-low py-2 px-4"
           role="status"
           aria-live="polite"
           data-qa="service-optional-banner"
@@ -710,8 +807,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : approval && !securityHold && !quotaHold ? (
         <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
+          className="border-b border-error-container bg-error-container/20 py-2 px-4"
           data-approval-chrome="routing"
           data-task-id={approval.task_id}
         >
@@ -777,8 +873,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : approvalError ? (
         <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b border-error-container bg-error-container/20 py-2 px-4`}
+          className="border-b border-error-container bg-error-container/20 py-2 px-4"
           role="status"
         >
           <div className="whitespace-normal break-words px-4 font-body text-body font-semibold leading-normal text-error-dim">
@@ -787,8 +882,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : layaBanner && decisionGate ? (
         <div
-          ref={attachBannerRef}
-          className={`${bannerPos} border-b py-2 px-4 ${
+          className={`border-b py-2 px-4 ${
             decisionGate.phase === "failed"
               ? "border-error-container bg-error-container"
               : decisionGate.phase === "available"
@@ -854,6 +948,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               </button>
             )}
           </div>
+        </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -1071,13 +1167,18 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <div className="space-y-3 border-t border-outline-variant/60 pt-3 pb-10">
-          {haltState.halted ? (
+          {haltState.halted || haltLoadError ? (
             <div
-              className="flex items-center justify-between gap-2 px-1"
+              className="flex flex-col gap-1 px-1"
               data-qa="halt-status-strip"
               role="status"
             >
               <StatusPill tone="halted">{t("haltedStatus")}</StatusPill>
+              {haltLoadError ? (
+                <p className="font-body text-meta text-error-dim" data-qa="halt-load-error-strip">
+                  {t("haltLoadFailed")}
+                </p>
+              ) : null}
             </div>
           ) : null}
           {serviceDegraded ? (
@@ -1173,11 +1274,20 @@ export function AppShell({ children }: { children: ReactNode }) {
           data-qa="halt-dialog-backdrop"
         >
           <div
+            ref={haltDialogRef}
             role="alertdialog"
             aria-modal="true"
             aria-labelledby="halt-dialog-title"
             data-qa={haltDialog === "halt" ? "halt-confirm-dialog" : "resume-confirm-dialog"}
             className="w-full max-w-md rounded-lg border border-outline-variant bg-surface-container p-4 shadow-lg"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !haltBusy) {
+                event.preventDefault();
+                event.stopPropagation();
+                setHaltDialog(null);
+                setHaltError(null);
+              }
+            }}
           >
             <h2
               id="halt-dialog-title"

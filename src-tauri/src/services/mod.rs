@@ -77,8 +77,9 @@ pub use deep_link::{
 };
 pub use experience_title::{
     backfill_missing_titles, clear_last_title_error, enqueue_title, ensure_title_worker,
-    last_title_error_type, record_last_title_error, title_backlog_count, title_model_name,
-    TitleError, TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT, TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
+    last_title_error_type, mark_startup_title_deferred, on_halt_resumed, record_last_title_error,
+    title_backlog_count, title_model_name, TitleError, TITLE_BACKOFF_SECS, TITLE_LMR_TIMEOUT,
+    TITLE_MAX_RETRIES, TITLE_MODEL_DEFAULT,
 };
 pub use graph_ui::{
     classify_port_status, default_graph_ui_port_band, enable_graph_ui, enable_graph_ui_headless,

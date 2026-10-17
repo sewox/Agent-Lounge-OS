@@ -342,11 +342,14 @@ pub fn run_with_start_route(start_route: &'static str) {
                 spawn_supervisor(supervisor_handle, supervisor_services);
                 spawn_auto_archive(auto_archive_store);
                 // PR-MCP-Quality-1: async title worker + upgrade backfill (concurrency 1).
-                // Halt v1: skip LMR title backfill while halted (do not start background jobs).
+                // Halt v1: defer LMR title backfill while halted; Resume wakes via on_halt_resumed.
                 let title_store = store.clone();
                 tauri::async_runtime::spawn(async move {
                     if is_halted(&title_store).await {
-                        log::info!("halt active — skipping title backfill / title worker start");
+                        log::info!(
+                            "halt active — deferring title backfill / title worker start until Resume"
+                        );
+                        crate::services::experience_title::mark_startup_title_deferred();
                         return;
                     }
                     crate::services::experience_title::ensure_title_worker(title_store.clone())
@@ -1248,6 +1251,9 @@ async fn fix_dead_symbol_with_agent(
     bus: tauri::State<'_, BusManager>,
     symbol: DeadSymbol,
 ) -> Result<FixDeadSymbolResult, String> {
+    if is_halted(store.inner()).await {
+        return Err(crate::services::halt::HALTED_ERROR_MESSAGE.into());
+    }
     publish_fix_dead_symbol(&store, bus.nats_url(), symbol)
         .await
         .map_err(|err| err.to_string())
@@ -1411,11 +1417,15 @@ struct GrokTestResult {
 #[tauri::command]
 #[allow(deprecated)]
 async fn trigger_grok_test(
+    store: tauri::State<'_, ExperienceStore>,
     bus: tauri::State<'_, BusManager>,
     project_id: Option<String>,
 ) -> Result<GrokTestResult, String> {
     use kernel::workflow_engine::{grok_bot_in_fleet, GROK_BOT_WORKER};
 
+    if is_halted(store.inner()).await {
+        return Err(crate::services::halt::HALTED_ERROR_MESSAGE.into());
+    }
     if !grok_bot_in_fleet() {
         return Err("Grok Bot fleet'te yok — test tetiklenemedi".into());
     }
@@ -1869,6 +1879,8 @@ async fn resume(
     let state = resume_halt(store.inner(), HALT_BY_UI)
         .await
         .map_err(|err| err.to_string())?;
+    // Wake parked LMR title worker; run deferred startup backfill if needed.
+    crate::services::experience_title::on_halt_resumed(store.inner()).await;
     let _ = app.emit(HALT_CHANGED_EVENT, &state);
     Ok(state)
 }

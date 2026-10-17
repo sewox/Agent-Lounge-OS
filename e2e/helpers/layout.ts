@@ -178,9 +178,14 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
       }
     }
 
+    const mainPadTop = mainEl
+      ? Number.parseFloat(window.getComputedStyle(mainEl).paddingTop || "0") || 0
+      : 0;
+
     return {
       sidebarW: sidebar?.width ?? 0,
       main: main ? { x: main.x, y: main.y, w: main.width, h: main.height } : null,
+      mainPadTop,
       panels,
       panelInteriorFills,
       scrollWidth,
@@ -195,8 +200,13 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
 
   const contentW = vp.width - measured.sidebarW;
   const contentX = measured.main?.x ?? measured.sidebarW;
-  const contentY = 0;
-  const contentH = vp.height;
+  // Content area starts below reserved fixed-banner padding on <main>, not the
+  // viewport top — otherwise Halt/approval chrome falsely inflates L3 empty space.
+  const contentY = (measured.main?.y ?? 0) + (measured.mainPadTop ?? 0);
+  const contentH = Math.max(
+    1,
+    (measured.main?.h ?? vp.height) - (measured.mainPadTop ?? 0),
+  );
   const panels = measured.panels.filter((p) => p.w > 0 && p.h > 0);
 
   const union =

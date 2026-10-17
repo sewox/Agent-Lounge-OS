@@ -111,6 +111,39 @@ fn global_queue() -> &'static Arc<TitleQueue> {
     Q.get_or_init(|| Arc::new(TitleQueue::new()))
 }
 
+/// Set when app startup skipped title worker/backfill because Halt was already active.
+static STARTUP_TITLE_DEFERRED: AtomicBool = AtomicBool::new(false);
+
+/// Marker error — job must be re-queued (not retried / not dropped).
+const TITLE_HALTED_PARK: &str = "title_halted_park";
+
+/// Record that title startup was skipped while halted (Resume will start worker + backfill).
+pub fn mark_startup_title_deferred() {
+    STARTUP_TITLE_DEFERRED.store(true, Ordering::SeqCst);
+}
+
+/// After UI Resume: wake the title worker; if startup was deferred, start worker + backfill.
+pub async fn on_halt_resumed(store: &ExperienceStore) {
+    let deferred = STARTUP_TITLE_DEFERRED.swap(false, Ordering::SeqCst);
+    ensure_title_worker(store.clone()).await;
+    if deferred {
+        log::info!("halt resumed — running deferred title backfill");
+        backfill_missing_titles(store).await;
+    }
+    global_queue().notify.notify_waiters();
+}
+
+/// Test helper: whether startup title work is currently deferred.
+#[cfg(test)]
+pub fn startup_title_deferred_for_tests() -> bool {
+    STARTUP_TITLE_DEFERRED.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub fn clear_startup_title_deferred_for_tests() {
+    STARTUP_TITLE_DEFERRED.store(false, Ordering::SeqCst);
+}
+
 /// Expose in-memory queue backlog for Health-1 (global worker only).
 pub fn title_backlog_count() -> u64 {
     global_queue().backlog.load(Ordering::Relaxed)
@@ -280,6 +313,17 @@ async fn resume_pending_retries(q: &Arc<TitleQueue>, store: &ExperienceStore) {
 
 async fn worker_loop(q: Arc<TitleQueue>) {
     loop {
+        // Park while Halt is active — do not pop or drop jobs.
+        if let Some(store) = q.store.lock().await.clone() {
+            while crate::services::halt::is_halted(&store).await {
+                log::debug!("title worker parked while halted");
+                tokio::select! {
+                    _ = q.notify.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        }
+
         let job = {
             let mut pending = q.pending.lock().await;
             let job = pending.pop_front();
@@ -298,13 +342,31 @@ async fn worker_loop(q: Arc<TitleQueue>) {
             // Dropped: no store — backlog already decremented on pop.
             continue;
         };
+
+        // Runtime Halt after pop: put the job back and park (never drop).
+        if crate::services::halt::is_halted(&store).await {
+            let mut pending = q.pending.lock().await;
+            pending.push_front(job);
+            q.set_backlog(pending.len());
+            continue;
+        }
+
         let endpoint = {
             let guard = q.endpoint.lock().await;
             guard.clone().unwrap_or_else(lounge_ollama_endpoint)
         };
         let _permit = q.gate.acquire().await.expect("title concurrency semaphore");
-        if let Err(err) = generate_and_apply(&store, &endpoint, &job).await {
-            log::warn!("title gen {}: {err}", job.id);
+        match generate_and_apply(&store, &endpoint, &job).await {
+            Ok(()) => {}
+            Err(err) if err.to_string().contains(TITLE_HALTED_PARK) => {
+                // Halt engaged mid-job (before / during LMR) — re-queue, do not fail.
+                let mut pending = q.pending.lock().await;
+                pending.push_front(job);
+                q.set_backlog(pending.len());
+            }
+            Err(err) => {
+                log::warn!("title gen {}: {err}", job.id);
+            }
         }
     }
 }
@@ -341,6 +403,10 @@ async fn generate_and_apply(store: &ExperienceStore, endpoint: &str, job: &Title
 
     let mut last_err: Option<TitleError> = None;
     for attempt in 0..TITLE_MAX_RETRIES {
+        // Halt check before every LMR embedding / chat call.
+        if crate::services::halt::is_halted(store).await {
+            anyhow::bail!(TITLE_HALTED_PARK);
+        }
         match title_pipeline_at(endpoint, &job.content).await {
             Ok((title, source)) => {
                 clear_last_title_error();
@@ -1045,5 +1111,157 @@ mod tests {
         assert_eq!(next_retry_delay(1), Duration::from_secs(5));
         assert_eq!(next_retry_delay(2), Duration::from_secs(15));
         assert_eq!(next_retry_delay(99), Duration::from_secs(15));
+    }
+
+    /// Counting stub: increments on each accepted HTTP chat request.
+    async fn counting_stub_chat(requests: Arc<AtomicUsize>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = chat_ok_body("Halted then resumed title");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                requests.fetch_add(1, Ordering::SeqCst);
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Slow enough that Halt can land between jobs.
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn runtime_halt_parks_jobs_without_dropping_then_resume_drains() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let port = counting_stub_chat(requests.clone()).await;
+        let store = ExperienceStore::memory().unwrap();
+        let q = local_queue_with_store(store.clone()).await;
+        q.set_endpoint(Some(format!("http://127.0.0.1:{port}")))
+            .await;
+        q.ensure_worker().await;
+
+        let ids: Vec<String> = (0..3).map(|i| format!("halt-park-{i}")).collect();
+        for (i, id) in ids.iter().enumerate() {
+            let body = format!("park content {i}");
+            let rec = sample_record(id.clone(), &body, "", TitleSource::Fallback);
+            store.insert_record(rec).await.unwrap();
+            q.enqueue_job(id, &body).await;
+        }
+
+        // Let the first job start, then Halt — remaining jobs must park (not drop).
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        crate::services::halt::halt(&store, Some("title-park".into()), crate::services::halt::HALT_BY_UI)
+            .await
+            .unwrap();
+
+        let after_halt = requests.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let during_halt = requests.load(Ordering::SeqCst);
+        assert!(
+            during_halt <= after_halt + 1,
+            "LMR must not keep draining while halted (after={after_halt} during={during_halt})"
+        );
+        assert!(
+            q.pending_len().await + during_halt >= 1,
+            "jobs must remain parked or in-flight, not dropped"
+        );
+
+        crate::services::halt::resume(&store, crate::services::halt::HALT_BY_UI)
+            .await
+            .unwrap();
+        q.notify.notify_waiters();
+        wait_pending_drain(&q, Duration::from_secs(12)).await;
+
+        let apply_deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let mut all_titled = true;
+            for id in &ids {
+                let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+                if loaded.title.trim().is_empty() {
+                    all_titled = false;
+                    break;
+                }
+            }
+            if all_titled {
+                break;
+            }
+            if Instant::now() >= apply_deadline {
+                panic!("backlog did not finish after resume");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            3,
+            "all three jobs must reach LMR after resume"
+        );
+        assert_eq!(q.pending_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn starting_halted_defers_worker_until_resume_hook() {
+        clear_startup_title_deferred_for_tests();
+        let store = ExperienceStore::memory().unwrap();
+        crate::services::halt::halt(&store, Some("boot".into()), crate::services::halt::HALT_BY_UI)
+            .await
+            .unwrap();
+        mark_startup_title_deferred();
+        assert!(startup_title_deferred_for_tests());
+
+        // While still halted, a worker must park and not call LMR.
+        let requests = Arc::new(AtomicUsize::new(0));
+        let port = counting_stub_chat(requests.clone()).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let body = "deferred boot row";
+        let rec = sample_record(id.clone(), body, body, TitleSource::Fallback);
+        store.insert_record(rec).await.unwrap();
+
+        let q = local_queue_with_store(store.clone()).await;
+        q.set_endpoint(Some(format!("http://127.0.0.1:{port}")))
+            .await;
+        q.ensure_worker().await;
+        q.enqueue_job(&id, body).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "while halted at boot, LMR must not run"
+        );
+        assert!(
+            q.pending_len().await >= 1,
+            "job must stay parked while startup-halted"
+        );
+
+        // Resume clears deferred flag (production on_halt_resumed) and wakes the worker.
+        crate::services::halt::resume(&store, crate::services::halt::HALT_BY_UI)
+            .await
+            .unwrap();
+        let deferred = STARTUP_TITLE_DEFERRED.swap(false, Ordering::SeqCst);
+        assert!(deferred, "Resume must consume the deferred-startup flag");
+        q.notify.notify_waiters();
+        wait_pending_drain(&q, Duration::from_secs(10)).await;
+
+        for _ in 0..40 {
+            let loaded = store.get_record(id.clone()).await.unwrap().unwrap();
+            if loaded.title_source == TitleSource::Llm {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let loaded = store.get_record(id).await.unwrap().unwrap();
+        assert_eq!(loaded.title_source, TitleSource::Llm);
+        clear_startup_title_deferred_for_tests();
     }
 }

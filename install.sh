@@ -465,6 +465,18 @@ EOF
   [ "$icon_field" = "$ICON_PATH" ] || fail "desktop Icon= mismatch: got '$icon_field'"
   [ -f "$icon_field" ] || fail "desktop Icon= path does not resolve: $icon_field"
 
+  # Refresh MIME / scheme caches when tools exist — never assume apt or a package manager.
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_DIR"
+  else
+    printf 'note: update-desktop-database not found — skipping desktop database refresh\n'
+  fi
+  if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default "${APP_ID}.desktop" x-scheme-handler/agentlounge
+  else
+    printf 'note: xdg-mime not found — skipping default scheme handler registration\n'
+  fi
+
   record_manifest "$target" "$shim" "$desktop" "$ICON_PATH"
   printf 'Installed AppImage → %s\n' "$target"
   printf 'Icon → %s\n' "$ICON_PATH"

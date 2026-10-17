@@ -88,11 +88,20 @@ pub async fn load_halt_state(store: &ExperienceStore) -> Result<HaltState> {
     }
 }
 
+/// Fail-closed: any storage or parse error is treated as halted (and logged).
 pub async fn is_halted(store: &ExperienceStore) -> bool {
-    load_halt_state(store)
-        .await
-        .map(|s| s.halted)
-        .unwrap_or(false)
+    halted_from_load_result(load_halt_state(store).await)
+}
+
+/// Map a [`load_halt_state`] result to the gate boolean (fail-closed on `Err`).
+pub fn halted_from_load_result(result: Result<HaltState>) -> bool {
+    match result {
+        Ok(state) => state.halted,
+        Err(err) => {
+            log::error!("halt_state unreadable — fail-closed as halted: {err:#}");
+            true
+        }
+    }
 }
 
 async fn persist(store: &ExperienceStore, state: &HaltState) -> Result<()> {
@@ -199,5 +208,44 @@ mod tests {
         let msg = v["message"].as_str().unwrap();
         assert!(msg.contains("temporary pause") || msg.contains("temporarily halted"));
         assert!(msg.contains("does not stop external"));
+    }
+
+    #[test]
+    fn load_error_fails_closed_as_halted() {
+        assert!(halted_from_load_result(Err(anyhow::anyhow!("sqlite locked"))));
+        assert!(!halted_from_load_result(Ok(HaltState::default())));
+        assert!(halted_from_load_result(Ok(HaltState::active(
+            None,
+            HALT_BY_UI
+        ))));
+    }
+
+    #[tokio::test]
+    async fn corrupt_halt_state_fails_closed() {
+        let store = ExperienceStore::memory().unwrap();
+        store
+            .set_setting(HALT_SETTING_KEY.into(), "{not-json".into())
+            .await
+            .unwrap();
+        assert!(
+            load_halt_state(&store).await.is_err(),
+            "corrupt JSON must not parse"
+        );
+        assert!(
+            is_halted(&store).await,
+            "corrupt halt_state must fail closed (halted)"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_unreadable_blob_fails_closed() {
+        let store = ExperienceStore::memory().unwrap();
+        // Valid JSON of the wrong shape — parse error → fail closed.
+        store
+            .set_setting(HALT_SETTING_KEY.into(), "\"halted\"".into())
+            .await
+            .unwrap();
+        assert!(load_halt_state(&store).await.is_err());
+        assert!(is_halted(&store).await);
     }
 }

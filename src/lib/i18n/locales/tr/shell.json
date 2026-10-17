@@ -102,5 +102,6 @@
   "haltedDoesNotStop": "Durmaz: uçuştaki/bekleyen görevler veya harici ajan oturumları (Cursor, Antigravity, Claude Desktop, Grok Bot).",
   "haltedStatus": "Durduruldu",
   "haltFailed": "Durdurma durumu güncellenemedi",
+  "haltLoadFailed": "Durdurma durumu okunamadı — fail-closed olarak durduruldu kabul ediliyor.",
   "haltLogged": "Durdur/Devam eylemleri kernel günlüğüne yazılır."
 }

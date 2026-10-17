@@ -102,5 +102,6 @@
   "haltedDoesNotStop": "Does not stop: in-flight/pending tasks, or external agent sessions (Cursor, Antigravity, Claude Desktop, Grok Bot).",
   "haltedStatus": "Halted",
   "haltFailed": "Could not update Halt state",
+  "haltLoadFailed": "Could not read Halt state — treating as halted (fail-closed).",
   "haltLogged": "Halt/Resume actions are logged in the kernel journal."
 }

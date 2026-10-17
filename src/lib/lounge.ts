@@ -2329,6 +2329,26 @@ export const HALT_CHANGED_EVENT = "lounge://halt-changed";
 export const DEEP_LINK_OPEN_EVENT = "lounge://deep-link-open";
 export const DEEP_LINK_SOURCE_AGENT = "deep-link";
 
+/** Mirrors Rust `ALLOWED_OPEN_ROUTES` — exact match only (no query, no host). */
+export const ALLOWED_DEEP_LINK_OPEN_ROUTES = [
+  "/",
+  "/dashboard",
+  "/stream",
+  "/vault",
+  "/health",
+  "/fleet",
+  "/telemetry",
+  "/quotas",
+  "/settings",
+  "/onboarding",
+] as const;
+
+export type AllowedDeepLinkOpenRoute = (typeof ALLOWED_DEEP_LINK_OPEN_ROUTES)[number];
+
+export function isAllowedDeepLinkOpenRoute(route: string): route is AllowedDeepLinkOpenRoute {
+  return (ALLOWED_DEEP_LINK_OPEN_ROUTES as readonly string[]).includes(route);
+}
+
 export function isDeepLinkExternalTrigger(
   fromAgent: string | undefined | null,
   reason?: string | null,

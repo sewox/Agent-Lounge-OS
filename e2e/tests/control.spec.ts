@@ -35,6 +35,13 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
     await expect(
       haltDialog.getByText(/does not stop|Durmaz|external agent|harici ajan/i),
     ).toBeVisible();
+    // Escape closes the dialog (a11y); focus trap lands on reason input or cancel.
+    await page.locator('[data-qa="halt-dialog-cancel"]').focus();
+    await page.keyboard.press("Escape");
+    await expect(haltDialog).toHaveCount(0);
+
+    await haltBtn.click();
+    await expect(haltDialog).toBeVisible();
     await page.locator('[data-qa="halt-reason-input"]').fill("e2e maintenance");
     await page.locator('[data-qa="halt-dialog-confirm"]').click();
 
@@ -52,14 +59,13 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
     ).toHaveAttribute("data-tone", "halted");
     await expect(haltBtn).toHaveText(/Resume|Devam/i);
 
-    // Banner remains on every page at this viewport (client-side nav keeps mock halt).
+    // CT8: banner visible on every page AND L1–L6 while halted (correct route arg).
     for (const route of ROUTES) {
       await page.locator(`[data-qa="sidebar"] a[href="${route.path}"]`).click();
       await expect(page).toHaveURL(new RegExp(`${route.path.replace("/", "\\/")}`));
       await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
       await expect(page.locator('[data-qa="halt-toggle"]')).toBeVisible();
-      // Re-check L1–L6 after Resume chrome is cleared would be unfair while fixed
-      // Halt banner reserves top padding; assert layout again after resume below.
+      await assertLayoutL1toL6(page, route.path, expect);
     }
 
     await page.locator('[data-qa="halt-toggle"]').click();
@@ -106,5 +112,51 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
     await expect(warning).toBeVisible();
     await expect(warning).toContainText(/Dış Kaynaklı Tetikleme|External trigger/i);
     await expect(banner.getByRole("button", { name: /Approve|Onayla/i })).toBeVisible();
+  });
+
+  test("CTL-03 · Halt stacks above SourceUnverified approval; Approve still works", async ({
+    page,
+  }) => {
+    test.info().annotations.push({ type: "id", description: "CTL-03" });
+    await openRoute(page, "/dashboard", "full");
+
+    // Seed a pending SourceUnverified approval first (in-flight/pending not cancelled).
+    await page.evaluate(() => {
+      const f = window.__QA_FIXTURE__;
+      if (!f) throw new Error("missing fixture");
+      f.pendingApprovals = [
+        {
+          task_id: "ctl03-halted-approval",
+          summary: "approve while halted",
+          from_agent: "deep-link",
+          to_agent: "cursor",
+          kind: "source_unverified",
+          reason:
+            "Dış Kaynaklı Tetikleme · source_verified=false — deep-link dispatch · PENDING_APPROVAL",
+          expires_at: new Date(Date.now() + 90_000).toISOString(),
+          timeout_secs: 90,
+        },
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    const approval = page.locator('[data-qa="approval-banner"]');
+    await expect(approval).toBeVisible({ timeout: 5_000 });
+    await expect(page.locator('[data-qa="external-trigger-warning"]')).toBeVisible();
+
+    // Engage Halt — approval chrome must remain visible (stacked, not exclusive).
+    await page.locator('[data-qa="halt-toggle"]').click();
+    await expect(page.locator('[data-qa="halt-confirm-dialog"]')).toBeVisible();
+    await page.locator('[data-qa="halt-dialog-confirm"]').click();
+    await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
+    await expect(approval).toBeVisible();
+    await expect(page.locator('[data-qa="external-trigger-warning"]')).toBeVisible();
+
+    await approval.getByRole("button", { name: /Approve|Onayla/i }).click();
+    await expect(page.locator('[data-qa="approval-banner"]')).toHaveCount(0, {
+      timeout: 5_000,
+    });
+    // Halt banner remains after acting on the approval.
+    await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
   });
 });
