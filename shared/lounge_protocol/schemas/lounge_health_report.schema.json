@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agent-lounge-os.local/schemas/lounge_health_report.schema.json",
   "title": "LoungeHealthReport",
-  "description": "Versioned Health-1b lounge_health response (schema_version 1.0.0). Process-local fields: title.queue_backlog and title.last_error_type reflect the calling process only — standalone lounge-mcp reports 0/null; use the Tauri lounge_health command for app-worker values. title.db_backlog / give_ups are durable SQLite.",
+  "description": "Versioned Health-1b lounge_health response (schema_version 1.1.0). Process-local fields: title.queue_backlog and title.last_error_type reflect the calling process only — standalone lounge-mcp reports 0/null; use the Tauri lounge_health command for app-worker values. title.db_backlog / give_ups are durable SQLite.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,7 +15,7 @@
     "cbm"
   ],
   "properties": {
-    "schema_version": { "type": "string", "const": "1.0.0" },
+    "schema_version": { "type": "string", "const": "1.1.0" },
     "checked_at": { "type": "string", "minLength": 1 },
     "platform": {
       "type": "object",
@@ -46,7 +46,8 @@
               "hash_mismatch",
               "non_canonical",
               "unreadable",
-              "not_installed"
+              "not_installed",
+              "unverified"
             ]
           },
           "severity": { "type": "string" },

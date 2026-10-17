@@ -1538,7 +1538,7 @@ yoksa ADR boş kalır (UI: No ADR). `tags` ajan etiketleridir (normalize edilir;
         ),
         tool_def(
             "lounge_health",
-            "Health-1b birleşik sağlık (şema 1.0.0): dead symbols, ajan lounge-mcp config (salt okunur; her config yolu ayrı rapor), title/LMR backlog, CBM daemon + 18749 pollution tespiti (düzeltmez). Ev yolları ~/… maskeli. Ayar/config yazmaz. Not: title.queue_backlog ve last_error_type bu süreçte localdir — standalone lounge-mcp'te 0/null; Tauri lounge_health canlı worker değerlerini verir. db_backlog/give_ups SQLite.",
+            "Health-1b birleşik sağlık (şema 1.1.0): dead symbols, ajan lounge-mcp config (salt okunur; her config yolu ayrı rapor), title/LMR backlog, CBM daemon + 18749 pollution tespiti (düzeltmez). URL-only girişler unverified. Ev yolları ~/… maskeli. Ayar/config yazmaz. Not: title.queue_backlog ve last_error_type bu süreçte localdir — standalone lounge-mcp'te 0/null; Tauri lounge_health canlı worker değerlerini verir. db_backlog/give_ups SQLite.",
             include_schema("mcp_lounge_health.schema.json"),
         ),
     ]
@@ -2591,7 +2591,7 @@ mod tests {
         let v: Value = serde_json::from_str(&resp).unwrap();
         assert!(v["error"].is_null(), "unexpected error: {v}");
         let body = &v["result"]["structuredContent"];
-        assert_eq!(body["schema_version"], "1.0.0");
+        assert_eq!(body["schema_version"], "1.1.0");
         assert!(body["agents"].is_array());
         assert!(body["title"].is_object());
         assert!(body["dead_symbols"].is_object());
