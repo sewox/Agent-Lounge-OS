@@ -29,11 +29,20 @@ Slots: **list** | **detail** | **inspector**.
 | Container | Mode | Behavior |
 |-----------|------|----------|
 | width &lt; 1200px | `one` | List fills content; detail/inspector open as **drawers** |
-| 1200–1699px | `two` | List + detail side-by-side; inspector as drawer |
-| ≥ 1700px | `three` | List + detail + inspector |
+| 1200–1599px | `two` | List + detail side-by-side; inspector as drawer |
+| ≥ 1600px | `three` | List + detail + inspector |
 | aspect &lt; 1 (portrait) | `portrait-stack` | List on top, detail below, **draggable splitter**; inspector as drawer |
 
 Breakpoints are measured on the grid container via `ResizeObserver`, not on `window` alone.
+
+Additional viewport proofs (ds-lab e2e; container ≈ viewport − sidebar − main padding):
+
+| Viewport (CSS px) | Expected mode | Notes |
+|-------------------|---------------|-------|
+| 1366×768 | `one` | Container ~1146px — intentional single panel |
+| 1600×900 | `two` | Medium band |
+| 1920×1080 | `three` | Inspector inline |
+| 2560×1440 | `three` | No max-width — panels widen in proportion |
 
 ## StatsStrip
 
@@ -110,7 +119,7 @@ Shared assert API: `assertLayoutL1toL6(page, route, expect)` — usable from any
 ## Testing
 
 - Unit: grid breakpoint resolver + StatsStrip filter clicks (`src/components/design-system/*.test.ts`)
-- E2E: `e2e/tests/design-system.spec.ts` uses L1–L6 helpers at D1/D2/D3 and checks StatsStrip / Halted affordances
+- E2E: `e2e/tests/design-system.spec.ts` uses L1–L6 helpers at D1/D2/D3, asserts exact `three` + inline inspector on D2 (1920×1080), and covers the 1366/1600/1920/2560 viewport matrix
 
 ## Out of scope (this PR)
 
