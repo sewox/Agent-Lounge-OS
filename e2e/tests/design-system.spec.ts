@@ -109,15 +109,23 @@ test.describe("PR-DS-0 design-system reference", () => {
 
     const metrics = await assertLayoutL1toL6(page, DS_LAB, expect);
     expect(metrics.panelCount).toBeGreaterThanOrEqual(1);
+    // L2 sparse-interior must pass on natural content depth (no bottom-pinned sentinels).
+    expect(metrics.l2_sparseInterior).toBe(false);
+    expect(metrics.l2_minInteriorFill).toBeGreaterThanOrEqual(0.45);
 
-    const mode = await page.locator('[data-qa="panel-grid"]').getAttribute("data-panel-mode");
+    const grid = page.locator('[data-qa="panel-grid"]');
+    const mode = await grid.getAttribute("data-panel-mode");
     if (metrics.viewport.height > metrics.viewport.width) {
       expect(mode).toBe("portrait-stack");
       await expect(page.locator('[data-qa="panel-grid-splitter"]')).toBeVisible();
-    } else if (metrics.viewport.width >= 1700) {
-      // Content width is viewport − sidebar; wide shell still reaches three when ≥1700 container.
-      // At 1920 with sidebar ~220, container is ~1700 — allow two or three.
-      expect(["two", "three"]).toContain(mode);
+    } else if (
+      metrics.viewport.width === 1920 &&
+      metrics.viewport.height === 1080
+    ) {
+      // D2: container (≥1600 after sidebar) must be exact three with inline inspector.
+      expect(mode).toBe("three");
+      await expect(page.locator('[data-panel-slot="inspector"]')).toBeVisible();
+      await expect(page.locator('[data-qa="open-inspector-drawer"]')).toHaveCount(0);
     }
   });
 });

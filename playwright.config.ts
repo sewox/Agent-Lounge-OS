@@ -33,7 +33,8 @@ export default defineConfig({
     },
     {
       name: "D1",
-      testIgnore: /hydration/,
+      // Viewport matrix lives in design-system-viewports.spec.ts (D0 only).
+      testIgnore: /hydration|design-system-viewports/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1512, height: 982 },
@@ -42,12 +43,12 @@ export default defineConfig({
     },
     {
       name: "D2",
-      testIgnore: /hydration/,
+      testIgnore: /hydration|design-system-viewports/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 },
     },
     {
       name: "D3",
-      testIgnore: /hydration/,
+      testIgnore: /hydration|design-system-viewports/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1080, height: 1920 }, deviceScaleFactor: 1 },
     },
     {

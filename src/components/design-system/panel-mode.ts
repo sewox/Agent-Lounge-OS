@@ -8,7 +8,7 @@ export type PanelMode = "one" | "two" | "three" | "portrait-stack";
 /** Narrow: single panel + drawers. */
 export const PANEL_NARROW_MAX = 1200;
 /** Medium upper bound (exclusive of wide). */
-export const PANEL_MEDIUM_MAX = 1700;
+export const PANEL_MEDIUM_MAX = 1600;
 
 /**
  * Resolve layout mode from the grid container's box.

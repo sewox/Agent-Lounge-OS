@@ -17,10 +17,12 @@ describe("resolvePanelMode", () => {
   it("returns two in the medium band", () => {
     assert.equal(resolvePanelMode(PANEL_NARROW_MAX, 900), "two");
     assert.equal(resolvePanelMode(1500, 900), "two");
+    assert.equal(resolvePanelMode(1599, 1000), "two");
     assert.equal(resolvePanelMode(PANEL_MEDIUM_MAX - 1, 1000), "two");
   });
 
   it("returns three at and above wide", () => {
+    assert.equal(resolvePanelMode(1600, 1000), "three");
     assert.equal(resolvePanelMode(PANEL_MEDIUM_MAX, 1000), "three");
     assert.equal(resolvePanelMode(1920, 1080), "three");
   });

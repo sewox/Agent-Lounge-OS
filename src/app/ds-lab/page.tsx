@@ -35,6 +35,52 @@ const ROWS: LabRow[] = [
   { id: "a16", name: "vault-sync", category: "running", detail: "experience log ok" },
 ];
 
+/** Representative recent-event lines for the detail reference panel. */
+const DETAIL_EVENTS = [
+  "boot · kernel handshake accepted",
+  "nats · subject lounge.health subscribed",
+  "quota · header badge refreshed",
+  "policy · default affinity applied",
+  "probe · mock endpoint answered 200",
+  "index · FTS queue depth 0",
+  "telemetry · sample window opened",
+  "approval · no pending alerts",
+  "memory · optional bridge skipped",
+  "laya · decision gate idle",
+  "mcp · stdio session warm",
+  "vault · experience log append ok",
+  "worker · heartbeat interval 5s",
+  "stream · last event seq +1",
+  "shell · panel mode observed",
+  "layout · container width measured",
+];
+
+/** Representative inspector metric / probe rows. */
+const INSPECTOR_ROWS = [
+  ["endpoint", "mock://inspector/{id}"],
+  ["last_sample", "{sample}"],
+  ["queue_depth", "0"],
+  ["backpressure", "none"],
+  ["affinity", "local"],
+  ["policy", "default"],
+  ["schema", "panel-grid slots"],
+  ["transport", "tauri-ipc"],
+  ["region", "local-dev"],
+  ["cpu_share", "0.4"],
+  ["mem_rss", "48 MiB"],
+  ["fd_count", "32"],
+  ["restart_budget", "3"],
+  ["cool_down", "30s"],
+  ["owner", "ds-lab"],
+  ["tags", "reference,layout"],
+  ["wide_rule", "≥1600 container → inspector inline"],
+  ["medium_rule", "1200–1599 → inspector drawer"],
+  ["narrow_rule", "<1200 → detail + inspector drawers"],
+  ["portrait_rule", "aspect < 1 → list/detail stack"],
+  ["max_width", "none — panels grow with content column"],
+  ["layout_gates", "L1–L6 on every ds-lab viewport proof"],
+];
+
 /**
  * PR-DS-0 reference surface: PanelGrid + StatsStrip + Halted language.
  * Not in primary nav — opened by URL for layout/e2e proof.
@@ -66,6 +112,8 @@ export default function DesignSystemLabPage() {
     { id: "error", label: "Error", value: counts.error },
     { id: "idle", label: "Idle", value: counts.idle },
   ];
+
+  const sample = selected.category === "running" ? "ok" : "n/a";
 
   return (
     <div
@@ -180,7 +228,6 @@ export default function DesignSystemLabPage() {
                 {selected.category}
               </StatusPill>
             </div>
-            {/* Fill interior so L2 sparse-interior does not flag the reference panel. */}
             <div className="mt-4 space-y-2 font-body text-body text-on-surface-variant">
               <p>Endpoint · mock://ds-lab/{selected.id}</p>
               <p>Heartbeat · {selected.category === "running" ? "live" : "stale"}</p>
@@ -194,29 +241,51 @@ export default function DesignSystemLabPage() {
               <p>StatsStrip clicks set the list filter; active chip uses aria-pressed.</p>
               <p>Halted hatch is distinct from solid error chrome.</p>
             </div>
+            <h3 className="mt-5 font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+              Recent events
+            </h3>
+            <ul className="mt-2 space-y-1.5 font-mono text-meta text-on-surface-variant">
+              {DETAIL_EVENTS.map((line) => (
+                <li key={line}>
+                  <span className="font-mono text-outline">{selected.id}</span>
+                  {" · "}
+                  {line}
+                </li>
+              ))}
+            </ul>
           </div>
         }
         inspector={
           <div className="flex h-full min-h-0 flex-col overflow-auto p-3">
             <h2 className="font-body text-panel font-semibold tracking-label uppercase">Inspector</h2>
-            <dl className="mt-2 space-y-2 font-mono text-meta text-on-surface-variant">
-              <div>
-                <dt className="text-outline">id</dt>
-                <dd className="text-on-surface">{selected.id}</dd>
-              </div>
-              <div>
-                <dt className="text-outline">category</dt>
-                <dd className="text-on-surface">{selected.category}</dd>
-              </div>
-              <div>
-                <dt className="text-outline">filter</dt>
-                <dd className="text-on-surface">{filter}</dd>
-              </div>
-              <div>
-                <dt className="text-outline">mode</dt>
-                <dd className="text-on-surface">{mode}</dd>
-              </div>
-            </dl>
+            <p className="mt-2 font-body text-body text-on-surface-variant">
+              Live probe fields for <span className="font-mono text-on-surface">{selected.name}</span>.
+            </p>
+            <ul className="mt-3 space-y-1.5 font-mono text-meta text-on-surface-variant">
+              {INSPECTOR_ROWS.map(([key, template]) => {
+                const value = template
+                  .replace("{id}", selected.id)
+                  .replace("{sample}", sample);
+                return (
+                  <li key={key} className="flex gap-2 border-b border-outline-variant/30 pb-1.5">
+                    <span className="w-28 shrink-0 font-mono text-outline">{key}</span>
+                    <span className="min-w-0 break-words font-mono text-on-surface">{value}</span>
+                  </li>
+                );
+              })}
+            </ul>
+            <h3 className="mt-4 font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+              Probe log
+            </h3>
+            <ul className="mt-2 space-y-1.5 font-mono text-meta text-on-surface-variant">
+              {DETAIL_EVENTS.slice(0, 12).map((line) => (
+                <li key={`probe-${line}`}>
+                  <span className="font-mono text-outline">t+{selected.id}</span>
+                  {" · "}
+                  {line}
+                </li>
+              ))}
+            </ul>
           </div>
         }
       />
