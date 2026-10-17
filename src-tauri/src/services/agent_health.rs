@@ -930,11 +930,7 @@ pub fn lookup_agent_mcp_url(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .is_some();
-            let url = raw
-                .url
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
+            let url = raw.url.as_deref().map(str::trim).filter(|s| !s.is_empty());
             // Probe is URL-only — refuse entries that also declare a command.
             if let (Some(url), false) = (url, has_command) {
                 return Ok(Some(url.to_string()));

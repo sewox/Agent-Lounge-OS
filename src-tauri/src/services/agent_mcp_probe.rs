@@ -230,9 +230,7 @@ mod tests {
     impl log::Log for CaptureLogger {
         fn enabled(&self, metadata: &log::Metadata) -> bool {
             metadata.target().contains("agent_mcp_probe")
-                || metadata
-                    .target()
-                    .contains("services::agent_mcp_probe")
+                || metadata.target().contains("services::agent_mcp_probe")
         }
 
         fn log(&self, record: &log::Record) {
@@ -373,7 +371,10 @@ mod tests {
             std::env::remove_var("HTTPS_PROXY");
             std::env::remove_var("ALL_PROXY");
         }
-        assert!(client.is_ok(), "no_proxy client must build with HTTP_PROXY set");
+        assert!(
+            client.is_ok(),
+            "no_proxy client must build with HTTP_PROXY set"
+        );
     }
 
     #[tokio::test]
@@ -438,10 +439,7 @@ mod tests {
     async fn never_connects_to_non_loopback() {
         // No std mutex held across await (clippy await_holding_lock).
         let (roots, base) = temp_roots("remote");
-        let id = write_url_only_config(
-            &roots,
-            "https://api.example.com/mcp?token=supersecret",
-        );
+        let id = write_url_only_config(&roots, "https://api.example.com/mcp?token=supersecret");
         let result = probe_agent_mcp_url_with("cursor", &id, &roots, true)
             .await
             .unwrap();
@@ -502,9 +500,8 @@ mod tests {
                 rh.fetch_add(1, Ordering::SeqCst);
                 let mut buf = [0u8; 512];
                 let _ = stream.read(&mut buf);
-                let resp = format!(
-                    "HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n"
-                );
+                let resp =
+                    format!("HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\n\r\n");
                 let _ = stream.write_all(resp.as_bytes());
             }
         });
@@ -635,15 +632,9 @@ mod tests {
             .await
             .unwrap();
         let lines = take_captured_logs();
-        assert!(
-            !lines.is_empty(),
-            "expected probe log lines to be captured"
-        );
+        assert!(!lines.is_empty(), "expected probe log lines to be captured");
         let joined = lines.join("\n");
-        assert!(
-            !joined.contains("/v1/mcp"),
-            "path leaked in logs: {joined}"
-        );
+        assert!(!joined.contains("/v1/mcp"), "path leaked in logs: {joined}");
         assert!(
             !joined.contains("authorization"),
             "query key leaked: {joined}"
