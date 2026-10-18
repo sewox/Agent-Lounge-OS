@@ -21,6 +21,8 @@ declare global {
     __QA_IPC_LOG__?: { cmd: string; args: unknown }[];
     __QA_FIXTURE__?: FixtureDataset;
     __QA_SEED_DESTRUCTIVE__?: (rows: QaDestructiveRow[]) => void;
+    /** Make the next `get_halt_state` reject (fail-closed Halt UI). */
+    __QA_REJECT_HALT_STATE__?: (message?: string) => void;
     /** Health-UI-2: override lounge_health payload, or `"error"` to throw. */
     __QA_LOUNGE_HEALTH__?: FixtureDataset["loungeHealth"] | "error";
     /** Health-UI-2: dead-symbols scan freshness override. */
@@ -89,6 +91,30 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       },
       ttlDays: 90,
       useCountThreshold: 0,
+    };
+    let qaHaltState: {
+      halted: boolean;
+      reason: string | null;
+      by: string | null;
+      at: string | null;
+    } = { halted: false, reason: null, by: null, at: null };
+    /** When set, `get_halt_state` rejects (fail-closed UI path). Cleared on halt/resume. */
+    let qaHaltStateError: string | null = null;
+    try {
+      const bootReject = sessionStorage.getItem("__QA_REJECT_HALT_STATE__");
+      if (bootReject != null) {
+        qaHaltStateError = bootReject.trim() || "halt_state unreadable";
+        sessionStorage.removeItem("__QA_REJECT_HALT_STATE__");
+      }
+    } catch {
+      /* private mode */
+    }
+    let qaDeepLinkRegistered = false;
+    window.__QA_REJECT_HALT_STATE__ = (message?: string) => {
+      qaHaltStateError =
+        message != null && String(message).trim()
+          ? String(message)
+          : "halt_state unreadable";
     };
     const qaDestructiveQueue: QaDestructiveRow[] = [];
 
@@ -578,6 +604,42 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           qaSettings.useCountThreshold = Math.max(0, Number(args?.threshold ?? 0));
           return qaSettings.useCountThreshold;
         }
+        case "get_halt_state":
+          if (qaHaltStateError) {
+            const msg = qaHaltStateError;
+            throw new Error(msg);
+          }
+          return { ...qaHaltState };
+        case "halt": {
+          qaHaltStateError = null;
+          qaHaltState = {
+            halted: true,
+            reason:
+              args?.reason != null && String(args.reason).trim()
+                ? String(args.reason).trim()
+                : null,
+            by: "ui",
+            at: new Date().toISOString(),
+          };
+          emitPluginEvent("lounge://halt-changed", { ...qaHaltState });
+          return { ...qaHaltState };
+        }
+        case "resume": {
+          qaHaltStateError = null;
+          qaHaltState = {
+            halted: false,
+            reason: null,
+            by: "ui",
+            at: new Date().toISOString(),
+          };
+          emitPluginEvent("lounge://halt-changed", { ...qaHaltState });
+          return { ...qaHaltState };
+        }
+        case "register_desktop_deep_link":
+          qaDeepLinkRegistered = true;
+          return true;
+        case "is_desktop_deep_link_registered":
+          return qaDeepLinkRegistered;
         case "resolve_routing": {
           const taskId = String(args?.taskId ?? "");
           f.pendingApprovals = f.pendingApprovals.filter((a) => a.task_id !== taskId);

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Agent Lounge OS (positive fixture)
+Type=Application
+Exec=agent-lounge-os %u
+MimeType=x-scheme-handler/agentlounge;
+Comment=Positive fixture for local smoke of deep-link desktop assert

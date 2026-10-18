@@ -62,6 +62,18 @@
         "displayLanguageSelector": false,
         "startMenuFolder": "Agent Lounge OS"
       }
+    },
+    "linux": {
+      "deb": {
+        "desktopTemplate": "./linux/agent-lounge-os.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["agentlounge"]
+      }
     }
   }
 }

@@ -57,6 +57,8 @@ libc = { version = "0.2", optional = true }
 # Windows exclusive→SO_REUSEADDR convert at handoff (test-helpers only).
 socket2 = { version = "0.6", optional = true }
 regex = "1"
+# Pin: 2.6.x breaks against rust-ini ParseOption fields in this lockfile.
+tauri-plugin-deep-link = "=2.4.5"
 url = "2"
 
 [target.'cfg(windows)'.dependencies]
@@ -74,6 +76,9 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 candle-core = { version = "0.11.0", default-features = false, features = ["metal"] }
 candle-nn = { version = "0.11.0", default-features = false, features = ["metal"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "=2.3.4", features = ["deep-link"] }
 
 [dev-dependencies]
 # Health-1a real-CBM test only: download + extract pinned v0.11.0 archives.

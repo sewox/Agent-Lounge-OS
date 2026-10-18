@@ -80,5 +80,12 @@
   "diagnosticsNatsLog": "NATS sunucu günlüğü",
   "diagnosticsLmrBinary": "Beklenen LMR binary",
   "diagnosticsBrowser": "Günlük yolları masaüstü uygulamada (Tauri) kullanılabilir.",
-  "diagnosticsLoading": "Günlük yolları çözülüyor…"
+  "diagnosticsLoading": "Günlük yolları çözülüyor…",
+  "desktopIntegrationTitle": "Masaüstü entegrasyonu",
+  "desktopIntegrationDesc": "agentlounge:// URL şemasını kaydederek işletim sistemi bağlantılarının Lounge’u açmasını sağlar. Paketlenmiş macOS/Windows/deb kurulumları şemayı kurulumda kaydeder. AppImage için açık etkinleştirme gerekir. Geliştirme modu (tauri dev) şemayı kaydetmez.",
+  "desktopIntegrationEnable": "Masaüstü Entegrasyonunu Etkinleştir",
+  "desktopIntegrationEnabled": "agentlounge:// bu kullanıcı için kayıtlı",
+  "desktopIntegrationUnavailable": "Çalışma zamanı kayıt yalnızca Linux ve Windows’ta desteklenir. macOS paketlenmiş uygulamada Info.plist CFBundleURLTypes kullanır.",
+  "desktopIntegrationFailed": "URL şeması kaydedilemedi",
+  "desktopIntegrationBrowser": "Masaüstü entegrasyonu paketlenmiş masaüstü uygulamasını gerektirir."
 }

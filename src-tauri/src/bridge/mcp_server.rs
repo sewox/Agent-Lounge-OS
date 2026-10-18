@@ -551,6 +551,14 @@ impl McpServer {
             ));
         }
 
+        // Halt v1: refuse write/dispatch tools; read tools keep working.
+        if is_halt_blocked_tool(name) && crate::services::halt::is_halted(&self.store).await {
+            return Ok(tool_result(
+                crate::services::halt::halted_error_payload(),
+                true,
+            ));
+        }
+
         let (payload, is_error) = match name {
             "lounge_search_experience" => match self.tool_search(&args).await {
                 Ok(v) => (v, false),
@@ -1430,6 +1438,18 @@ fn is_forbidden_tool(name: &str) -> bool {
         || lower.contains("set_policy")
         || lower.contains("delete_file")
         || lower.contains("fs_write")
+}
+
+/// Write / dispatch tools refused while halted. Read tools keep working.
+fn is_halt_blocked_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "lounge_dispatch_task"
+            | "lounge_ask_agent"
+            | "lounge_call_agent"
+            | "lounge_record_experience"
+            | "lounge_record_decision"
+    )
 }
 
 /// `MCP_RPC:<code>:<message>` — must_deliver kota vb.
@@ -3036,5 +3056,67 @@ mod tests {
             tasks[0]["next_action"].as_str().unwrap(),
             crate::db::NEXT_ACTION_WAIT_TASK
         );
+    }
+
+    #[tokio::test]
+    async fn halted_refuses_dispatch_while_read_tools_work() {
+        let store = ExperienceStore::memory().expect("db");
+        crate::services::halt::halt(
+            &store,
+            Some("mcp-test".into()),
+            crate::services::halt::HALT_BY_UI,
+        )
+        .await
+        .unwrap();
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+
+        let dispatch = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lounge_dispatch_task","arguments":{"target_agent":"cursor","task":"hi","project_id":"p"}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let dval: Value = serde_json::from_str(&dispatch).unwrap();
+        assert_eq!(dval["result"]["isError"], true);
+        let body = &dval["result"]["structuredContent"];
+        assert_eq!(body["code"], crate::services::halt::HALTED_ERROR_CODE);
+        assert_eq!(body["retryable"], true);
+        let msg = body["message"].as_str().unwrap();
+        assert!(
+            msg.contains("temporary pause") || msg.contains("temporarily halted"),
+            "{msg}"
+        );
+        assert!(msg.contains("does not stop external") || msg.contains("does not cancel"));
+
+        let status = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lounge_status","arguments":{}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let sval: Value = serde_json::from_str(&status).unwrap();
+        assert_ne!(sval["result"]["isError"], true, "{sval}");
+
+        let search = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lounge_search_experience","arguments":{"query":"redis"}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let search_val: Value = serde_json::from_str(&search).unwrap();
+        assert_ne!(search_val["result"]["isError"], true, "{search_val}");
+
+        let health = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lounge_health","arguments":{}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let hval: Value = serde_json::from_str(&health).unwrap();
+        assert_ne!(hval["result"]["isError"], true, "{hval}");
     }
 }

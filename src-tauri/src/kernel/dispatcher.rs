@@ -861,6 +861,12 @@ impl Dispatcher {
 
     async fn handle_nats_message(&self, nc: &nats::Connection, msg: nats::Message) -> Result<()> {
         let task = parse_nats_task(&msg.data)?;
+        // Halt before LMR embedding (recall_context) — refuse without spending an embed call.
+        if crate::services::halt::is_halted(&self.store).await {
+            log::warn!("NATS dispatch refused while halted (no embedding)");
+            publish_json(nc, TASK_FAILED, &task).await?;
+            return Ok(());
+        }
         let context = self.recall_context(&task).await.unwrap_or_else(|err| {
             log::warn!("tecrübe araması atlandı: {err}");
             ExperienceContext::default()
@@ -901,6 +907,9 @@ impl Dispatcher {
 
     /// Kernel / test senkron yolu — görev zaten güvenilir oluşturulmuş olmalı.
     pub async fn handle_task(&self, task: LoungeTask) -> Result<LoungeExperience> {
+        if crate::services::halt::is_halted(&self.store).await {
+            anyhow::bail!("{}", crate::services::halt::HALTED_ERROR_MESSAGE);
+        }
         let context = self.recall_context(&task).await.unwrap_or_default();
         match self.execute_task(task, context, None).await? {
             TaskExecution::Local(experience) => Ok(*experience),
@@ -931,7 +940,37 @@ impl Dispatcher {
         self.dispatch_with_shared_nats(task).await
     }
 
+    /// Deep-link `dispatch` — always `source_verified=false` → SourceUnverified PENDING_APPROVAL.
+    /// Agent id must match an enabled connected tool. Refused while halted.
+    pub async fn handle_deep_link_dispatch(&self, agent: &str, text: &str) -> Result<()> {
+        if crate::services::halt::is_halted(&self.store).await {
+            anyhow::bail!("{}", crate::services::halt::HALTED_ERROR_MESSAGE);
+        }
+        let agent = agent.trim();
+        let text = text.trim();
+        if agent.is_empty() || text.is_empty() {
+            anyhow::bail!("deep-link dispatch requires agent and text");
+        }
+        let tools = self.store.list_connected_tools().await?;
+        let registered = tools.iter().any(|t| t.id == agent && t.enabled);
+        if !registered {
+            anyhow::bail!("deep-link dispatch: agent is not a registered connected tool");
+        }
+        let mut task = LoungeTask::new(
+            crate::services::deep_link::DEEP_LINK_SOURCE_AGENT,
+            "agent-lounge-os",
+            text,
+        );
+        task.target_agent = Some(agent.to_string());
+        task.source_verified = false;
+        self.dispatch_with_shared_nats(task).await
+    }
+
     async fn dispatch_with_shared_nats(&self, task: LoungeTask) -> Result<()> {
+        // Halt before LMR embedding — refuse without spending an embed call.
+        if crate::services::halt::is_halted(&self.store).await {
+            anyhow::bail!("{}", crate::services::halt::HALTED_ERROR_MESSAGE);
+        }
         let context = self.recall_context(&task).await.unwrap_or_else(|err| {
             log::warn!("tecrübe araması atlandı: {err}");
             ExperienceContext::default()
@@ -1050,6 +1089,11 @@ impl Dispatcher {
     ) -> Result<TaskExecution> {
         if task.msg_type != "task" {
             anyhow::bail!("beklenen type=task, gelen={}", task.msg_type);
+        }
+
+        // Halt v1: refuse new dispatch only (in-flight / pending untouched).
+        if crate::services::halt::is_halted(&self.store).await {
+            anyhow::bail!("{}", crate::services::halt::HALTED_ERROR_MESSAGE);
         }
 
         if let Some(replay) = self.admit_inbound(&mut task)? {
@@ -1313,6 +1357,14 @@ impl Dispatcher {
         if !task.source_verified {
             task.status = TaskStatus::PendingApproval;
             self.persist_status(&task.id, TaskStatus::PendingApproval);
+            let reason = if task.source_agent == crate::services::deep_link::DEEP_LINK_SOURCE_AGENT
+            {
+                crate::services::deep_link::EXTERNAL_TRIGGER_REASON.to_string()
+            } else {
+                format!(
+                    "source_verified=false — doğrulanmamış NATS/kaynak talebi · status={PENDING_APPROVAL}"
+                )
+            };
             let request = ApprovalRequest {
                 task_id: task.id.clone(),
                 summary: task.summary.clone(),
@@ -1322,9 +1374,7 @@ impl Dispatcher {
                     .clone()
                     .unwrap_or_else(|| KERNEL_AGENT.into()),
                 kind: ApprovalKind::SourceUnverified,
-                reason: format!(
-                    "source_verified=false — doğrulanmamış NATS/kaynak talebi · status={PENDING_APPROVAL}"
-                ),
+                reason,
                 expires_at: None,
                 timeout_secs: None,
             };
@@ -2564,6 +2614,198 @@ mod tests {
             .resolve_vote(id, RoutingVote::Approve)
             .expect("Onayla");
         assert!(handle.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn halt_refuses_new_dispatch() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        crate::services::halt::halt(
+            dispatcher.store(),
+            Some("test".into()),
+            crate::services::halt::HALT_BY_UI,
+        )
+        .await
+        .unwrap();
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "should not run");
+        let err = dispatcher.handle_task(task).await.unwrap_err().to_string();
+        assert!(
+            err.contains("temporarily halted") || err.contains("halted"),
+            "unexpected: {err}"
+        );
+        crate::services::halt::resume(dispatcher.store(), crate::services::halt::HALT_BY_UI)
+            .await
+            .unwrap();
+        assert!(!crate::services::halt::is_halted(dispatcher.store()).await);
+        // After resume the halt gate must not short-circuit (other failures OK).
+        let task2 = LoungeTask::new("cursor", "agent-lounge-os", "ok after resume");
+        match dispatcher.handle_task(task2).await {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.contains("temporarily halted") && !msg.contains("Halt v1"),
+                    "halt gate still active after resume: {msg}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deep_link_dispatch_refused_while_halted() {
+        use crate::models::DiscoveredTool;
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        let mut tool = DiscoveredTool::host_app("cursor", "Cursor");
+        tool.id = "cursor".into();
+        dispatcher
+            .store()
+            .save_connected_tools(vec![tool])
+            .await
+            .unwrap();
+        crate::services::halt::halt(
+            dispatcher.store(),
+            Some("deeplink-halt".into()),
+            crate::services::halt::HALT_BY_UI,
+        )
+        .await
+        .unwrap();
+        let err = dispatcher
+            .handle_deep_link_dispatch("cursor", "should refuse")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("temporarily halted") || err.contains("halted"),
+            "unexpected: {err}"
+        );
+        assert!(
+            dispatcher.pending_approvals().is_empty(),
+            "no approval while halted"
+        );
+        crate::services::halt::resume(dispatcher.store(), crate::services::halt::HALT_BY_UI)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deep_link_dispatch_rejects_unregistered_or_disabled_agent() {
+        use crate::models::DiscoveredTool;
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        // No connected tools registered.
+        let err = dispatcher
+            .handle_deep_link_dispatch("not-a-real-agent", "hello")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("registered") || err.contains("not a registered"),
+            "unexpected: {err}"
+        );
+        assert!(
+            !err.contains("not-a-real-agent"),
+            "must not log agent id: {err}"
+        );
+
+        let mut tool = DiscoveredTool::host_app("cursor", "Cursor");
+        tool.id = "cursor".into();
+        dispatcher
+            .store()
+            .save_connected_tools(vec![tool])
+            .await
+            .unwrap();
+        dispatcher
+            .store()
+            .deactivate_connected_tool("cursor")
+            .await
+            .unwrap();
+        let err = dispatcher
+            .handle_deep_link_dispatch("cursor", "hello")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("registered"),
+            "disabled agent must be rejected: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_halt_state_refuses_dispatch() {
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher
+            .store()
+            .set_setting(
+                crate::services::halt::HALT_SETTING_KEY.into(),
+                "{broken".into(),
+            )
+            .await
+            .unwrap();
+        assert!(crate::services::halt::is_halted(dispatcher.store()).await);
+        let task = LoungeTask::new("cursor", "agent-lounge-os", "corrupt halt refuse");
+        let err = dispatcher.handle_task(task).await.unwrap_err().to_string();
+        assert!(
+            err.contains("temporarily halted") || err.contains("halted"),
+            "corrupt halt must fail closed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deep_link_dispatch_lands_in_source_unverified_pending_approval() {
+        use crate::models::DiscoveredTool;
+        let dispatcher = live_dispatcher(Duration::from_secs(5));
+        dispatcher.set_gate_ready(true);
+        let mut tool = DiscoveredTool::host_app("cursor", "Cursor");
+        tool.id = "cursor".into();
+        dispatcher
+            .store()
+            .save_connected_tools(vec![tool])
+            .await
+            .unwrap();
+
+        let d = dispatcher.clone();
+        let handle = tokio::spawn(async move {
+            d.handle_deep_link_dispatch("cursor", "hello from deeplink")
+                .await
+        });
+
+        let started = std::time::Instant::now();
+        let mut pending_id = String::new();
+        while pending_id.is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "deep-link SourceUnverified PENDING_APPROVAL beklemeli"
+            );
+            let snap = dispatcher.pending_approvals();
+            if let Some(req) = snap.first() {
+                assert_eq!(req.kind, ApprovalKind::SourceUnverified);
+                assert_eq!(
+                    req.from_agent,
+                    crate::services::deep_link::DEEP_LINK_SOURCE_AGENT
+                );
+                assert!(
+                    req.reason.contains("Dış Kaynaklı Tetikleme"),
+                    "reason={}",
+                    req.reason
+                );
+                pending_id = req.task_id.clone();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        dispatcher
+            .resolve_vote(pending_id, RoutingVote::Approve)
+            .expect("approve deep-link");
+        // Approval gate is the contract under test; post-approve execution may
+        // still fail without NATS/workers — only assert it was not a halt refuse.
+        match handle.await.unwrap() {
+            Ok(()) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.contains("temporarily halted"),
+                    "unexpected halt after approve: {msg}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

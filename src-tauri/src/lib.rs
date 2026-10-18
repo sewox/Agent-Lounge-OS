@@ -25,19 +25,21 @@ use models::{
 use services::autodiscover::discovery_report;
 use services::{
     api_keys_from_store, apply_placement_show, build_agent_efficiency_report,
-    collect_lounge_health, collect_quota_state_with_keys, data_root, enable_graph_ui,
+    collect_lounge_health, collect_quota_state_with_keys, data_root, enable_graph_ui, engage_halt,
     fix_dead_symbol_with_agent as publish_fix_dead_symbol, flush_session, graph_ui_status,
-    handle_window_event, load_port_from_store, load_port_preference_from_store,
-    on_main_window_closed, open_dead_symbol_in_editor as open_indexed_dead_symbol,
-    open_or_focus_graph_window, open_path_in_editor, persist_port, persist_port_preference,
+    handle_window_event, is_halted, load_halt_state, load_port_from_store,
+    load_port_preference_from_store, log_deep_link_rejection, on_main_window_closed,
+    open_dead_symbol_in_editor as open_indexed_dead_symbol, open_or_focus_graph_window,
+    open_path_in_editor, parse_deep_link, persist_port, persist_port_preference,
     placement_for_window, probe_agent_mcp_url as probe_agent_mcp_url_svc, record_dead_snapshot,
-    record_whisper_injection, resolve_data_root_for_app, run_startup_lounge_health,
+    record_whisper_injection, resolve_data_root_for_app, resume_halt, run_startup_lounge_health,
     spawn_auto_archive, spawn_event_pump, spawn_quota_pump, spawn_supervisor,
-    AgentEfficiencyReport, AgentMcpProbeResult, CbmDaemonPresence, EfficiencyReportQuery,
-    FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus,
-    HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus,
-    MemoryBridge, ModelManager, ServiceManager, SharedServices, WorkspaceScanResult,
-    GRAPH_WINDOW_LABEL, MAIN_WINDOW_LABEL,
+    AgentEfficiencyReport, AgentMcpProbeResult, CbmDaemonPresence, DeepLinkAction,
+    EfficiencyReportQuery, FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState,
+    GraphUiStatus, HaltState, HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue,
+    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
+    WorkspaceScanResult, DEEP_LINK_OPEN_EVENT, DEEP_LINK_SCHEME, GRAPH_WINDOW_LABEL,
+    HALTED_ERROR_MESSAGE, HALT_BY_UI, HALT_CHANGED_EVENT, MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -118,7 +120,24 @@ pub fn run() {
 }
 
 pub fn run_with_start_route(start_route: &'static str) {
-    tauri::Builder::default()
+    // Single-instance must be first so Windows/Linux deep-link argv reaches the
+    // existing process (see tauri-plugin-deep-link + deep-link feature).
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|_app, argv, _cwd| {
+            // Deep-link plugin already forwards matching argv; log without values.
+            let has_deeplink = argv
+                .iter()
+                .any(|a| a.to_ascii_lowercase().starts_with("agentlounge://"));
+            if has_deeplink {
+                log::info!("single-instance: deep-link argv forwarded to running instance");
+            }
+        }));
+    }
+    builder
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
@@ -228,6 +247,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             app.manage(index_queue);
             app.manage(health_scan_queue);
 
+            // Deep links: agentlounge:// — never halt/resume; dispatch → SourceUnverified.
+            // Dev mode does not register the OS scheme (documented in docs/control.md).
+            install_deep_link_handler(app.handle().clone(), dispatcher.clone(), store.clone());
+
             // Graph UI port — settings'ten MemoryBridge + mode yükle (process-global yok).
             // Also run one-time shared CBM config.json pollution migration.
             let port_store = store.clone();
@@ -320,8 +343,16 @@ pub fn run_with_start_route(start_route: &'static str) {
                 spawn_supervisor(supervisor_handle, supervisor_services);
                 spawn_auto_archive(auto_archive_store);
                 // PR-MCP-Quality-1: async title worker + upgrade backfill (concurrency 1).
+                // Halt v1: defer LMR title backfill while halted; Resume wakes via on_halt_resumed.
                 let title_store = store.clone();
                 tauri::async_runtime::spawn(async move {
+                    if is_halted(&title_store).await {
+                        log::info!(
+                            "halt active — deferring title backfill / title worker start until Resume"
+                        );
+                        crate::services::experience_title::mark_startup_title_deferred();
+                        return;
+                    }
                     crate::services::experience_title::ensure_title_worker(title_store.clone())
                         .await;
                     crate::services::experience_title::backfill_missing_titles(&title_store).await;
@@ -448,7 +479,12 @@ pub fn run_with_start_route(start_route: &'static str) {
             set_graph_ui_port,
             get_graph_ui_port_mode,
             set_graph_ui_port_mode,
-            markdown_export::save_markdown_report
+            markdown_export::save_markdown_report,
+            get_halt_state,
+            halt,
+            resume,
+            register_desktop_deep_link,
+            is_desktop_deep_link_registered
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -577,9 +613,15 @@ async fn index_workspace(
         }
     }
     // Health-1a: background full dead scan (concurrency 1) after manual index too.
+    // Halt v1: do not start automatic background scans while halted.
     let repo = graph.repo_path.clone();
     let hint = snapshot.project.clone();
+    let halt_store = store.inner().clone();
     tauri::async_runtime::spawn(async move {
+        if is_halted(&halt_store).await {
+            log::info!("halt active — skipping post-index health scan enqueue");
+            return;
+        }
         services::enqueue_after_index(&repo, &hint).await;
     });
     Ok(snapshot)
@@ -588,10 +630,14 @@ async fn index_workspace(
 /// Health-1a: manually trigger a full dead-symbol scan for a repo.
 #[tauri::command]
 async fn start_health_scan(
+    store: tauri::State<'_, ExperienceStore>,
     queue: tauri::State<'_, std::sync::Arc<HealthScanQueue>>,
     repo_path: String,
     project_id: Option<String>,
 ) -> Result<HealthScanJob, String> {
+    if is_halted(store.inner()).await {
+        return Err(HALTED_ERROR_MESSAGE.to_string());
+    }
     let hint = project_id.unwrap_or_default();
     queue
         .enqueue(repo_path.trim(), hint.trim())
@@ -1217,6 +1263,9 @@ async fn fix_dead_symbol_with_agent(
     bus: tauri::State<'_, BusManager>,
     symbol: DeadSymbol,
 ) -> Result<FixDeadSymbolResult, String> {
+    if is_halted(store.inner()).await {
+        return Err(crate::services::halt::HALTED_ERROR_MESSAGE.into());
+    }
     publish_fix_dead_symbol(&store, bus.nats_url(), symbol)
         .await
         .map_err(|err| err.to_string())
@@ -1368,7 +1417,7 @@ async fn search_index_nodes(
         .map_err(|err| err.to_string())
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct GrokTestResult {
     task_id: String,
     subject: String,
@@ -1380,12 +1429,34 @@ struct GrokTestResult {
 #[tauri::command]
 #[allow(deprecated)]
 async fn trigger_grok_test(
+    store: tauri::State<'_, ExperienceStore>,
     bus: tauri::State<'_, BusManager>,
     project_id: Option<String>,
 ) -> Result<GrokTestResult, String> {
-    use kernel::workflow_engine::{grok_bot_in_fleet, GROK_BOT_WORKER};
+    use kernel::workflow_engine::grok_bot_in_fleet;
+    trigger_grok_test_impl(
+        store.inner(),
+        bus.nats_url(),
+        project_id,
+        grok_bot_in_fleet(),
+    )
+    .await
+}
 
-    if !grok_bot_in_fleet() {
+/// Testable body for [`trigger_grok_test`] (Halt gate before any NATS publish).
+#[allow(deprecated)]
+async fn trigger_grok_test_impl(
+    store: &ExperienceStore,
+    bus_url: &str,
+    project_id: Option<String>,
+    fleet_has_grok: bool,
+) -> Result<GrokTestResult, String> {
+    use kernel::workflow_engine::GROK_BOT_WORKER;
+
+    if is_halted(store).await {
+        return Err(crate::services::halt::HALTED_ERROR_MESSAGE.into());
+    }
+    if !fleet_has_grok {
         return Err("Grok Bot fleet'te yok — test tetiklenemedi".into());
     }
 
@@ -1400,7 +1471,7 @@ async fn trigger_grok_test(
     let chain = format!("{project} -> Triggered Manual Grok Test");
     task.workflow_chain = Some(chain.clone());
 
-    let url = bus.nats_url().to_string();
+    let url = bus_url.to_string();
     let subject = TASK_REQUESTED.to_string();
     let bytes = serde_json::to_vec(&task).map_err(|err| err.to_string())?;
     let subject_err = subject.clone();
@@ -1808,6 +1879,144 @@ async fn set_graph_ui_port_mode(
     Ok(parsed.as_str().into())
 }
 
+#[tauri::command]
+async fn get_halt_state(store: tauri::State<'_, ExperienceStore>) -> Result<HaltState, String> {
+    load_halt_state(store.inner())
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Halt — local UI only. Never callable via deep link or MCP.
+#[tauri::command]
+async fn halt(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, ExperienceStore>,
+    reason: Option<String>,
+) -> Result<HaltState, String> {
+    let state = engage_halt(store.inner(), reason, HALT_BY_UI)
+        .await
+        .map_err(|err| err.to_string())?;
+    let _ = app.emit(HALT_CHANGED_EVENT, &state);
+    Ok(state)
+}
+
+/// Resume — local UI only. Never callable via deep link or MCP.
+#[tauri::command]
+async fn resume(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, ExperienceStore>,
+) -> Result<HaltState, String> {
+    let state = resume_halt(store.inner(), HALT_BY_UI)
+        .await
+        .map_err(|err| err.to_string())?;
+    // Wake parked LMR title worker; run deferred startup backfill if needed.
+    crate::services::experience_title::on_halt_resumed(store.inner()).await;
+    let _ = app.emit(HALT_CHANGED_EVENT, &state);
+    Ok(state)
+}
+
+/// AppImage / Linux+Windows runtime: register `agentlounge://` with user consent (Settings).
+/// macOS uses CFBundleURLTypes from the bundle — runtime register is unsupported there.
+/// Dev mode (`tauri dev`) does **not** auto-register; call this explicitly if needed.
+#[tauri::command]
+fn register_desktop_deep_link(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        app.deep_link()
+            .register(DEEP_LINK_SCHEME)
+            .map_err(|err| err.to_string())?;
+        log::info!("deep-link scheme registered at runtime: {DEEP_LINK_SCHEME}://");
+        Ok(true)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = app;
+        Err("runtime deep-link registration is only supported on Linux and Windows (macOS uses Info.plist CFBundleURLTypes)".into())
+    }
+}
+
+#[tauri::command]
+fn is_desktop_deep_link_registered(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        app.deep_link()
+            .is_registered(DEEP_LINK_SCHEME)
+            .map_err(|err| err.to_string())
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = app;
+        // Bundled macOS apps register via Info.plist — treat as registered when packaged.
+        Ok(cfg!(not(debug_assertions)))
+    }
+}
+
+fn install_deep_link_handler(
+    app: tauri::AppHandle,
+    dispatcher: Dispatcher,
+    store: ExperienceStore,
+) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+
+    let handle_urls = {
+        let app = app.clone();
+        let dispatcher = dispatcher.clone();
+        let store = store.clone();
+        move |urls: Vec<String>| {
+            for raw in urls {
+                match parse_deep_link(&raw) {
+                    Ok(DeepLinkAction::Open { route }) => {
+                        log::info!("deep-link open route accepted");
+                        let _ =
+                            app.emit(DEEP_LINK_OPEN_EVENT, serde_json::json!({ "route": route }));
+                    }
+                    Ok(DeepLinkAction::Dispatch { agent, text }) => {
+                        let app2 = app.clone();
+                        let dispatcher2 = dispatcher.clone();
+                        let store2 = store.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if is_halted(&store2).await {
+                                log::warn!("deep-link dispatch refused while halted");
+                                return;
+                            }
+                            match dispatcher2.handle_deep_link_dispatch(&agent, &text).await {
+                                Ok(()) => {
+                                    log::info!("deep-link dispatch completed (approval gate)")
+                                }
+                                Err(err) => {
+                                    // Do not log agent/text values.
+                                    log::warn!("deep-link dispatch failed: {err}");
+                                    let _ = app2.emit(
+                                        DEEP_LINK_OPEN_EVENT,
+                                        serde_json::json!({
+                                            "error": "dispatch_failed",
+                                        }),
+                                    );
+                                }
+                            }
+                        });
+                    }
+                    Err(reject) => {
+                        log_deep_link_rejection(&reject);
+                    }
+                }
+            }
+        }
+    };
+
+    // Startup URLs (app launched via deep link).
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        handle_urls(urls.into_iter().map(|u| u.to_string()).collect());
+    }
+
+    let handler = handle_urls;
+    app.deep_link().on_open_url(move |event| {
+        handler(event.urls().into_iter().map(|u| u.to_string()).collect());
+    });
+}
+
 #[cfg(test)]
 mod kernel_log_config_tests {
     #[test]
@@ -1820,5 +2029,29 @@ mod kernel_log_config_tests {
         }
         // Plugin defaults (tauri-plugin-log 2.10.0): 40_000 bytes + KeepOne.
         assert!(max_size > 40_000);
+    }
+}
+
+#[cfg(test)]
+mod halt_ui_dispatch_tests {
+    use super::trigger_grok_test_impl;
+    use crate::db::ExperienceStore;
+    use crate::services::halt::{self, HALTED_ERROR_MESSAGE, HALT_BY_UI};
+
+    #[tokio::test]
+    async fn trigger_grok_test_refuses_while_halted_without_publish() {
+        let store = ExperienceStore::memory().unwrap();
+        halt::halt(&store, Some("grok".into()), HALT_BY_UI)
+            .await
+            .unwrap();
+        // Unreachable NATS — Halt must return before connect/publish.
+        let err = trigger_grok_test_impl(&store, "nats://127.0.0.1:9", None, true)
+            .await
+            .unwrap_err();
+        assert_eq!(err, HALTED_ERROR_MESSAGE, "unexpected: {err}");
+        assert!(
+            !err.contains("NATS") && !err.contains("publish") && !err.contains("bağlant"),
+            "must not reach NATS while halted: {err}"
+        );
     }
 }

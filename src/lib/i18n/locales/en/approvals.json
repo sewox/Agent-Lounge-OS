@@ -6,6 +6,8 @@
   "switchLocal": "Switch to local model",
   "routingApproval": "Routing approval",
   "sourceUnverified": "Unverified source · PENDING_APPROVAL",
+  "externalTrigger": "External trigger",
+  "externalTriggerDetail": "This task was opened via an OS deep link (agentlounge://). Review carefully before approving.",
   "securityPending": "Security · {{level}} · PENDING_APPROVAL",
   "quotaBlocked": "Quota Alert · QUOTA_BLOCKED",
   "noPending": "No pending approval",

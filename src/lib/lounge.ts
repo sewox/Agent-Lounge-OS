@@ -2360,3 +2360,89 @@ export async function probeAgentMcpUrl(
     configPathId,
   });
 }
+
+// --- PR-Control-1: Halt v1 + deep-link helpers (append-only) ---
+
+export type HaltState = {
+  halted: boolean;
+  reason?: string | null;
+  by?: string | null;
+  at?: string | null;
+};
+
+export const HALT_CHANGED_EVENT = "lounge://halt-changed";
+export const DEEP_LINK_OPEN_EVENT = "lounge://deep-link-open";
+export const DEEP_LINK_SOURCE_AGENT = "deep-link";
+
+/** Mirrors Rust `ALLOWED_OPEN_ROUTES` — exact match only (no query, no host). */
+export const ALLOWED_DEEP_LINK_OPEN_ROUTES = [
+  "/",
+  "/dashboard",
+  "/stream",
+  "/vault",
+  "/health",
+  "/fleet",
+  "/telemetry",
+  "/quotas",
+  "/settings",
+  "/onboarding",
+] as const;
+
+export type AllowedDeepLinkOpenRoute = (typeof ALLOWED_DEEP_LINK_OPEN_ROUTES)[number];
+
+export function isAllowedDeepLinkOpenRoute(route: string): route is AllowedDeepLinkOpenRoute {
+  return (ALLOWED_DEEP_LINK_OPEN_ROUTES as readonly string[]).includes(route);
+}
+
+export function isDeepLinkExternalTrigger(
+  fromAgent: string | undefined | null,
+  reason?: string | null,
+): boolean {
+  if (fromAgent === DEEP_LINK_SOURCE_AGENT) {
+    return true;
+  }
+  if (reason && /Dış Kaynaklı Tetikleme|External trigger/i.test(reason)) {
+    return true;
+  }
+  return false;
+}
+
+export async function getHaltState(): Promise<HaltState> {
+  if (!isTauri()) {
+    return { halted: false };
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<HaltState>("get_halt_state");
+}
+
+export async function haltLounge(reason?: string | null): Promise<HaltState> {
+  if (!isTauri()) {
+    throw new Error("Halt requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<HaltState>("halt", { reason: reason?.trim() || null });
+}
+
+export async function resumeLounge(): Promise<HaltState> {
+  if (!isTauri()) {
+    throw new Error("Resume requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<HaltState>("resume");
+}
+
+export async function registerDesktopDeepLink(): Promise<boolean> {
+  if (!isTauri()) {
+    throw new Error("Desktop integration requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<boolean>("register_desktop_deep_link");
+}
+
+export async function isDesktopDeepLinkRegistered(): Promise<boolean> {
+  if (!isTauri()) {
+    return false;
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<boolean>("is_desktop_deep_link_registered");
+}

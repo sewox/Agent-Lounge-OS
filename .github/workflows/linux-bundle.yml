@@ -214,6 +214,24 @@ jobs:
           fi
           echo "ok: lounge-test-helper absent from .deb listing"
 
+      # OPEN 8: real-bundle deep-link registration (not only installer fixtures).
+      # Job name "Build AppImage + deb" stays unchanged (branch-protection check).
+      - name: Assert agentlounge MimeType + Exec %u in built .deb/.AppImage
+        run: |
+          set -euo pipefail
+          bash scripts/install/assert-bundle-deep-link-desktop.sh --self-test
+          DEB="$(ls src-tauri/target/release/bundle/deb/*.deb | head -n1)"
+          APPIMAGE="$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -n1)"
+          if [[ -z "$DEB" || ! -f "$DEB" ]]; then
+            echo "FAIL: no .deb produced under src-tauri/target/release/bundle/deb/"
+            exit 1
+          fi
+          if [[ -z "$APPIMAGE" || ! -f "$APPIMAGE" ]]; then
+            echo "FAIL: no .AppImage produced under src-tauri/target/release/bundle/appimage/"
+            exit 1
+          fi
+          bash scripts/install/assert-bundle-deep-link-desktop.sh --deb "$DEB" --appimage "$APPIMAGE"
+
       - name: Sidecar functional smoke
         if: steps.stage.outputs.mode == 'real'
         run: |

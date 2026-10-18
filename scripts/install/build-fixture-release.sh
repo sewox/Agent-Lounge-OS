@@ -65,6 +65,17 @@ EOF
   <key>CFBundleExecutable</key><string>agent-lounge-os</string>
   <key>CFBundleIdentifier</key><string>com.agentlounge.os</string>
   <key>CFBundleName</key><string>Agent Lounge OS</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>com.agentlounge.os</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>agentlounge</string>
+      </array>
+    </dict>
+  </array>
 </dict></plist>
 PLIST
   tar -czf "$OUT/Agent-Lounge-OS-macos-${arch}.app.tar.gz" -C "$staging" "Agent Lounge OS.app"

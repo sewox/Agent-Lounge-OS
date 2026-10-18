@@ -117,6 +117,28 @@ Lounge’un codebase-memory-mcp **3D Graph UI** dinleme portu Antigravity cbm va
 
 Serbest biçim / `additionalProperties` → net MCP `isError` yanıtı.
 
+### Halted error (`code: halted`)
+
+When the operator engages **Halt** in the UI (see [control.md](./control.md)), write/dispatch tools return a structured error:
+
+```json
+{
+  "error": "halted",
+  "code": "halted",
+  "message": "Agent Lounge OS is temporarily halted. … temporary pause — retry after Resume. … does not cancel in-flight … does not stop external agent sessions …",
+  "retryable": true,
+  "temporary_pause": true,
+  "cancels_inflight": false,
+  "stops_external_sessions": false
+}
+```
+
+Blocked while halted: `lounge_dispatch_task`, `lounge_ask_agent`, `lounge_call_agent`, `lounge_record_experience`, `lounge_record_decision`.
+
+Still available: `lounge_status`, `lounge_health`, `lounge_search_experience`, `lounge_wait_task`, `lounge_list_my_tasks`, `lounge_yield_result`.
+
+Callers should treat `halted` as a **temporary pause** and retry after the operator resumes. Halt v1 does not cancel in-flight tasks and does not stop Cursor / Antigravity / Claude Desktop / Grok Bot sessions.
+
 ## Timeout manager (PR-3 / PR-3b)
 
 Oturum başına tek eşik: `timeout_limit` (`bridge/timeout_manager.rs` → [`ClientProfile`]).

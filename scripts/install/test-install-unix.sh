@@ -146,6 +146,14 @@ if ! printf '%s\n' "$install_out" | grep -Eq 'Uninstall: curl -fsSL .*\| sh -s -
   exit 1
 fi
 
+# Static assert: Windows NSIS fixture template registers agentlounge:// (runs on all hosts).
+NSI="$ROOT/scripts/install/fixture-nsis/lounge-fixture.nsi"
+[[ -f "$NSI" ]] || { echo "FAIL: NSIS fixture missing: $NSI" >&2; exit 1; }
+grep -q 'Software\\Classes\\agentlounge' "$NSI" \
+  || { echo "FAIL: NSIS fixture missing HKCU Software\\Classes\\agentlounge" >&2; exit 1; }
+grep -q 'URL Protocol' "$NSI" \
+  || { echo "FAIL: NSIS fixture missing URL Protocol" >&2; exit 1; }
+
 CLI="$PREFIX/bin/agent-lounge-os"
 ICON="$PREFIX/share/icons/hicolor/128x128/apps/agent-lounge-os.png"
 DESKTOP="$PREFIX/share/applications/agent-lounge-os.desktop"
@@ -170,9 +178,17 @@ if [[ "$(uname -s)" = Linux ]]; then
   [[ -n "$icon_field" ]] || { echo "FAIL: desktop has no Icon=" >&2; exit 1; }
   [[ -f "$icon_field" ]] || { echo "FAIL: desktop Icon= path does not resolve: $icon_field" >&2; exit 1; }
   [[ "$icon_field" = "$ICON" ]] || { echo "FAIL: Icon= ($icon_field) != $ICON" >&2; exit 1; }
+  grep -q 'MimeType=.*x-scheme-handler/agentlounge' "$DESKTOP" \
+    || { echo "FAIL: .desktop missing MimeType x-scheme-handler/agentlounge" >&2; exit 1; }
 elif [[ "$(uname -s)" = Darwin ]]; then
   [[ -d "$PREFIX/Applications/Agent Lounge OS.app" ]] \
     || { echo "FAIL: macOS .app missing under LOUNGE_MAC_APP_DIR" >&2; exit 1; }
+  PLIST="$PREFIX/Applications/Agent Lounge OS.app/Contents/Info.plist"
+  [[ -f "$PLIST" ]] || { echo "FAIL: Info.plist missing" >&2; exit 1; }
+  grep -q 'CFBundleURLTypes' "$PLIST" \
+    || { echo "FAIL: Info.plist missing CFBundleURLTypes" >&2; exit 1; }
+  grep -q 'agentlounge' "$PLIST" \
+    || { echo "FAIL: Info.plist missing agentlounge URL scheme" >&2; exit 1; }
 fi
 
 echo "== --version =="
@@ -324,9 +340,27 @@ fi
 [[ -f "$MANIFEST" ]] || { echo "FAIL: manifest disappeared during lock test" >&2; exit 1; }
 echo "ok: undeletable path → non-zero uninstall (mode=$LOCK_MODE)"
 
+echo "== uninstall removes x-scheme-handler/agentlounge from mimeapps.list =="
+MIME_HOME=$(mktemp -d "${TMPDIR:-/tmp}/lounge-mime.XXXXXX")
+mkdir -p "$MIME_HOME/.config" "$MIME_HOME/.local/share/applications"
+# XDG config: keep an unrelated entry so we prove we only strip the scheme line.
+printf '%s\n' \
+  '[Default Applications]' \
+  'x-scheme-handler/agentlounge=agent-lounge-os.desktop' \
+  'text/plain=other.desktop' \
+  >"$MIME_HOME/.config/mimeapps.list"
+# Legacy path: file whose *only* line is the scheme default (grep -v → empty; must not abort under set -e).
+printf '%s\n' 'x-scheme-handler/agentlounge=agent-lounge-os.desktop' \
+  >"$MIME_HOME/.local/share/applications/mimeapps.list"
+
 echo "== uninstall (every installed file) =="
 chmod u+w "$SHARE_DIR"
-sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX"
+# Override HOME/XDG so uninstall edits our seeded mimeapps (does not require xdg-mime).
+un_out=$(
+  HOME="$MIME_HOME" XDG_CONFIG_HOME="$MIME_HOME/.config" \
+    sh "$ROOT/install.sh" --uninstall --prefix "$PREFIX" 2>&1
+)
+printf '%s\n' "$un_out"
 for p in "${INSTALLED_FILES[@]}"; do
   if [[ -e "$p" || -L "$p" ]]; then
     echo "FAIL: still present after uninstall: $p" >&2
@@ -337,5 +371,24 @@ if [[ -e "$CLI" || -e "$ICON" || -e "$DESKTOP" || -e "$APPIMAGE" || -e "$MANIFES
   echo "FAIL: known install paths remain after uninstall" >&2
   exit 1
 fi
+
+if grep -q 'x-scheme-handler/agentlounge=' "$MIME_HOME/.config/mimeapps.list"; then
+  echo "FAIL: x-scheme-handler/agentlounge still in XDG mimeapps.list after uninstall" >&2
+  cat "$MIME_HOME/.config/mimeapps.list" >&2
+  exit 1
+fi
+grep -q 'text/plain=other.desktop' "$MIME_HOME/.config/mimeapps.list" \
+  || { echo "FAIL: unrelated mimeapps entry was removed" >&2; exit 1; }
+if grep -q 'x-scheme-handler/agentlounge=' "$MIME_HOME/.local/share/applications/mimeapps.list"; then
+  echo "FAIL: x-scheme-handler/agentlounge still in legacy mimeapps.list after uninstall" >&2
+  cat "$MIME_HOME/.local/share/applications/mimeapps.list" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$un_out" | grep -q 'Removed x-scheme-handler/agentlounge default'; then
+  echo "FAIL: uninstall did not report mimeapps scheme-default removal" >&2
+  exit 1
+fi
+rm -rf "$MIME_HOME"
+echo "ok: uninstall stripped scheme default from XDG + legacy mimeapps.list"
 
 echo "ALL OK (unix installer fixture; ID=${OS_ID} pkg=${PKG})"

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Agent Lounge OS (negative fixture — no %u)
+Type=Application
+Exec=agent-lounge-os
+MimeType=x-scheme-handler/agentlounge;
+# Intentionally no %u on Exec= — used by assert-bundle-deep-link-desktop.sh --self-test
+Comment=Negative fixture for deep-link Exec %u assert

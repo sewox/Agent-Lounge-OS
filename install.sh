@@ -220,11 +220,46 @@ remove_path_loud() {
   fi
 }
 
+strip_scheme_default_from_mimeapps() {
+  # Remove x-scheme-handler/agentlounge= lines from a mimeapps.list.
+  # Safe under `set -e`: empty output after grep -v (file held only that line) is OK.
+  mimeapps="$1"
+  if [ ! -f "$mimeapps" ]; then
+    printf 'note: mimeapps.list not found at %s — skipping x-scheme-handler/agentlounge default removal\n' "$mimeapps"
+    return 0
+  fi
+  if ! grep -q 'x-scheme-handler/agentlounge=' "$mimeapps"; then
+    printf 'note: no x-scheme-handler/agentlounge default in %s — nothing to remove\n' "$mimeapps"
+    return 0
+  fi
+  tmp="${mimeapps}.lounge-uninstall.$$"
+  # grep exits 1 when every line matched -v (file becomes empty) — do not abort uninstall.
+  set +e
+  grep -v 'x-scheme-handler/agentlounge=' "$mimeapps" >"$tmp"
+  greprc=$?
+  set -e
+  if [ "$greprc" -ne 0 ] && [ "$greprc" -ne 1 ]; then
+    rm -f "$tmp"
+    fail "uninstall failed: could not filter $mimeapps (grep exit $greprc)"
+  fi
+  mv -f "$tmp" "$mimeapps"
+  printf 'Removed x-scheme-handler/agentlounge default from %s\n' "$mimeapps"
+}
+
+uninstall_scheme_default() {
+  # Undo install-time scheme default entries. Does not require xdg-mime on PATH —
+  # we edit mimeapps.list directly (xdg-mime may be absent in minimal containers).
+  strip_scheme_default_from_mimeapps "${XDG_CONFIG_HOME:-${HOME}/.config}/mimeapps.list"
+  # Legacy location still consulted by some desktops / older xdg-utils.
+  strip_scheme_default_from_mimeapps "${HOME}/.local/share/applications/mimeapps.list"
+}
+
 uninstall() {
   man="$(manifest_path)"
   if [ ! -f "$man" ]; then
     fail "uninstall failed: no install manifest at $man (nothing this installer recorded). Refusing best-effort wipe."
   fi
+  uninstall_scheme_default
   while IFS= read -r path || [ -n "$path" ]; do
     [ -n "$path" ] || continue
     [ "$path" = "$man" ] && continue
@@ -453,16 +488,29 @@ EOF
 Type=Application
 Name=${APP_NAME}
 Comment=Local multi-agent orchestration layer
-Exec=${target}
+Exec=${target} %u
 Icon=${ICON_PATH}
 Terminal=false
 Categories=Development;
+MimeType=x-scheme-handler/agentlounge;
 EOF
 
   [ -f "$ICON_PATH" ] || fail "icon file missing after install: $ICON_PATH"
   icon_field=$(sed -n 's/^Icon=//p' "$desktop" | head -n1)
   [ "$icon_field" = "$ICON_PATH" ] || fail "desktop Icon= mismatch: got '$icon_field'"
   [ -f "$icon_field" ] || fail "desktop Icon= path does not resolve: $icon_field"
+
+  # Refresh MIME / scheme caches when tools exist — never assume apt or a package manager.
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_DIR"
+  else
+    printf 'note: update-desktop-database not found — skipping desktop database refresh\n'
+  fi
+  if command -v xdg-mime >/dev/null 2>&1; then
+    xdg-mime default "${APP_ID}.desktop" x-scheme-handler/agentlounge
+  else
+    printf 'note: xdg-mime not found — skipping default scheme handler registration\n'
+  fi
 
   record_manifest "$target" "$shim" "$desktop" "$ICON_PATH"
   printf 'Installed AppImage → %s\n' "$target"
