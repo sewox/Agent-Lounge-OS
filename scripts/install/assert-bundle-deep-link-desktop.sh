@@ -21,6 +21,16 @@ fail() {
   exit 1
 }
 
+# Resolve to an absolute path before any `cd` (relative paths break after mktemp cd).
+abspath() {
+  local p="$1"
+  [[ -e "$p" ]] || fail "path does not exist: $p"
+  local dir base
+  dir="$(CDPATH= cd -- "$(dirname -- "$p")" && pwd)"
+  base="$(basename -- "$p")"
+  printf '%s/%s\n' "$dir" "$base"
+}
+
 # Assert one .desktop file. Prints ok: on success.
 assert_desktop_file() {
   local desktop="$1"
@@ -32,7 +42,7 @@ assert_desktop_file() {
   fi
 
   local exec_line
-  exec_line="$(grep -E '^Exec=' "$desktop" | head -n1 || true)"
+  exec_line="$(awk '/^Exec=/{print; exit}' "$desktop")"
   [[ -n "$exec_line" ]] || fail "desktop missing Exec= line (${label})"
 
   # Strip Exec= prefix and trailing whitespace; require %u as the final token.
@@ -78,7 +88,8 @@ extract_deb_desktops() {
 }
 
 assert_deb() {
-  local deb="$1"
+  local deb
+  deb="$(abspath "$1")"
   local extract
   extract="$(mktemp -d "${TMPDIR:-/tmp}/lounge-deb-desktop.XXXXXX")"
   # shellcheck disable=SC2064
@@ -94,7 +105,8 @@ assert_deb() {
 }
 
 assert_appimage() {
-  local appimage="$1"
+  local appimage
+  appimage="$(abspath "$1")"
   [[ -f "$appimage" ]] || fail "AppImage not found: $appimage"
   [[ -x "$appimage" ]] || chmod +x "$appimage"
 
@@ -119,27 +131,46 @@ assert_appimage() {
   [[ "$found" -eq 1 ]] || fail "no .desktop file found after AppImage extract: $appimage"
 }
 
+expect_desktop_fail() {
+  local desktop="$1"
+  local label="$2"
+  local expect_pat="$3"
+  local out rc
+  set +e
+  out="$(assert_desktop_file "$desktop" "$label" 2>&1)"
+  rc=$?
+  set -e
+  if [[ "$rc" -eq 0 ]]; then
+    fail "self-test: expected non-zero exit for ${label}, got 0"
+  fi
+  if ! printf '%s' "$out" | grep -Eq "$expect_pat"; then
+    fail "self-test: ${label} did not match /${expect_pat}/ (out=${out})"
+  fi
+  printf 'ok: self-test %s rejected (rc=%s)\n' "$label" "$rc"
+}
+
 run_self_test() {
-  local bad="$FIXTURE_DIR/desktop-missing-mimetype.desktop"
+  local bad_mime="$FIXTURE_DIR/desktop-missing-mimetype.desktop"
+  local bad_exec="$FIXTURE_DIR/desktop-missing-exec-u.desktop"
   local good="$FIXTURE_DIR/desktop-ok-deep-link.desktop"
-  [[ -f "$bad" ]] || fail "missing negative fixture: $bad"
+  [[ -f "$bad_mime" ]] || fail "missing negative fixture: $bad_mime"
+  [[ -f "$bad_exec" ]] || fail "missing negative fixture: $bad_exec"
   [[ -f "$good" ]] || fail "missing positive fixture: $good"
 
   # Positive fixture must pass.
   assert_desktop_file "$good" "fixture:desktop-ok-deep-link.desktop"
 
-  # Negative fixture must fail (non-zero). Capture output; do not use || true.
-  set +e
-  out="$(assert_desktop_file "$bad" "fixture:desktop-missing-mimetype.desktop" 2>&1)"
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 0 ]]; then
-    fail "self-test: expected non-zero exit for desktop missing MimeType, got 0"
-  fi
-  if ! printf '%s' "$out" | grep -q 'FAIL:.*MimeType'; then
-    fail "self-test: negative fixture did not report MimeType failure (out=${out})"
-  fi
-  printf 'ok: self-test negative fixture rejected (rc=%s)\n' "$rc"
+  # Negative: missing MimeType.
+  expect_desktop_fail \
+    "$bad_mime" \
+    "fixture:desktop-missing-mimetype.desktop" \
+    'FAIL:.*MimeType'
+
+  # Negative: MimeType present but Exec without %u.
+  expect_desktop_fail \
+    "$bad_exec" \
+    "fixture:desktop-missing-exec-u.desktop" \
+    'FAIL:.*Exec= must end with %u'
 }
 
 usage() {
