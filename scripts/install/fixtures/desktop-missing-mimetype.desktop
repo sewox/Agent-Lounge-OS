@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Agent Lounge OS (negative fixture)
+Type=Application
+Exec=agent-lounge-os
+# Intentionally no MimeType= line — used by assert-bundle-deep-link-desktop.sh --self-test
+Comment=Negative fixture for deep-link MimeType assert
