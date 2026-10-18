@@ -1,9 +1,18 @@
 #!/usr/bin/env node
 /**
  * Build docs/qa/baseline-2026-09-26.md from Playwright JSON + layout-metrics.jsonl.
+ *
+ * L3 thresholds and banner occupancy rules live in `./layout-l3.mjs` (shared with
+ * `e2e/helpers/layout.ts`) so the report cannot drift from the harness.
  */
 import fs from "node:fs";
 import path from "node:path";
+import {
+  L3_EMPTY_RATIO_MAX,
+  STATUS_BANNER_STACK_SELECTOR,
+  l3ContentRect,
+  l3Pass,
+} from "./layout-l3.mjs";
 
 /** Playwright JSON + layout metrics live under ignored test-results/ (CI artifact). */
 const ARTIFACT_ROOT = path.resolve("test-results", "qa-baseline");
@@ -72,9 +81,28 @@ const metrics = fs.existsSync(METRICS)
   ? fs.readFileSync(METRICS, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
   : [];
 
-const layoutViolations = metrics.filter(
-  (m) => !m.l1_pass || !m.l2_pass || !m.l3_pass || !m.l4_pass || !m.l5_pass || m.l6_pass === false,
-);
+const layoutViolations = metrics.filter((m) => {
+  // Re-derive L3 from the shared helper so a stale l3_pass flag cannot drift.
+  const l3_ok = l3Pass(m.l3_largestEmptyRatio);
+  // Content-area contract: full viewport (shared with measureLayout).
+  const content = l3ContentRect({
+    viewport: m.viewport,
+    sidebarW: m.sidebarW,
+  });
+  if (content.y !== 0 || content.h !== m.viewport.height) {
+    throw new Error(
+      `L3 content-area drift for ${m.route}: y=${content.y} h=${content.h} vp.h=${m.viewport.height}`,
+    );
+  }
+  return (
+    !m.l1_pass ||
+    !m.l2_pass ||
+    !l3_ok ||
+    !m.l4_pass ||
+    !m.l5_pass ||
+    m.l6_pass === false
+  );
+});
 
 const blockerExpected = rows.filter((r) => {
   const isB =
@@ -141,13 +169,19 @@ for (const r of rows) {
 lines.push("");
 lines.push("## Layout metrics (L1–L6) per route × viewport");
 lines.push("");
+lines.push(
+  `L3 empty ≤ ${(L3_EMPTY_RATIO_MAX * 100).toFixed(0)}% of content area (full viewport height; ` +
+    `visible banners under \`${STATUS_BANNER_STACK_SELECTOR}\` count as occupied — see \`scripts/qa/layout-l3.mjs\`).`,
+);
+lines.push("");
 lines.push("| Route | Viewport | L1 ratio | L2 | L3 empty | L4 | L5 | L6 | Violations |");
 lines.push("|-------|----------|----------|----|----------|----|----|----|------------|");
 for (const m of metrics) {
   const v = [];
   if (!m.l1_pass) v.push(`L1=${(m.l1_widthRatio * 100).toFixed(0)}%`);
   if (!m.l2_pass) v.push("L2");
-  if (!m.l3_pass) v.push(`L3=${(m.l3_largestEmptyRatio * 100).toFixed(0)}%`);
+  const l3_ok = l3Pass(m.l3_largestEmptyRatio);
+  if (!l3_ok) v.push(`L3=${(m.l3_largestEmptyRatio * 100).toFixed(0)}%`);
   if (!m.l4_pass) v.push("L4");
   if (!m.l5_pass) v.push("L5");
   if (m.l6_pass === false) v.push("L6");

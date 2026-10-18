@@ -463,6 +463,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
+      {/* L3 occupancy hook only — `contents` keeps layout identical; bannerHeight/RO/paddingTop unchanged. */}
+      <div data-qa="status-banner-stack" className="contents">
       {indexing || indexProgressActive(indexProgress) ? (
         <div
           ref={attachBannerRef}
@@ -768,6 +770,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       ) : null}
+      </div>
 
       <header className="fixed top-0 left-0 z-40 flex h-12 w-full min-w-0 items-center gap-2 border-b border-outline-variant bg-surface px-3">
         <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
