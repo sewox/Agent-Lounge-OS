@@ -108,7 +108,7 @@ Canonical implementation: `e2e/helpers/layout.ts` (`measureLayout`, `assertLayou
 |------|----------------------------------------|
 | **L1** | Union of `main [data-qa=panel]` widths ≥ **85%** of content width (viewport − sidebar) |
 | **L2** | Panel union bottom ≥ **85%** of viewport height **or** page/main scrolls; tall panels (≥50% vh) must not be sparse (interior fill ≥ **45%**) |
-| **L3** | Largest empty 8×8 cell block over content ≤ **15%** of content area |
+| **L3** | Largest empty 8×8 cell block over content ≤ **15%** of content area. Content area is the **full viewport** (`contentY = 0`, `contentH = vp.height`) — do not exclude header or `<main>` padding. Visible banners under `[data-qa="status-banner-stack"]` count as **occupied** cells (union of viewport-clipped rects; no generic `position:fixed` heuristic). Shared impl: `scripts/qa/layout-l3.mjs`. |
 | **L4** | No single panel narrower than **70%** of content (centered or left-aligned unused width — live G4) |
 | **L5** | No horizontal page overflow; sidebar children stay inside rail; `+ New Node` must not overlap `AL-OS CORE` |
 | **L6** | Portrait only: every panel width ≥ **95%** of content width (stack, don’t split side-by-side) |

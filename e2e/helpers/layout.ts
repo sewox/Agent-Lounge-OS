@@ -1,4 +1,11 @@
 import type { Page, Expect } from "@playwright/test";
+import {
+  collectStatusBannerRects,
+  largestEmptyRatio as sharedLargestEmptyRatio,
+  L3_EMPTY_RATIO_MAX,
+  L3_GRID,
+  l3Pass,
+} from "../../scripts/qa/layout-l3.mjs";
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
@@ -45,59 +52,21 @@ export type LayoutMetrics = {
   l6_pass: boolean | null;
 };
 
-function intersects(a: Rect, cell: Rect) {
-  return !(a.x + a.w <= cell.x || cell.x + cell.w <= a.x || a.y + a.h <= cell.y || cell.y + cell.h <= a.y);
-}
-
 function rectsOverlap(a: Rect, b: Rect) {
   return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
 }
 
-/** Largest empty rectangle on an 8x8 grid over the content area (fraction of content area). */
+/**
+ * Largest empty rectangle on an 8×8 grid over the content area (fraction of content area).
+ * Occupied = panels ∪ visible `[data-qa="status-banner-stack"]` banner rects (union).
+ * Implementation lives in `scripts/qa/layout-l3.mjs` (shared with baseline report).
+ */
 export function largestEmptyRatio(
   content: Rect,
-  panels: Rect[],
-  grid = 8,
+  occupiedRects: Rect[],
+  grid = L3_GRID,
 ): number {
-  if (content.w <= 0 || content.h <= 0) return 1;
-  const occupied = Array.from({ length: grid }, () => Array.from({ length: grid }, () => false));
-  const cellW = content.w / grid;
-  const cellH = content.h / grid;
-  for (let gy = 0; gy < grid; gy++) {
-    for (let gx = 0; gx < grid; gx++) {
-      const cell: Rect = {
-        x: content.x + gx * cellW,
-        y: content.y + gy * cellH,
-        w: cellW,
-        h: cellH,
-      };
-      occupied[gy]![gx] = panels.some((p) => intersects(p, cell));
-    }
-  }
-
-  let best = 0;
-  for (let y0 = 0; y0 < grid; y0++) {
-    for (let x0 = 0; x0 < grid; x0++) {
-      for (let y1 = y0; y1 < grid; y1++) {
-        for (let x1 = x0; x1 < grid; x1++) {
-          let empty = true;
-          for (let y = y0; y <= y1 && empty; y++) {
-            for (let x = x0; x <= x1; x++) {
-              if (occupied[y]![x]) {
-                empty = false;
-                break;
-              }
-            }
-          }
-          if (empty) {
-            const cells = (x1 - x0 + 1) * (y1 - y0 + 1);
-            best = Math.max(best, cells / (grid * grid));
-          }
-        }
-      }
-    }
-  }
-  return best;
+  return sharedLargestEmptyRatio(content, occupiedRects, grid);
 }
 
 export async function measureLayout(page: Page, route: string): Promise<LayoutMetrics> {
@@ -195,9 +164,12 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
 
   const contentW = vp.width - measured.sidebarW;
   const contentX = measured.main?.x ?? measured.sidebarW;
+  // L3 content area is the full viewport — never shrink for header/main padding.
   const contentY = 0;
   const contentH = vp.height;
   const panels = measured.panels.filter((p) => p.w > 0 && p.h > 0);
+  // Visible status banners (locked selector) occupy L3 cells the same as panels.
+  const bannerRects = (await page.evaluate(collectStatusBannerRects)) as Rect[];
 
   const union =
     panels.length === 0
@@ -226,7 +198,8 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
   }
 
   const contentRect: Rect = { x: contentX, y: contentY, w: contentW, h: contentH };
-  const l3_largestEmptyRatio = largestEmptyRatio(contentRect, panels);
+  const l3Occupied = [...panels, ...bannerRects];
+  const l3_largestEmptyRatio = largestEmptyRatio(contentRect, l3Occupied);
 
   // L4: narrow single panel — centered (classic) OR left-aligned unused width (live G4).
   let l4_centeredNarrow = false;
@@ -256,7 +229,7 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
 
   const l1_pass = l1_widthRatio >= 0.85;
   const l2_pass = l2_heightOk && !l2_sparseInterior;
-  const l3_pass = l3_largestEmptyRatio <= 0.15;
+  const l3_pass = l3Pass(l3_largestEmptyRatio);
   const l4_pass = !l4_centeredNarrow && !l4_narrowSinglePanel;
   const l5_pass = !l5_horizontalOverflow && !l5_sidebarOverflow && !l5_newNodeOverlap;
   const l6_pass = l6_portraitStackOk;
@@ -299,7 +272,11 @@ export function formatLayoutFailure(m: LayoutMetrics): string {
   if (m.l2_sparseInterior) {
     fails.push(`L2 sparse interior fill ${(m.l2_minInteriorFill * 100).toFixed(0)}% < 45% (stretched frame)`);
   }
-  if (!m.l3_pass) fails.push(`L3 empty ${(m.l3_largestEmptyRatio * 100).toFixed(1)}% > 15%`);
+  if (!m.l3_pass) {
+    fails.push(
+      `L3 empty ${(m.l3_largestEmptyRatio * 100).toFixed(1)}% > ${(L3_EMPTY_RATIO_MAX * 100).toFixed(0)}%`,
+    );
+  }
   if (m.l4_narrowSinglePanel) fails.push(`L4 narrow single panel (${(m.l1_widthRatio * 100).toFixed(0)}% width)`);
   else if (m.l4_centeredNarrow) fails.push(`L4 centered narrow panel`);
   if (!m.l5_pass) {
