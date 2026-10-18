@@ -10,6 +10,7 @@ import path from "node:path";
 import {
   L3_EMPTY_RATIO_MAX,
   STATUS_BANNER_STACK_SELECTOR,
+  l3ContentRect,
   l3Pass,
 } from "./layout-l3.mjs";
 
@@ -83,6 +84,16 @@ const metrics = fs.existsSync(METRICS)
 const layoutViolations = metrics.filter((m) => {
   // Re-derive L3 from the shared helper so a stale l3_pass flag cannot drift.
   const l3_ok = l3Pass(m.l3_largestEmptyRatio);
+  // Content-area contract: full viewport (shared with measureLayout).
+  const content = l3ContentRect({
+    viewport: m.viewport,
+    sidebarW: m.sidebarW,
+  });
+  if (content.y !== 0 || content.h !== m.viewport.height) {
+    throw new Error(
+      `L3 content-area drift for ${m.route}: y=${content.y} h=${content.h} vp.h=${m.viewport.height}`,
+    );
+  }
   return (
     !m.l1_pass ||
     !m.l2_pass ||

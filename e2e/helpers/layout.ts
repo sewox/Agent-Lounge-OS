@@ -2,6 +2,7 @@ import type { Page, Expect } from "@playwright/test";
 import {
   collectStatusBannerRects,
   largestEmptyRatio as sharedLargestEmptyRatio,
+  l3ContentRect,
   L3_EMPTY_RATIO_MAX,
   L3_GRID,
   l3Pass,
@@ -162,11 +163,14 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
     };
   });
 
-  const contentW = vp.width - measured.sidebarW;
-  const contentX = measured.main?.x ?? measured.sidebarW;
-  // L3 content area is the full viewport — never shrink for header/main padding.
-  const contentY = 0;
-  const contentH = vp.height;
+  const contentRect = l3ContentRect({
+    viewport: { width: vp.width, height: vp.height },
+    sidebarW: measured.sidebarW,
+    mainX: measured.main?.x ?? measured.sidebarW,
+    // mainPadTop / mainY intentionally omitted — shared helper ignores them.
+  }) as Rect;
+  const contentW = contentRect.w;
+  const contentX = contentRect.x;
   const panels = measured.panels.filter((p) => p.w > 0 && p.h > 0);
   // Visible status banners (locked selector) occupy L3 cells the same as panels.
   const bannerRects = (await page.evaluate(collectStatusBannerRects)) as Rect[];
@@ -197,7 +201,6 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
     }
   }
 
-  const contentRect: Rect = { x: contentX, y: contentY, w: contentW, h: contentH };
   const l3Occupied = [...panels, ...bannerRects];
   const l3_largestEmptyRatio = largestEmptyRatio(contentRect, l3Occupied);
 

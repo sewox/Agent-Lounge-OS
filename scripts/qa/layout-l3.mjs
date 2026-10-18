@@ -2,8 +2,8 @@
  * Shared L3 empty-region geometry for Playwright (`e2e/helpers/layout.ts`) and
  * the baseline report (`scripts/qa/generate-baseline-report.mjs`).
  *
- * L3 content area is always the full viewport band used by measureLayout
- * (contentY = 0, contentH = vp.height). Visible status banners under
+ * L3 content area is always the full viewport (`l3ContentRect`: y = 0,
+ * h = vp.height). Visible status banners under
  * `[data-qa="status-banner-stack"]` count as occupied cells (same as panels).
  * No generic position:fixed heuristic — only that explicit selector.
  */
@@ -18,12 +18,44 @@ export const L3_GRID = 8;
 
 /**
  * @typedef {{ x: number, y: number, w: number, h: number }} Rect
+ * @typedef {{ width: number, height: number }} ViewportSize
  */
+
+/**
+ * Canonical L3 content area: full viewport height, sidebar-excluded width.
+ * Never subtracts header, `<main>` padding, or banner reservation.
+ *
+ * Extra keys such as `mainPadTop` / `mainY` are ignored on purpose — a
+ * reintroduced padding exclusion must not be expressible through this API.
+ *
+ * @param {{
+ *   viewport: ViewportSize,
+ *   sidebarW?: number,
+ *   mainX?: number,
+ *   mainPadTop?: number,
+ *   mainY?: number,
+ * }} input
+ * @returns {Rect}
+ */
+export function l3ContentRect(input) {
+  const viewport = input.viewport;
+  const sidebarW = input.sidebarW ?? 0;
+  const contentX = input.mainX ?? sidebarW;
+  // Intentionally ignore mainPadTop / mainY — L3 content is the full viewport.
+  void input.mainPadTop;
+  void input.mainY;
+  return {
+    x: contentX,
+    y: 0,
+    w: viewport.width - sidebarW,
+    h: viewport.height,
+  };
+}
 
 /**
  * Clip a rect to the viewport; return null if nothing remains visible.
  * @param {Rect} rect
- * @param {{ width: number, height: number }} viewport
+ * @param {ViewportSize} viewport
  * @returns {Rect | null}
  */
 export function clipRectToViewport(rect, viewport) {
@@ -102,24 +134,43 @@ export function largestEmptyRatio(content, occupiedRects, grid = L3_GRID) {
 }
 
 /**
- * Whether an element should contribute occupied area for L3 banners.
- * Invisible / display:none / visibility:hidden / zero-size → nothing.
+ * Pure/jsdom visibility: element or any ancestor up to `stack` is invisible when
+ * display:none, visibility:hidden, effective opacity ≤ 0 (multiplied), or a
+ * zero-size box (skipping `display:contents`, which generates no box).
+ *
  * @param {Element} el
+ * @param {Element} stack
  * @param {typeof globalThis.getComputedStyle} [getStyle]
  */
-export function isVisibleOccupyingElement(el, getStyle = globalThis.getComputedStyle) {
-  if (!(el instanceof Element)) return false;
-  const style = getStyle(el);
-  if (style.display === "none" || style.visibility === "hidden") return false;
-  const opacity = Number.parseFloat(style.opacity || "1");
-  if (Number.isFinite(opacity) && opacity <= 0) return false;
-  const r = el.getBoundingClientRect();
-  return r.width > 0 && r.height > 0;
+export function isEffectivelyVisibleBanner(el, stack, getStyle = globalThis.getComputedStyle) {
+  if (!(el instanceof Element) || !(stack instanceof Element)) return false;
+  let node = el;
+  let opacityProduct = 1;
+  while (node) {
+    const style = getStyle(node);
+    if (style.display === "none") return false;
+    if (style.visibility === "hidden") return false;
+    const opacity = Number.parseFloat(style.opacity || "1");
+    if (Number.isFinite(opacity)) {
+      opacityProduct *= opacity;
+    }
+    if (opacityProduct <= 0) return false;
+    if (style.display !== "contents") {
+      const r = node.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return false;
+    }
+    if (node === stack) break;
+    node = node.parentElement;
+  }
+  return true;
 }
 
 /**
  * Collect viewport-clipped rects for visible banner elements under
  * `[data-qa="status-banner-stack"]`. Overlap is fine — L3 cells are boolean.
+ *
+ * Direct children of the stack (or the stack itself when childless). No
+ * descendant fallback — hidden parents cannot leak occupancy via children.
  *
  * Runs in the browser (`page.evaluate`) or jsdom. Must stay closure-free so
  * Playwright can serialize it for `page.evaluate(collectStatusBannerRects)`.
@@ -145,41 +196,65 @@ export function collectStatusBannerRects() {
   }
 
   /**
+   * Ancestor-aware visibility up to and including the stack.
+   * Prefer Element.checkVisibility when present (real Chromium); pure fallback
+   * for jsdom matches the same display / visibility / opacity / zero-box rules.
    * @param {Element} el
+   * @param {Element} stack
    */
-  function visible(el) {
-    const style = getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    const opacity = Number.parseFloat(style.opacity || "1");
-    if (Number.isFinite(opacity) && opacity <= 0) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
+  function visible(el, stack) {
+    if (typeof el.checkVisibility === "function") {
+      if (
+        !el.checkVisibility({
+          opacityProperty: true,
+          visibilityProperty: true,
+        })
+      ) {
+        return false;
+      }
+      // checkVisibility does not cover zero-size ancestors; walk for that.
+      let node = el;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (style.display !== "contents") {
+          const r = node.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+        }
+        if (node === stack) break;
+        node = node.parentElement;
+      }
+      return true;
+    }
+
+    let node = el;
+    let opacityProduct = 1;
+    while (node) {
+      const style = getComputedStyle(node);
+      if (style.display === "none") return false;
+      if (style.visibility === "hidden") return false;
+      const opacity = Number.parseFloat(style.opacity || "1");
+      if (Number.isFinite(opacity)) {
+        opacityProduct *= opacity;
+      }
+      if (opacityProduct <= 0) return false;
+      if (style.display !== "contents") {
+        const r = node.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+      }
+      if (node === stack) break;
+      node = node.parentElement;
+    }
+    return true;
   }
 
   const stacks = document.querySelectorAll('[data-qa="status-banner-stack"]');
   for (const stack of stacks) {
     const kids = Array.from(stack.children);
     const candidates = kids.length > 0 ? kids : [stack];
-    let added = false;
     for (const el of candidates) {
-      if (!visible(el)) continue;
+      if (!visible(el, stack)) continue;
       const clipped = clip(el.getBoundingClientRect());
-      if (clipped) {
-        out.push(clipped);
-        added = true;
-      }
-    }
-    // Wrapper with display:contents (or zero box) may expose no child box —
-    // fall back to any visible descendant with area, then the stack itself.
-    if (!added && visible(stack)) {
-      const clipped = clip(stack.getBoundingClientRect());
       if (clipped) out.push(clipped);
-    } else if (!added) {
-      for (const el of Array.from(stack.querySelectorAll("*"))) {
-        if (!visible(el)) continue;
-        const clipped = clip(el.getBoundingClientRect());
-        if (clipped) out.push(clipped);
-      }
     }
   }
   return out;
