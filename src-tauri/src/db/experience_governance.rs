@@ -6,8 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use super::experiences::{column_names, has_col};
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, ExperienceRecord, TitleSource, ARCHIVED_BY_TTL, ARCHIVED_BY_USER,
-    EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
+    now_rfc3339, ExperienceRecord, LoungeExperience, TitleSource, ARCHIVED_BY_REJECTED,
+    ARCHIVED_BY_TTL, ARCHIVED_BY_USER, EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
 };
 
 /// Settings key for auto-archive TTL in days (default 90).
@@ -33,6 +33,59 @@ pub struct ExperienceUpdate {
     pub project_id: Option<String>,
     pub topic: Option<String>,
     pub title: Option<String>,
+}
+
+/// Vault Review StatsStrip / list filter key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatFilter {
+    #[default]
+    Pending,
+    Hygiene,
+    ApprovedToday,
+    Rejected,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReviewQueueFilter {
+    /// StatsStrip selection; default = pending (active unreviewed).
+    #[serde(default)]
+    pub stat: ReviewStatFilter,
+    pub project_id: Option<String>,
+    pub agent: Option<String>,
+    /// Experience outcome / type filter (`success` | `failure` | `partial`).
+    pub outcome: Option<String>,
+    /// When true, further restrict pending/hygiene to hygiene-masked rows.
+    #[serde(default)]
+    pub hygiene_only: bool,
+    #[serde(default = "default_review_limit")]
+    pub limit: usize,
+}
+
+fn default_review_limit() -> usize {
+    200
+}
+
+impl Default for ReviewQueueFilter {
+    fn default() -> Self {
+        Self {
+            stat: ReviewStatFilter::Pending,
+            project_id: None,
+            agent: None,
+            outcome: None,
+            hygiene_only: false,
+            limit: default_review_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReviewStats {
+    /// Same source as [`ExperienceStore::count_unreviewed_experiences`].
+    pub pending: u64,
+    pub hygiene: u64,
+    pub approved_today: u64,
+    pub rejected: u64,
 }
 
 /// Injectable clock for TTL tests (seconds since UNIX epoch as RFC3339 helper).
@@ -106,9 +159,10 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
             conn.execute(
-                "UPDATE experiences SET reviewed = 1, updated_at = ?1 WHERE id = ?2",
-                params![now_rfc3339(), id],
+                "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE id = ?2",
+                params![now, id],
             )?;
             Ok(())
         })
@@ -121,14 +175,104 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
             let n = conn.execute(
-                "UPDATE experiences SET reviewed = 1, updated_at = ?1 WHERE reviewed = 0 AND status = ?2",
-                params![now_rfc3339(), EXPERIENCE_STATUS_ACTIVE],
+                "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE reviewed = 0 AND status = ?2",
+                params![now, EXPERIENCE_STATUS_ACTIVE],
             )?;
             Ok(n as u64)
         })
         .await
         .context("experience mark_all_reviewed join")?
+    }
+
+    /// Bulk-approve selected active rows (Vault Review). Local user action — Halt-safe.
+    pub async fn mark_experiences_reviewed(&self, ids: Vec<String>) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
+            let mut n = 0u64;
+            for id in ids {
+                let changed = conn.execute(
+                    "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE id = ?2 AND reviewed = 0 AND status = ?3",
+                    params![now, id, EXPERIENCE_STATUS_ACTIVE],
+                )?;
+                n += changed as u64;
+            }
+            Ok(n)
+        })
+        .await
+        .context("experience mark_many_reviewed join")?
+    }
+
+    /// Soft-reject = archived with `archived_by=rejected` (undoable). No hard delete.
+    pub async fn reject_experience(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            reject_blocking(&conn, &id)
+        })
+        .await
+        .context("experience reject join")?
+    }
+
+    pub async fn reject_experiences(&self, ids: Vec<String>) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let mut n = 0u64;
+            for id in ids {
+                reject_blocking(&conn, &id)?;
+                n += 1;
+            }
+            Ok(n)
+        })
+        .await
+        .context("experience reject_many join")?
+    }
+
+    /// Undo a soft-reject (only rows with `archived_by=rejected`).
+    pub async fn undo_reject_experience(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            undo_reject_blocking(&conn, &id)
+        })
+        .await
+        .context("experience undo_reject join")?
+    }
+
+    /// Vault Review list: default = active unreviewed; hygiene flagged first, then newest.
+    pub async fn list_review_queue(
+        &self,
+        filter: ReviewQueueFilter,
+    ) -> Result<Vec<LoungeExperience>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_review_queue_blocking(&conn, &filter)
+        })
+        .await
+        .context("experience list_review_queue join")?
+    }
+
+    /// StatsStrip counters for Vault Review (pending uses the same SQL as
+    /// [`Self::count_unreviewed_experiences`]).
+    pub async fn count_review_stats(&self) -> Result<ReviewStats> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            count_review_stats_blocking(&conn)
+        })
+        .await
+        .context("experience count_review_stats join")?
     }
 
     pub async fn count_unreviewed_experiences(&self) -> Result<u64> {
@@ -339,6 +483,176 @@ fn set_archive_blocking(conn: &Connection, id: &str, archive: bool) -> Result<()
     Ok(())
 }
 
+fn reject_blocking(conn: &Connection, id: &str) -> Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE experiences SET status = ?1, archived_at = ?2, archived_by = ?3, updated_at = ?2 WHERE id = ?4",
+        params![EXPERIENCE_STATUS_ARCHIVED, now, ARCHIVED_BY_REJECTED, id],
+    )?;
+    Ok(())
+}
+
+fn undo_reject_blocking(conn: &Connection, id: &str) -> Result<()> {
+    let now = now_rfc3339();
+    let n = conn.execute(
+        "UPDATE experiences SET status = ?1, archived_at = NULL, archived_by = NULL, updated_at = ?2 WHERE id = ?3 AND archived_by = ?4",
+        params![EXPERIENCE_STATUS_ACTIVE, now, id, ARCHIVED_BY_REJECTED],
+    )?;
+    if n == 0 {
+        anyhow::bail!("undo_reject: row not found or not rejected");
+    }
+    Ok(())
+}
+
+fn today_prefix_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+fn count_review_stats_blocking(conn: &Connection) -> Result<ReviewStats> {
+    let pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM experiences WHERE reviewed = 0 AND status = ?1",
+        params![EXPERIENCE_STATUS_ACTIVE],
+        |row| row.get(0),
+    )?;
+    let hygiene_pred = crate::bridge::hygiene::hygiene_masked_sql("");
+    let hygiene_sql = format!(
+        "SELECT COUNT(*) FROM experiences WHERE reviewed = 0 AND status = ?1 AND {hygiene_pred}"
+    );
+    let hygiene: i64 = conn.query_row(&hygiene_sql, params![EXPERIENCE_STATUS_ACTIVE], |row| {
+        row.get(0)
+    })?;
+    let today = today_prefix_utc();
+    let approved_today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM experiences WHERE reviewed = 1 AND status = ?1 AND reviewed_at IS NOT NULL AND reviewed_at LIKE ?2",
+        params![EXPERIENCE_STATUS_ACTIVE, format!("{today}%")],
+        |row| row.get(0),
+    )?;
+    let rejected: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM experiences WHERE status = ?1 AND archived_by = ?2",
+        params![EXPERIENCE_STATUS_ARCHIVED, ARCHIVED_BY_REJECTED],
+        |row| row.get(0),
+    )?;
+    Ok(ReviewStats {
+        pending: pending.max(0) as u64,
+        hygiene: hygiene.max(0) as u64,
+        approved_today: approved_today.max(0) as u64,
+        rejected: rejected.max(0) as u64,
+    })
+}
+
+fn list_review_queue_blocking(
+    conn: &Connection,
+    filter: &ReviewQueueFilter,
+) -> Result<Vec<LoungeExperience>> {
+    let hygiene_pred = crate::bridge::hygiene::hygiene_masked_sql("");
+    let lim = filter.limit.max(1) as i64;
+    let today = today_prefix_utc();
+    list_review_queue_positional(conn, filter, &hygiene_pred, &today, lim)
+}
+
+fn list_review_queue_positional(
+    conn: &Connection,
+    filter: &ReviewQueueFilter,
+    hygiene_pred: &str,
+    today: &str,
+    lim: i64,
+) -> Result<Vec<LoungeExperience>> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    match filter.stat {
+        ReviewStatFilter::Pending => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ACTIVE.to_string()));
+            clauses.push("reviewed = 0".into());
+        }
+        ReviewStatFilter::Hygiene => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ACTIVE.to_string()));
+            clauses.push("reviewed = 0".into());
+            clauses.push(format!("({hygiene_pred})"));
+        }
+        ReviewStatFilter::ApprovedToday => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ACTIVE.to_string()));
+            clauses.push("reviewed = 1".into());
+            clauses.push("reviewed_at IS NOT NULL".into());
+            clauses.push("reviewed_at LIKE ?".into());
+            params_vec.push(Box::new(format!("{today}%")));
+        }
+        ReviewStatFilter::Rejected => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ARCHIVED.to_string()));
+            clauses.push("archived_by = ?".into());
+            params_vec.push(Box::new(ARCHIVED_BY_REJECTED.to_string()));
+        }
+    }
+
+    if let Some(ref project) = filter.project_id {
+        let p = project.trim();
+        if !p.is_empty() {
+            clauses.push("project_id = ?".into());
+            params_vec.push(Box::new(p.to_string()));
+        }
+    }
+    if let Some(ref agent) = filter.agent {
+        let a = agent.trim();
+        if !a.is_empty() {
+            clauses.push("agent_id = ?".into());
+            params_vec.push(Box::new(a.to_string()));
+        }
+    }
+    if let Some(ref outcome) = filter.outcome {
+        let o = outcome.trim();
+        if !o.is_empty() {
+            clauses.push("lower(outcome) = lower(?)".into());
+            params_vec.push(Box::new(o.to_string()));
+        }
+    }
+    if filter.hygiene_only
+        && matches!(
+            filter.stat,
+            ReviewStatFilter::Pending | ReviewStatFilter::Hygiene
+        )
+    {
+        clauses.push(format!("({hygiene_pred})"));
+    }
+
+    let order = match filter.stat {
+        ReviewStatFilter::Pending => {
+            format!("CASE WHEN ({hygiene_pred}) THEN 0 ELSE 1 END ASC, created_at DESC")
+        }
+        ReviewStatFilter::Hygiene => "created_at DESC".into(),
+        ReviewStatFilter::ApprovedToday => "reviewed_at DESC, created_at DESC".into(),
+        ReviewStatFilter::Rejected => "archived_at DESC, created_at DESC".into(),
+    };
+
+    let sql = format!(
+        r#"
+        SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
+               outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+               status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+               updated_at, original_content, archived_by, title, title_source, source
+        FROM experiences
+        WHERE {}
+        ORDER BY {order}
+        LIMIT ?
+        "#,
+        clauses.join(" AND ")
+    );
+    params_vec.push(Box::new(lim));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mapped = stmt.query_map(param_refs.as_slice(), map_lounge_row)?;
+    let mut out = Vec::new();
+    for row in mapped {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 fn get_full_record(conn: &Connection, id: &str) -> Result<Option<ExperienceRecord>> {
     let row = conn
         .query_row(
@@ -420,7 +734,7 @@ fn search_filtered_blocking(
         FROM experiences
         WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || COALESCE(title,'') || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
           {status_clause}
-        ORDER BY is_pinned DESC, created_at DESC
+        ORDER BY reviewed DESC, is_pinned DESC, created_at DESC
         LIMIT ?{limit_idx}
         "#,
         limit_idx = if status.is_some() { 3 } else { 2 }
@@ -507,6 +821,7 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
     let additions: &[(&str, &str)] = &[
         ("status", "TEXT NOT NULL DEFAULT 'active'"),
         ("reviewed", "INTEGER NOT NULL DEFAULT 0"),
+        ("reviewed_at", "TEXT"),
         ("use_count", "INTEGER NOT NULL DEFAULT 0"),
         ("last_used_at", "TEXT"),
         ("archived_at", "TEXT"),
@@ -1228,5 +1543,131 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 1, "must soft-hide, never DELETE");
+    }
+
+    #[tokio::test]
+    async fn reject_and_undo_persist_rejected_provenance() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut record = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj", "reject-me"),
+            "solution",
+            "adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        record.reviewed = false;
+        let id = record.id.clone();
+        store.insert_record(record).await.unwrap();
+
+        store.reject_experience(id.clone()).await.unwrap();
+        let rejected = store.get_record(id.clone()).await.unwrap().unwrap();
+        assert_eq!(rejected.status, EXPERIENCE_STATUS_ARCHIVED);
+        assert_eq!(rejected.archived_by.as_deref(), Some(ARCHIVED_BY_REJECTED));
+        assert!(rejected.archived_at.is_some());
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 0);
+
+        let stats = store.count_review_stats().await.unwrap();
+        assert_eq!(stats.rejected, 1);
+        assert_eq!(stats.pending, 0);
+
+        store.undo_reject_experience(id.clone()).await.unwrap();
+        let active = store.get_record(id).await.unwrap().unwrap();
+        assert_eq!(active.status, EXPERIENCE_STATUS_ACTIVE);
+        assert!(active.archived_by.is_none());
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn review_queue_orders_hygiene_before_plain_unreviewed() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut plain = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj", "plain-topic"),
+            "plain solution",
+            "plain adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        plain.reviewed = false;
+        plain.created_at = "2026-10-20T12:00:00+00:00".into();
+        let plain_id = plain.id.clone();
+        store.insert_record(plain).await.unwrap();
+
+        let mut hygiene = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj", "masked <home>/secret"),
+            "token <redacted-token> gone",
+            "adr ok",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        hygiene.reviewed = false;
+        hygiene.created_at = "2026-10-19T12:00:00+00:00".into();
+        let hygiene_id = hygiene.id.clone();
+        store.insert_record(hygiene).await.unwrap();
+
+        let unreviewed = store.count_unreviewed_experiences().await.unwrap();
+        assert_eq!(unreviewed, 2, "both rows must be active unreviewed");
+
+        let queue = store
+            .list_review_queue(ReviewQueueFilter {
+                stat: ReviewStatFilter::Pending,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            queue.len(),
+            2,
+            "queue ids={:?}",
+            queue.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(queue[0].id, hygiene_id, "hygiene-flagged must sort first");
+        assert!(queue.iter().any(|r| r.id == plain_id));
+
+        let stats = store.count_review_stats().await.unwrap();
+        assert_eq!(stats.pending, store.count_unreviewed_experiences().await.unwrap());
+        assert!(stats.hygiene >= 1);
+    }
+
+    #[tokio::test]
+    async fn search_orders_reviewed_before_unreviewed_same_band() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut approved = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", "shared-keyword-alpha"),
+            "shared-keyword-alpha solution",
+            "shared-keyword-alpha adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        approved.reviewed = true;
+        approved.created_at = "2026-01-01T00:00:00+00:00".into();
+        let approved_id = approved.id.clone();
+        store.insert_record(approved).await.unwrap();
+
+        let mut pending = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", "shared-keyword-beta"),
+            "shared-keyword-beta solution",
+            "shared-keyword-beta adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        pending.reviewed = false;
+        pending.created_at = "2026-06-01T00:00:00+00:00".into();
+        let pending_id = pending.id.clone();
+        store.insert_record(pending).await.unwrap();
+
+        let hits = store
+            .search_experiences_filtered(
+                "shared-keyword".into(),
+                Some(10),
+                Some(EXPERIENCE_STATUS_ACTIVE),
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&approved_id.as_str()));
+        assert!(ids.contains(&pending_id.as_str()), "unreviewed still returned");
+        let ai = ids.iter().position(|id| *id == approved_id).unwrap();
+        let pi = ids.iter().position(|id| *id == pending_id).unwrap();
+        assert!(ai < pi, "reviewed must rank above unreviewed in band");
     }
 }

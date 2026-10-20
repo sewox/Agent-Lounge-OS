@@ -718,6 +718,23 @@ impl McpServer {
             hits.sort_by_key(|row| if row.project_id == *project_id { 0 } else { 1 });
         }
 
+        // VR4 / UD-5: same score/project band — reviewed (approved) before unreviewed.
+        // Additive `reviewed` field below; never drop unreviewed from results.
+        hits.sort_by(|a, b| {
+            let band_a = project
+                .as_ref()
+                .map(|pid| if a.project_id == *pid { 0 } else { 1 })
+                .unwrap_or(0);
+            let band_b = project
+                .as_ref()
+                .map(|pid| if b.project_id == *pid { 0 } else { 1 })
+                .unwrap_or(0);
+            band_a
+                .cmp(&band_b)
+                .then_with(|| b.reviewed.cmp(&a.reviewed))
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+
         if let Some(cap) = limit.or(Some(12)) {
             hits.truncate(cap);
         }
@@ -749,6 +766,7 @@ impl McpServer {
                     "created_at": row.created_at,
                     "same_project": same_project,
                     "archived": from_archive,
+                    "reviewed": row.reviewed,
                 })
             })
             .collect();
@@ -3118,5 +3136,66 @@ mod tests {
             .unwrap();
         let hval: Value = serde_json::from_str(&health).unwrap();
         assert_ne!(hval["result"]["isError"], true, "{hval}");
+    }
+
+    #[tokio::test]
+    async fn search_adds_reviewed_field_and_ranks_approved_first() {
+        use crate::models::{ExperienceOutcome, ExperienceRecord, LoungeTask};
+
+        let store = ExperienceStore::memory().expect("db");
+        let mut approved = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-rev", "vault-review-keyword-a"),
+            "vault-review-keyword-a solution",
+            "vault-review-keyword-a adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        approved.reviewed = true;
+        approved.created_at = "2026-01-01T00:00:00+00:00".into();
+        store.insert_record(approved).await.unwrap();
+
+        let mut pending = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-rev", "vault-review-keyword-b"),
+            "vault-review-keyword-b solution",
+            "vault-review-keyword-b adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        pending.reviewed = false;
+        pending.created_at = "2026-06-01T00:00:00+00:00".into();
+        store.insert_record(pending).await.unwrap();
+
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let resp = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lounge_search_experience","arguments":{"query":"vault-review-keyword","limit":10}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true, "{val}");
+        let experiences = val["result"]["structuredContent"]["experiences"]
+            .as_array()
+            .expect("experiences array");
+        assert!(experiences.len() >= 2);
+        // Additive field — every hit exposes reviewed (backward compatible).
+        for row in experiences {
+            assert!(row.get("reviewed").is_some(), "reviewed must be present: {row}");
+            assert!(row.get("id").is_some());
+            assert!(row.get("project_id").is_some());
+        }
+        let reviewed_flags: Vec<bool> = experiences
+            .iter()
+            .map(|row| row["reviewed"].as_bool().unwrap())
+            .collect();
+        assert!(reviewed_flags.contains(&true));
+        assert!(reviewed_flags.contains(&false), "unreviewed still searchable");
+        let first_approved = reviewed_flags.iter().position(|r| *r).unwrap();
+        let first_pending = reviewed_flags.iter().position(|r| !*r).unwrap();
+        assert!(
+            first_approved < first_pending,
+            "approved must rank above unreviewed in the same band"
+        );
     }
 }

@@ -85,7 +85,7 @@ Health agents UI: see `docs/health.md` (Health-UI-2).
 | **PageHeader** | Title + actions row for a route | Later UI PRs |
 | **FilterBar** | Category/text filters; StatsStrip writes into it | Later UI PRs |
 | **MasterDetail** | Opinionated list↔detail binding on top of PanelGrid | Later UI PRs |
-| **StickyActionBar** | Bottom actions that stay visible while content scrolls | Later UI PRs |
+| **StickyActionBar** | Bottom actions that stay visible while content scrolls | Vault Review (`sticky-action-bar.tsx`) |
 | **EmptyState** | Generic empty (IndexEmptyState already covers index/map) | Later UI PRs |
 | **Timeline** | Chronological event spine | Out of scope here |
 

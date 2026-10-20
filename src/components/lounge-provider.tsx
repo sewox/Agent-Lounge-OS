@@ -121,6 +121,8 @@ type LoungeContextValue = {
   switchProject: (name: string | null) => void;
   focusExperience: (experience: LoungeExperience) => void;
   unreviewedCount: number;
+  /** Re-fetch `count_unreviewed_experiences` (single source for badge / review UI). */
+  refreshUnreviewedCount: () => Promise<void>;
   experienceTotal: number;
   experiencesLoading: boolean;
   experiencesError: string | null;
@@ -809,10 +811,18 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  const refreshUnreviewedCount = useCallback(async () => {
+    try {
+      const count = await invoke<number>("count_unreviewed_experiences");
+      setUnreviewedCount(Number(count));
+    } catch {
+      setUnreviewedCount(0);
+    }
+  }, []);
+
   const markAllExperiencesReviewed = useCallback(async () => {
     await invoke<number>("mark_all_experiences_reviewed");
-    const count = await invoke<number>("count_unreviewed_experiences");
-    setUnreviewedCount(Number(count));
+    await refreshUnreviewedCount();
     setExperiences((current) =>
       current.map((row) =>
         row.status === "archived" ? row : { ...row, reviewed: true },
@@ -821,7 +831,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     setExperienceDetail((current) =>
       current && current.status !== "archived" ? { ...current, reviewed: true } : current,
     );
-  }, []);
+  }, [refreshUnreviewedCount]);
 
   const focusExperience = useCallback(
     (experience: LoungeExperience) => {
@@ -1406,6 +1416,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       switchProject,
       focusExperience,
       unreviewedCount,
+      refreshUnreviewedCount,
       experienceTotal,
       experiencesLoading,
       experiencesError,
@@ -1484,6 +1495,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       switchProject,
       focusExperience,
       unreviewedCount,
+      refreshUnreviewedCount,
       experienceTotal,
       experiencesLoading,
       experiencesError,

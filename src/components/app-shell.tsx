@@ -1050,7 +1050,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <nav className="space-y-0.5 font-label text-body">
             {NAV.map((item) => {
               const active =
-                pathname === item.href || (item.id === "dashboard" && pathname === "/");
+                pathname === item.href ||
+                (item.id === "vault" && pathname.startsWith("/vault")) ||
+                (item.id === "dashboard" && pathname === "/");
               return (
                 <Link
                   key={item.id}
@@ -1066,12 +1068,19 @@ export function AppShell({ children }: { children: ReactNode }) {
                     {t(item.labelKey)}
                   </span>
                   {item.id === "vault" && unreviewedCount > 0 ? (
-                    <span
+                    <button
+                      type="button"
                       data-qa="unreviewed-count"
-                      className="tnum min-w-[1.25rem] rounded-full bg-secondary px-1.5 py-0.5 text-center font-mono text-meta text-on-secondary"
+                      title="Review queue"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        router.push("/vault?view=review");
+                      }}
+                      className="tnum min-w-[1.25rem] rounded-full border border-dashed border-on-secondary/80 bg-secondary px-1.5 py-0.5 text-center font-mono text-meta text-on-secondary hover:opacity-90"
                     >
                       {unreviewedCount}
-                    </span>
+                    </button>
                   ) : null}
                   {item.id === "stream" ? <span className="h-1.5 w-1.5 animate-ping rounded-full bg-primary" /> : null}
                 </Link>

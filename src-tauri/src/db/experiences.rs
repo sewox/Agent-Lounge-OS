@@ -518,6 +518,7 @@ fn create_experiences_sql() -> &'static str {
                 payload_json TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 reviewed INTEGER NOT NULL DEFAULT 0,
+                reviewed_at TEXT,
                 use_count INTEGER NOT NULL DEFAULT 0,
                 last_used_at TEXT,
                 archived_at TEXT,

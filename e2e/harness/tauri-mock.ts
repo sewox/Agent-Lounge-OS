@@ -320,6 +320,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             throw new Error(`not found: ${id}`);
           }
           row.reviewed = true;
+          (row as { reviewed_at?: string | null }).reviewed_at = new Date().toISOString();
           return null;
         }
         case "mark_all_experiences_reviewed": {
@@ -327,15 +328,184 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           for (const row of f.experiences) {
             if (row.reviewed === false && (row.status ?? "active") === "active") {
               row.reviewed = true;
+              (row as { reviewed_at?: string | null }).reviewed_at = new Date().toISOString();
               changed += 1;
             }
           }
           return changed;
         }
+        case "mark_experiences_reviewed": {
+          const ids = Array.isArray(args?.ids) ? (args.ids as string[]) : [];
+          let changed = 0;
+          const now = new Date().toISOString();
+          for (const id of ids) {
+            const row = f.experiences.find((item) => item.id === id);
+            if (row && row.reviewed === false && (row.status ?? "active") === "active") {
+              row.reviewed = true;
+              (row as { reviewed_at?: string | null }).reviewed_at = now;
+              changed += 1;
+            }
+          }
+          return changed;
+        }
+        case "reject_experience": {
+          const id = String(args?.id ?? "");
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row) {
+            throw new Error(`not found: ${id}`);
+          }
+          row.status = "archived";
+          row.archived_at = new Date().toISOString();
+          row.archived_by = "rejected";
+          return null;
+        }
+        case "reject_experiences": {
+          const ids = Array.isArray(args?.ids) ? (args.ids as string[]) : [];
+          let changed = 0;
+          const now = new Date().toISOString();
+          for (const id of ids) {
+            const row = f.experiences.find((item) => item.id === id);
+            if (row) {
+              row.status = "archived";
+              row.archived_at = now;
+              row.archived_by = "rejected";
+              changed += 1;
+            }
+          }
+          return changed;
+        }
+        case "undo_reject_experience": {
+          const id = String(args?.id ?? "");
+          const row = f.experiences.find((item) => item.id === id);
+          if (!row || row.archived_by !== "rejected") {
+            throw new Error(`undo_reject: row not found or not rejected: ${id}`);
+          }
+          row.status = "active";
+          row.archived_at = null;
+          row.archived_by = null;
+          return null;
+        }
         case "count_unreviewed_experiences":
           return f.experiences.filter(
             (row) => row.reviewed === false && (row.status ?? "active") === "active",
           ).length;
+        case "count_review_stats": {
+          if (
+            (window as Window & { __QA_FORCE_REVIEW_ERROR__?: boolean })
+              .__QA_FORCE_REVIEW_ERROR__
+          ) {
+            throw new Error("review queue unavailable");
+          }
+          const hygienePlaceholders = [
+            "<device-ip>",
+            "<redacted-token>",
+            "<device-serial>",
+            "<home>",
+          ];
+          const hasHygiene = (row: (typeof f.experiences)[number]) =>
+            hygienePlaceholders.some((p) =>
+              `${row.adr_summary} ${row.original_content ?? ""}`.includes(p),
+            );
+          const today = new Date().toISOString().slice(0, 10);
+          const pending = f.experiences.filter(
+            (row) => row.reviewed === false && (row.status ?? "active") === "active",
+          ).length;
+          const hygiene = f.experiences.filter(
+            (row) =>
+              row.reviewed === false &&
+              (row.status ?? "active") === "active" &&
+              hasHygiene(row),
+          ).length;
+          const approved_today = f.experiences.filter((row) => {
+            const at = (row as { reviewed_at?: string | null }).reviewed_at;
+            return (
+              row.reviewed === true &&
+              (row.status ?? "active") === "active" &&
+              typeof at === "string" &&
+              at.startsWith(today)
+            );
+          }).length;
+          const rejected = f.experiences.filter(
+            (row) => row.status === "archived" && row.archived_by === "rejected",
+          ).length;
+          return { pending, hygiene, approved_today, rejected };
+        }
+        case "list_review_queue": {
+          if (
+            (window as Window & { __QA_FORCE_REVIEW_ERROR__?: boolean })
+              .__QA_FORCE_REVIEW_ERROR__
+          ) {
+            throw new Error("review queue unavailable");
+          }
+          const filter = (args?.filter ?? {}) as {
+            stat?: string;
+            project_id?: string | null;
+            agent?: string | null;
+            outcome?: string | null;
+            hygiene_only?: boolean;
+            limit?: number;
+          };
+          const hygienePlaceholders = [
+            "<device-ip>",
+            "<redacted-token>",
+            "<device-serial>",
+            "<home>",
+          ];
+          const hasHygiene = (row: (typeof f.experiences)[number]) =>
+            hygienePlaceholders.some((p) =>
+              `${row.adr_summary} ${row.original_content ?? ""}`.includes(p),
+            );
+          const today = new Date().toISOString().slice(0, 10);
+          const stat = filter.stat ?? "pending";
+          let rows = f.experiences.slice();
+          if (stat === "pending") {
+            rows = rows.filter(
+              (row) => row.reviewed === false && (row.status ?? "active") === "active",
+            );
+            rows.sort((a, b) => {
+              const ha = hasHygiene(a) ? 0 : 1;
+              const hb = hasHygiene(b) ? 0 : 1;
+              if (ha !== hb) return ha - hb;
+              return b.created_at.localeCompare(a.created_at);
+            });
+          } else if (stat === "hygiene") {
+            rows = rows.filter(
+              (row) =>
+                row.reviewed === false &&
+                (row.status ?? "active") === "active" &&
+                hasHygiene(row),
+            );
+            rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
+          } else if (stat === "approved_today") {
+            rows = rows.filter((row) => {
+              const at = (row as { reviewed_at?: string | null }).reviewed_at;
+              return (
+                row.reviewed === true &&
+                (row.status ?? "active") === "active" &&
+                typeof at === "string" &&
+                at.startsWith(today)
+              );
+            });
+          } else if (stat === "rejected") {
+            rows = rows.filter(
+              (row) => row.status === "archived" && row.archived_by === "rejected",
+            );
+          }
+          if (filter.project_id) {
+            rows = rows.filter((row) => row.project_id === filter.project_id);
+          }
+          if (filter.agent) {
+            rows = rows.filter((row) => row.agent === filter.agent);
+          }
+          if (filter.outcome) {
+            rows = rows.filter((row) => row.outcome === filter.outcome);
+          }
+          if (filter.hygiene_only) {
+            rows = rows.filter((row) => hasHygiene(row));
+          }
+          const lim = Math.max(1, Number(filter.limit ?? 200));
+          return rows.slice(0, lim);
+        }
         case "search_experiences": {
           if (rejectLive) {
             throw new Error("search_experiences unavailable");

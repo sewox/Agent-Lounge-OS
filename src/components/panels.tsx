@@ -1027,7 +1027,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                           </span>
                         ) : null}
                         {item.reviewed === false ? (
-                          <span className="rounded border border-secondary/40 px-1 text-meta text-secondary uppercase">
+                          <span className="rounded border border-dashed border-secondary/60 px-1 text-meta text-secondary uppercase">
                             {tv("unreviewed")}
                           </span>
                         ) : null}

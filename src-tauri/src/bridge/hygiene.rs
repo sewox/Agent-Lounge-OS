@@ -121,6 +121,43 @@ pub fn scrub(input: &str) -> HygieneResult {
     }
 }
 
+/// Placeholders written by [`scrub`] — used to detect hygiene-flagged rows.
+pub const HYGIENE_PLACEHOLDERS: &[&str] = &[
+    "<device-ip>",
+    "<redacted-token>",
+    "<device-serial>",
+    "<home>",
+];
+
+/// True when text still contains a hygiene mask placeholder.
+pub fn text_has_hygiene_mask(text: &str) -> bool {
+    HYGIENE_PLACEHOLDERS.iter().any(|p| text.contains(p))
+}
+
+/// SQL predicate (no leading AND) matching hygiene-masked experience text columns.
+/// `prefix` is an optional table alias (`""` or `"e"`); never wrap expressions.
+pub fn hygiene_masked_sql(prefix: &str) -> String {
+    let p = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}.")
+    };
+    let cols = [
+        format!("{p}topic"),
+        format!("{p}solution_summary"),
+        format!("{p}adr_record"),
+        format!("COALESCE({p}original_content,'')"),
+        format!("COALESCE({p}title,'')"),
+    ];
+    let mut parts = Vec::new();
+    for expr in &cols {
+        for ph in HYGIENE_PLACEHOLDERS {
+            parts.push(format!("{expr} LIKE '%{ph}%'"));
+        }
+    }
+    format!("({})", parts.join(" OR "))
+}
+
 /// Tag limits (documented constants).
 pub const MAX_TAGS: usize = 16;
 pub const MAX_TAG_LEN: usize = 32;

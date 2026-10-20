@@ -37,6 +37,8 @@ export type LoungeExperience = {
   is_pinned?: boolean;
   updated_at?: string | null;
   original_content?: string | null;
+  reviewed_at?: string | null;
+  title?: string;
 };
 
 export type DeadSymbol = {

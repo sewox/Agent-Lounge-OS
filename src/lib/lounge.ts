@@ -276,10 +276,12 @@ export type LoungeExperience = {
   /** `active` | `archived` */
   status?: string;
   reviewed?: boolean;
+  /** ISO timestamp when reviewed flipped to true (Vault Review). */
+  reviewed_at?: string | null;
   use_count?: number;
   last_used_at?: string | null;
   archived_at?: string | null;
-  /** `user` | `ttl` */
+  /** `user` | `ttl` | `rejected` */
   archived_by?: string | null;
   is_pinned?: boolean;
   updated_at?: string | null;
@@ -289,6 +291,29 @@ export type LoungeExperience = {
   title_source?: TitleSource;
   /** Provenance metadata (mcp/external), not tags. */
   source?: string;
+};
+
+/** Vault Review StatsStrip / list filter (matches Rust `ReviewStatFilter`). */
+export type ReviewStatFilter =
+  | "pending"
+  | "hygiene"
+  | "approved_today"
+  | "rejected";
+
+export type ReviewQueueFilter = {
+  stat?: ReviewStatFilter;
+  project_id?: string | null;
+  agent?: string | null;
+  outcome?: string | null;
+  hygiene_only?: boolean;
+  limit?: number;
+};
+
+export type ReviewStats = {
+  pending: number;
+  hygiene: number;
+  approved_today: number;
+  rejected: number;
 };
 
 export type NatsEvent = {
@@ -2445,4 +2470,55 @@ export async function isDesktopDeepLinkRegistered(): Promise<boolean> {
   }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<boolean>("is_desktop_deep_link_registered");
+}
+
+/** Vault Review — additive wrappers (safe alongside PR-Connect-1 lounge.ts edits). */
+export async function listReviewQueue(
+  filter?: ReviewQueueFilter,
+): Promise<LoungeExperience[]> {
+  if (!isTauri()) {
+    return [];
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<LoungeExperience[]>("list_review_queue", { filter: filter ?? null });
+}
+
+export async function countReviewStats(): Promise<ReviewStats> {
+  if (!isTauri()) {
+    return { pending: 0, hygiene: 0, approved_today: 0, rejected: 0 };
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<ReviewStats>("count_review_stats");
+}
+
+export async function rejectExperience(id: string): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("rejectExperience requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("reject_experience", { id });
+}
+
+export async function undoRejectExperience(id: string): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("undoRejectExperience requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("undo_reject_experience", { id });
+}
+
+export async function markExperiencesReviewed(ids: string[]): Promise<number> {
+  if (!isTauri()) {
+    throw new Error("markExperiencesReviewed requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<number>("mark_experiences_reviewed", { ids });
+}
+
+export async function rejectExperiences(ids: string[]): Promise<number> {
+  if (!isTauri()) {
+    throw new Error("rejectExperiences requires the desktop app");
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<number>("reject_experiences", { ids });
 }
