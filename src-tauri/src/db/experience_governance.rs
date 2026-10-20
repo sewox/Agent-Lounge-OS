@@ -73,27 +73,27 @@ pub fn lexical_search_score(query: &str, row: &LoungeExperience) -> f64 {
     score
 }
 
+/// One side of [`cmp_search_with_review_band`] (keeps the comparator ≤7 args for clippy).
+#[derive(Clone, Copy, Debug)]
+pub struct SearchRankKey<'a> {
+    pub score: f64,
+    pub reviewed: bool,
+    pub created_at: &'a str,
+    pub id: &'a str,
+}
+
 /// Total order for MCP/search hits (never panics under `sort_by` since Rust 1.81):
 /// bucket desc → reviewed → score desc → created_at desc → id asc.
-pub fn cmp_search_with_review_band(
-    score_a: f64,
-    reviewed_a: bool,
-    created_a: &str,
-    id_a: &str,
-    score_b: f64,
-    reviewed_b: bool,
-    created_b: &str,
-    id_b: &str,
-) -> Ordering {
-    let sa = normalize_search_score(score_a);
-    let sb = normalize_search_score(score_b);
+pub fn cmp_search_with_review_band(a: SearchRankKey<'_>, b: SearchRankKey<'_>) -> Ordering {
+    let sa = normalize_search_score(a.score);
+    let sb = normalize_search_score(b.score);
     let ba = review_score_bucket(sa);
     let bb = review_score_bucket(sb);
     bb.cmp(&ba)
-        .then_with(|| reviewed_b.cmp(&reviewed_a))
+        .then_with(|| b.reviewed.cmp(&a.reviewed))
         .then_with(|| sb.partial_cmp(&sa).unwrap_or(Ordering::Equal))
-        .then_with(|| created_b.cmp(created_a))
-        .then_with(|| id_a.cmp(id_b))
+        .then_with(|| b.created_at.cmp(a.created_at))
+        .then_with(|| a.id.cmp(b.id))
 }
 
 /// Sort search hits: relevance bucket primary, `reviewed` only inside a bucket.
@@ -114,14 +114,18 @@ pub fn sort_experiences_for_search(
             }
         }
         cmp_search_with_review_band(
-            sa,
-            a.reviewed,
-            &a.created_at,
-            &a.id,
-            sb,
-            b.reviewed,
-            &b.created_at,
-            &b.id,
+            SearchRankKey {
+                score: sa,
+                reviewed: a.reviewed,
+                created_at: &a.created_at,
+                id: &a.id,
+            },
+            SearchRankKey {
+                score: sb,
+                reviewed: b.reviewed,
+                created_at: &b.created_at,
+                id: &b.id,
+            },
         )
     });
 }
@@ -1858,38 +1862,67 @@ mod tests {
 
     #[test]
     fn review_score_band_tiebreak_and_relevance_primary() {
-        use super::{cmp_search_with_review_band, REVIEW_SCORE_BAND};
+        use super::{cmp_search_with_review_band, SearchRankKey, REVIEW_SCORE_BAND};
         use std::cmp::Ordering;
         // Same bucket → approved first.
         assert_eq!(
             cmp_search_with_review_band(
-                0.80,
-                true,
-                "a",
-                "id-a",
-                0.80 + REVIEW_SCORE_BAND / 2.0,
-                false,
-                "z",
-                "id-b",
+                SearchRankKey {
+                    score: 0.80,
+                    reviewed: true,
+                    created_at: "a",
+                    id: "id-a",
+                },
+                SearchRankKey {
+                    score: 0.80 + REVIEW_SCORE_BAND / 2.0,
+                    reviewed: false,
+                    created_at: "z",
+                    id: "id-b",
+                },
             ),
             Ordering::Less
         );
         // Different buckets → higher score first even if unreviewed.
         assert_eq!(
-            cmp_search_with_review_band(0.95, false, "a", "id-a", 0.40, true, "z", "id-b"),
+            cmp_search_with_review_band(
+                SearchRankKey {
+                    score: 0.95,
+                    reviewed: false,
+                    created_at: "a",
+                    id: "id-a",
+                },
+                SearchRankKey {
+                    score: 0.40,
+                    reviewed: true,
+                    created_at: "z",
+                    id: "id-b",
+                },
+            ),
             Ordering::Less
         );
         // Cycle repro from review: A(0.80,rev), B(0.84), C(0.88,older) — total order.
-        let a = (0.80, true, "2026-01-01", "a");
-        let b = (0.84, false, "2026-06-01", "b");
-        let c = (0.88, false, "2025-01-01", "c");
-        let cmp = |x: (f64, bool, &str, &str), y: (f64, bool, &str, &str)| {
-            cmp_search_with_review_band(x.0, x.1, x.2, x.3, y.0, y.1, y.2, y.3)
+        let a = SearchRankKey {
+            score: 0.80,
+            reviewed: true,
+            created_at: "2026-01-01",
+            id: "a",
+        };
+        let b = SearchRankKey {
+            score: 0.84,
+            reviewed: false,
+            created_at: "2026-06-01",
+            id: "b",
+        };
+        let c = SearchRankKey {
+            score: 0.88,
+            reviewed: false,
+            created_at: "2025-01-01",
+            id: "c",
         };
         // C (bucket 17) before A/B (bucket 16); A reviewed before B in same bucket.
-        assert_eq!(cmp(c, a), Ordering::Less);
-        assert_eq!(cmp(c, b), Ordering::Less);
-        assert_eq!(cmp(a, b), Ordering::Less);
+        assert_eq!(cmp_search_with_review_band(c, a), Ordering::Less);
+        assert_eq!(cmp_search_with_review_band(c, b), Ordering::Less);
+        assert_eq!(cmp_search_with_review_band(a, b), Ordering::Less);
     }
 
     #[test]
@@ -1924,7 +1957,7 @@ mod tests {
     fn review_score_band_comparator_is_total_order_property() {
         use super::{
             cmp_search_with_review_band, normalize_search_score, review_score_bucket,
-            REVIEW_SCORE_BAND,
+            SearchRankKey, REVIEW_SCORE_BAND,
         };
         use std::cmp::Ordering;
 
@@ -1938,12 +1971,23 @@ mod tests {
 
         fn cmp_hit(a: &Hit, b: &Hit) -> Ordering {
             cmp_search_with_review_band(
-                a.score, a.reviewed, &a.created, &a.id, b.score, b.reviewed, &b.created, &b.id,
+                SearchRankKey {
+                    score: a.score,
+                    reviewed: a.reviewed,
+                    created_at: &a.created,
+                    id: &a.id,
+                },
+                SearchRankKey {
+                    score: b.score,
+                    reviewed: b.reviewed,
+                    created_at: &b.created,
+                    id: &b.id,
+                },
             )
         }
 
         // xorshift64 — deterministic, no extra crate.
-        let mut state: u64 = 0xC0FFEE_DEAD_BEEF;
+        let mut state: u64 = 0x00C0_FFEE_DEAD_BEEF;
         let mut next_u64 = || -> u64 {
             state ^= state << 13;
             state ^= state >> 7;

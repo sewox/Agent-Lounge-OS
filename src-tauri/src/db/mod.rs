@@ -26,7 +26,7 @@ pub use experience_governance::{
     migrate_mcp_quality_v1, normalize_search_score, review_score_bucket,
     sort_experiences_for_search, strip_original_content_for_ui, strip_original_content_for_ui_vec,
     ArchiveClock, ExperienceUpdate, FakeClock, ReviewQueueFilter, ReviewStatFilter, ReviewStats,
-    SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_MCP_QUALITY_V1,
+    SearchRankKey, SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_MCP_QUALITY_V1,
     MIGRATION_PLACEHOLDER_CLEANUP_V1, MIGRATION_TITLE_BACKFILL_ENQUEUE_V1, REVIEW_SCORE_BAND,
     SEARCH_SAME_PROJECT_BOOST, SETTING_EXPERIENCE_TTL_DAYS,
 };
