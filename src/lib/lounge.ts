@@ -2452,16 +2452,16 @@ export async function isDesktopDeepLinkRegistered(): Promise<boolean> {
 export type ConnectAction = "connect" | "disconnect" | "print";
 
 export type ConnectFilePlan = {
-  path: string;
   path_masked: string;
   kind: string;
   exists: boolean;
   would_create: boolean;
   jsonc_comment_loss: boolean;
-  before?: string | null;
-  after?: string | null;
+  /** Redacted agent-lounge-os entry only (env values are "***"). */
+  entry_before?: unknown | null;
+  entry_after?: unknown | null;
+  /** Structural diff of our entry — never a full-file dump. */
   diff: string;
-  backup_path?: string | null;
   backup_path_masked?: string | null;
 };
 
@@ -2470,7 +2470,6 @@ export type ConnectPlan = {
   scope: string;
   action: ConnectAction;
   dry_run: boolean;
-  command_path?: string | null;
   command_path_masked?: string | null;
   files: ConnectFilePlan[];
   warnings: string[];

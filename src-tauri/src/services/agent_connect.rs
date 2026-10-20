@@ -53,17 +53,27 @@ pub enum ConnectAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectFilePlan {
-    pub path: String,
+    /// Masked path only (`~/…`). Never serialize absolute home paths to UI/IPC.
     pub path_masked: String,
     pub kind: String,
     pub exists: bool,
     pub would_create: bool,
     pub jsonc_comment_loss: bool,
-    pub before: Option<String>,
-    pub after: Option<String>,
+    /// Redacted `agent-lounge-os` entry only (env values `***`, command home-masked).
+    pub entry_before: Option<Value>,
+    /// Redacted `agent-lounge-os` entry only after the planned change.
+    pub entry_after: Option<Value>,
+    /// Structural diff of our entry (not a line-position file diff).
     pub diff: String,
-    pub backup_path: Option<String>,
     pub backup_path_masked: Option<String>,
+    /// Absolute path for local apply only — never sent over IPC.
+    #[serde(skip)]
+    pub(crate) path: PathBuf,
+    /// Full file bytes to write on apply — never sent over IPC.
+    #[serde(skip)]
+    pub(crate) write_contents: Option<String>,
+    #[serde(skip)]
+    pub(crate) backup_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +82,6 @@ pub struct ConnectPlan {
     pub scope: String,
     pub action: ConnectAction,
     pub dry_run: bool,
-    pub command_path: Option<String>,
     pub command_path_masked: Option<String>,
     pub files: Vec<ConnectFilePlan>,
     pub warnings: Vec<String>,
@@ -142,23 +151,72 @@ fn mask_path(path: &Path, roots: &AgentHealthRoots) -> String {
     mask_home_path_with(&path.to_string_lossy(), &roots.mask_homes())
 }
 
-fn unified_diff(path_label: &str, before: &str, after: &str) -> String {
-    if before == after {
-        return format!("--- {path_label} (unchanged)\n");
+/// Extract the `agent-lounge-os` server object from a parsed config root.
+fn extract_lounge_entry(root: &Value, servers_key: &str) -> Option<Value> {
+    root.get(servers_key)
+        .and_then(Value::as_object)
+        .and_then(|m| m.get(LOUNGE_MCP_SERVER_KEY))
+        .cloned()
+}
+
+/// Redact env values to `***` and mask home prefixes in command/string fields.
+fn redact_lounge_entry(entry: &Value, roots: &AgentHealthRoots) -> Value {
+    let mut out = entry.clone();
+    let homes = roots.mask_homes();
+    if let Some(obj) = out.as_object_mut() {
+        if let Some(cmd) = obj.get("command").and_then(Value::as_str) {
+            obj.insert(
+                "command".into(),
+                Value::String(mask_home_path_with(cmd, &homes)),
+            );
+        }
+        if let Some(env) = obj.get_mut("env").and_then(Value::as_object_mut) {
+            for (_k, v) in env.iter_mut() {
+                *v = Value::String("***".into());
+            }
+        }
+        // Redact any other string that looks path-like under home.
+        for (key, v) in obj.clone().iter() {
+            if key == "command" || key == "env" || key == "args" {
+                continue;
+            }
+            if let Some(s) = v.as_str() {
+                let masked = mask_home_path_with(s, &homes);
+                if masked != s {
+                    obj.insert(key.clone(), Value::String(masked));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Structural diff of our redacted entry (not a full-file line diff).
+fn structural_entry_diff(
+    path_label: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+) -> String {
+    let before_s = before
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into()))
+        .unwrap_or_else(|| "null".into());
+    let after_s = after
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into()))
+        .unwrap_or_else(|| "null".into());
+    if before_s == after_s {
+        return format!("--- {path_label} / {LOUNGE_MCP_SERVER_KEY} (unchanged)\n");
     }
     let mut out = String::new();
-    out.push_str(&format!("--- a/{path_label}\n+++ b/{path_label}\n"));
-    let before_lines: Vec<&str> = before.lines().collect();
-    let after_lines: Vec<&str> = after.lines().collect();
+    out.push_str(&format!(
+        "--- a/{path_label}#{LOUNGE_MCP_SERVER_KEY}\n+++ b/{path_label}#{LOUNGE_MCP_SERVER_KEY}\n"
+    ));
+    let before_lines: Vec<&str> = before_s.lines().collect();
+    let after_lines: Vec<&str> = after_s.lines().collect();
     let max = before_lines.len().max(after_lines.len());
     for i in 0..max {
         match (before_lines.get(i), after_lines.get(i)) {
-            (Some(b), Some(a)) if b == a => {
-                out.push_str(&format!(" {b}\n"));
-            }
-            (Some(b), Some(a)) => {
-                out.push_str(&format!("-{b}\n+{a}\n"));
-            }
+            (Some(b), Some(a)) if b == a => out.push_str(&format!(" {b}\n")),
+            (Some(b), Some(a)) => out.push_str(&format!("-{b}\n+{a}\n")),
             (Some(b), None) => out.push_str(&format!("-{b}\n")),
             (None, Some(a)) => out.push_str(&format!("+{a}\n")),
             (None, None) => {}
@@ -275,43 +333,54 @@ fn plan_mcp_file(
         }
     }
 
-    let before = if exists {
+    let raw_before = if exists {
         Some(fs::read_to_string(&target.path).map_err(|e| format!("read failed: {e}"))?)
     } else {
         None
     };
 
-    let jsonc_comment_loss = before
+    let jsonc_comment_loss = raw_before
         .as_deref()
         .map(|raw| target.allow_jsonc && jsonc_write_would_lose_comments(raw))
         .unwrap_or(false);
+    let _ = force_lossy_jsonc;
 
-    let after = match action {
-        ConnectAction::Print => before.clone(),
+    let parsed_before = if let Some(raw) = &raw_before {
+        Some(parse_config_raw(raw, target.allow_jsonc)?)
+    } else {
+        None
+    };
+
+    let entry_before_raw = parsed_before
+        .as_ref()
+        .and_then(|v| extract_lounge_entry(v, target.servers_key));
+    let entry_before = entry_before_raw
+        .as_ref()
+        .map(|e| redact_lounge_entry(e, roots));
+
+    let (write_contents, entry_after_raw) = match action {
+        ConnectAction::Print => (None, entry_before_raw.clone()),
         ConnectAction::Connect => {
-            let mut value = if let Some(raw) = &before {
-                parse_config_raw(raw, target.allow_jsonc)?
-            } else {
-                json!({})
-            };
+            let mut value = parsed_before.clone().unwrap_or_else(|| json!({}));
             upsert_lounge_key(&mut value, target.servers_key, command)?;
-            Some(pretty_json(&value)?)
+            let entry = extract_lounge_entry(&value, target.servers_key);
+            (Some(pretty_json(&value)?), entry)
         }
         ConnectAction::Disconnect => {
-            if let Some(raw) = &before {
-                let mut value = parse_config_raw(raw, target.allow_jsonc)?;
+            if let Some(mut value) = parsed_before.clone() {
                 remove_lounge_key(&mut value, target.servers_key);
-                Some(pretty_json(&value)?)
+                (Some(pretty_json(&value)?), None)
             } else {
-                None
+                (None, None)
             }
         }
     };
 
-    let before_s = before.clone().unwrap_or_default();
-    let after_s = after.clone().unwrap_or_default();
+    let entry_after = entry_after_raw
+        .as_ref()
+        .map(|e| redact_lounge_entry(e, roots));
     let label = mask_path(&target.path, roots);
-    let diff = unified_diff(&label, &before_s, &after_s);
+    let diff = structural_entry_diff(&label, entry_before.as_ref(), entry_after.as_ref());
 
     let backup = if exists && action != ConnectAction::Print {
         Some(backup_sibling(&target.path))
@@ -319,20 +388,19 @@ fn plan_mcp_file(
         None
     };
 
-    let _ = (jsonc_comment_loss, force_lossy_jsonc); // surfaced via jsonc_comment_loss field
-
     Ok(ConnectFilePlan {
-        path: target.path.to_string_lossy().into_owned(),
         path_masked: label,
         kind: "mcp_config".into(),
         exists,
         would_create,
         jsonc_comment_loss,
-        before,
-        after,
+        entry_before,
+        entry_after,
         diff,
-        backup_path: backup.as_ref().map(|p| p.to_string_lossy().into_owned()),
         backup_path_masked: backup.as_ref().map(|p| mask_path(p, roots)),
+        path: target.path.clone(),
+        write_contents,
+        backup_path: backup,
     })
 }
 
@@ -343,18 +411,24 @@ fn plan_rule_file(
     action: ConnectAction,
 ) -> ConnectFilePlan {
     let exists = path.is_file();
-    let before = if exists {
+    let homes = roots.mask_homes();
+    let before_raw = if exists {
         fs::read_to_string(&path).ok()
     } else {
         None
     };
-    let after = match action {
+    let after_raw = match action {
         ConnectAction::Connect => Some(rule_body_for_client(client)),
         ConnectAction::Disconnect => None,
-        ConnectAction::Print => before.clone(),
+        ConnectAction::Print => before_raw.clone(),
     };
-    let before_s = before.clone().unwrap_or_default();
-    let after_s = after.clone().unwrap_or_default();
+    // Rule files are our text only — still mask any home substrings; no env secrets.
+    let entry_before = before_raw.as_ref().map(|s| {
+        Value::String(mask_home_in_text_local(s, &homes))
+    });
+    let entry_after = after_raw.as_ref().map(|s| {
+        Value::String(mask_home_in_text_local(s, &homes))
+    });
     let label = mask_path(&path, roots);
     let backup = if exists && action != ConnectAction::Print {
         Some(backup_sibling(&path))
@@ -362,18 +436,23 @@ fn plan_rule_file(
         None
     };
     ConnectFilePlan {
-        path: path.to_string_lossy().into_owned(),
         path_masked: label.clone(),
         kind: "rule_file".into(),
         exists,
         would_create: !exists && action == ConnectAction::Connect,
         jsonc_comment_loss: false,
-        before,
-        after,
-        diff: unified_diff(&label, &before_s, &after_s),
-        backup_path: backup.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        entry_before: entry_before.clone(),
+        entry_after: entry_after.clone(),
+        diff: structural_entry_diff(&label, entry_before.as_ref(), entry_after.as_ref()),
         backup_path_masked: backup.as_ref().map(|p| mask_path(p, roots)),
+        path,
+        write_contents: after_raw,
+        backup_path: backup,
     }
+}
+
+fn mask_home_in_text_local(text: &str, homes: &[String]) -> String {
+    crate::services::health_filters::mask_home_in_text(text, homes)
 }
 
 /// Build a connect/disconnect/print plan without writing.
@@ -461,7 +540,6 @@ pub fn plan_agent_connect(
         scope: opts.scope.as_str().into(),
         action,
         dry_run: opts.dry_run,
-        command_path: command.map(|p| p.to_string_lossy().into_owned()),
         command_path_masked: cmd_masked,
         files,
         warnings,
@@ -518,6 +596,17 @@ pub fn write_atomic_with_backup(
     Ok(())
 }
 
+#[cfg(unix)]
+fn fsync_parent_dir(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let dir = fs::File::open(parent).map_err(|e| format!("open parent dir: {e}"))?;
+    dir.sync_all()
+        .map_err(|e| format!("fsync parent dir: {e}"))?;
+    Ok(())
+}
+
 fn atomic_replace(tmp: &Path, dest: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -526,7 +615,8 @@ fn atomic_replace(tmp: &Path, dest: &Path) -> Result<(), String> {
         use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
 
         if !dest.exists() {
-            return fs::rename(tmp, dest).map_err(|e| format!("rename: {e}"));
+            fs::rename(tmp, dest).map_err(|e| format!("rename: {e}"))?;
+            return Ok(());
         }
         let wide = |p: &Path| -> Vec<u16> {
             p.as_os_str()
@@ -556,36 +646,35 @@ fn atomic_replace(tmp: &Path, dest: &Path) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        fs::rename(tmp, dest).map_err(|e| format!("rename: {e}"))
+        fs::rename(tmp, dest).map_err(|e| format!("rename: {e}"))?;
+        fsync_parent_dir(dest)?;
+        Ok(())
     }
 }
 
 fn apply_file_plan(file: &ConnectFilePlan, action: &ConnectAction) -> Result<(), String> {
-    let path = PathBuf::from(&file.path);
+    let path = &file.path;
     match action {
         ConnectAction::Print => Ok(()),
         ConnectAction::Connect => {
             let after = file
-                .after
+                .write_contents
                 .as_deref()
-                .ok_or_else(|| "missing after content".to_string())?;
-            let backup = file.backup_path.as_deref().map(Path::new);
-            write_atomic_with_backup(&path, after.as_bytes(), backup)
+                .ok_or_else(|| "missing write contents".to_string())?;
+            write_atomic_with_backup(path, after.as_bytes(), file.backup_path.as_deref())
         }
         ConnectAction::Disconnect => {
             if file.kind == "rule_file" {
                 if path.is_file() {
-                    let backup = file.backup_path.as_deref().map(Path::new);
-                    if let Some(bak) = backup {
-                        fs::copy(&path, bak).map_err(|e| format!("rule backup: {e}"))?;
+                    if let Some(bak) = file.backup_path.as_deref() {
+                        fs::copy(path, bak).map_err(|e| format!("rule backup: {e}"))?;
                     }
-                    fs::remove_file(&path).map_err(|e| format!("remove rule: {e}"))?;
+                    fs::remove_file(path).map_err(|e| format!("remove rule: {e}"))?;
                 }
                 return Ok(());
             }
-            if let Some(after) = &file.after {
-                let backup = file.backup_path.as_deref().map(Path::new);
-                write_atomic_with_backup(&path, after.as_bytes(), backup)?;
+            if let Some(after) = &file.write_contents {
+                write_atomic_with_backup(path, after.as_bytes(), file.backup_path.as_deref())?;
             }
             Ok(())
         }
@@ -633,29 +722,74 @@ pub fn apply_agent_connect(
     })
 }
 
-/// Print fragment: target path + JSON snippet (no writes).
+/// Print fragment for UI/IPC: masked paths only, env values redacted. No writes.
 pub fn print_agent_connect(
     roots: &AgentHealthRoots,
     opts: &ConnectOptions,
 ) -> Result<Value, String> {
+    print_agent_connect_inner(roots, opts, /*include_unmasked_path*/ false)
+}
+
+/// CLI print: same as UI plus `path_unmasked_for_cli` for copy-paste installs.
+pub fn print_agent_connect_for_cli(
+    roots: &AgentHealthRoots,
+    opts: &ConnectOptions,
+) -> Result<Value, String> {
+    print_agent_connect_inner(roots, opts, /*include_unmasked_path*/ true)
+}
+
+fn print_agent_connect_inner(
+    roots: &AgentHealthRoots,
+    opts: &ConnectOptions,
+    include_unmasked_path: bool,
+) -> Result<Value, String> {
     let plan = plan_agent_connect(roots, opts, ConnectAction::Print)?;
     let command = resolve_command_path(opts)?;
     let target = primary_write_target(&opts.client, roots, opts.scope)?;
-    let fragment = {
+    let mut fragment = {
         let mut root = json!({});
         upsert_lounge_key(&mut root, target.servers_key, &command)?;
         root
     };
-    Ok(json!({
+    // Always redact env values; mask command for UI, keep real command for CLI copy-paste.
+    if let Some(entry) = fragment
+        .get_mut(target.servers_key)
+        .and_then(Value::as_object_mut)
+        .and_then(|m| m.get_mut(LOUNGE_MCP_SERVER_KEY))
+    {
+        let redacted = redact_lounge_entry(entry, roots);
+        if include_unmasked_path {
+            // Restore real command path for CLI; keep env as ***.
+            if let Some(obj) = redacted.as_object() {
+                let mut cli_entry = obj.clone();
+                cli_entry.insert(
+                    "command".into(),
+                    Value::String(command.to_string_lossy().into_owned()),
+                );
+                *entry = Value::Object(cli_entry);
+            } else {
+                *entry = redacted;
+            }
+        } else {
+            *entry = redacted;
+        }
+    }
+    let mut out = json!({
         "client": opts.client,
         "scope": opts.scope.as_str(),
         "path": mask_path(&target.path, roots),
-        "path_unmasked_for_cli": target.path.to_string_lossy(),
         "servers_key": target.servers_key,
         "fragment": fragment,
         "rule_files": plan.files.iter().filter(|f| f.kind == "rule_file").map(|f| &f.path_masked).collect::<Vec<_>>(),
         "warnings": plan.warnings,
-    }))
+    });
+    if include_unmasked_path {
+        out.as_object_mut().unwrap().insert(
+            "path_unmasked_for_cli".into(),
+            Value::String(target.path.to_string_lossy().into_owned()),
+        );
+    }
+    Ok(out)
 }
 
 /// After connect, re-check health for the client (loop test helper).
@@ -728,7 +862,7 @@ pub fn run_connect_cli(args: &[String]) -> Result<(), String> {
 
     match action {
         ConnectAction::Print => {
-            let value = print_agent_connect(&roots, &opts)?;
+            let value = print_agent_connect_for_cli(&roots, &opts)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
@@ -991,6 +1125,79 @@ mod tests {
         assert_eq!(fs::read(&cfg).unwrap(), before);
         assert!(!result.plan.files.is_empty());
         assert!(!result.plan.files[0].diff.is_empty());
+        assert!(result.plan.files[0].entry_after.is_some());
+    }
+
+    #[test]
+    fn plan_ipc_redacts_sibling_secrets_and_masks_home() {
+        let (roots, base) = temp_roots("secret");
+        let bin = base.join("bin/lounge-mcp");
+        let sha = fake_binary(&bin, "0.1.0");
+        let cfg = roots.home.join(".cursor/mcp.json");
+        let secret = "sk-live-FAKESECRET-sibling-env-value";
+        let home_s = roots.home.to_string_lossy().replace('\\', "/");
+        let cfg_json = json!({
+            "mcpServers": {
+                "sibling": {
+                    "command": "npx",
+                    "env": { "API_KEY": secret, "TOKEN": secret }
+                },
+                "agent-lounge-os": {
+                    "command": format!("{home_s}/bin/old-lounge-mcp"),
+                    "args": [],
+                    "env": { "LOUNGE_MCP_URL": "http://127.0.0.1:18791", "LOUNGE_DB_PATH": format!("{home_s}/secret.db") }
+                }
+            }
+        });
+        fs::write(&cfg, pretty_json(&cfg_json).unwrap()).unwrap();
+
+        let o = opts("cursor", &roots, &bin, &sha);
+        let plan = plan_agent_connect(&roots, &o, ConnectAction::Connect).unwrap();
+        let ipc = serde_json::to_string_pretty(&plan).expect("plan serializes for IPC");
+        assert!(
+            !ipc.contains(secret),
+            "sibling secret must never appear in IPC plan: {ipc}"
+        );
+        assert!(
+            !ipc.contains(home_s.as_str()),
+            "unmasked home must never appear in IPC plan: {ipc}"
+        );
+        assert!(
+            !ipc.contains("path_unmasked"),
+            "no unmasked path key in plan IPC"
+        );
+        // Full file body fields must be gone.
+        assert!(!ipc.contains("\"before\""), "full before must not be serialized");
+        assert!(!ipc.contains("\"after\""), "full after must not be serialized");
+        assert!(!ipc.contains("write_contents"));
+
+        let file = &plan.files[0];
+        assert_eq!(file.kind, "mcp_config");
+        let entry_before = file.entry_before.as_ref().expect("entry_before");
+        let entry_after = file.entry_after.as_ref().expect("entry_after");
+        // Only our entry — sibling must not be present as a peer object in entry_* .
+        let before_s = serde_json::to_string(entry_before).unwrap();
+        let after_s = serde_json::to_string(entry_after).unwrap();
+        assert!(!before_s.contains("sibling"));
+        assert!(!after_s.contains("sibling"));
+        assert!(!before_s.contains(secret));
+        assert!(!after_s.contains(secret));
+        assert!(before_s.contains("***"));
+        assert!(after_s.contains("***"));
+        assert!(file.path_masked.starts_with("~/") || file.path_masked.contains('~'));
+        assert!(file.diff.contains(LOUNGE_MCP_SERVER_KEY) || file.diff.contains("command"));
+
+        let ui_print = print_agent_connect(&roots, &o).unwrap();
+        let ui_s = serde_json::to_string(&ui_print).unwrap();
+        assert!(!ui_s.contains(secret));
+        assert!(!ui_s.contains(home_s.as_str()));
+        assert!(ui_print.get("path_unmasked_for_cli").is_none());
+        assert!(ui_print["path"].as_str().unwrap().starts_with("~/") || ui_print["path"].as_str().unwrap().contains('~'));
+
+        let cli_print = print_agent_connect_for_cli(&roots, &o).unwrap();
+        assert!(cli_print.get("path_unmasked_for_cli").is_some());
+        let cli_s = serde_json::to_string(&cli_print).unwrap();
+        assert!(!cli_s.contains(secret), "CLI print must still redact env secrets");
     }
 
     #[test]

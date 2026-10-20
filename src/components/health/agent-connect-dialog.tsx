@@ -90,7 +90,10 @@ export function AgentConnectDialog({
               {t("agents.jsoncConsentLead")}
             </p>
             <p className="mt-2 font-body text-body text-on-surface-variant">
-              Yorumlar kaybolacak: [{t("agents.jsoncWriteAnyway")}] [{t("agents.jsoncPrintOnly")}]
+              {t("agents.jsoncConsentPrompt", {
+                write: t("agents.jsoncWriteAnyway"),
+                print: t("agents.jsoncPrintOnly"),
+              })}
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <button
@@ -133,7 +136,17 @@ export function AgentConnectDialog({
               data-qa="connect-plan-diff"
               className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface"
             >
-              {plan.files.map((f) => `${f.path_masked}\n${f.diff}`).join("\n")}
+              {plan.files
+                .map((f) => {
+                  const before = f.entry_before
+                    ? JSON.stringify(f.entry_before, null, 2)
+                    : "null";
+                  const after = f.entry_after
+                    ? JSON.stringify(f.entry_after, null, 2)
+                    : "null";
+                  return `${f.path_masked}\n${f.diff}\n--- entry_before ---\n${before}\n--- entry_after ---\n${after}`;
+                })
+                .join("\n\n")}
             </pre>
             {plan.warnings.length > 0 ? (
               <ul className="mt-2 list-disc pl-5 font-body text-meta text-on-surface-variant">

@@ -39,8 +39,7 @@ jobs:
             setup: dnf install -y bash ca-certificates curl findutils e2fsprogs
           - distro: opensuse
             image: opensuse/leap:15.6
-            # CDN update-repo timeouts → zypper exit 106; see scripts/install/setup-opensuse-ci.sh
-            setup: bash scripts/install/setup-opensuse-ci.sh
+            setup: zypper --non-interactive install -y bash curl findutils gzip tar e2fsprogs
           - distro: arch
             image: archlinux:latest
             setup: pacman -Sy --noconfirm bash curl findutils tar gzip e2fsprogs
@@ -64,15 +63,14 @@ jobs:
             -w /work \
             "${{ matrix.image }}" \
             sh -c 'set -eu
+              ${{ matrix.setup }}
               export TMPDIR=/work/tmp
               export LOUNGE_FIXTURE_DIR=/work/fixture
               export LOUNGE_TEST_PREFIX=/work/prefix
               mkdir -p "$TMPDIR" "$LOUNGE_FIXTURE_DIR" "$LOUNGE_TEST_PREFIX"
               cp -a /src/. /work/src
               cd /work/src
-              chmod +x install.sh scripts/install/*.sh scripts/ci/*.sh
-              # Setup after copy so openSUSE can run scripts/install/setup-opensuse-ci.sh
-              ${{ matrix.setup }}
+              chmod +x install.sh scripts/install/*.sh
               bash scripts/install/test-install-unix.sh'
 
       # Host Ubuntu smoke once per matrix row would be wasteful — only ubuntu row.

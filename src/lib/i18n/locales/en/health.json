@@ -70,6 +70,7 @@
     "connectScopeGlobal": "Global",
     "jsoncConsentTitle": "Comments will be lost",
     "jsoncConsentLead": "This config has comments or trailing commas. Automatic write cannot preserve them.",
+    "jsoncConsentPrompt": "Comments will be lost: [{{write}}] [{{print}}]",
     "jsoncWriteAnyway": "Write anyway",
     "jsoncPrintOnly": "Print only",
     "printResultTitle": "Print fragment",

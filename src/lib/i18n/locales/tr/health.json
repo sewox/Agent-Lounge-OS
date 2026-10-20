@@ -70,6 +70,7 @@
     "connectScopeGlobal": "Global",
     "jsoncConsentTitle": "Yorumlar kaybolacak",
     "jsoncConsentLead": "Bu yapılandırmada yorumlar veya sondaki virgüller var. Otomatik yazma bunları koruyamaz.",
+    "jsoncConsentPrompt": "Yorumlar kaybolacak: [{{write}}] [{{print}}]",
     "jsoncWriteAnyway": "Yine de Yaz",
     "jsoncPrintOnly": "Sadece Ekrana Bas",
     "printResultTitle": "Yazdırılan parça",

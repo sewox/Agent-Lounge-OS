@@ -31,6 +31,13 @@ declare global {
     __QA_CONNECT_JSONC_CONSENT__?: boolean;
     /** PR-Connect-1: force next connect/disconnect to throw. */
     __QA_CONNECT_ERROR__?: string;
+    /**
+     * PR-Connect-1 / B1: sibling MCP env secret the mock "reads" from disk.
+     * Must never appear in plan/print IPC payloads or the DOM.
+     */
+    __QA_CONNECT_SIBLING_SECRET__?: string;
+    /** Last plan/print IPC response for B1/B2 secret assertions. */
+    __QA_LAST_CONNECT_PAYLOAD__?: unknown;
     /** PR-Connect-1 / CO-7: seed Halt state before mock boots. */
     __QA_HALT_STATE__?: {
       halted: boolean;
@@ -1078,7 +1085,25 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           const action = String(args?.action ?? "connect");
           const forceLossy = Boolean(args?.forceLossyJsonc ?? args?.force_lossy_jsonc);
           const needsConsent = Boolean(window.__QA_CONNECT_JSONC_CONSENT__) && !forceLossy;
-          return {
+          // On-disk fixture includes a sibling server with a fake secret + unmasked home.
+          // IPC plan must expose only the redacted agent-lounge-os entry (B1).
+          const siblingSecret =
+            window.__QA_CONNECT_SIBLING_SECRET__ ??
+            "sk-live-FAKESECRET-e2e-sibling";
+          window.__QA_CONNECT_SIBLING_SECRET__ = siblingSecret;
+          void {
+            mcpServers: {
+              sibling: {
+                command: "npx",
+                env: { API_KEY: siblingSecret },
+              },
+              "agent-lounge-os": {
+                command: "/home/qa-user/bin/old-lounge-mcp",
+                env: { LOUNGE_MCP_URL: "http://127.0.0.1:18791" },
+              },
+            },
+          };
+          const plan = {
             client,
             scope,
             action,
@@ -1086,23 +1111,32 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             command_path_masked: "~/bin/lounge-mcp",
             files: [
               {
-                path: `/tmp/qa-home/.cursor/mcp.json`,
                 path_masked: "~/.cursor/mcp.json",
                 kind: "mcp_config",
                 exists: true,
                 would_create: false,
                 jsonc_comment_loss: needsConsent,
-                before: '{ "mcpServers": {} }\n',
-                after: '{ "mcpServers": { "agent-lounge-os": { "command": "~/bin/lounge-mcp" } } }\n',
-                diff: "--- a/~/.cursor/mcp.json\n+++ b/~/.cursor/mcp.json\n+agent-lounge-os\n",
+                entry_before: {
+                  command: "~/bin/old-lounge-mcp",
+                  args: [],
+                  env: { LOUNGE_MCP_URL: "***" },
+                },
+                entry_after: {
+                  command: "~/bin/lounge-mcp",
+                  args: [],
+                  env: { LOUNGE_MCP_URL: "***" },
+                },
+                diff: "--- a/~/.cursor/mcp.json#agent-lounge-os\n+++ b/~/.cursor/mcp.json#agent-lounge-os\n-  \"command\": \"~/bin/old-lounge-mcp\"\n+  \"command\": \"~/bin/lounge-mcp\"\n",
                 backup_path_masked: "~/.cursor/mcp.json.lounge-bak-fixture",
               },
             ],
             warnings: needsConsent
-              ? ["Yorumlar kaybolacak: ~/.cursor/mcp.json"]
+              ? ["JSONC comments would be lost: ~/.cursor/mcp.json"]
               : [],
             requires_jsonc_consent: needsConsent,
           };
+          window.__QA_LAST_CONNECT_PAYLOAD__ = plan;
+          return plan;
         }
         case "connect_agent":
         case "disconnect_agent": {
@@ -1129,12 +1163,17 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               command_path_masked: "~/bin/lounge-mcp",
               files: [
                 {
-                  path: `/tmp/qa-home/.cursor/mcp.json`,
                   path_masked: "~/.cursor/mcp.json",
                   kind: "mcp_config",
                   exists: true,
                   would_create: false,
                   jsonc_comment_loss: false,
+                  entry_before: null,
+                  entry_after: {
+                    command: "~/bin/lounge-mcp",
+                    args: [],
+                    env: { LOUNGE_MCP_URL: "***" },
+                  },
                   diff: "+agent-lounge-os\n",
                 },
               ],
@@ -1145,7 +1184,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "print_agent_connect": {
           const client = String(args?.client ?? "cursor");
-          return {
+          // UI payload: masked path only — never path_unmasked_for_cli.
+          const printed = {
             client,
             scope: String(args?.scope ?? "global"),
             path: "~/.cursor/mcp.json",
@@ -1154,12 +1194,14 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
                 "agent-lounge-os": {
                   command: "~/bin/lounge-mcp",
                   args: [],
-                  env: { LOUNGE_MCP_URL: "http://127.0.0.1:18791" },
+                  env: { LOUNGE_MCP_URL: "***" },
                 },
               },
             },
             warnings: [],
           };
+          window.__QA_LAST_CONNECT_PAYLOAD__ = printed;
+          return printed;
         }
         case "list_health_scans": {
           const meta =

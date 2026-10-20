@@ -262,7 +262,14 @@ test.describe("Health-UI-2 agents + dead", () => {
     await expect(connectBtn).toBeVisible();
     await connectBtn.click();
     await expect(page.locator('[data-qa="connect-dialog"]')).toBeVisible();
-    await expect(page.locator('[data-qa="connect-plan-diff"]')).toBeVisible();
+    const planDiff = page.locator('[data-qa="connect-plan-diff"]');
+    await expect(planDiff).toBeVisible();
+    const planText = await planDiff.innerText();
+    // B1: never show sibling secrets or unmasked home paths in the plan dialog.
+    expect(planText).not.toMatch(/sk-live-|API_KEY|sibling-secret/i);
+    expect(planText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    expect(planText).toMatch(/\*\*\*/);
+    expect(planText).toMatch(/agent-lounge-os|lounge-mcp|~/i);
     const axePlan = await new AxeBuilder({ page }).include('[data-qa="connect-dialog"]').analyze();
     expect(axePlan.violations, JSON.stringify(axePlan.violations, null, 2)).toEqual([]);
     await page.locator('[data-qa="connect-confirm"]').click();
@@ -290,7 +297,54 @@ test.describe("Health-UI-2 agents + dead", () => {
     await page.locator('[data-qa="agents-connect"]').click();
     await expect(page.locator('[data-qa="connect-dialog"][data-mode="jsonc"]')).toBeVisible();
     await page.locator('[data-qa="connect-jsonc-print"]').click();
-    await expect(page.locator('[data-qa="connect-print-payload"]')).toBeVisible();
+    const printPayload = page.locator('[data-qa="connect-print-payload"]');
+    await expect(printPayload).toBeVisible();
+    const printText = await printPayload.innerText();
+    // B2: UI print must not expose path_unmasked_for_cli or unmasked homes.
+    expect(printText).not.toMatch(/path_unmasked_for_cli/);
+    expect(printText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    expect(printText).toMatch(/~\//);
+  });
+
+  test("CN-03 · plan/print DOM never leaks sibling env secret", async ({ page }, testInfo) => {
+    testInfo.annotations.push({ type: "id", description: "CN-03" });
+    // Mock "reads" a sibling MCP server whose env holds this secret; plan IPC must omit it.
+    const secret = "sk-live-FAKESECRET-e2e-sibling";
+    await page.addInitScript((secretValue) => {
+      (window as Window & { __QA_CONNECT_SIBLING_SECRET__?: string }).__QA_CONNECT_SIBLING_SECRET__ =
+        secretValue;
+    }, secret);
+    await openRoute(page, "/health?tab=agents", "full");
+    await page
+      .locator('[data-qa="agents-health-row"]')
+      .filter({ has: page.locator('[data-status="missing"]') })
+      .first()
+      .click();
+    await revealDetail(page);
+    await page.locator('[data-qa="agents-connect"]').click();
+    await expect(page.locator('[data-qa="connect-dialog"]')).toBeVisible();
+    const planText = await page.locator('[data-qa="connect-plan-diff"]').innerText();
+    expect(planText).toContain("***");
+    expect(planText).toMatch(/agent-lounge-os|~/);
+    expect(planText).not.toContain(secret);
+    expect(planText).not.toContain("sibling");
+    expect(planText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    const body = await page.locator('[data-qa="connect-dialog"]').innerText();
+    expect(body).not.toContain(secret);
+    const html = await page.content();
+    expect(html).not.toContain(secret);
+    // Last plan IPC payload must omit the sibling secret and unmasked homes.
+    const payloadJson = await page.evaluate(() =>
+      JSON.stringify(
+        (window as Window & { __QA_LAST_CONNECT_PAYLOAD__?: unknown }).__QA_LAST_CONNECT_PAYLOAD__ ??
+          null,
+      ),
+    );
+    expect(payloadJson).not.toContain(secret);
+    expect(payloadJson).not.toContain("sibling");
+    expect(payloadJson).not.toMatch(/\/home\/qa-user|\/Users\/|C:\\\\Users/i);
+    expect(payloadJson).toContain("***");
+    expect(payloadJson).toContain("~/");
   });
 
   test("CN-02 · Durduruldu note on agents tab when Halted", async ({ page }, testInfo) => {
