@@ -142,17 +142,21 @@ test.describe("L3 status-banner-stack occupancy (PR-L3-Banner-1)", () => {
     const banner = page.locator('[data-qa="approval-banner"]');
     await expect(banner, "routing demo approval banner").toBeVisible({ timeout: 10_000 });
 
+    const metrics = await measureLayout(page, "/dashboard?demo=routing-banner");
+    expect(metrics.main, "measureLayout must report main geometry").toEqual(
+      expect.objectContaining({ x: expect.any(Number), w: expect.any(Number) }),
+    );
     const banners = await page.evaluate(collectStatusBannerRects);
     expect(banners.length, "app shell stack must expose visible banner rects").toBeGreaterThan(0);
-
-    const metrics = await measureLayout(page, "/dashboard?demo=routing-banner");
-    expect(metrics.main, "measureLayout must report main geometry").not.toBeNull();
-    const panels = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('main [data-qa="panel"]')).map((el) => {
-        const r = el.getBoundingClientRect();
-        return { x: r.x, y: r.y, w: r.width, h: r.height };
-      }),
-    );
+    // Same panel filter as measureLayout (drop zero-size boxes).
+    const panels = (
+      await page.evaluate(() =>
+        Array.from(document.querySelectorAll('main [data-qa="panel"]')).map((el) => {
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        }),
+      )
+    ).filter((p) => p.w > 0 && p.h > 0);
     const content = l3ContentRect({
       viewport: metrics.viewport,
       sidebarW: metrics.sidebarW,

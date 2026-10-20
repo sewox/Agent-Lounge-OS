@@ -25,6 +25,8 @@ export type LayoutMetrics = {
   viewport: { width: number; height: number };
   contentW: number;
   sidebarW: number;
+  /** `<main>` viewport box used for `l3ContentRect({ mainX })`; null if missing. */
+  main: Rect | null;
   panelCount: number;
   unionW: number;
   unionBottom: number;
@@ -242,6 +244,7 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
     viewport: { width: vp.width, height: vp.height },
     contentW,
     sidebarW: measured.sidebarW,
+    main: measured.main,
     panelCount: panels.length,
     unionW,
     unionBottom: union.y1,
