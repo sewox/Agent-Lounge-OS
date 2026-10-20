@@ -265,8 +265,8 @@ test.describe("Health-UI-2 agents + dead", () => {
     const planDiff = page.locator('[data-qa="connect-plan-diff"]');
     await expect(planDiff).toBeVisible();
     const planText = await planDiff.innerText();
-    // B1: never show sibling secrets or unmasked home paths in the plan dialog.
-    expect(planText).not.toMatch(/sk-live-|API_KEY|sibling-secret/i);
+    // UI must render the already-redacted mock plan (*** / ~), inventing neither secrets nor homes.
+    // Sibling-env redaction: Rust plan_ipc_redacts_sibling_secrets_and_masks_home.
     expect(planText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
     expect(planText).toMatch(/\*\*\*/);
     expect(planText).toMatch(/agent-lounge-os|lounge-mcp|~/i);
@@ -306,14 +306,14 @@ test.describe("Health-UI-2 agents + dead", () => {
     expect(printText).toMatch(/~\//);
   });
 
-  test("CN-03 · plan/print DOM never leaks sibling env secret", async ({ page }, testInfo) => {
+  test("CN-03 · plan dialog renders redacted mock without inventing secrets/homes", async ({
+    page,
+  }, testInfo) => {
     testInfo.annotations.push({ type: "id", description: "CN-03" });
-    // Mock "reads" a sibling MCP server whose env holds this secret; plan IPC must omit it.
-    const secret = "sk-live-FAKESECRET-e2e-sibling";
-    await page.addInitScript((secretValue) => {
-      (window as Window & { __QA_CONNECT_SIBLING_SECRET__?: string }).__QA_CONNECT_SIBLING_SECRET__ =
-        secretValue;
-    }, secret);
+    // Honesty: the tauri-mock returns an already-redacted plan. This test only proves the UI
+    // surfaces that fixture (*** / ~) and does not inject secrets or unmasked home paths into
+    // the DOM. Redaction of a sibling server's env is covered by Rust
+    // plan_ipc_redacts_sibling_secrets_and_masks_home — not reimplemented here.
     await openRoute(page, "/health?tab=agents", "full");
     await page
       .locator('[data-qa="agents-health-row"]')
@@ -326,25 +326,18 @@ test.describe("Health-UI-2 agents + dead", () => {
     const planText = await page.locator('[data-qa="connect-plan-diff"]').innerText();
     expect(planText).toContain("***");
     expect(planText).toMatch(/agent-lounge-os|~/);
-    expect(planText).not.toContain(secret);
-    expect(planText).not.toContain("sibling");
     expect(planText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
     const body = await page.locator('[data-qa="connect-dialog"]').innerText();
-    expect(body).not.toContain(secret);
-    const html = await page.content();
-    expect(html).not.toContain(secret);
-    // Last plan IPC payload must omit the sibling secret and unmasked homes.
+    expect(body).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
     const payloadJson = await page.evaluate(() =>
       JSON.stringify(
         (window as Window & { __QA_LAST_CONNECT_PAYLOAD__?: unknown }).__QA_LAST_CONNECT_PAYLOAD__ ??
           null,
       ),
     );
-    expect(payloadJson).not.toContain(secret);
-    expect(payloadJson).not.toContain("sibling");
-    expect(payloadJson).not.toMatch(/\/home\/qa-user|\/Users\/|C:\\\\Users/i);
     expect(payloadJson).toContain("***");
     expect(payloadJson).toContain("~/");
+    expect(payloadJson).not.toMatch(/\/home\/|\/Users\/|C:\\\\Users/i);
   });
 
   test("CN-02 · Durduruldu note on agents tab when Halted", async ({ page }, testInfo) => {

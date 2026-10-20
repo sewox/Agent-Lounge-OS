@@ -31,12 +31,7 @@ declare global {
     __QA_CONNECT_JSONC_CONSENT__?: boolean;
     /** PR-Connect-1: force next connect/disconnect to throw. */
     __QA_CONNECT_ERROR__?: string;
-    /**
-     * PR-Connect-1 / B1: sibling MCP env secret the mock "reads" from disk.
-     * Must never appear in plan/print IPC payloads or the DOM.
-     */
-    __QA_CONNECT_SIBLING_SECRET__?: string;
-    /** Last plan/print IPC response for B1/B2 secret assertions. */
+    /** Last plan/print IPC response (already-redacted fixture for UI rendering checks). */
     __QA_LAST_CONNECT_PAYLOAD__?: unknown;
     /** PR-Connect-1 / CO-7: seed Halt state before mock boots. */
     __QA_HALT_STATE__?: {
@@ -1085,24 +1080,9 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           const action = String(args?.action ?? "connect");
           const forceLossy = Boolean(args?.forceLossyJsonc ?? args?.force_lossy_jsonc);
           const needsConsent = Boolean(window.__QA_CONNECT_JSONC_CONSENT__) && !forceLossy;
-          // On-disk fixture includes a sibling server with a fake secret + unmasked home.
-          // IPC plan must expose only the redacted agent-lounge-os entry (B1).
-          const siblingSecret =
-            window.__QA_CONNECT_SIBLING_SECRET__ ??
-            "sk-live-FAKESECRET-e2e-sibling";
-          window.__QA_CONNECT_SIBLING_SECRET__ = siblingSecret;
-          void {
-            mcpServers: {
-              sibling: {
-                command: "npx",
-                env: { API_KEY: siblingSecret },
-              },
-              "agent-lounge-os": {
-                command: "/home/qa-user/bin/old-lounge-mcp",
-                env: { LOUNGE_MCP_URL: "http://127.0.0.1:18791" },
-              },
-            },
-          };
+          // Fixture returns an already-redacted plan (env ***, homes ~). Sibling-secret
+          // redaction itself is guaranteed by Rust plan_ipc_redacts_sibling_secrets_and_masks_home —
+          // do not reimplement that pipeline in TS.
           const plan = {
             client,
             scope,
