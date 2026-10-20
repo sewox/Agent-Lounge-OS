@@ -27,7 +27,8 @@ Branch protection (owner-managed) can require these **16** check names. They mus
 - **Concurrency:** PR workflows use `cancel-in-progress` on the same ref so superseded pushes free runners.
 - **Not required:** `nightly-laya.yml` (`Prove live_laya_infer filter` / `Laya live infer`) is schedule / `workflow_dispatch` (and path-filtered on PRs that touch its wiring only). Do not add those names to branch protection.
 - **Not required (installer):** `installer.yml` (`Installer Linux (*)` / `Installer macOS` / `Installer Windows`) exercises `install.sh` / `install.ps1` against a local fixture release (incl. Alpine unsupported + checksum mismatch). Do not rename the 16 required checks to absorb these.
-- **Release:** `release.yml` (tag `v*` only) publishes a **draft** GitHub Release with canonical assets + icon + **SHA256SUMS**. Linux AppImage is reused from `linux-bundle.yml` (no duplicated Tauri build); macOS/Windows fetch the real SHA-pinned codebase-memory-mcp sidecar (never `--stub`).
+- **Release:** `release.yml` (tag `v*` only) publishes a **draft** GitHub Release with canonical assets + icon + **SHA256SUMS**. Linux AppImage is reused from `linux-bundle.yml` (no duplicated Tauri build); macOS/Windows fetch the real SHA-pinned codebase-memory-mcp sidecar (never `--stub`). Local sidecar fetch: `GH_TOKEN=$(gh auth token) bash scripts/ci/fetch-codebase-memory-mcp.sh`.
+- **Installer openSUSE:** matrix image is `opensuse/leap:16.0` with `zypper --non-interactive refresh` before install (GPG checks on; refresh/install failures fail the job — no blanket zypper 106 accept).
 
 ## apt mirror stalls
 

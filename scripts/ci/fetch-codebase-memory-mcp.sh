@@ -7,6 +7,7 @@
 # - Fall back to browser download URL with the same Bearer token
 # - SHA256-verify against the pinned digest
 # - Cache verified archives under $CBM_CACHE_DIR (default: ~/.cache/lounge-cbm)
+# Local run: GH_TOKEN=$(gh auth token) bash scripts/ci/fetch-codebase-memory-mcp.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
