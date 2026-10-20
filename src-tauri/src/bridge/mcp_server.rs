@@ -713,27 +713,16 @@ impl McpServer {
             if let Some(ref project_id) = project {
                 hits.retain(|row| row.project_id == *project_id);
             }
-        } else if let Some(ref project_id) = project {
-            // Aynı proje önce; diğer projeler sonra (katı filtre değil).
-            hits.sort_by_key(|row| if row.project_id == *project_id { 0 } else { 1 });
         }
 
-        // VR4 / UD-5: same score/project band — reviewed (approved) before unreviewed.
+        // VR4 / UD-5: relevance primary; `reviewed` only inside REVIEW_SCORE_BAND.
+        // Same-project preference is a soft score boost — never replaces relevance.
         // Additive `reviewed` field below; never drop unreviewed from results.
-        hits.sort_by(|a, b| {
-            let band_a = project
-                .as_ref()
-                .map(|pid| if a.project_id == *pid { 0 } else { 1 })
-                .unwrap_or(0);
-            let band_b = project
-                .as_ref()
-                .map(|pid| if b.project_id == *pid { 0 } else { 1 })
-                .unwrap_or(0);
-            band_a
-                .cmp(&band_b)
-                .then_with(|| b.reviewed.cmp(&a.reviewed))
-                .then_with(|| b.created_at.cmp(&a.created_at))
-        });
+        crate::db::sort_experiences_for_search(
+            &mut hits,
+            &query,
+            if restrict { None } else { project.as_deref() },
+        );
 
         if let Some(cap) = limit.or(Some(12)) {
             hits.truncate(cap);
@@ -3203,5 +3192,53 @@ mod tests {
             first_approved < first_pending,
             "approved must rank above unreviewed in the same band"
         );
+    }
+
+    #[tokio::test]
+    async fn search_relevance_outranks_reviewed_outside_band() {
+        use crate::models::{ExperienceOutcome, ExperienceRecord, LoungeTask};
+
+        let store = ExperienceStore::memory().expect("db");
+        let needle = "vault-review-strong-needle-xyz";
+        let mut strong_pending = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-rev", needle),
+            needle,
+            format!("{needle} adr"),
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        strong_pending.reviewed = false;
+        store.insert_record(strong_pending).await.unwrap();
+
+        let mut weak_approved = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-rev", "other-topic"),
+            "unrelated solution text",
+            "unrelated adr",
+            ExperienceOutcome::Success,
+            vec![needle.into()],
+        );
+        weak_approved.reviewed = true;
+        store.insert_record(weak_approved).await.unwrap();
+
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let resp = server
+            .handle_line(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"lounge_search_experience","arguments":{{"query":"{needle}","limit":10}}}}}}"#
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true, "{val}");
+        let experiences = val["result"]["structuredContent"]["experiences"]
+            .as_array()
+            .expect("experiences array");
+        assert!(experiences.len() >= 2);
+        assert_eq!(
+            experiences[0]["reviewed"].as_bool(),
+            Some(false),
+            "strong unreviewed must lead outside REVIEW_SCORE_BAND: {experiences:?}"
+        );
+        assert!(experiences.iter().any(|r| r["reviewed"] == true));
     }
 }

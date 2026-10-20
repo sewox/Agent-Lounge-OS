@@ -1,6 +1,7 @@
 /**
  * Pure helpers for Vault Review ordering, filters, and counter consistency.
- * Keep in sync with Rust `list_review_queue` / `count_review_stats`.
+ * Keep in sync with Rust `list_review_queue` / `count_unreviewed_experiences`
+ * and UD-5 `REVIEW_SCORE_BAND` (docs/mcp.md).
  */
 
 export type ReviewStatId = "pending" | "hygiene" | "approved_today" | "rejected";
@@ -29,6 +30,9 @@ export const HYGIENE_PLACEHOLDERS = [
   "<home>",
 ] as const;
 
+/** Must match Rust `REVIEW_SCORE_BAND` in experience_governance.rs / docs/mcp.md. */
+export const REVIEW_SCORE_BAND = 0.05;
+
 export function textHasHygieneMask(text: string | null | undefined): boolean {
   if (!text) return false;
   return HYGIENE_PLACEHOLDERS.some((p) => text.includes(p));
@@ -43,6 +47,33 @@ export function experienceHasHygieneMask(row: ReviewableExperience): boolean {
     textHasHygieneMask(row.solution_summary) ||
     (row.tags ?? []).some((tag) => textHasHygieneMask(tag))
   );
+}
+
+/**
+ * Strip absolute home roots before any review content reaches the DOM.
+ * Raw pre-hygiene paths must never appear in the review view.
+ */
+export function redactHomePaths(text: string): string {
+  return text
+    .replace(/\/Users\/[^/\s]+/gi, "<home>")
+    .replace(/\/home\/[^/\s]+/gi, "<home>")
+    .replace(/C:\\Users\\[^\\\s]+/gi, "<home>");
+}
+
+/** Hygiene-masked body for the inspector (once). Never returns raw home paths. */
+export function maskedReviewContent(row: ReviewableExperience): string {
+  const raw = (row.adr_summary || row.title || "").trim();
+  return redactHomePaths(raw);
+}
+
+/** Drop original_content so pre-hygiene text cannot leak into React trees. */
+export function sanitizeReviewRow<T extends ReviewableExperience>(row: T): T {
+  return {
+    ...row,
+    original_content: null,
+    adr_summary: redactHomePaths(row.adr_summary ?? ""),
+    title: row.title != null ? redactHomePaths(row.title) : row.title,
+  };
 }
 
 /** Hygiene-flagged first, then newest `created_at`. */
@@ -93,11 +124,19 @@ export function assertCounterConsistency(
   return unreviewedCount === stats.pending;
 }
 
-/** Same-band ordering: reviewed before unreviewed (stable within band by created_at). */
-export function sortSearchByReviewedBand<T extends { reviewed?: boolean; created_at: string }>(
-  rows: T[],
-): T[] {
+/**
+ * UD-5: relevance primary; within REVIEW_SCORE_BAND, reviewed before unreviewed.
+ * Callers supply normalized scores in [0, 1] (same contract as Rust lexical_search_score).
+ */
+export function sortSearchByReviewedBand<
+  T extends { reviewed?: boolean; created_at: string; score?: number },
+>(rows: T[]): T[] {
   return [...rows].sort((a, b) => {
+    const sa = a.score ?? (a.reviewed === false ? 0.5 : 0.5);
+    const sb = b.score ?? (b.reviewed === false ? 0.5 : 0.5);
+    if (Math.abs(sa - sb) > REVIEW_SCORE_BAND) {
+      return sb - sa;
+    }
     const ra = a.reviewed === false ? 1 : 0;
     const rb = b.reviewed === false ? 1 : 0;
     if (ra !== rb) return ra - rb;

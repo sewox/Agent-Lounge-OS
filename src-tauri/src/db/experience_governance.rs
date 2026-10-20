@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::cmp::Ordering;
 
 use super::experiences::{column_names, has_col};
 use super::ExperienceStore;
@@ -13,6 +14,88 @@ use crate::models::{
 /// Settings key for auto-archive TTL in days (default 90).
 pub const SETTING_EXPERIENCE_TTL_DAYS: &str = "experience_ttl_days";
 pub const DEFAULT_EXPERIENCE_TTL_DAYS: u64 = 90;
+
+/// UD-5 / VR4: `reviewed` is only a tiebreaker when two hits' normalized
+/// relevance scores differ by at most this amount. Larger gaps keep relevance
+/// primary — a strongly relevant unreviewed hit stays above a weakly relevant
+/// approved one. Documented in `docs/mcp.md`.
+pub const REVIEW_SCORE_BAND: f64 = 0.05;
+
+/// Soft same-project preference applied on top of lexical relevance (MCP).
+pub const SEARCH_SAME_PROJECT_BOOST: f64 = 0.04;
+
+/// Normalized [0, 1] lexical relevance for LIKE-search hits (primary sort key).
+pub fn lexical_search_score(query: &str, row: &LoungeExperience) -> f64 {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return if row.is_pinned { 0.05 } else { 0.0 };
+    }
+    let title = row.title.to_lowercase();
+    let adr = row.adr_summary.to_lowercase();
+    let tags = row.tags.join(" ").to_lowercase();
+    let mut score = 0.0_f64;
+    if !title.is_empty() && title == q {
+        score = 1.0;
+    } else if title.contains(&q) {
+        score = 0.9;
+    } else if adr.contains(&q) {
+        let ratio = (q.len() as f64) / (adr.len().max(1) as f64);
+        score = 0.55 + 0.25 * ratio.min(1.0);
+    } else if tags.contains(&q) {
+        score = 0.3;
+    } else {
+        let tokens: Vec<_> = q.split_whitespace().filter(|t| t.len() > 1).collect();
+        let hay = format!("{title} {adr} {tags}");
+        if !tokens.is_empty() {
+            let hits = tokens.iter().filter(|t| hay.contains(**t)).count();
+            score = 0.2 * (hits as f64 / tokens.len() as f64);
+        }
+    }
+    if row.is_pinned {
+        score = (score + 0.02).min(1.0);
+    }
+    score
+}
+
+/// Relevance descending; within [`REVIEW_SCORE_BAND`], approved before unreviewed;
+/// then newer `created_at`.
+pub fn cmp_search_with_review_band(
+    score_a: f64,
+    reviewed_a: bool,
+    created_a: &str,
+    score_b: f64,
+    reviewed_b: bool,
+    created_b: &str,
+) -> Ordering {
+    let diff = (score_a - score_b).abs();
+    if diff > REVIEW_SCORE_BAND {
+        return score_b.partial_cmp(&score_a).unwrap_or(Ordering::Equal);
+    }
+    reviewed_b
+        .cmp(&reviewed_a)
+        .then_with(|| created_b.cmp(created_a))
+}
+
+/// Sort search hits: relevance primary, `reviewed` only inside [`REVIEW_SCORE_BAND`].
+pub fn sort_experiences_for_search(
+    hits: &mut [LoungeExperience],
+    query: &str,
+    prefer_project: Option<&str>,
+) {
+    hits.sort_by(|a, b| {
+        let mut sa = lexical_search_score(query, a);
+        let mut sb = lexical_search_score(query, b);
+        if let Some(pid) = prefer_project {
+            if a.project_id == pid {
+                sa = (sa + SEARCH_SAME_PROJECT_BOOST).min(1.0);
+            }
+            if b.project_id == pid {
+                sb = (sb + SEARCH_SAME_PROJECT_BOOST).min(1.0);
+            }
+        }
+        cmp_search_with_review_band(sa, a.reviewed, &a.created_at, sb, b.reviewed, &b.created_at)
+    });
+}
 /// Optional use-count threshold for auto-archive (0 = disabled).
 pub const SETTING_EXPERIENCE_USE_COUNT_THRESHOLD: &str = "experience_use_count_threshold";
 pub const DEFAULT_EXPERIENCE_USE_COUNT_THRESHOLD: u64 = 0;
@@ -724,7 +807,10 @@ fn search_filtered_blocking(
     } else {
         ""
     };
-    // Column-backed governance fields — never prefer stale payload_json.
+    // Fetch a wider window, then UD-5 score-band sort + truncate (relevance primary).
+    let fetch_cap = (limit.saturating_mul(4)).clamp(limit, 256);
+    // Pre-PR relevance proxy preserved as SQL seed order (pinned, then newest).
+    // `reviewed` must NOT be the primary ORDER BY — see REVIEW_SCORE_BAND.
     let sql = format!(
         r#"
         SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
@@ -734,21 +820,23 @@ fn search_filtered_blocking(
         FROM experiences
         WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || COALESCE(title,'') || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
           {status_clause}
-        ORDER BY reviewed DESC, is_pinned DESC, created_at DESC
+        ORDER BY is_pinned DESC, created_at DESC
         LIMIT ?{limit_idx}
         "#,
         limit_idx = if status.is_some() { 3 } else { 2 }
     );
     let mut stmt = conn.prepare(&sql)?;
     let mapped = if let Some(status) = status {
-        stmt.query_map(params![needle, status, limit as i64], map_lounge_row)?
+        stmt.query_map(params![needle, status, fetch_cap as i64], map_lounge_row)?
     } else {
-        stmt.query_map(params![needle, limit as i64], map_lounge_row)?
+        stmt.query_map(params![needle, fetch_cap as i64], map_lounge_row)?
     };
     let mut out = Vec::new();
     for row in mapped {
         out.push(row?);
     }
+    sort_experiences_for_search(&mut out, needle, None);
+    out.truncate(limit);
     Ok(out)
 }
 
@@ -1675,5 +1763,78 @@ mod tests {
         let ai = ids.iter().position(|id| *id == approved_id).unwrap();
         let pi = ids.iter().position(|id| *id == pending_id).unwrap();
         assert!(ai < pi, "reviewed must rank above unreviewed in band");
+    }
+
+    #[tokio::test]
+    async fn search_strong_unreviewed_outranks_weak_approved() {
+        let store = ExperienceStore::memory().unwrap();
+        let needle = "redis-cluster-failover-protocol";
+        let mut strong_pending = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", needle),
+            needle,
+            format!("{needle} adr"),
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        strong_pending.reviewed = false;
+        strong_pending.created_at = "2026-01-01T00:00:00+00:00".into();
+        let pending_id = strong_pending.id.clone();
+        store.insert_record(strong_pending).await.unwrap();
+
+        let mut weak_approved = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", "unrelated-topic"),
+            "entirely different solution about networking caches",
+            "no needle in adr body",
+            ExperienceOutcome::Success,
+            vec![needle.into()],
+        );
+        weak_approved.reviewed = true;
+        weak_approved.created_at = "2026-06-01T00:00:00+00:00".into();
+        let approved_id = weak_approved.id.clone();
+        store.insert_record(weak_approved).await.unwrap();
+
+        let hits = store
+            .search_experiences_filtered(needle.into(), Some(10), Some(EXPERIENCE_STATUS_ACTIVE))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&pending_id.as_str()));
+        assert!(ids.contains(&approved_id.as_str()));
+        let pi = ids.iter().position(|id| *id == pending_id).unwrap();
+        let ai = ids.iter().position(|id| *id == approved_id).unwrap();
+        assert!(
+            pi < ai,
+            "strongly relevant unreviewed must outrank weakly relevant approved (UD-5)"
+        );
+
+        let pending_score = lexical_search_score(needle, &hits[pi]);
+        let approved_score = lexical_search_score(needle, &hits[ai]);
+        assert!(
+            (pending_score - approved_score).abs() > REVIEW_SCORE_BAND,
+            "scores must differ by more than REVIEW_SCORE_BAND ({REVIEW_SCORE_BAND})"
+        );
+    }
+
+    #[test]
+    fn review_score_band_tiebreak_and_relevance_primary() {
+        use super::{cmp_search_with_review_band, REVIEW_SCORE_BAND};
+        use std::cmp::Ordering;
+        // Within band → approved first.
+        assert_eq!(
+            cmp_search_with_review_band(
+                0.80,
+                true,
+                "a",
+                0.80 + REVIEW_SCORE_BAND / 2.0,
+                false,
+                "z"
+            ),
+            Ordering::Less
+        );
+        // Outside band → higher score first even if unreviewed.
+        assert_eq!(
+            cmp_search_with_review_band(0.95, false, "a", 0.40, true, "z"),
+            Ordering::Less
+        );
     }
 }

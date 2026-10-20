@@ -4,6 +4,10 @@ import {
   applyReviewFilters,
   assertCounterConsistency,
   experienceHasHygieneMask,
+  maskedReviewContent,
+  redactHomePaths,
+  REVIEW_SCORE_BAND,
+  sanitizeReviewRow,
   sortReviewQueue,
   sortSearchByReviewedBand,
   type ReviewableExperience,
@@ -89,19 +93,54 @@ describe("vault-review filters", () => {
 });
 
 describe("vault-review search band ordering", () => {
-  it("ranks reviewed above unreviewed without dropping either", () => {
+  it("ranks reviewed above unreviewed within REVIEW_SCORE_BAND", () => {
     const approved = row({
       id: "ok",
       reviewed: true,
       created_at: "2026-01-01T00:00:00.000Z",
-    });
+      score: 0.8,
+    } as ReviewableExperience & { score: number });
     const pending = row({
       id: "wait",
       reviewed: false,
       created_at: "2026-06-01T00:00:00.000Z",
-    });
+      score: 0.8 + REVIEW_SCORE_BAND / 2,
+    } as ReviewableExperience & { score: number });
     const sorted = sortSearchByReviewedBand([pending, approved]);
     assert.equal(sorted[0]?.id, "ok");
     assert.equal(sorted[1]?.id, "wait");
+  });
+
+  it("keeps strongly relevant unreviewed above weakly relevant approved", () => {
+    const strongPending = row({
+      id: "strong",
+      reviewed: false,
+      score: 0.95,
+    } as ReviewableExperience & { score: number });
+    const weakApproved = row({
+      id: "weak",
+      reviewed: true,
+      score: 0.3,
+    } as ReviewableExperience & { score: number });
+    const sorted = sortSearchByReviewedBand([weakApproved, strongPending]);
+    assert.equal(sorted[0]?.id, "strong");
+    assert.equal(sorted[1]?.id, "weak");
+  });
+});
+
+describe("vault-review masking", () => {
+  it("redacts home roots and sanitizes rows for the DOM", () => {
+    assert.equal(redactHomePaths("/Users/ci/projects/secret"), "<home>/projects/secret");
+    assert.equal(redactHomePaths("/home/sercan/dev"), "<home>/dev");
+    assert.equal(redactHomePaths("C:\\Users\\sercan\\dev"), "<home>\\dev");
+    const dirty = row({
+      id: "x",
+      adr_summary: "see /Users/ci/leak",
+      original_content: "/Users/ci/raw",
+    });
+    const clean = sanitizeReviewRow(dirty);
+    assert.equal(clean.original_content, null);
+    assert.equal(clean.adr_summary.includes("/Users/"), false);
+    assert.equal(maskedReviewContent(clean).includes("/Users/"), false);
   });
 });

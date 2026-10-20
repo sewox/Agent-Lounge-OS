@@ -215,6 +215,17 @@ printf '%s\n' \
 LOUNGE_MCP_STANDALONE=1 cargo run --manifest-path src-tauri/Cargo.toml --bin lounge-mcp
 ```
 
+## Search ranking (UD-5 / Vault Review)
+
+`lounge_search_experience` keeps **relevance primary**. The additive JSON field `reviewed` (bool) is backward-compatible and does not drop unreviewed hits.
+
+| Constant | Value | Role |
+|----------|-------|------|
+| `REVIEW_SCORE_BAND` | `0.05` | When two hits' normalized lexical scores differ by **at most** this amount, approved (`reviewed=true`) ranks above unreviewed. Larger gaps keep the higher-relevance hit first even if it is unreviewed. |
+| `SEARCH_SAME_PROJECT_BOOST` | `0.04` | Soft preference for the caller's project; never replaces relevance. |
+
+Defined in `src-tauri/src/db/experience_governance.rs` (`lexical_search_score`, `sort_experiences_for_search`).
+
 ## Follow-up
 
 NATS worker şablonu: [`workers/`](../workers/README.md) — `bot_template.py`, `grok_tester.py`.

@@ -22,10 +22,12 @@ pub use a2a::{
 };
 pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experience_governance::{
-    migrate_experience_governance, migrate_mcp_quality_v1, ArchiveClock, ExperienceUpdate,
-    FakeClock, ReviewQueueFilter, ReviewStatFilter, ReviewStats, SystemClock,
-    DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_MCP_QUALITY_V1, MIGRATION_PLACEHOLDER_CLEANUP_V1,
-    MIGRATION_TITLE_BACKFILL_ENQUEUE_V1, SETTING_EXPERIENCE_TTL_DAYS,
+    cmp_search_with_review_band, lexical_search_score, migrate_experience_governance,
+    migrate_mcp_quality_v1, sort_experiences_for_search, ArchiveClock, ExperienceUpdate, FakeClock,
+    ReviewQueueFilter, ReviewStatFilter, ReviewStats, SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS,
+    MIGRATION_MCP_QUALITY_V1, MIGRATION_PLACEHOLDER_CLEANUP_V1,
+    MIGRATION_TITLE_BACKFILL_ENQUEUE_V1, REVIEW_SCORE_BAND, SEARCH_SAME_PROJECT_BOOST,
+    SETTING_EXPERIENCE_TTL_DAYS,
 };
 pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,
