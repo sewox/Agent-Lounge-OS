@@ -1165,7 +1165,9 @@ mod tests {
     /// can miss the 15s read timeout even when the stub itself is fast.
     async fn health_scan_cli_lock() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
     }
 
     /// Fast cross-platform stub: pre-rendered JSON pages, no per-call Python.
