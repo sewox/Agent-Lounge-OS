@@ -253,7 +253,10 @@ test.describe("Vault Review UI", () => {
     const bodyText = await page.locator("body").innerText();
     expect(bodyText).not.toMatch(/\/Users\//);
     expect(bodyText).not.toMatch(/\/home\//);
+    expect(bodyText).not.toMatch(/\/var\/home\//);
+    expect(bodyText).not.toMatch(/(^|[^a-z])\/root(\/|\s|$)/i);
     expect(bodyText).not.toMatch(/C:\\Users/i);
+    expect(bodyText).not.toMatch(/C:\/Users/i);
     const mainResults = await new AxeBuilder({ page }).include("main").analyze();
     expect(mainResults.violations, JSON.stringify(mainResults.violations, null, 2)).toEqual(
       [],
