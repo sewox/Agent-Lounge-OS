@@ -22,9 +22,7 @@ jobs:
   linux-distros:
     name: Installer Linux (${{ matrix.distro }})
     runs-on: ubuntu-latest
-    # openSUSE zypper metadata pulls can exceed 20m on slow mirrors; OSS-only
-    # refresh (below) is the primary fix, timeout is the backstop.
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -39,11 +37,9 @@ jobs:
           - distro: fedora
             image: fedora:41
             setup: dnf install -y bash ca-certificates curl findutils e2fsprogs
-          # OSS-only: update/SLE/backports metadata fetches hung 8–20m on CI mirrors
-          # (f6ed7e6 Installer Linux opensuse cancelled at timeout mid-refresh).
           - distro: opensuse
             image: opensuse/leap:15.6
-            setup: zypper --non-interactive modifyrepo --disable --all && zypper --non-interactive modifyrepo --enable repo-oss && zypper --non-interactive --gpg-auto-import-keys refresh && zypper --non-interactive install -y bash curl findutils gzip tar e2fsprogs
+            setup: zypper --non-interactive install -y bash curl findutils gzip tar e2fsprogs
           - distro: arch
             image: archlinux:latest
             setup: pacman -Sy --noconfirm bash curl findutils tar gzip e2fsprogs
