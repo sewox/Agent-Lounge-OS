@@ -44,6 +44,13 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # Health-scan stub dispatcher (`write_fast_paged_stub`) shells out to Python.
+      # Pin an interpreter so Windows runners do not hit the Store `python` alias
+      # (hangs under CREATE_NO_WINDOW → false 15s codebase-memory-mcp timeouts).
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       # Health-1a real_cbm_v011_skip_limit_multi_page needs the pinned v0.11.0 binary
       # on every OS (checksummed). The Rust test can also fetch itself; CI stages it
       # first so Windows/macOS do not depend on in-test download alone.
