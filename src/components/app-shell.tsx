@@ -285,11 +285,15 @@ export function AppShell({ children }: { children: ReactNode }) {
       ].filter((node) => !node.hasAttribute("disabled") && node.tabIndex !== -1);
     }
 
+    // Only steal focus if it is still outside the dialog — a delayed boot
+    // must not yank focus after the user (or e2e) has already Tabbed inside.
     const boot = window.setTimeout(() => {
-      const rejectBtn = destructiveDialogRef.current?.querySelector<HTMLElement>(
-        '[data-qa="destructive-reject"]',
-      );
-      (rejectBtn ?? destructiveDialogRef.current?.querySelector<HTMLElement>("button"))?.focus();
+      const root = destructiveDialogRef.current;
+      if (!root || root.contains(document.activeElement)) {
+        return;
+      }
+      const rejectBtn = root.querySelector<HTMLElement>('[data-qa="destructive-reject"]');
+      (rejectBtn ?? root.querySelector<HTMLElement>("button"))?.focus();
     }, 0);
 
     function onKeyDown(event: KeyboardEvent) {
@@ -344,14 +348,16 @@ export function AppShell({ children }: { children: ReactNode }) {
       ].filter((node) => !node.hasAttribute("disabled") && node.tabIndex !== -1);
     }
 
+    // Only steal focus if it is still outside the dialog — a delayed boot
+    // must not yank focus after the user (or e2e) has already Tabbed inside.
     const boot = window.setTimeout(() => {
-      const cancelBtn = haltDialogRef.current?.querySelector<HTMLElement>(
-        '[data-qa="halt-dialog-cancel"]',
-      );
-      const input = haltDialogRef.current?.querySelector<HTMLElement>(
-        '[data-qa="halt-reason-input"]',
-      );
-      (input ?? cancelBtn ?? haltDialogRef.current?.querySelector<HTMLElement>("button"))?.focus();
+      const root = haltDialogRef.current;
+      if (!root || root.contains(document.activeElement)) {
+        return;
+      }
+      const cancelBtn = root.querySelector<HTMLElement>('[data-qa="halt-dialog-cancel"]');
+      const input = root.querySelector<HTMLElement>('[data-qa="halt-reason-input"]');
+      (input ?? cancelBtn ?? root.querySelector<HTMLElement>("button"))?.focus();
     }, 0);
 
     function onKeyDown(event: KeyboardEvent) {
