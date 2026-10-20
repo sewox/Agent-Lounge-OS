@@ -151,7 +151,7 @@ export function ExperienceDrawer({
                   </span>
                 ) : null}
                 {experience.reviewed === false ? (
-                  <span className="rounded border border-secondary/40 px-1 text-secondary uppercase">
+                  <span className="rounded border border-dashed border-secondary/60 px-1 text-secondary uppercase">
                     {s("unreviewed")}
                   </span>
                 ) : null}

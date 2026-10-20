@@ -128,7 +128,11 @@ const experiences: FixtureDataset["experiences"] = [
     archived_by: i === 15 ? "ttl" : null,
     is_pinned: i === 2,
     updated_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
-    original_content: null,
+    // exp-1 keeps a distinct original so the drawer can show + restore it (NB2).
+    original_content:
+      i === 0
+        ? "ORIGINAL BODY before edit — Indexed dispatcher.rs snapshot for restore."
+        : null,
   })),
   // Extra Agent-Lounge-OS experiences so drill-down lists stay >12 (EX-08).
   ...Array.from({ length: 12 }, (_, i) => ({
@@ -172,6 +176,81 @@ const experiences: FixtureDataset["experiences"] = [
     updated_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
     original_content: null,
   },
+];
+
+/**
+ * Vault Review seeds (injected in vault-review.spec only).
+ * Kept out of FULL_FIXTURE so EX-05 (single unreviewed → badge clears) stays intact.
+ */
+export const VAULT_REVIEW_SEED_EXPERIENCES: FixtureDataset["experiences"] = [
+  {
+    id: "exp-review-hygiene",
+    type: "experience",
+    agent: "cursor-agent",
+    project_id: "Agent-Lounge-OS",
+    adr_summary:
+      "Masked path at <home>/projects/secret and token <redacted-token>. ".repeat(8).trim(),
+    outcome: "success",
+    related_task_id: null,
+    tags: ["hygiene", "vault"],
+    created_at: new Date(Date.UTC(2026, 9, 19, 8, 0, 0)).toISOString(),
+    status: "active",
+    reviewed: false,
+    use_count: 0,
+    last_used_at: null,
+    archived_at: null,
+    archived_by: null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 9, 19, 8, 0, 0)).toISOString(),
+    // Pre-hygiene paths must never reach the review DOM — store only masked form.
+    original_content: "raw had <home>/projects/secret — masked for review. ".repeat(10).trim(),
+    title: "Hygiene masked experience",
+  },
+  {
+    id: "exp-review-plain",
+    type: "experience",
+    agent: "grok-bot",
+    project_id: "EchoMind",
+    adr_summary: "Plain unreviewed experience for Vault Review list depth.",
+    outcome: "partial",
+    related_task_id: null,
+    tags: ["review"],
+    created_at: new Date(Date.UTC(2026, 9, 20, 9, 0, 0)).toISOString(),
+    status: "active",
+    reviewed: false,
+    use_count: 0,
+    last_used_at: null,
+    archived_at: null,
+    archived_by: null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 9, 20, 9, 0, 0)).toISOString(),
+    original_content: null,
+    title: "Plain review candidate",
+  },
+  ...Array.from({ length: 18 }, (_, i) => ({
+    id: `exp-review-fill-${i + 1}`,
+    type: "experience",
+    agent: i % 2 === 0 ? "cursor-agent" : "lounge-kernel",
+    project_id: ["Agent-Lounge-OS", "EchoMind", "codebase-memory-mcp"][i % 3],
+    adr_summary:
+      `Review-queue fill ADR #${i + 1} for layout occupancy across list/detail/inspector panes on D2 three-column PanelGrid. `.repeat(
+        22,
+      ).trim(),
+    outcome: (["success", "partial", "failure"] as const)[i % 3],
+    related_task_id: null,
+    tags: ["review", "fill", "layout-depth", `seed-${i + 1}`],
+    created_at: new Date(Date.UTC(2026, 9, 18, 10, i, 0)).toISOString(),
+    status: "active" as const,
+    reviewed: false,
+    use_count: i + 1,
+    last_used_at: new Date(Date.UTC(2026, 9, 18, 11, i, 0)).toISOString(),
+    archived_at: null as string | null,
+    archived_by: null as string | null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 9, 18, 10, i, 0)).toISOString(),
+    original_content: null,
+    title: `Review fill ${i + 1} — dense queue row for PanelGrid L2 occupancy`,
+  })),
 ];
 
 /** Re-export page counts from vault mock (single source of truth). */

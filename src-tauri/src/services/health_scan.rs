@@ -1157,17 +1157,13 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
-    use std::sync::OnceLock;
     use std::time::Duration;
 
-    /// Serialize CLI-backed health_scan tests (stub + real CBM). On Windows CI,
-    /// parallel `spawn_blocking` + python stub launches under a live CBM index
-    /// can miss the 15s read timeout even when the stub itself is fast.
+    /// Serialize CLI-backed health_scan tests with **all** MemoryBridge CLI tests
+    /// (see [`crate::services::memory_bridge::acquire_cli_test_lock`]). #116's
+    /// module-local mutex did not cover concurrent `memory_bridge::tests`.
     async fn health_scan_cli_lock() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await
+        crate::services::memory_bridge::acquire_cli_test_lock().await
     }
 
     /// Fast cross-platform stub: pre-rendered JSON pages, no per-call Python.
@@ -1983,8 +1979,15 @@ edition = "2021"
             .timeout(Duration::from_secs(180))
             .build()
             .expect("reqwest blocking client");
-        let bytes = client
-            .get(&url)
+        // Prefer GITHUB_TOKEN so CI runners are not rate-limited to 403.
+        let mut req = client.get(&url);
+        if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+            let t = token.trim();
+            if !t.is_empty() {
+                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+        }
+        let bytes = req
             .send()
             .unwrap_or_else(|e| panic!("download CBM v0.11.0 failed: {e} ({url})"))
             .error_for_status()

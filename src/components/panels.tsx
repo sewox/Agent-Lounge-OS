@@ -478,6 +478,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     closeExperience,
   } = useLounge();
   const { t: tv } = useTranslation("vault");
+  // Map↔Review switcher lives in this existing header row (no extra chrome height)
+  // so D960 SemanticMap stretch rows keep enough vertical room.
   const tauriReady = useIsTauri();
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const [selectionProject, setSelectionProject] = useState(selectedProject);
@@ -706,6 +708,30 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {embedded ? null : (
+            <nav
+              aria-label={tv("review.viewsNav")}
+              data-qa="vault-view-nav"
+              className="flex flex-wrap items-center gap-1 rounded-md border border-outline-variant bg-surface-container p-0.5"
+            >
+              <Link
+                href="/vault"
+                data-qa="vault-view-active"
+                data-view="map"
+                className="min-h-8 rounded px-2 py-1 font-body text-meta font-medium bg-primary-container text-on-primary-container"
+              >
+                {tv("review.viewMap")}
+              </Link>
+              <Link
+                href="/vault?view=review"
+                data-qa="vault-view-link"
+                data-view="review"
+                className="min-h-8 rounded px-2 py-1 font-body text-meta font-medium text-on-surface-variant hover:bg-surface-container-high"
+              >
+                {tv("review.viewReview")}
+              </Link>
+            </nav>
+          )}
           <span className="font-body text-meta text-outline">
             {whispered.size > 0 ? (
               <span className="text-primary">whisper · live</span>
@@ -1027,7 +1053,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                           </span>
                         ) : null}
                         {item.reviewed === false ? (
-                          <span className="rounded border border-secondary/40 px-1 text-meta text-secondary uppercase">
+                          <span className="rounded border border-dashed border-secondary/60 px-1 text-meta text-secondary uppercase">
                             {tv("unreviewed")}
                           </span>
                         ) : null}

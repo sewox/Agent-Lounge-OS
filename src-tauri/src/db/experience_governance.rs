@@ -2,17 +2,146 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::cmp::Ordering;
 
 use super::experiences::{column_names, has_col};
 use super::ExperienceStore;
 use crate::models::{
-    now_rfc3339, ExperienceRecord, TitleSource, ARCHIVED_BY_TTL, ARCHIVED_BY_USER,
-    EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
+    now_rfc3339, ExperienceRecord, LoungeExperience, TitleSource, ARCHIVED_BY_REJECTED,
+    ARCHIVED_BY_TTL, ARCHIVED_BY_USER, EXPERIENCE_STATUS_ACTIVE, EXPERIENCE_STATUS_ARCHIVED,
 };
 
 /// Settings key for auto-archive TTL in days (default 90).
 pub const SETTING_EXPERIENCE_TTL_DAYS: &str = "experience_ttl_days";
 pub const DEFAULT_EXPERIENCE_TTL_DAYS: u64 = 90;
+
+/// UD-5 / VR4: score **bucket** width for search ranking.
+/// Bucket = `floor(normalize(score) / REVIEW_SCORE_BAND)`. Hits in the **same**
+/// bucket are ordered by `reviewed` → score → `created_at` → `id`. Hits in
+/// different buckets are ordered by bucket (higher score band first) — a total
+/// order. Documented in `docs/mcp.md`.
+pub const REVIEW_SCORE_BAND: f64 = 0.05;
+
+/// Clamp non-finite / negative scores so bucket math and `partial_cmp` stay total.
+pub fn normalize_search_score(score: f64) -> f64 {
+    if !score.is_finite() || score < 0.0 {
+        0.0
+    } else {
+        score
+    }
+}
+
+/// Discrete relevance band: `floor(normalize(score) / REVIEW_SCORE_BAND)`.
+pub fn review_score_bucket(score: f64) -> i64 {
+    let s = normalize_search_score(score);
+    (s / REVIEW_SCORE_BAND).floor() as i64
+}
+
+/// Normalized [0, 1] lexical relevance for LIKE-search hits (primary sort key).
+pub fn lexical_search_score(query: &str, row: &LoungeExperience) -> f64 {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return if row.is_pinned { 0.05 } else { 0.0 };
+    }
+    let title = row.title.to_lowercase();
+    let adr = row.adr_summary.to_lowercase();
+    let tags = row.tags.join(" ").to_lowercase();
+    let mut score = 0.0_f64;
+    if !title.is_empty() && title == q {
+        score = 1.0;
+    } else if title.contains(&q) {
+        score = 0.9;
+    } else if adr.contains(&q) {
+        let ratio = (q.len() as f64) / (adr.len().max(1) as f64);
+        score = 0.55 + 0.25 * ratio.min(1.0);
+    } else if tags.contains(&q) {
+        score = 0.3;
+    } else {
+        let tokens: Vec<_> = q.split_whitespace().filter(|t| t.len() > 1).collect();
+        let hay = format!("{title} {adr} {tags}");
+        if !tokens.is_empty() {
+            let hits = tokens.iter().filter(|t| hay.contains(**t)).count();
+            score = 0.2 * (hits as f64 / tokens.len() as f64);
+        }
+    }
+    if row.is_pinned {
+        score = (score + 0.02).min(1.0);
+    }
+    score
+}
+
+/// One side of [`cmp_search_with_review_band`] (keeps the comparator ≤7 args for clippy).
+#[derive(Clone, Copy, Debug)]
+pub struct SearchRankKey<'a> {
+    /// Hard same-project tier (main behavior): prefer caller's project above buckets.
+    pub same_project: bool,
+    pub score: f64,
+    pub reviewed: bool,
+    pub created_at: &'a str,
+    pub id: &'a str,
+}
+
+/// Total order for MCP/search hits (never panics under `sort_by` since Rust 1.81):
+/// same_project → bucket desc → reviewed → score desc → created_at desc → id asc.
+pub fn cmp_search_with_review_band(a: SearchRankKey<'_>, b: SearchRankKey<'_>) -> Ordering {
+    let sa = normalize_search_score(a.score);
+    let sb = normalize_search_score(b.score);
+    let ba = review_score_bucket(sa);
+    let bb = review_score_bucket(sb);
+    b.same_project
+        .cmp(&a.same_project)
+        .then_with(|| bb.cmp(&ba))
+        .then_with(|| b.reviewed.cmp(&a.reviewed))
+        .then_with(|| sb.partial_cmp(&sa).unwrap_or(Ordering::Equal))
+        .then_with(|| b.created_at.cmp(a.created_at))
+        .then_with(|| a.id.cmp(b.id))
+}
+
+/// Sort search hits: hard same-project first (main), then score buckets / reviewed.
+pub fn sort_experiences_for_search(
+    hits: &mut [LoungeExperience],
+    query: &str,
+    prefer_project: Option<&str>,
+) {
+    hits.sort_by(|a, b| {
+        let sa = lexical_search_score(query, a);
+        let sb = lexical_search_score(query, b);
+        let same_a = prefer_project
+            .map(|pid| a.project_id == pid)
+            .unwrap_or(false);
+        let same_b = prefer_project
+            .map(|pid| b.project_id == pid)
+            .unwrap_or(false);
+        cmp_search_with_review_band(
+            SearchRankKey {
+                same_project: same_a,
+                score: sa,
+                reviewed: a.reviewed,
+                created_at: &a.created_at,
+                id: &a.id,
+            },
+            SearchRankKey {
+                same_project: same_b,
+                score: sb,
+                reviewed: b.reviewed,
+                created_at: &b.created_at,
+                id: &b.id,
+            },
+        )
+    });
+}
+
+/// UI IPC must never expose pre-hygiene `original_content` (B2). MCP paths are unchanged.
+pub fn strip_original_content_for_ui(mut row: LoungeExperience) -> LoungeExperience {
+    row.original_content = None;
+    row
+}
+
+pub fn strip_original_content_for_ui_vec(rows: Vec<LoungeExperience>) -> Vec<LoungeExperience> {
+    rows.into_iter()
+        .map(strip_original_content_for_ui)
+        .collect()
+}
 /// Optional use-count threshold for auto-archive (0 = disabled).
 pub const SETTING_EXPERIENCE_USE_COUNT_THRESHOLD: &str = "experience_use_count_threshold";
 pub const DEFAULT_EXPERIENCE_USE_COUNT_THRESHOLD: u64 = 0;
@@ -33,6 +162,59 @@ pub struct ExperienceUpdate {
     pub project_id: Option<String>,
     pub topic: Option<String>,
     pub title: Option<String>,
+}
+
+/// Vault Review StatsStrip / list filter key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatFilter {
+    #[default]
+    Pending,
+    Hygiene,
+    ApprovedToday,
+    Rejected,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReviewQueueFilter {
+    /// StatsStrip selection; default = pending (active unreviewed).
+    #[serde(default)]
+    pub stat: ReviewStatFilter,
+    pub project_id: Option<String>,
+    pub agent: Option<String>,
+    /// Experience outcome / type filter (`success` | `failure` | `partial`).
+    pub outcome: Option<String>,
+    /// When true, further restrict pending/hygiene to hygiene-masked rows.
+    #[serde(default)]
+    pub hygiene_only: bool,
+    #[serde(default = "default_review_limit")]
+    pub limit: usize,
+}
+
+fn default_review_limit() -> usize {
+    200
+}
+
+impl Default for ReviewQueueFilter {
+    fn default() -> Self {
+        Self {
+            stat: ReviewStatFilter::Pending,
+            project_id: None,
+            agent: None,
+            outcome: None,
+            hygiene_only: false,
+            limit: default_review_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReviewStats {
+    /// Same source as [`ExperienceStore::count_unreviewed_experiences`].
+    pub pending: u64,
+    pub hygiene: u64,
+    pub approved_today: u64,
+    pub rejected: u64,
 }
 
 /// Injectable clock for TTL tests (seconds since UNIX epoch as RFC3339 helper).
@@ -106,9 +288,10 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
             conn.execute(
-                "UPDATE experiences SET reviewed = 1, updated_at = ?1 WHERE id = ?2",
-                params![now_rfc3339(), id],
+                "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE id = ?2",
+                params![now, id],
             )?;
             Ok(())
         })
@@ -121,14 +304,104 @@ impl ExperienceStore {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
             let n = conn.execute(
-                "UPDATE experiences SET reviewed = 1, updated_at = ?1 WHERE reviewed = 0 AND status = ?2",
-                params![now_rfc3339(), EXPERIENCE_STATUS_ACTIVE],
+                "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE reviewed = 0 AND status = ?2",
+                params![now, EXPERIENCE_STATUS_ACTIVE],
             )?;
             Ok(n as u64)
         })
         .await
         .context("experience mark_all_reviewed join")?
+    }
+
+    /// Bulk-approve selected active rows (Vault Review). Local user action — Halt-safe.
+    pub async fn mark_experiences_reviewed(&self, ids: Vec<String>) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let now = now_rfc3339();
+            let mut n = 0u64;
+            for id in ids {
+                let changed = conn.execute(
+                    "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE id = ?2 AND reviewed = 0 AND status = ?3",
+                    params![now, id, EXPERIENCE_STATUS_ACTIVE],
+                )?;
+                n += changed as u64;
+            }
+            Ok(n)
+        })
+        .await
+        .context("experience mark_many_reviewed join")?
+    }
+
+    /// Soft-reject = archived with `archived_by=rejected` (undoable). No hard delete.
+    pub async fn reject_experience(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            reject_blocking(&conn, &id)
+        })
+        .await
+        .context("experience reject join")?
+    }
+
+    pub async fn reject_experiences(&self, ids: Vec<String>) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            let mut n = 0u64;
+            for id in ids {
+                reject_blocking(&conn, &id)?;
+                n += 1;
+            }
+            Ok(n)
+        })
+        .await
+        .context("experience reject_many join")?
+    }
+
+    /// Undo a soft-reject (only rows with `archived_by=rejected`).
+    pub async fn undo_reject_experience(&self, id: String) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            undo_reject_blocking(&conn, &id)
+        })
+        .await
+        .context("experience undo_reject join")?
+    }
+
+    /// Vault Review list: default = active unreviewed; hygiene flagged first, then newest.
+    pub async fn list_review_queue(
+        &self,
+        filter: ReviewQueueFilter,
+    ) -> Result<Vec<LoungeExperience>> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            list_review_queue_blocking(&conn, &filter)
+        })
+        .await
+        .context("experience list_review_queue join")?
+    }
+
+    /// StatsStrip counters for Vault Review (pending uses the same SQL as
+    /// [`Self::count_unreviewed_experiences`]).
+    pub async fn count_review_stats(&self) -> Result<ReviewStats> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("experience db lock");
+            count_review_stats_blocking(&conn)
+        })
+        .await
+        .context("experience count_review_stats join")?
     }
 
     pub async fn count_unreviewed_experiences(&self) -> Result<u64> {
@@ -339,6 +612,176 @@ fn set_archive_blocking(conn: &Connection, id: &str, archive: bool) -> Result<()
     Ok(())
 }
 
+fn reject_blocking(conn: &Connection, id: &str) -> Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE experiences SET status = ?1, archived_at = ?2, archived_by = ?3, updated_at = ?2 WHERE id = ?4",
+        params![EXPERIENCE_STATUS_ARCHIVED, now, ARCHIVED_BY_REJECTED, id],
+    )?;
+    Ok(())
+}
+
+fn undo_reject_blocking(conn: &Connection, id: &str) -> Result<()> {
+    let now = now_rfc3339();
+    let n = conn.execute(
+        "UPDATE experiences SET status = ?1, archived_at = NULL, archived_by = NULL, updated_at = ?2 WHERE id = ?3 AND archived_by = ?4",
+        params![EXPERIENCE_STATUS_ACTIVE, now, id, ARCHIVED_BY_REJECTED],
+    )?;
+    if n == 0 {
+        anyhow::bail!("undo_reject: row not found or not rejected");
+    }
+    Ok(())
+}
+
+fn today_prefix_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+fn count_review_stats_blocking(conn: &Connection) -> Result<ReviewStats> {
+    let pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM experiences WHERE reviewed = 0 AND status = ?1",
+        params![EXPERIENCE_STATUS_ACTIVE],
+        |row| row.get(0),
+    )?;
+    let hygiene_pred = crate::bridge::hygiene::hygiene_masked_sql("");
+    let hygiene_sql = format!(
+        "SELECT COUNT(*) FROM experiences WHERE reviewed = 0 AND status = ?1 AND {hygiene_pred}"
+    );
+    let hygiene: i64 = conn.query_row(&hygiene_sql, params![EXPERIENCE_STATUS_ACTIVE], |row| {
+        row.get(0)
+    })?;
+    let today = today_prefix_utc();
+    let approved_today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM experiences WHERE reviewed = 1 AND status = ?1 AND reviewed_at IS NOT NULL AND reviewed_at LIKE ?2",
+        params![EXPERIENCE_STATUS_ACTIVE, format!("{today}%")],
+        |row| row.get(0),
+    )?;
+    let rejected: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM experiences WHERE status = ?1 AND archived_by = ?2",
+        params![EXPERIENCE_STATUS_ARCHIVED, ARCHIVED_BY_REJECTED],
+        |row| row.get(0),
+    )?;
+    Ok(ReviewStats {
+        pending: pending.max(0) as u64,
+        hygiene: hygiene.max(0) as u64,
+        approved_today: approved_today.max(0) as u64,
+        rejected: rejected.max(0) as u64,
+    })
+}
+
+fn list_review_queue_blocking(
+    conn: &Connection,
+    filter: &ReviewQueueFilter,
+) -> Result<Vec<LoungeExperience>> {
+    let hygiene_pred = crate::bridge::hygiene::hygiene_masked_sql("");
+    let lim = filter.limit.max(1) as i64;
+    let today = today_prefix_utc();
+    list_review_queue_positional(conn, filter, &hygiene_pred, &today, lim)
+}
+
+fn list_review_queue_positional(
+    conn: &Connection,
+    filter: &ReviewQueueFilter,
+    hygiene_pred: &str,
+    today: &str,
+    lim: i64,
+) -> Result<Vec<LoungeExperience>> {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    match filter.stat {
+        ReviewStatFilter::Pending => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ACTIVE.to_string()));
+            clauses.push("reviewed = 0".into());
+        }
+        ReviewStatFilter::Hygiene => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ACTIVE.to_string()));
+            clauses.push("reviewed = 0".into());
+            clauses.push(format!("({hygiene_pred})"));
+        }
+        ReviewStatFilter::ApprovedToday => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ACTIVE.to_string()));
+            clauses.push("reviewed = 1".into());
+            clauses.push("reviewed_at IS NOT NULL".into());
+            clauses.push("reviewed_at LIKE ?".into());
+            params_vec.push(Box::new(format!("{today}%")));
+        }
+        ReviewStatFilter::Rejected => {
+            clauses.push("status = ?".into());
+            params_vec.push(Box::new(EXPERIENCE_STATUS_ARCHIVED.to_string()));
+            clauses.push("archived_by = ?".into());
+            params_vec.push(Box::new(ARCHIVED_BY_REJECTED.to_string()));
+        }
+    }
+
+    if let Some(ref project) = filter.project_id {
+        let p = project.trim();
+        if !p.is_empty() {
+            clauses.push("project_id = ?".into());
+            params_vec.push(Box::new(p.to_string()));
+        }
+    }
+    if let Some(ref agent) = filter.agent {
+        let a = agent.trim();
+        if !a.is_empty() {
+            clauses.push("agent_id = ?".into());
+            params_vec.push(Box::new(a.to_string()));
+        }
+    }
+    if let Some(ref outcome) = filter.outcome {
+        let o = outcome.trim();
+        if !o.is_empty() {
+            clauses.push("lower(outcome) = lower(?)".into());
+            params_vec.push(Box::new(o.to_string()));
+        }
+    }
+    if filter.hygiene_only
+        && matches!(
+            filter.stat,
+            ReviewStatFilter::Pending | ReviewStatFilter::Hygiene
+        )
+    {
+        clauses.push(format!("({hygiene_pred})"));
+    }
+
+    let order = match filter.stat {
+        ReviewStatFilter::Pending => {
+            format!("CASE WHEN ({hygiene_pred}) THEN 0 ELSE 1 END ASC, created_at DESC")
+        }
+        ReviewStatFilter::Hygiene => "created_at DESC".into(),
+        ReviewStatFilter::ApprovedToday => "reviewed_at DESC, created_at DESC".into(),
+        ReviewStatFilter::Rejected => "archived_at DESC, created_at DESC".into(),
+    };
+
+    let sql = format!(
+        r#"
+        SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
+               outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+               status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+               updated_at, original_content, archived_by, title, title_source, source
+        FROM experiences
+        WHERE {}
+        ORDER BY {order}
+        LIMIT ?
+        "#,
+        clauses.join(" AND ")
+    );
+    params_vec.push(Box::new(lim));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mapped = stmt.query_map(param_refs.as_slice(), map_lounge_row)?;
+    let mut out = Vec::new();
+    for row in mapped {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 fn get_full_record(conn: &Connection, id: &str) -> Result<Option<ExperienceRecord>> {
     let row = conn
         .query_row(
@@ -410,7 +853,10 @@ fn search_filtered_blocking(
     } else {
         ""
     };
-    // Column-backed governance fields — never prefer stale payload_json.
+    // Fetch a wider window, then UD-5 score-band sort + truncate (relevance primary).
+    let fetch_cap = (limit.saturating_mul(4)).clamp(limit, 256);
+    // Pre-PR relevance proxy preserved as SQL seed order (pinned, then newest).
+    // `reviewed` must NOT be the primary ORDER BY — see REVIEW_SCORE_BAND.
     let sql = format!(
         r#"
         SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
@@ -427,14 +873,16 @@ fn search_filtered_blocking(
     );
     let mut stmt = conn.prepare(&sql)?;
     let mapped = if let Some(status) = status {
-        stmt.query_map(params![needle, status, limit as i64], map_lounge_row)?
+        stmt.query_map(params![needle, status, fetch_cap as i64], map_lounge_row)?
     } else {
-        stmt.query_map(params![needle, limit as i64], map_lounge_row)?
+        stmt.query_map(params![needle, fetch_cap as i64], map_lounge_row)?
     };
     let mut out = Vec::new();
     for row in mapped {
         out.push(row?);
     }
+    sort_experiences_for_search(&mut out, needle, None);
+    out.truncate(limit);
     Ok(out)
 }
 
@@ -507,6 +955,7 @@ pub fn migrate_experience_governance(conn: &Connection) -> Result<()> {
     let additions: &[(&str, &str)] = &[
         ("status", "TEXT NOT NULL DEFAULT 'active'"),
         ("reviewed", "INTEGER NOT NULL DEFAULT 0"),
+        ("reviewed_at", "TEXT"),
         ("use_count", "INTEGER NOT NULL DEFAULT 0"),
         ("last_used_at", "TEXT"),
         ("archived_at", "TEXT"),
@@ -1228,5 +1677,465 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 1, "must soft-hide, never DELETE");
+    }
+
+    #[tokio::test]
+    async fn reject_and_undo_persist_rejected_provenance() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut record = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj", "reject-me"),
+            "solution",
+            "adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        record.reviewed = false;
+        let id = record.id.clone();
+        store.insert_record(record).await.unwrap();
+
+        store.reject_experience(id.clone()).await.unwrap();
+        let rejected = store.get_record(id.clone()).await.unwrap().unwrap();
+        assert_eq!(rejected.status, EXPERIENCE_STATUS_ARCHIVED);
+        assert_eq!(rejected.archived_by.as_deref(), Some(ARCHIVED_BY_REJECTED));
+        assert!(rejected.archived_at.is_some());
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 0);
+
+        let stats = store.count_review_stats().await.unwrap();
+        assert_eq!(stats.rejected, 1);
+        assert_eq!(stats.pending, 0);
+
+        store.undo_reject_experience(id.clone()).await.unwrap();
+        let active = store.get_record(id).await.unwrap().unwrap();
+        assert_eq!(active.status, EXPERIENCE_STATUS_ACTIVE);
+        assert!(active.archived_by.is_none());
+        assert_eq!(store.count_unreviewed_experiences().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn review_queue_orders_hygiene_before_plain_unreviewed() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut plain = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj", "plain-topic"),
+            "plain solution",
+            "plain adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        plain.reviewed = false;
+        plain.created_at = "2026-10-20T12:00:00+00:00".into();
+        let plain_id = plain.id.clone();
+        store.insert_record(plain).await.unwrap();
+
+        let mut hygiene = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj", "masked <home>/secret"),
+            "token <redacted-token> gone",
+            "adr ok",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        hygiene.reviewed = false;
+        hygiene.created_at = "2026-10-19T12:00:00+00:00".into();
+        let hygiene_id = hygiene.id.clone();
+        store.insert_record(hygiene).await.unwrap();
+
+        let unreviewed = store.count_unreviewed_experiences().await.unwrap();
+        assert_eq!(unreviewed, 2, "both rows must be active unreviewed");
+
+        let queue = store
+            .list_review_queue(ReviewQueueFilter {
+                stat: ReviewStatFilter::Pending,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            queue.len(),
+            2,
+            "queue ids={:?}",
+            queue.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(queue[0].id, hygiene_id, "hygiene-flagged must sort first");
+        assert!(queue.iter().any(|r| r.id == plain_id));
+
+        let stats = store.count_review_stats().await.unwrap();
+        assert_eq!(
+            stats.pending,
+            store.count_unreviewed_experiences().await.unwrap()
+        );
+        assert!(stats.hygiene >= 1);
+    }
+
+    #[tokio::test]
+    async fn search_orders_reviewed_before_unreviewed_same_band() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut approved = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", "shared-keyword-alpha"),
+            "shared-keyword-alpha solution",
+            "shared-keyword-alpha adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        approved.reviewed = true;
+        approved.created_at = "2026-01-01T00:00:00+00:00".into();
+        let approved_id = approved.id.clone();
+        store.insert_record(approved).await.unwrap();
+
+        let mut pending = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", "shared-keyword-beta"),
+            "shared-keyword-beta solution",
+            "shared-keyword-beta adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        pending.reviewed = false;
+        pending.created_at = "2026-06-01T00:00:00+00:00".into();
+        let pending_id = pending.id.clone();
+        store.insert_record(pending).await.unwrap();
+
+        let hits = store
+            .search_experiences_filtered(
+                "shared-keyword".into(),
+                Some(10),
+                Some(EXPERIENCE_STATUS_ACTIVE),
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&approved_id.as_str()));
+        assert!(
+            ids.contains(&pending_id.as_str()),
+            "unreviewed still returned"
+        );
+        let ai = ids.iter().position(|id| *id == approved_id).unwrap();
+        let pi = ids.iter().position(|id| *id == pending_id).unwrap();
+        assert!(ai < pi, "reviewed must rank above unreviewed in band");
+    }
+
+    #[tokio::test]
+    async fn search_strong_unreviewed_outranks_weak_approved() {
+        let store = ExperienceStore::memory().unwrap();
+        let needle = "redis-cluster-failover-protocol";
+        let mut strong_pending = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", needle),
+            needle,
+            format!("{needle} adr"),
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        strong_pending.reviewed = false;
+        strong_pending.created_at = "2026-01-01T00:00:00+00:00".into();
+        let pending_id = strong_pending.id.clone();
+        store.insert_record(strong_pending).await.unwrap();
+
+        let mut weak_approved = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "band-proj", "unrelated-topic"),
+            "entirely different solution about networking caches",
+            "no needle in adr body",
+            ExperienceOutcome::Success,
+            vec![needle.into()],
+        );
+        weak_approved.reviewed = true;
+        weak_approved.created_at = "2026-06-01T00:00:00+00:00".into();
+        let approved_id = weak_approved.id.clone();
+        store.insert_record(weak_approved).await.unwrap();
+
+        let hits = store
+            .search_experiences_filtered(needle.into(), Some(10), Some(EXPERIENCE_STATUS_ACTIVE))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&pending_id.as_str()));
+        assert!(ids.contains(&approved_id.as_str()));
+        let pi = ids.iter().position(|id| *id == pending_id).unwrap();
+        let ai = ids.iter().position(|id| *id == approved_id).unwrap();
+        assert!(
+            pi < ai,
+            "strongly relevant unreviewed must outrank weakly relevant approved (UD-5)"
+        );
+
+        let pending_score = lexical_search_score(needle, &hits[pi]);
+        let approved_score = lexical_search_score(needle, &hits[ai]);
+        assert!(
+            (pending_score - approved_score).abs() > REVIEW_SCORE_BAND,
+            "scores must differ by more than REVIEW_SCORE_BAND ({REVIEW_SCORE_BAND})"
+        );
+    }
+
+    #[test]
+    fn review_score_band_tiebreak_and_relevance_primary() {
+        use super::{cmp_search_with_review_band, SearchRankKey, REVIEW_SCORE_BAND};
+        use std::cmp::Ordering;
+        // Same bucket → approved first.
+        assert_eq!(
+            cmp_search_with_review_band(
+                SearchRankKey {
+                    same_project: false,
+                    score: 0.80,
+                    reviewed: true,
+                    created_at: "a",
+                    id: "id-a",
+                },
+                SearchRankKey {
+                    same_project: false,
+                    score: 0.80 + REVIEW_SCORE_BAND / 2.0,
+                    reviewed: false,
+                    created_at: "z",
+                    id: "id-b",
+                },
+            ),
+            Ordering::Less
+        );
+        // Different buckets → higher score first even if unreviewed.
+        assert_eq!(
+            cmp_search_with_review_band(
+                SearchRankKey {
+                    same_project: false,
+                    score: 0.95,
+                    reviewed: false,
+                    created_at: "a",
+                    id: "id-a",
+                },
+                SearchRankKey {
+                    same_project: false,
+                    score: 0.40,
+                    reviewed: true,
+                    created_at: "z",
+                    id: "id-b",
+                },
+            ),
+            Ordering::Less
+        );
+        // Cycle repro from review: A(0.80,rev), B(0.84), C(0.88,older) — total order.
+        let a = SearchRankKey {
+            same_project: false,
+            score: 0.80,
+            reviewed: true,
+            created_at: "2026-01-01",
+            id: "a",
+        };
+        let b = SearchRankKey {
+            same_project: false,
+            score: 0.84,
+            reviewed: false,
+            created_at: "2026-06-01",
+            id: "b",
+        };
+        let c = SearchRankKey {
+            same_project: false,
+            score: 0.88,
+            reviewed: false,
+            created_at: "2025-01-01",
+            id: "c",
+        };
+        // C (bucket 17) before A/B (bucket 16); A reviewed before B in same bucket.
+        assert_eq!(cmp_search_with_review_band(c, a), Ordering::Less);
+        assert_eq!(cmp_search_with_review_band(c, b), Ordering::Less);
+        assert_eq!(cmp_search_with_review_band(a, b), Ordering::Less);
+    }
+
+    #[test]
+    fn same_project_hard_tier_outranks_higher_score_other_project() {
+        use super::{cmp_search_with_review_band, sort_experiences_for_search, SearchRankKey};
+        use crate::models::LoungeExperience;
+        use std::cmp::Ordering;
+        // Weak same-project beat strong other-project (main hard tier).
+        assert_eq!(
+            cmp_search_with_review_band(
+                SearchRankKey {
+                    same_project: true,
+                    score: 0.20,
+                    reviewed: false,
+                    created_at: "a",
+                    id: "same",
+                },
+                SearchRankKey {
+                    same_project: false,
+                    score: 0.99,
+                    reviewed: true,
+                    created_at: "z",
+                    id: "other",
+                },
+            ),
+            Ordering::Less
+        );
+
+        let mut hits = vec![
+            LoungeExperience {
+                id: "other-hi".into(),
+                project_id: "other".into(),
+                title: "needle-xyz".into(),
+                adr_summary: "needle-xyz strong".into(),
+                reviewed: true,
+                created_at: "2026-01-02T00:00:00Z".into(),
+                ..Default::default()
+            },
+            LoungeExperience {
+                id: "same-lo".into(),
+                project_id: "mine".into(),
+                title: "unrelated".into(),
+                adr_summary: "weak".into(),
+                tags: vec!["needle-xyz".into()],
+                reviewed: false,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                ..Default::default()
+            },
+        ];
+        sort_experiences_for_search(&mut hits, "needle-xyz", Some("mine"));
+        assert_eq!(hits[0].id, "same-lo", "same project must hard-rank first");
+        assert_eq!(hits[1].id, "other-hi");
+    }
+
+    #[test]
+    fn normalize_search_score_clamps_nan_and_negative() {
+        use super::{normalize_search_score, review_score_bucket};
+        assert_eq!(normalize_search_score(f64::NAN), 0.0);
+        assert_eq!(normalize_search_score(f64::NEG_INFINITY), 0.0);
+        assert_eq!(normalize_search_score(-1.0), 0.0);
+        assert_eq!(normalize_search_score(0.42), 0.42);
+        assert_eq!(review_score_bucket(0.80), 16);
+        assert_eq!(review_score_bucket(0.84), 16);
+        assert_eq!(review_score_bucket(0.88), 17);
+    }
+
+    #[test]
+    fn strip_original_content_for_ui_clears_field() {
+        use super::strip_original_content_for_ui;
+        use crate::models::LoungeExperience;
+        let row = LoungeExperience {
+            id: "strip-me".into(),
+            original_content: Some("/Users/ci/secret".into()),
+            ..Default::default()
+        };
+        let clean = strip_original_content_for_ui(row);
+        assert!(clean.original_content.is_none());
+    }
+
+    /// Property: bucket comparator is a total order — no panic under `sort_by`,
+    /// antisymmetric + transitive on samples, and a ≥2-bucket gap always ranks
+    /// the higher score first.
+    #[test]
+    fn review_score_band_comparator_is_total_order_property() {
+        use super::{
+            cmp_search_with_review_band, normalize_search_score, review_score_bucket,
+            SearchRankKey, REVIEW_SCORE_BAND,
+        };
+        use std::cmp::Ordering;
+
+        #[derive(Clone, Debug)]
+        struct Hit {
+            same_project: bool,
+            score: f64,
+            reviewed: bool,
+            created: String,
+            id: String,
+        }
+
+        fn cmp_hit(a: &Hit, b: &Hit) -> Ordering {
+            cmp_search_with_review_band(
+                SearchRankKey {
+                    same_project: a.same_project,
+                    score: a.score,
+                    reviewed: a.reviewed,
+                    created_at: &a.created,
+                    id: &a.id,
+                },
+                SearchRankKey {
+                    same_project: b.same_project,
+                    score: b.score,
+                    reviewed: b.reviewed,
+                    created_at: &b.created,
+                    id: &b.id,
+                },
+            )
+        }
+
+        // xorshift64 — deterministic, no extra crate.
+        let mut state: u64 = 0x00C0_FFEE_DEAD_BEEF;
+        let mut next_u64 = || -> u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for trial in 0..400 {
+            let n = (next_u64() % 256) as usize + 1;
+            let mut hits: Vec<Hit> = Vec::with_capacity(n);
+            for i in 0..n {
+                let raw = (next_u64() as f64) / (u64::MAX as f64);
+                let score = match next_u64() % 32 {
+                    0 => f64::NAN,
+                    1 => -raw,
+                    2 => f64::INFINITY,
+                    3 => f64::NEG_INFINITY,
+                    4 => raw * 3.0,
+                    _ => raw,
+                };
+                hits.push(Hit {
+                    same_project: next_u64() % 2 == 0,
+                    score,
+                    reviewed: next_u64() % 2 == 0,
+                    created: format!(
+                        "2026-{:02}-{:02}T{:02}:00:00Z",
+                        (i % 12) + 1,
+                        (i % 28) + 1,
+                        i % 24
+                    ),
+                    id: format!("id-{trial:04}-{i:04}-{:016x}", next_u64()),
+                });
+            }
+
+            // Must not panic (Rust 1.81+ sort_by requires total order).
+            hits.sort_by(cmp_hit);
+
+            // Antisymmetry + equality: a≤b and b≤a ⇒ equal keys after normalize.
+            for w in hits.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                let ab = cmp_hit(a, b);
+                let ba = cmp_hit(b, a);
+                match ab {
+                    Ordering::Equal => assert_eq!(ba, Ordering::Equal),
+                    Ordering::Less => assert_eq!(ba, Ordering::Greater),
+                    Ordering::Greater => assert_eq!(ba, Ordering::Less),
+                }
+            }
+
+            // Transitivity on random triples from this list.
+            if hits.len() >= 3 {
+                for _ in 0..32 {
+                    let i = (next_u64() as usize) % hits.len();
+                    let j = (next_u64() as usize) % hits.len();
+                    let k = (next_u64() as usize) % hits.len();
+                    let (a, b, c) = (&hits[i], &hits[j], &hits[k]);
+                    if cmp_hit(a, b) == Ordering::Less && cmp_hit(b, c) == Ordering::Less {
+                        assert_eq!(
+                            cmp_hit(a, c),
+                            Ordering::Less,
+                            "transitivity failed at trial {trial}: {a:?} < {b:?} < {c:?}"
+                        );
+                    }
+                }
+            }
+
+            // ≥2 bucket gap within the same project tier ⇒ higher score first.
+            for a in &hits {
+                for b in &hits {
+                    if a.same_project != b.same_project {
+                        continue;
+                    }
+                    let sa = normalize_search_score(a.score);
+                    let sb = normalize_search_score(b.score);
+                    let ba = review_score_bucket(sa);
+                    let bb = review_score_bucket(sb);
+                    if ba >= bb + 2 {
+                        assert_eq!(
+                            cmp_hit(a, b),
+                            Ordering::Less,
+                            "bucket gap≥2 ({ba} vs {bb}, band={REVIEW_SCORE_BAND}): higher must lead"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

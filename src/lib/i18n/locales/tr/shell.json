@@ -4,12 +4,17 @@
     "dashboard": "Gösterge Paneli",
     "stream": "Olay Akışı",
     "vault": "Bilgi Kasası",
+    "vaultWithUnreviewed_one": "Bilgi Kasası, inceleme kuyruğunda {{count}}",
+    "vaultWithUnreviewed_other": "Bilgi Kasası, inceleme kuyruğunda {{count}}",
+    "vaultUnreviewedUnknown": "Bilgi Kasası, inceleme sayısı alınamadı",
     "health": "Proje Sağlığı",
     "fleet": "Worker Filosu",
     "telemetry": "Telemetri",
     "quotas": "Kotalar",
     "settings": "Ayarlar"
   },
+  "reviewQueue": "İnceleme kuyruğu",
+  "unreviewedCountUnknown": "İnceleme sayısı alınamadı",
   "titles": {
     "/stream": "Olay Akışı",
     "/vault": "Bilgi Kasası",

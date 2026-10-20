@@ -18,3 +18,7 @@ export {
   type StatusTone,
 } from "./status-pill";
 export { HaltedBanner, type HaltedBannerProps } from "./halted-banner";
+export {
+  StickyActionBar,
+  type StickyActionBarProps,
+} from "./sticky-action-bar";

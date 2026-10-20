@@ -54,12 +54,60 @@ fn re_token() -> &'static Regex {
 fn re_home_path() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // /Users/<u>, /home/<u>, /var/home/<u>, C:\Users\<u>, C:/Users/<u>
+        // `/root` is handled separately in [`redact_unix_root_home`] (no lookaround;
+        // must not touch `/rootfs`).
         Regex::new(concat!(
-            r"(?i)(?:/Users/[^/\s]+|/(?:home|root)/[^/\s]+|",
-            r"(?:[A-Z]:)?\\Users\\[^\\\s]+)",
+            r"(?i)(?:",
+            r"/Users/[^/\s]+",
+            r"|/var/home/[^/\s]+",
+            r"|/home/[^/\s]+",
+            r"|(?:[A-Z]:)?[/\\]Users[/\\][^/\\\s]+",
+            r")",
         ))
         .expect("home path regex")
     })
+}
+
+/// Mask `/root` and `/root/<seg>` only when `root` is a full path component
+/// (never `/rootfs/...`). `regex` crate has no lookaround, so this is manual.
+fn redact_unix_root_home(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let is_root = bytes[i] == b'/'
+            && i + 5 <= bytes.len()
+            && bytes[i + 1].eq_ignore_ascii_case(&b'r')
+            && bytes[i + 2].eq_ignore_ascii_case(&b'o')
+            && bytes[i + 3].eq_ignore_ascii_case(&b'o')
+            && bytes[i + 4].eq_ignore_ascii_case(&b't');
+        if is_root {
+            let after = i + 5;
+            let boundary = match bytes.get(after) {
+                None => true,
+                Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => true,
+                Some(c) if !c.is_ascii_alphanumeric() && *c != b'_' => true,
+                Some(_) => false, // e.g. `/rootfs`
+            };
+            if boundary {
+                out.push_str("<home>");
+                i = after;
+                if bytes.get(i) == Some(&b'/') {
+                    // Consume `/root/<first-segment>` like other home roots.
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'/' && !bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+        }
+        let ch = text[i..].chars().next().expect("utf-8");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -108,6 +156,7 @@ pub fn scrub(input: &str) -> HygieneResult {
     let next = re_home_path()
         .replace_all(&text, |_caps: &regex::Captures| "<home>")
         .into_owned();
+    let next = redact_unix_root_home(&next);
     if next != text {
         masked = true;
         warnings.push("masked absolute home path".into());
@@ -119,6 +168,43 @@ pub fn scrub(input: &str) -> HygieneResult {
         masked,
         warnings,
     }
+}
+
+/// Placeholders written by [`scrub`] — used to detect hygiene-flagged rows.
+pub const HYGIENE_PLACEHOLDERS: &[&str] = &[
+    "<device-ip>",
+    "<redacted-token>",
+    "<device-serial>",
+    "<home>",
+];
+
+/// True when text still contains a hygiene mask placeholder.
+pub fn text_has_hygiene_mask(text: &str) -> bool {
+    HYGIENE_PLACEHOLDERS.iter().any(|p| text.contains(p))
+}
+
+/// SQL predicate (no leading AND) matching hygiene-masked experience text columns.
+/// `prefix` is an optional table alias (`""` or `"e"`); never wrap expressions.
+pub fn hygiene_masked_sql(prefix: &str) -> String {
+    let p = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}.")
+    };
+    let cols = [
+        format!("{p}topic"),
+        format!("{p}solution_summary"),
+        format!("{p}adr_record"),
+        format!("COALESCE({p}original_content,'')"),
+        format!("COALESCE({p}title,'')"),
+    ];
+    let mut parts = Vec::new();
+    for expr in &cols {
+        for ph in HYGIENE_PLACEHOLDERS {
+            parts.push(format!("{expr} LIKE '%{ph}%'"));
+        }
+    }
+    format!("({})", parts.join(" OR "))
 }
 
 /// Tag limits (documented constants).
@@ -296,6 +382,42 @@ mod tests {
         assert!(r.text.contains("<home>"));
         assert!(!r.text.contains("/Users/alice"));
         assert!(!r.text.contains("ghp_"));
+    }
+
+    #[test]
+    fn masks_extended_home_roots() {
+        let samples = [
+            "/Users/ci/projects/secret",
+            "/home/sercan/dev",
+            "/root",
+            "/root/.config/lounge",
+            "/var/home/fedora/work",
+            r"C:\Users\sercan\dev",
+            "C:/Users/sercan/dev",
+        ];
+        for sample in samples {
+            let r = scrub(sample);
+            assert!(r.masked, "expected mask for {sample}");
+            assert!(r.text.contains("<home>"), "{sample} → {}", r.text);
+            assert!(!r.text.contains("/Users/"), "{sample}");
+            assert!(!r.text.contains("/home/"), "{sample}");
+            assert!(!r.text.contains("/var/home/"), "{sample}");
+            assert!(!r.text.contains(r"C:\Users"), "{sample}");
+            assert!(!r.text.contains("C:/Users"), "{sample}");
+            // Bare /root → <home>; /root/foo → <home>/foo already covered by replace.
+            if sample == "/root" {
+                assert_eq!(r.text, "<home>");
+            }
+        }
+        // Path boundary: /rootfs must not be treated as /root.
+        let rootfs = scrub("/rootfs/var/lib/data");
+        assert!(
+            !rootfs.masked || rootfs.text.contains("/rootfs"),
+            "must not redact /rootfs: {}",
+            rootfs.text
+        );
+        assert!(!rootfs.text.starts_with("<home>fs"), "{}", rootfs.text);
+        assert_eq!(rootfs.text, "/rootfs/var/lib/data");
     }
 
     #[test]

@@ -121,6 +121,10 @@ type LoungeContextValue = {
   switchProject: (name: string | null) => void;
   focusExperience: (experience: LoungeExperience) => void;
   unreviewedCount: number;
+  /** `ok` when count IPC succeeded; `error` when it failed (badge must not fake 0). */
+  unreviewedCountStatus: "ok" | "error" | "loading";
+  /** Re-fetch `count_unreviewed_experiences` (single source for badge / review UI). */
+  refreshUnreviewedCount: () => Promise<void>;
   experienceTotal: number;
   experiencesLoading: boolean;
   experiencesError: string | null;
@@ -204,6 +208,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
   const [deadSymbolNotice, setDeadSymbolNotice] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [unreviewedCount, setUnreviewedCount] = useState(0);
+  const [unreviewedCountStatus, setUnreviewedCountStatus] = useState<
+    "ok" | "error" | "loading"
+  >("loading");
   const [experienceTotal, setExperienceTotal] = useState(0);
   const [experiencesLoading, setExperiencesLoading] = useState(false);
   const [experiencesError, setExperiencesError] = useState<string | null>(null);
@@ -263,8 +270,9 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     try {
       const count = await invoke<number>("count_unreviewed_experiences");
       setUnreviewedCount(Number(count));
+      setUnreviewedCountStatus("ok");
     } catch {
-      setUnreviewedCount(0);
+      setUnreviewedCountStatus("error");
     }
   }, [showArchived]);
 
@@ -809,10 +817,19 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  const refreshUnreviewedCount = useCallback(async () => {
+    try {
+      const count = await invoke<number>("count_unreviewed_experiences");
+      setUnreviewedCount(Number(count));
+      setUnreviewedCountStatus("ok");
+    } catch {
+      setUnreviewedCountStatus("error");
+    }
+  }, []);
+
   const markAllExperiencesReviewed = useCallback(async () => {
     await invoke<number>("mark_all_experiences_reviewed");
-    const count = await invoke<number>("count_unreviewed_experiences");
-    setUnreviewedCount(Number(count));
+    await refreshUnreviewedCount();
     setExperiences((current) =>
       current.map((row) =>
         row.status === "archived" ? row : { ...row, reviewed: true },
@@ -821,7 +838,7 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
     setExperienceDetail((current) =>
       current && current.status !== "archived" ? { ...current, reviewed: true } : current,
     );
-  }, []);
+  }, [refreshUnreviewedCount]);
 
   const focusExperience = useCallback(
     (experience: LoungeExperience) => {
@@ -1406,6 +1423,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       switchProject,
       focusExperience,
       unreviewedCount,
+      unreviewedCountStatus,
+      refreshUnreviewedCount,
       experienceTotal,
       experiencesLoading,
       experiencesError,
@@ -1484,6 +1503,8 @@ export function LoungeProvider({ children }: { children: ReactNode }) {
       switchProject,
       focusExperience,
       unreviewedCount,
+      unreviewedCountStatus,
+      refreshUnreviewedCount,
       experienceTotal,
       experiencesLoading,
       experiencesError,

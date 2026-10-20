@@ -149,6 +149,35 @@ test.describe("EX — vault experiences", () => {
     expect(JSON.stringify(update?.args ?? {})).toMatch(/Edited ADR summary for e2e verification/);
   });
 
+  test("EX-02b · Drawer shows original_content and restore reverts ADR", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "EX-02b" });
+    await openRoute(page, "/vault", "full");
+    await openVaultProject(page, "Agent-Lounge-OS");
+    await page
+      .locator('[data-qa="experience-card"]')
+      .filter({ hasText: /Indexed dispatcher\.rs/i })
+      .first()
+      .click();
+    const drawer = page.locator("[data-qa=experience-drawer]");
+    await expect(drawer).toBeVisible();
+    // IPC must still deliver original_content (not stripped like review-queue).
+    await expect(drawer.getByText(/ORIGINAL BODY before edit/i)).toBeVisible();
+    await drawer.getByRole("button", { name: /^Edit$/i }).click();
+    await expect(drawer).toHaveAttribute("data-mode", "edit");
+    const adrInput = drawer.locator('[data-qa="experience-adr-input"]');
+    await adrInput.fill("Temporary ADR that restore must undo.");
+    await drawer.getByRole("button", { name: /^Save$/i }).click();
+    await expect(drawer).toContainText("Temporary ADR that restore must undo.");
+    await drawer.getByRole("button", { name: /^Edit$/i }).click();
+    await expect(drawer.getByRole("button", { name: /revert|restore|orijinal/i })).toBeVisible();
+    await drawer.getByRole("button", { name: /revert|restore|orijinal/i }).click();
+    await expect(drawer).toContainText(/ORIGINAL BODY before edit/i);
+    const log = await getIpcLog(page);
+    const updates = log.filter((entry) => entry.cmd === "update_experience");
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(updates.at(-1)?.args ?? {})).toMatch(/ORIGINAL BODY before edit/i);
+  });
+
   test("EX-03 · Soft delete / archive", async ({ page }) => {
     await openRoute(page, "/vault", "full");
     await openVaultProject(page, "EchoMind");

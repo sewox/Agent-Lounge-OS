@@ -410,6 +410,8 @@ pub struct LoungeExperience {
 pub const ARCHIVED_BY_USER: &str = "user";
 /// Soft-hide from the 90-day TTL auto-archive path.
 pub const ARCHIVED_BY_TTL: &str = "ttl";
+/// Soft-reject from Vault Review (undoable; not a hard delete).
+pub const ARCHIVED_BY_REJECTED: &str = "rejected";
 
 fn default_reviewed_true() -> bool {
     true

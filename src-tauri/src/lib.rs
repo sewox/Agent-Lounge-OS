@@ -8,7 +8,7 @@ pub mod services;
 
 use std::path::PathBuf;
 
-use db::ExperienceStore;
+use db::{strip_original_content_for_ui_vec, ExperienceStore};
 use infra::BusManager;
 use kernel::{
     default_model_lock, inject_knowledge_hit, DecisionGate, DecisionGatePhase, DecisionGateStatus,
@@ -435,6 +435,12 @@ pub fn run_with_start_route(start_route: &'static str) {
             pin_experience,
             mark_experience_reviewed,
             mark_all_experiences_reviewed,
+            mark_experiences_reviewed,
+            reject_experience,
+            reject_experiences,
+            undo_reject_experience,
+            list_review_queue,
+            count_review_stats,
             count_experiences,
             count_unreviewed_experiences,
             ignore_symbol,
@@ -1202,6 +1208,8 @@ async fn list_experiences(
     include_archived: Option<bool>,
     offset: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
+    // Keep original_content for the experience drawer / restore (NB2).
+    // Only list_review_queue strips it.
     state
         .list_experiences_page(
             limit.unwrap_or(20),
@@ -1228,6 +1236,7 @@ async fn get_experience(
     state: tauri::State<'_, ExperienceStore>,
     id: String,
 ) -> Result<Option<LoungeExperience>, String> {
+    // Drawer needs original_content for display + restore (NB2).
     state.get(id).await.map_err(|err| err.to_string())
 }
 
@@ -1304,6 +1313,74 @@ async fn count_unreviewed_experiences(
 ) -> Result<u64, String> {
     state
         .count_unreviewed_experiences()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn mark_experiences_reviewed(
+    state: tauri::State<'_, ExperienceStore>,
+    ids: Vec<String>,
+) -> Result<u64, String> {
+    // Local Vault Review action — allowed while Halted (not an MCP write).
+    state
+        .mark_experiences_reviewed(ids)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn reject_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .reject_experience(id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn reject_experiences(
+    state: tauri::State<'_, ExperienceStore>,
+    ids: Vec<String>,
+) -> Result<u64, String> {
+    state
+        .reject_experiences(ids)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn undo_reject_experience(
+    state: tauri::State<'_, ExperienceStore>,
+    id: String,
+) -> Result<(), String> {
+    state
+        .undo_reject_experience(id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_review_queue(
+    state: tauri::State<'_, ExperienceStore>,
+    filter: Option<db::ReviewQueueFilter>,
+) -> Result<Vec<LoungeExperience>, String> {
+    let rows = state
+        .list_review_queue(filter.unwrap_or_default())
+        .await
+        .map_err(|err| err.to_string())?;
+    // B2 / NB2: strip pre-hygiene original_content only on the review-queue path.
+    Ok(strip_original_content_for_ui_vec(rows))
+}
+
+#[tauri::command]
+async fn count_review_stats(
+    state: tauri::State<'_, ExperienceStore>,
+) -> Result<db::ReviewStats, String> {
+    state
+        .count_review_stats()
         .await
         .map_err(|err| err.to_string())
 }
@@ -1508,6 +1585,7 @@ async fn search_experiences(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
+    // Same as list/get: preserve original_content for drawer/log fallbacks (NB2).
     state
         .search_experiences(query, limit)
         .await
