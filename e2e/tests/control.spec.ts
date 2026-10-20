@@ -202,7 +202,8 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
     const cancel = page.locator('[data-qa="halt-dialog-cancel"]');
     const confirm = page.locator('[data-qa="halt-dialog-confirm"]');
 
-    await reason.focus();
+    // User-visible open state: dialog focused on the reason field before Tab.
+    // (Sync useLayoutEffect initial focus — not a timing wait.)
     await expect(reason).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(cancel).toBeFocused();

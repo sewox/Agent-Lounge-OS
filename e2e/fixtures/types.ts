@@ -170,6 +170,8 @@ export type DiscoveryReport = {
   models?: unknown[];
   mcp_servers?: unknown[];
   tools?: unknown[];
+  /** System tools discovered at scan time (parity with src/lib/lounge DiscoveryReport). */
+  system_tools?: unknown[];
 };
 
 export type FixtureDataset = {
@@ -208,6 +210,8 @@ export type FixtureDataset = {
     port?: number;
     port_mode?: "auto" | "user";
     owned_by_lounge?: boolean;
+    daemon_mode?: boolean;
+    daemon_presence?: string | null;
   };
   workers: { id: string; name: string; kind: string; is_active: boolean; enabled: boolean; model?: string }[];
   agentSessions: {

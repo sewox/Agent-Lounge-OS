@@ -150,6 +150,9 @@ jobs:
       - name: Playwright config coverage (no silent grep/testIgnore)
         run: bash scripts/qa/gates/playwright-config-coverage.sh
 
+      - name: E2E TypeScript check
+        run: npx tsc --noEmit -p e2e
+
   # Independent MCP client-matrix probe (tools/mcp-probe). No product code.
   # Cross-platform; required gate — no continue-on-error / skip labels.
   mcp-probe:
