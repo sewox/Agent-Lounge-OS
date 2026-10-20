@@ -4,7 +4,14 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { act, createElement, useRef, useState, type ReactElement } from "react";
+import {
+  act,
+  createElement,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import {
@@ -89,6 +96,13 @@ afterEach(() => {
 function HaltFixture({ startOpen = false }: { startOpen?: boolean }): ReactElement {
   const [open, setOpen] = useState(startOpen);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Bind via layout effect (not a createElement `ref` prop) so react-hooks/refs
+  // stays quiet in this .ts fixture; runs before the trap's layout effect below.
+  useLayoutEffect(() => {
+    containerRef.current = open
+      ? document.querySelector<HTMLDivElement>('[data-qa="halt-confirm-dialog"]')
+      : null;
+  }, [open]);
   useAlertdialogFocusTrap({
     open,
     containerRef,
@@ -111,7 +125,6 @@ function HaltFixture({ startOpen = false }: { startOpen?: boolean }): ReactEleme
       ? createElement(
           "div",
           {
-            ref: containerRef,
             role: "alertdialog",
             "data-qa": "halt-confirm-dialog",
           },
