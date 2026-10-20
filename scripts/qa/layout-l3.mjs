@@ -134,9 +134,11 @@ export function largestEmptyRatio(content, occupiedRects, grid = L3_GRID) {
 }
 
 /**
- * Pure/jsdom visibility: element or any ancestor up to `stack` is invisible when
- * display:none, visibility:hidden, effective opacity ≤ 0 (multiplied), or a
- * zero-size box (skipping `display:contents`, which generates no box).
+ * Pure/jsdom visibility matching Chromium `checkVisibility` ancestor coverage:
+ * - display:none / visibility:hidden / effective opacity ≤ 0: walk up to
+ *   `document.documentElement` (so an opacity:0 ancestor *above* the stack hides).
+ * - zero-size box: walk up to and including `stack` only (skipping
+ *   `display:contents`). html/body often report 0×0 without layout in jsdom.
  *
  * @param {Element} el
  * @param {Element} stack
@@ -144,8 +146,10 @@ export function largestEmptyRatio(content, occupiedRects, grid = L3_GRID) {
  */
 export function isEffectivelyVisibleBanner(el, stack, getStyle = globalThis.getComputedStyle) {
   if (!(el instanceof Element) || !(stack instanceof Element)) return false;
+  const root = el.ownerDocument?.documentElement;
   let node = el;
   let opacityProduct = 1;
+  let checkZeroSize = true;
   while (node) {
     const style = getStyle(node);
     if (style.display === "none") return false;
@@ -155,11 +159,12 @@ export function isEffectivelyVisibleBanner(el, stack, getStyle = globalThis.getC
       opacityProduct *= opacity;
     }
     if (opacityProduct <= 0) return false;
-    if (style.display !== "contents") {
+    if (checkZeroSize && style.display !== "contents") {
       const r = node.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) return false;
     }
-    if (node === stack) break;
+    if (node === stack) checkZeroSize = false;
+    if (node === root) break;
     node = node.parentElement;
   }
   return true;
@@ -196,13 +201,14 @@ export function collectStatusBannerRects() {
   }
 
   /**
-   * Ancestor-aware visibility up to and including the stack.
-   * Prefer Element.checkVisibility when present (real Chromium); pure fallback
-   * for jsdom matches the same display / visibility / opacity / zero-box rules.
+   * Ancestor-aware visibility. Prefer Element.checkVisibility (Chromium).
+   * jsdom fallback: display / visibility / opacity through documentElement;
+   * zero-size only through the stack (same as the Chromium zero-size walk).
    * @param {Element} el
    * @param {Element} stack
    */
   function visible(el, stack) {
+    const root = document.documentElement;
     if (typeof el.checkVisibility === "function") {
       if (
         !el.checkVisibility({
@@ -228,6 +234,7 @@ export function collectStatusBannerRects() {
 
     let node = el;
     let opacityProduct = 1;
+    let checkZeroSize = true;
     while (node) {
       const style = getComputedStyle(node);
       if (style.display === "none") return false;
@@ -237,11 +244,12 @@ export function collectStatusBannerRects() {
         opacityProduct *= opacity;
       }
       if (opacityProduct <= 0) return false;
-      if (style.display !== "contents") {
+      if (checkZeroSize && style.display !== "contents") {
         const r = node.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return false;
       }
-      if (node === stack) break;
+      if (node === stack) checkZeroSize = false;
+      if (node === root) break;
       node = node.parentElement;
     }
     return true;
