@@ -1,3 +1,5 @@
+# tauri.conf.json → bundle.linux.deb.desktopTemplate points here.
+# An rpm target would need its own bundle.linux.rpm.desktopTemplate setting.
 [Desktop Entry]
 Categories={{categories}}
 {{#if comment}}

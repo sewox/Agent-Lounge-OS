@@ -124,13 +124,17 @@ pub fn mark_startup_title_deferred() {
 
 /// After UI Resume: wake the title worker; if startup was deferred, start worker + backfill.
 pub async fn on_halt_resumed(store: &ExperienceStore) {
-    on_halt_resumed_on(global_queue(), store).await;
+    on_halt_resumed_on(global_queue(), store, &STARTUP_TITLE_DEFERRED).await;
 }
 
-/// Testable Resume hook that operates on an injected queue (avoids the process-global
-/// `OnceLock` queue raced by other unit tests).
-async fn on_halt_resumed_on(q: &Arc<TitleQueue>, store: &ExperienceStore) {
-    let deferred = STARTUP_TITLE_DEFERRED.swap(false, Ordering::SeqCst);
+/// Testable Resume hook that operates on an injected queue and deferred flag
+/// (avoids process-global state raced by other unit tests).
+async fn on_halt_resumed_on(
+    q: &Arc<TitleQueue>,
+    store: &ExperienceStore,
+    deferred_flag: &AtomicBool,
+) {
+    let deferred = deferred_flag.swap(false, Ordering::SeqCst);
     q.attach_store(store.clone()).await;
     q.ensure_worker().await;
     if deferred {
@@ -138,17 +142,6 @@ async fn on_halt_resumed_on(q: &Arc<TitleQueue>, store: &ExperienceStore) {
         backfill_on_queue(store, q).await;
     }
     q.notify.notify_waiters();
-}
-
-/// Test helper: whether startup title work is currently deferred.
-#[cfg(test)]
-pub fn startup_title_deferred_for_tests() -> bool {
-    STARTUP_TITLE_DEFERRED.load(Ordering::SeqCst)
-}
-
-#[cfg(test)]
-pub fn clear_startup_title_deferred_for_tests() {
-    STARTUP_TITLE_DEFERRED.store(false, Ordering::SeqCst);
 }
 
 /// Expose in-memory queue backlog for Health-1 (global worker only).
@@ -1225,7 +1218,8 @@ mod tests {
 
     #[tokio::test]
     async fn starting_halted_defers_worker_until_resume_hook() {
-        clear_startup_title_deferred_for_tests();
+        // Test-local deferred flag — never touch the process-global AtomicBool.
+        let deferred_flag = AtomicBool::new(false);
         let store = ExperienceStore::memory().unwrap();
         crate::services::halt::halt(
             &store,
@@ -1234,8 +1228,8 @@ mod tests {
         )
         .await
         .unwrap();
-        mark_startup_title_deferred();
-        assert!(startup_title_deferred_for_tests());
+        deferred_flag.store(true, Ordering::SeqCst);
+        assert!(deferred_flag.load(Ordering::SeqCst));
 
         // Isolated local queue — never touch the process-global OnceLock queue.
         let requests = Arc::new(AtomicUsize::new(0));
@@ -1265,11 +1259,11 @@ mod tests {
         crate::services::halt::resume(&store, crate::services::halt::HALT_BY_UI)
             .await
             .unwrap();
-        // Injected-queue Resume hook: clears deferred flag + deferred backfill.
-        on_halt_resumed_on(&q, &store).await;
+        // Injected queue + deferred flag: clears flag + runs deferred backfill.
+        on_halt_resumed_on(&q, &store, &deferred_flag).await;
         assert!(
-            !startup_title_deferred_for_tests(),
-            "on_halt_resumed_on must clear STARTUP_TITLE_DEFERRED"
+            !deferred_flag.load(Ordering::SeqCst),
+            "on_halt_resumed_on must clear the injected deferred flag"
         );
         wait_pending_drain(&q, Duration::from_secs(10)).await;
 
@@ -1290,7 +1284,6 @@ mod tests {
         );
         let loaded = store.get_record(id).await.unwrap().unwrap();
         assert_eq!(loaded.title_source, TitleSource::Llm);
-        clear_startup_title_deferred_for_tests();
     }
 
     #[test]

@@ -1,4 +1,8 @@
 import type { NextConfig } from "next";
+import {
+  resolveDevAssetPrefix,
+  resolveDevPort,
+} from "./src/lib/dev-asset-prefix";
 
 const isProd = process.env.NODE_ENV === "production";
 const internalHost = process.env.TAURI_DEV_HOST || "localhost";
@@ -8,7 +12,12 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
-  assetPrefix: isProd ? undefined : `http://${internalHost}:3000`,
+  // Must track PORT (default 3000) — same source as scripts/next-dev.mjs.
+  assetPrefix: resolveDevAssetPrefix({
+    isProd,
+    host: internalHost,
+    port: resolveDevPort(),
+  }),
 };
 
 export default nextConfig;

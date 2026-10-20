@@ -234,10 +234,18 @@ strip_scheme_default_from_mimeapps() {
   fi
   tmp="${mimeapps}.lounge-uninstall.$$"
   # grep exits 1 when every line matched -v (file becomes empty) — do not abort uninstall.
+  # Save/restore prior errexit: do not force `set -e` if the caller had it off.
+  case $- in
+    *e*) _lounge_errexit_was_on=1 ;;
+    *) _lounge_errexit_was_on=0 ;;
+  esac
   set +e
   grep -v 'x-scheme-handler/agentlounge=' "$mimeapps" >"$tmp"
   greprc=$?
-  set -e
+  if [ "$_lounge_errexit_was_on" -eq 1 ]; then
+    set -e
+  fi
+  unset _lounge_errexit_was_on
   if [ "$greprc" -ne 0 ] && [ "$greprc" -ne 1 ]; then
     rm -f "$tmp"
     fail "uninstall failed: could not filter $mimeapps (grep exit $greprc)"

@@ -391,4 +391,48 @@ fi
 rm -rf "$MIME_HOME"
 echo "ok: uninstall stripped scheme default from XDG + legacy mimeapps.list"
 
+echo "== strip_scheme_default_from_mimeapps restores prior errexit =="
+# Extract the helper and prove it does not force `set -e` when the caller had it off,
+# and restores `set -e` when the caller had it on.
+ERREXIT_PROBE=$(mktemp -d "${TMPDIR:-/tmp}/lounge-errexit.XXXXXX")
+awk '
+  /^strip_scheme_default_from_mimeapps\(\)/ { keep=1 }
+  keep { print }
+  keep && /^}/ { exit }
+' "$ROOT/install.sh" >"$ERREXIT_PROBE/fn.sh"
+
+# Caller had errexit OFF → must stay OFF after the helper returns.
+cat >"$ERREXIT_PROBE/off.sh" <<EOF
+set +e
+fail() { printf 'fail: %s\n' "\$*" >&2; exit 2; }
+. "$ERREXIT_PROBE/fn.sh"
+printf '%s\n' 'x-scheme-handler/agentlounge=agent-lounge-os.desktop' >"$ERREXIT_PROBE/mime-off.list"
+strip_scheme_default_from_mimeapps "$ERREXIT_PROBE/mime-off.list"
+case \$- in
+  *e*) echo "FAIL: errexit was turned on though caller had set +e" >&2; exit 1 ;;
+esac
+echo "ok: errexit stayed off"
+EOF
+sh "$ERREXIT_PROBE/off.sh"
+
+# Caller had errexit ON → must stay ON after the helper returns.
+cat >"$ERREXIT_PROBE/on.sh" <<EOF
+set -e
+fail() { printf 'fail: %s\n' "\$*" >&2; exit 2; }
+. "$ERREXIT_PROBE/fn.sh"
+printf '%s\n' \
+  'x-scheme-handler/agentlounge=agent-lounge-os.desktop' \
+  'text/plain=other.desktop' \
+  >"$ERREXIT_PROBE/mime-on.list"
+strip_scheme_default_from_mimeapps "$ERREXIT_PROBE/mime-on.list"
+case \$- in
+  *e*) ;;
+  *) echo "FAIL: errexit was left off though caller had set -e" >&2; exit 1 ;;
+esac
+echo "ok: errexit stayed on"
+EOF
+sh "$ERREXIT_PROBE/on.sh"
+rm -rf "$ERREXIT_PROBE"
+echo "ok: strip_scheme_default_from_mimeapps restores prior errexit"
+
 echo "ALL OK (unix installer fixture; ID=${OS_ID} pkg=${PKG})"

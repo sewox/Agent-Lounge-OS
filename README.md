@@ -171,6 +171,18 @@ npm install
 npm run tauri dev
 ```
 
+`npm run dev` / `beforeDevCommand` Next’i `PORT` üzerinden pinler (varsayılan **3000**); `next.config.ts` `assetPrefix` aynı `PORT`’u okur. Başka bir süreç 3000’i tutuyorsa:
+
+```bash
+# macOS / Linux
+PORT=3001 npm run tauri -- dev --config '{"build":{"devUrl":"http://localhost:3001"}}'
+
+# Windows (PowerShell)
+$env:PORT=3001; npm run tauri -- dev --config '{\"build\":{\"devUrl\":\"http://localhost:3001\"}}'
+```
+
+`PORT` yalnız Next/`assetPrefix` tarafını değiştirir; Tauri penceresinin yüklediği URL için `devUrl` override (`--config`) gerekir. `beforeDevCommand` zaten `npm run dev` olduğu için ekstra bir env-driven komut gerekmez — `PORT` yeterli.
+
 İlk açılışta Kernel NATS ve LMR sağlık durumunu kontrol eder. Host Ollama (`:11434`) çalışıyor olsa bile LMR kendi portunda (`:18790`) ve kendi `data/lmr` dizininde kalır.
 
 ### Laya (native DecisionGate) — isteğe bağlı
@@ -191,6 +203,7 @@ HF deposu: [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/l
 
 | Değişken | Anlam |
 |----------|--------|
+| `PORT` | Next.js dev portu + `assetPrefix` (varsayılan **3000**). Tauri `devUrl` için ayrıca `--config` override gerekir — yukarıya bakın. |
 | `LOUNGE_OLLAMA_PORT` | LMR portu (varsayılan **18790**) |
 | `LOUNGE_LMR_DIR` | LMR runtime (varsayılan `data/lmr`) |
 | `LOUNGE_LMR_BINARY` | LMR binary yolu |
