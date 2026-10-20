@@ -2,6 +2,8 @@
 //!
 //! Never writes MCP configs. Checks only at caller request (startup + on-demand).
 //! When several configs exist for one client, every path is reported (no "best" mask).
+//!
+//! Path table lives in [`crate::services::agent_mcp_paths`] (shared with Connect-1).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,75 +13,21 @@ use sha2::{Digest, Sha256};
 
 use super::probe::{find_executable, find_executable_in_dirs};
 use crate::models::{AgentHealthEntry, AgentMcpStatus};
+use crate::services::agent_mcp_paths::{
+    antigravity_config_paths, claude_code_config_paths, claude_desktop_config_path,
+    config_paths_for_client, cursor_config_paths, grok_config_paths, parse_jsonc,
+    vscode_config_paths, windsurf_config_paths,
+};
 use crate::services::autodiscover::{
     find_antigravity, find_claude_cli, find_claude_desktop, find_cursor_app, find_grok_bot,
 };
 use crate::services::health_filters::{mask_home_in_text, mask_home_path_with};
 
-/// Canonical MCP server key for Agent Lounge OS.
-pub const LOUNGE_MCP_SERVER_KEY: &str = "agent-lounge-os";
+// Re-export shared types/constants so existing `agent_health::…` imports keep working.
+pub use crate::services::agent_mcp_paths::{strip_jsonc, AgentHealthRoots, LOUNGE_MCP_SERVER_KEY};
+
 /// Embedded version marker scanned from lounge-mcp binaries (tests + release).
 pub const LOUNGE_MCP_VERSION_MARKER_PREFIX: &str = "LOUNGE_MCP_VERSION=";
-
-/// Env / path roots for injectable checks (no process-env mutation required).
-#[derive(Debug, Clone)]
-pub struct AgentHealthRoots {
-    pub home: PathBuf,
-    pub appdata: Option<PathBuf>,
-    pub xdg_config: Option<PathBuf>,
-    pub workspace: PathBuf,
-    /// Extra dirs searched before the process PATH for bare `lounge-mcp` commands.
-    pub path_dirs: Vec<PathBuf>,
-}
-
-impl AgentHealthRoots {
-    pub fn from_env(workspace: PathBuf) -> Self {
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-        let xdg_config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-        Self {
-            home,
-            appdata,
-            xdg_config,
-            workspace,
-            path_dirs: Vec::new(),
-        }
-    }
-
-    /// Home candidates used for `~/…` masking (injectable; no env read).
-    pub fn mask_homes(&self) -> Vec<String> {
-        let mut out = vec![self.home.to_string_lossy().into_owned()];
-        if let Some(ad) = &self.appdata {
-            // Roaming appdata is usually under the profile; include parent profile if distinct.
-            if let Some(parent) = ad.parent().and_then(|p| p.parent()) {
-                let s = parent.to_string_lossy().into_owned();
-                if !s.is_empty() && !out.iter().any(|h| h.eq_ignore_ascii_case(&s)) {
-                    out.push(s);
-                }
-            }
-        }
-        out
-    }
-
-    fn os_config_dir(&self, app: &str) -> PathBuf {
-        if cfg!(target_os = "macos") {
-            return self.home.join("Library/Application Support").join(app);
-        }
-        if cfg!(target_os = "windows") {
-            if let Some(appdata) = &self.appdata {
-                return appdata.join(app);
-            }
-            return self.home.join("AppData/Roaming").join(app);
-        }
-        if let Some(xdg) = &self.xdg_config {
-            return xdg.join(app);
-        }
-        self.home.join(".config").join(app)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ExpectedLoungeMcp {
@@ -240,61 +188,6 @@ fn roots_hint_windsurf_app() -> bool {
     ]
     .iter()
     .any(|p| p.exists())
-}
-
-fn antigravity_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
-    vec![
-        roots.home.join(".gemini/config/mcp_config.json"),
-        roots.home.join(".gemini/antigravity/mcp_config.json"),
-        roots
-            .os_config_dir("Antigravity")
-            .join("User/mcp_config.json"),
-        roots.workspace.join(".agents/mcp_config.json"),
-    ]
-}
-
-fn cursor_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
-    vec![
-        roots.home.join(".cursor/mcp.json"),
-        roots.workspace.join(".cursor/mcp.json"),
-    ]
-}
-
-fn claude_desktop_config_path(roots: &AgentHealthRoots) -> PathBuf {
-    roots
-        .os_config_dir("Claude")
-        .join("claude_desktop_config.json")
-}
-
-fn claude_code_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
-    vec![
-        roots.home.join(".claude.json"),
-        roots.home.join(".claude/settings.json"),
-        roots.workspace.join(".mcp.json"),
-    ]
-}
-
-fn grok_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
-    vec![
-        roots.os_config_dir("Grok").join("mcp.json"),
-        roots.os_config_dir("Grok Bot").join("mcp.json"),
-        roots.home.join(".grok/mcp.json"),
-    ]
-}
-
-fn vscode_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
-    vec![
-        roots.workspace.join(".vscode/mcp.json"),
-        roots.os_config_dir("Code").join("User/mcp.json"),
-    ]
-}
-
-fn windsurf_config_paths(roots: &AgentHealthRoots) -> Vec<PathBuf> {
-    vec![
-        roots.home.join(".codeium/windsurf/mcp_config.json"),
-        roots.workspace.join(".windsurf/mcp.json"),
-        roots.os_config_dir("Windsurf").join("mcp_config.json"),
-    ]
 }
 
 /// Report every existing config path for this client (no healthy-mask-stale).
@@ -807,93 +700,6 @@ pub fn extract_embedded_version_from_bytes(bytes: &[u8]) -> Option<String> {
         }
     }
     None
-}
-
-/// Strip `//` / `/* */` comments and trailing commas (VS Code / Windsurf / Cursor JSONC).
-pub fn strip_jsonc(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escape = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if in_string {
-            out.push(c);
-            if escape {
-                escape = false;
-            } else if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '/' && i + 1 < chars.len() {
-            if chars[i + 1] == '/' {
-                i += 2;
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            if chars[i + 1] == '*' {
-                i += 2;
-                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                    i += 1;
-                }
-                i = (i + 2).min(chars.len());
-                continue;
-            }
-        }
-        out.push(c);
-        i += 1;
-    }
-    // Remove trailing commas before } or ]
-    let mut cleaned = String::with_capacity(out.len());
-    let oc: Vec<char> = out.chars().collect();
-    let mut j = 0;
-    while j < oc.len() {
-        if oc[j] == ',' {
-            let mut k = j + 1;
-            while k < oc.len() && oc[k].is_whitespace() {
-                k += 1;
-            }
-            if k < oc.len() && (oc[k] == '}' || oc[k] == ']') {
-                j += 1;
-                continue;
-            }
-        }
-        cleaned.push(oc[j]);
-        j += 1;
-    }
-    cleaned
-}
-
-pub fn parse_jsonc(input: &str) -> Result<Value, String> {
-    let cleaned = strip_jsonc(input);
-    serde_json::from_str(&cleaned).map_err(|e| e.to_string())
-}
-
-/// Config paths + JSONC flag for a known agent client id.
-fn config_paths_for_client(client: &str, roots: &AgentHealthRoots) -> Option<(Vec<PathBuf>, bool)> {
-    match client {
-        "antigravity" => Some((antigravity_config_paths(roots), false)),
-        "cursor" => Some((cursor_config_paths(roots), true)),
-        "claude_desktop" => Some((vec![claude_desktop_config_path(roots)], false)),
-        "claude_code" => Some((claude_code_config_paths(roots), false)),
-        "grok_bot" => Some((grok_config_paths(roots), false)),
-        "vscode" => Some((vscode_config_paths(roots), true)),
-        "windsurf" => Some((windsurf_config_paths(roots), true)),
-        _ => None,
-    }
 }
 
 /// Re-read lounge-mcp URL from disk for `client` + masked `config_path_id`.

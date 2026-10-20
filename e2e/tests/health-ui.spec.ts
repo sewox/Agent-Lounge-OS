@@ -235,11 +235,127 @@ test.describe("Health-UI-2 agents + dead", () => {
     test.info().annotations.push({ type: "id", description: "HU-05" });
     await openAgentsWithOverride(page, HEALTH_AGENTS_EMPTY);
     await expect(page.locator('[data-qa="agents-health-empty-message"]')).toBeVisible();
-    await expect(page.locator('[data-qa="agents-health-empty-message"]')).toContainText(/Connect-1/i);
+    await expect(page.locator('[data-qa="agents-health-empty-message"]')).toContainText(
+      /Connect|Bağla|lounge-mcp/i,
+    );
+    await expect(page.locator('[data-qa="agents-empty-connect"]')).toBeVisible();
 
     await openAgentsWithOverride(page, "error");
     await expect(page.locator('[data-qa-agents-health="error"]')).toBeVisible();
     await expect(page.getByRole("button", { name: /Retry|Yeniden dene/i })).toBeVisible();
+  });
+
+  test("CN-01 · Bağla/Onar plan dialog confirm + JSONC consent", async ({ page }, testInfo) => {
+    testInfo.annotations.push({ type: "id", description: "CN-01" });
+    await openRoute(page, "/health?tab=agents", "full");
+    await expect(page.locator('[data-qa-agents-health="ready"]')).toBeVisible();
+    const metrics = await assertLayoutL1toL6(page, "/health?tab=agents", expect);
+    expect(metrics.l1_pass).toBe(true);
+
+    await page
+      .locator('[data-qa="agents-health-row"]')
+      .filter({ has: page.locator('[data-status="missing"]') })
+      .first()
+      .click();
+    await revealDetail(page);
+    const connectBtn = page.locator('[data-qa="agents-connect"]');
+    await expect(connectBtn).toBeVisible();
+    await connectBtn.click();
+    await expect(page.locator('[data-qa="connect-dialog"]')).toBeVisible();
+    const planDiff = page.locator('[data-qa="connect-plan-diff"]');
+    await expect(planDiff).toBeVisible();
+    const planText = await planDiff.innerText();
+    // UI must render the already-redacted mock plan (*** / ~), inventing neither secrets nor homes.
+    // Sibling-env redaction: Rust plan_ipc_redacts_sibling_secrets_and_masks_home.
+    expect(planText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    expect(planText).toMatch(/\*\*\*/);
+    expect(planText).toMatch(/agent-lounge-os|lounge-mcp|~/i);
+    const axePlan = await new AxeBuilder({ page }).include('[data-qa="connect-dialog"]').analyze();
+    expect(axePlan.violations, JSON.stringify(axePlan.violations, null, 2)).toEqual([]);
+    await page.locator('[data-qa="connect-confirm"]').click();
+    await expect(page.locator('[data-qa="connect-dialog"]')).toHaveCount(0);
+
+    await page
+      .locator('[data-qa="agents-health-row"]')
+      .filter({ has: page.locator('[data-status="stale"]') })
+      .first()
+      .click();
+    await revealDetail(page);
+    await expect(page.locator('[data-qa="agents-repair"]')).toBeVisible();
+
+    await page.addInitScript(() => {
+      (window as Window & { __QA_CONNECT_JSONC_CONSENT__?: boolean }).__QA_CONNECT_JSONC_CONSENT__ =
+        true;
+    });
+    await openRoute(page, "/health?tab=agents", "full");
+    await page
+      .locator('[data-qa="agents-health-row"]')
+      .filter({ has: page.locator('[data-status="missing"]') })
+      .first()
+      .click();
+    await revealDetail(page);
+    await page.locator('[data-qa="agents-connect"]').click();
+    await expect(page.locator('[data-qa="connect-dialog"][data-mode="jsonc"]')).toBeVisible();
+    await page.locator('[data-qa="connect-jsonc-print"]').click();
+    const printPayload = page.locator('[data-qa="connect-print-payload"]');
+    await expect(printPayload).toBeVisible();
+    const printText = await printPayload.innerText();
+    // B2: UI print must not expose path_unmasked_for_cli or unmasked homes.
+    expect(printText).not.toMatch(/path_unmasked_for_cli/);
+    expect(printText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    expect(printText).toMatch(/~\//);
+  });
+
+  test("CN-03 · plan dialog renders redacted mock without inventing secrets/homes", async ({
+    page,
+  }, testInfo) => {
+    testInfo.annotations.push({ type: "id", description: "CN-03" });
+    // Honesty: the tauri-mock returns an already-redacted plan. This test only proves the UI
+    // surfaces that fixture (*** / ~) and does not inject secrets or unmasked home paths into
+    // the DOM. Redaction of a sibling server's env is covered by Rust
+    // plan_ipc_redacts_sibling_secrets_and_masks_home — not reimplemented here.
+    await openRoute(page, "/health?tab=agents", "full");
+    await page
+      .locator('[data-qa="agents-health-row"]')
+      .filter({ has: page.locator('[data-status="missing"]') })
+      .first()
+      .click();
+    await revealDetail(page);
+    await page.locator('[data-qa="agents-connect"]').click();
+    await expect(page.locator('[data-qa="connect-dialog"]')).toBeVisible();
+    const planText = await page.locator('[data-qa="connect-plan-diff"]').innerText();
+    expect(planText).toContain("***");
+    expect(planText).toMatch(/agent-lounge-os|~/);
+    expect(planText).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    const body = await page.locator('[data-qa="connect-dialog"]').innerText();
+    expect(body).not.toMatch(/\/home\/|\/Users\/|C:\\Users/i);
+    const payloadJson = await page.evaluate(() =>
+      JSON.stringify(
+        (window as Window & { __QA_LAST_CONNECT_PAYLOAD__?: unknown }).__QA_LAST_CONNECT_PAYLOAD__ ??
+          null,
+      ),
+    );
+    expect(payloadJson).toContain("***");
+    expect(payloadJson).toContain("~/");
+    expect(payloadJson).not.toMatch(/\/home\/|\/Users\/|C:\\\\Users/i);
+  });
+
+  test("CN-02 · Durduruldu note on agents tab when Halted", async ({ page }, testInfo) => {
+    testInfo.annotations.push({ type: "id", description: "CN-02" });
+    await page.addInitScript(() => {
+      (window as Window & { __QA_HALT_STATE__?: { halted: boolean } }).__QA_HALT_STATE__ = {
+        halted: true,
+      };
+    });
+    await openRoute(page, "/health?tab=agents", "full");
+    await expect(page.locator('[data-qa="agents-halted-note"]')).toBeVisible();
+    await expect(page.locator('[data-qa="agents-halted-note"]')).toContainText(
+      /Halted|Durduruldu/i,
+    );
+    const metrics = await assertLayoutL1toL6(page, "/health?tab=agents", expect);
+    expect(metrics.l1_pass).toBe(true);
+    const axe = await new AxeBuilder({ page }).include("main").analyze();
+    expect(axe.violations, JSON.stringify(axe.violations, null, 2)).toEqual([]);
   });
 
   test("HU-05b · non-Tauri browser mode", async ({ page }) => {

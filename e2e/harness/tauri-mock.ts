@@ -27,6 +27,19 @@ declare global {
     __QA_LOUNGE_HEALTH__?: FixtureDataset["loungeHealth"] | "error";
     /** Health-UI-2: dead-symbols scan freshness override. */
     __QA_HEALTH_SCAN_META__?: { partial: boolean; indexed_at: string | null };
+    /** PR-Connect-1: force next connect plan to require JSONC consent. */
+    __QA_CONNECT_JSONC_CONSENT__?: boolean;
+    /** PR-Connect-1: force next connect/disconnect to throw. */
+    __QA_CONNECT_ERROR__?: string;
+    /** Last plan/print IPC response (already-redacted fixture for UI rendering checks). */
+    __QA_LAST_CONNECT_PAYLOAD__?: unknown;
+    /** PR-Connect-1 / CO-7: seed Halt state before mock boots. */
+    __QA_HALT_STATE__?: {
+      halted: boolean;
+      reason?: string | null;
+      by?: string | null;
+      at?: string | null;
+    };
     __TAURI_INTERNALS__?: Record<string, unknown>;
     __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
   }
@@ -92,12 +105,29 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
       ttlDays: 90,
       useCountThreshold: 0,
     };
+    const seededHalt = (
+      window as Window & {
+        __QA_HALT_STATE__?: {
+          halted: boolean;
+          reason?: string | null;
+          by?: string | null;
+          at?: string | null;
+        };
+      }
+    ).__QA_HALT_STATE__;
     let qaHaltState: {
       halted: boolean;
       reason: string | null;
       by: string | null;
       at: string | null;
-    } = { halted: false, reason: null, by: null, at: null };
+    } = seededHalt
+      ? {
+          halted: Boolean(seededHalt.halted),
+          reason: seededHalt.reason ?? null,
+          by: seededHalt.by ?? null,
+          at: seededHalt.at ?? null,
+        }
+      : { halted: false, reason: null, by: null, at: null };
     /** When set, `get_halt_state` rejects (fail-closed UI path). Cleared on halt/resume. */
     let qaHaltStateError: string | null = null;
     try {
@@ -1226,6 +1256,116 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             return { outcome: "not_probed_remote", elapsed_ms: 0 };
           }
           return { outcome: "reachable", elapsed_ms: 12 };
+        }
+        // PR-Connect-1 — append-only (shared with parallel PR-Vault-Review-UI).
+        case "plan_agent_connect_cmd": {
+          const client = String(args?.client ?? "cursor");
+          const scope = String(args?.scope ?? "global");
+          const action = String(args?.action ?? "connect");
+          const forceLossy = Boolean(args?.forceLossyJsonc ?? args?.force_lossy_jsonc);
+          const needsConsent = Boolean(window.__QA_CONNECT_JSONC_CONSENT__) && !forceLossy;
+          // Fixture returns an already-redacted plan (env ***, homes ~). Sibling-secret
+          // redaction itself is guaranteed by Rust plan_ipc_redacts_sibling_secrets_and_masks_home —
+          // do not reimplement that pipeline in TS.
+          const plan = {
+            client,
+            scope,
+            action,
+            dry_run: true,
+            command_path_masked: "~/bin/lounge-mcp",
+            files: [
+              {
+                path_masked: "~/.cursor/mcp.json",
+                kind: "mcp_config",
+                exists: true,
+                would_create: false,
+                jsonc_comment_loss: needsConsent,
+                entry_before: {
+                  command: "~/bin/old-lounge-mcp",
+                  args: [],
+                  env: { LOUNGE_MCP_URL: "***" },
+                },
+                entry_after: {
+                  command: "~/bin/lounge-mcp",
+                  args: [],
+                  env: { LOUNGE_MCP_URL: "***" },
+                },
+                diff: "--- a/~/.cursor/mcp.json#agent-lounge-os\n+++ b/~/.cursor/mcp.json#agent-lounge-os\n-  \"command\": \"~/bin/old-lounge-mcp\"\n+  \"command\": \"~/bin/lounge-mcp\"\n",
+                backup_path_masked: "~/.cursor/mcp.json.lounge-bak-fixture",
+              },
+            ],
+            warnings: needsConsent
+              ? ["JSONC comments would be lost: ~/.cursor/mcp.json"]
+              : [],
+            requires_jsonc_consent: needsConsent,
+          };
+          window.__QA_LAST_CONNECT_PAYLOAD__ = plan;
+          return plan;
+        }
+        case "connect_agent":
+        case "disconnect_agent": {
+          if (window.__QA_CONNECT_ERROR__) {
+            throw new Error(window.__QA_CONNECT_ERROR__);
+          }
+          const client = String(args?.client ?? "cursor");
+          const scope = String(args?.scope ?? "global");
+          const forceLossy = Boolean(args?.forceLossyJsonc ?? args?.force_lossy_jsonc);
+          if (window.__QA_CONNECT_JSONC_CONSENT__ && !forceLossy && cmd === "connect_agent") {
+            throw new Error(
+              "JSONC comments would be lost. Pass --force-lossy-jsonc (CLI) or confirm in UI (Yine de Yaz).",
+            );
+          }
+          const dryRun = Boolean(args?.dryRun ?? args?.dry_run);
+          return {
+            applied: !dryRun,
+            message: cmd === "connect_agent" ? "connected" : "disconnected",
+            plan: {
+              client,
+              scope,
+              action: cmd === "connect_agent" ? "connect" : "disconnect",
+              dry_run: dryRun,
+              command_path_masked: "~/bin/lounge-mcp",
+              files: [
+                {
+                  path_masked: "~/.cursor/mcp.json",
+                  kind: "mcp_config",
+                  exists: true,
+                  would_create: false,
+                  jsonc_comment_loss: false,
+                  entry_before: null,
+                  entry_after: {
+                    command: "~/bin/lounge-mcp",
+                    args: [],
+                    env: { LOUNGE_MCP_URL: "***" },
+                  },
+                  diff: "+agent-lounge-os\n",
+                },
+              ],
+              warnings: [],
+              requires_jsonc_consent: false,
+            },
+          };
+        }
+        case "print_agent_connect": {
+          const client = String(args?.client ?? "cursor");
+          // UI payload: masked path only — never path_unmasked_for_cli.
+          const printed = {
+            client,
+            scope: String(args?.scope ?? "global"),
+            path: "~/.cursor/mcp.json",
+            fragment: {
+              mcpServers: {
+                "agent-lounge-os": {
+                  command: "~/bin/lounge-mcp",
+                  args: [],
+                  env: { LOUNGE_MCP_URL: "***" },
+                },
+              },
+            },
+            warnings: [],
+          };
+          window.__QA_LAST_CONNECT_PAYLOAD__ = printed;
+          return printed;
         }
         case "list_health_scans": {
           const meta =

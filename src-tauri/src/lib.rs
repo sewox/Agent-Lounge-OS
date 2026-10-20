@@ -24,22 +24,24 @@ use models::{
 };
 use services::autodiscover::discovery_report;
 use services::{
-    api_keys_from_store, apply_placement_show, build_agent_efficiency_report,
+    api_keys_from_store, apply_agent_connect, apply_placement_show, build_agent_efficiency_report,
     collect_lounge_health, collect_quota_state_with_keys, data_root, enable_graph_ui, engage_halt,
     fix_dead_symbol_with_agent as publish_fix_dead_symbol, flush_session, graph_ui_status,
     handle_window_event, is_halted, load_halt_state, load_port_from_store,
     load_port_preference_from_store, log_deep_link_rejection, on_main_window_closed,
     open_dead_symbol_in_editor as open_indexed_dead_symbol, open_or_focus_graph_window,
     open_path_in_editor, parse_deep_link, persist_port, persist_port_preference,
-    placement_for_window, probe_agent_mcp_url as probe_agent_mcp_url_svc, record_dead_snapshot,
-    record_whisper_injection, resolve_data_root_for_app, resume_halt, run_startup_lounge_health,
-    spawn_auto_archive, spawn_event_pump, spawn_quota_pump, spawn_supervisor,
-    AgentEfficiencyReport, AgentMcpProbeResult, CbmDaemonPresence, DeepLinkAction,
-    EfficiencyReportQuery, FixDeadSymbolResult, GeometrySession, GraphUiPortMode, GraphUiState,
-    GraphUiStatus, HaltState, HealthScanJob, HealthScanQueue, IndexJob, IndexProgress, IndexQueue,
-    LayaEngineStatus, MemoryBridge, ModelManager, ServiceManager, SharedServices,
-    WorkspaceScanResult, DEEP_LINK_OPEN_EVENT, DEEP_LINK_SCHEME, GRAPH_WINDOW_LABEL,
-    HALTED_ERROR_MESSAGE, HALT_BY_UI, HALT_CHANGED_EVENT, MAIN_WINDOW_LABEL,
+    placement_for_window, plan_agent_connect, print_agent_connect as print_agent_connect_svc,
+    probe_agent_mcp_url as probe_agent_mcp_url_svc, record_dead_snapshot, record_whisper_injection,
+    resolve_data_root_for_app, resume_halt, run_startup_lounge_health, spawn_auto_archive,
+    spawn_event_pump, spawn_quota_pump, spawn_supervisor, AgentEfficiencyReport, AgentHealthRoots,
+    AgentMcpProbeResult, CbmDaemonPresence, ConnectAction, ConnectOptions, ConnectPlan,
+    ConnectResult, ConnectScope, DeepLinkAction, EfficiencyReportQuery, FixDeadSymbolResult,
+    GeometrySession, GraphUiPortMode, GraphUiState, GraphUiStatus, HaltState, HealthScanJob,
+    HealthScanQueue, IndexJob, IndexProgress, IndexQueue, LayaEngineStatus, MemoryBridge,
+    ModelManager, ServiceManager, SharedServices, WorkspaceScanResult, DEEP_LINK_OPEN_EVENT,
+    DEEP_LINK_SCHEME, GRAPH_WINDOW_LABEL, HALTED_ERROR_MESSAGE, HALT_BY_UI, HALT_CHANGED_EVENT,
+    MAIN_WINDOW_LABEL,
 };
 use tauri::{Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -403,6 +405,10 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_health_scan,
             lounge_health,
             probe_agent_mcp_url,
+            plan_agent_connect_cmd,
+            connect_agent,
+            disconnect_agent,
+            print_agent_connect,
             get_dead_symbols,
             get_semantic_map,
             list_vault_projects,
@@ -694,6 +700,109 @@ async fn probe_agent_mcp_url(
     config_path_id: String,
 ) -> Result<AgentMcpProbeResult, String> {
     probe_agent_mcp_url_svc(&client, &config_path_id).await
+}
+
+fn connect_roots_from_workspace(workspace: Option<String>) -> AgentHealthRoots {
+    let ws = workspace
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    AgentHealthRoots::from_env(ws)
+}
+
+fn parse_connect_scope(scope: Option<String>) -> Result<ConnectScope, String> {
+    match scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("global") => Ok(ConnectScope::Global),
+        Some("project") => Ok(ConnectScope::Project),
+        Some(other) => Err(format!("invalid scope {other:?}; use global|project")),
+    }
+}
+
+fn connect_options(
+    client: String,
+    scope: Option<String>,
+    dry_run: Option<bool>,
+    force_lossy_jsonc: Option<bool>,
+) -> Result<ConnectOptions, String> {
+    Ok(ConnectOptions {
+        client: client.trim().to_ascii_lowercase(),
+        scope: parse_connect_scope(scope)?,
+        dry_run: dry_run.unwrap_or(false),
+        force_lossy_jsonc: force_lossy_jsonc.unwrap_or(false),
+        command_path: None,
+        expected: None,
+    })
+}
+
+/// PR-Connect-1: plan only (local UI/CLI). Allowed while Halted. Not an MCP tool.
+#[tauri::command]
+async fn plan_agent_connect_cmd(
+    client: String,
+    scope: Option<String>,
+    dry_run: Option<bool>,
+    force_lossy_jsonc: Option<bool>,
+    workspace: Option<String>,
+    action: Option<String>,
+) -> Result<ConnectPlan, String> {
+    let opts = connect_options(client, scope, dry_run, force_lossy_jsonc)?;
+    let roots = connect_roots_from_workspace(workspace);
+    let act = match action.as_deref().unwrap_or("connect") {
+        "connect" => ConnectAction::Connect,
+        "disconnect" => ConnectAction::Disconnect,
+        "print" => ConnectAction::Print,
+        other => return Err(format!("invalid action {other:?}")),
+    };
+    tokio::task::spawn_blocking(move || plan_agent_connect(&roots, &opts, act))
+        .await
+        .map_err(|e| format!("plan join: {e}"))?
+}
+
+/// PR-Connect-1: apply connect. Local UI only; Halted OK; never MCP/deep-link.
+#[tauri::command]
+async fn connect_agent(
+    client: String,
+    scope: Option<String>,
+    dry_run: Option<bool>,
+    force_lossy_jsonc: Option<bool>,
+    workspace: Option<String>,
+) -> Result<ConnectResult, String> {
+    let opts = connect_options(client, scope, dry_run, force_lossy_jsonc)?;
+    let roots = connect_roots_from_workspace(workspace);
+    tokio::task::spawn_blocking(move || apply_agent_connect(&roots, &opts, ConnectAction::Connect))
+        .await
+        .map_err(|e| format!("connect join: {e}"))?
+}
+
+/// PR-Connect-1: remove only our key + rule files.
+#[tauri::command]
+async fn disconnect_agent(
+    client: String,
+    scope: Option<String>,
+    dry_run: Option<bool>,
+    force_lossy_jsonc: Option<bool>,
+    workspace: Option<String>,
+) -> Result<ConnectResult, String> {
+    let opts = connect_options(client, scope, dry_run, force_lossy_jsonc)?;
+    let roots = connect_roots_from_workspace(workspace);
+    tokio::task::spawn_blocking(move || {
+        apply_agent_connect(&roots, &opts, ConnectAction::Disconnect)
+    })
+    .await
+    .map_err(|e| format!("disconnect join: {e}"))?
+}
+
+/// PR-Connect-1: print JSON fragment + target path (no writes).
+#[tauri::command]
+async fn print_agent_connect(
+    client: String,
+    scope: Option<String>,
+    workspace: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let opts = connect_options(client, scope, Some(true), None)?;
+    let roots = connect_roots_from_workspace(workspace);
+    tokio::task::spawn_blocking(move || print_agent_connect_svc(&roots, &opts))
+        .await
+        .map_err(|e| format!("print join: {e}"))?
 }
 
 /// Çalışma alanını tara → projeleri keşfet/import et → arka plan indeks kuyruğuna al.
