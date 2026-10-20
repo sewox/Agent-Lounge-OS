@@ -5,6 +5,7 @@
 export {
   assertDevPortFree,
   buildNextDevArgs,
+  canBindIpv6Loopback,
   DEFAULT_DEV_HOST,
   DEFAULT_DEV_PORT,
   InvalidDevPortError,

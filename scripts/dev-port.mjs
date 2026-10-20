@@ -7,7 +7,7 @@ import net from "node:net";
 /** Default when PORT is unset/empty — shared by resolver and assetPrefix. */
 export const DEFAULT_DEV_PORT = "3000";
 
-/** Host Next/assetPrefix use when TAURI_DEV_HOST is unset (matches next.config.ts). */
+/** Host assetPrefix uses when TAURI_DEV_HOST is unset (matches next.config.ts). */
 export const DEFAULT_DEV_HOST = "localhost";
 
 export class InvalidDevPortError extends Error {
@@ -21,17 +21,13 @@ export class InvalidDevPortError extends Error {
 }
 
 export class PortInUseError extends Error {
-  /**
-   * @param {string|number} port
-   * @param {string} host
-   */
-  constructor(port, host) {
+  /** @param {string|number} port */
+  constructor(port) {
     super(
-      `Port ${port} is already in use on ${host}. Set PORT=<free-port> (1–65535) and retry — next-dev will not pick another port.`,
+      `Port ${port} is already in use. Set PORT=<free-port> (1–65535) and retry — next-dev will not pick another port.`,
     );
     this.name = "PortInUseError";
     this.port = String(port);
-    this.host = host;
   }
 }
 
@@ -73,20 +69,22 @@ export function resolveDevPort(env = process.env) {
 }
 
 /**
- * Pre-flight: bind the resolved port on the same host Next will use.
- * On EADDRINUSE, throws PortInUseError — never falls back to another port.
+ * Pre-flight: bind the resolved port with no host argument — same as
+ * `next dev -p` without `-H` (every address). On EADDRINUSE, throws
+ * PortInUseError — never falls back to another port.
  *
  * @param {string|number} port
- * @param {string} [host]
+ * @param {{ createServer?: typeof net.createServer }} [opts]
  * @returns {Promise<void>}
  */
-export function assertDevPortFree(port, host = DEFAULT_DEV_HOST) {
+export function assertDevPortFree(port, opts = {}) {
   const portNum = Number(port);
+  const createServer = opts.createServer ?? net.createServer;
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
+    const server = createServer();
     server.once("error", (err) => {
       if (err && /** @type {NodeJS.ErrnoException} */ (err).code === "EADDRINUSE") {
-        reject(new PortInUseError(portNum, host));
+        reject(new PortInUseError(portNum));
         return;
       }
       reject(err);
@@ -100,7 +98,27 @@ export function assertDevPortFree(port, host = DEFAULT_DEV_HOST) {
         resolve();
       });
     });
-    server.listen(portNum, host);
+    // No host — matches Next's default bind when `-H` is omitted.
+    server.listen(portNum);
+  });
+}
+
+/**
+ * Deterministic probe: can this process bind IPv6 loopback (`::1`)?
+ * Used by tests — not a skip gate; callers assert the boolean result.
+ *
+ * @param {{ createServer?: typeof net.createServer }} [opts]
+ * @returns {Promise<boolean>}
+ */
+export function canBindIpv6Loopback(opts = {}) {
+  const createServer = opts.createServer ?? net.createServer;
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(0, "::1");
   });
 }
 

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   assertDevPortFree,
   buildNextDevArgs,
+  canBindIpv6Loopback,
   DEFAULT_DEV_HOST,
   DEFAULT_DEV_PORT,
   InvalidDevPortError,
@@ -20,7 +21,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const devPortMjs = path.join(root, "scripts/dev-port.mjs");
 const nextDevMjs = path.join(root, "scripts/next-dev.mjs");
 
-function listen(port: number, host: string): Promise<net.Server> {
+/** Bind with an explicit host (e.g. 127.0.0.1 / ::1). */
+function listenOnHost(port: number, host: string): Promise<net.Server> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once("error", reject);
@@ -28,10 +30,27 @@ function listen(port: number, host: string): Promise<net.Server> {
   });
 }
 
+/** Bind with no host — same as Next / assertDevPortFree (every address). */
+function listenAllAddresses(port: number): Promise<net.Server> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(port, () => resolve(server));
+  });
+}
+
 function closeServer(server: net.Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((err) => (err ? reject(err) : resolve()));
   });
+}
+
+function assertPortInUseError(err: unknown, port: number): boolean {
+  assert.ok(err instanceof PortInUseError);
+  assert.match((err as Error).message, new RegExp(String(port)));
+  assert.match((err as Error).message, /already in use/i);
+  assert.match((err as Error).message, /PORT=/);
+  return true;
 }
 
 describe("dev assetPrefix / PORT — single source", () => {
@@ -207,38 +226,99 @@ describe("next-dev CLI arg passthrough", () => {
 });
 
 describe("busy port pre-flight", () => {
-  it("assertDevPortFree rejects with PortInUseError when the port is held", async () => {
-    const holder = await listen(0, DEFAULT_DEV_HOST);
+  it("assertDevPortFree rejects when the port is held on all addresses", async () => {
+    const holder = await listenAllAddresses(0);
     const addr = holder.address();
     assert.ok(addr && typeof addr === "object");
     const port = addr.port;
     try {
       await assert.rejects(
-        () => assertDevPortFree(port, DEFAULT_DEV_HOST),
-        (err: unknown) => {
-          assert.ok(err instanceof PortInUseError);
-          assert.match((err as Error).message, new RegExp(String(port)));
-          assert.match((err as Error).message, /already in use/i);
-          assert.match((err as Error).message, /PORT=/);
-          return true;
-        },
+        () => assertDevPortFree(port),
+        (err: unknown) => assertPortInUseError(err, port),
       );
     } finally {
       await closeServer(holder);
     }
   });
 
-  it("assertDevPortFree resolves when the port is free", async () => {
-    const probe = await listen(0, DEFAULT_DEV_HOST);
-    const addr = probe.address();
+  it("assertDevPortFree rejects when the holder is only on 127.0.0.1", async () => {
+    const holder = await listenOnHost(0, "127.0.0.1");
+    const addr = holder.address();
     assert.ok(addr && typeof addr === "object");
     const port = addr.port;
-    await closeServer(probe);
-    await assertDevPortFree(port, DEFAULT_DEV_HOST);
+    try {
+      await assert.rejects(
+        () => assertDevPortFree(port),
+        (err: unknown) => assertPortInUseError(err, port),
+      );
+      const result = spawnSync(process.execPath, [nextDevMjs], {
+        encoding: "utf8",
+        env: { ...process.env, PORT: String(port) },
+        timeout: 15_000,
+      });
+      assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+      const out = `${result.stdout}${result.stderr}`;
+      assert.match(out, new RegExp(String(port)));
+      assert.match(out, /already in use/i);
+      assert.match(out, /PORT=/);
+    } finally {
+      await closeServer(holder);
+    }
   });
 
-  it("next-dev.mjs exits non-zero with a clear message when the port is busy", async () => {
-    const holder = await listen(0, DEFAULT_DEV_HOST);
+  it("assertDevPortFree rejects ::1-only holders when IPv6 loopback is bindable", async () => {
+    const ipv6Ok = await canBindIpv6Loopback();
+    if (!ipv6Ok) {
+      // Deterministic: assert unavailability, then cover via IPv4-only holder.
+      assert.equal(ipv6Ok, false);
+      const holder = await listenOnHost(0, "127.0.0.1");
+      const addr = holder.address();
+      assert.ok(addr && typeof addr === "object");
+      const port = addr.port;
+      try {
+        await assert.rejects(
+          () => assertDevPortFree(port),
+          (err: unknown) => assertPortInUseError(err, port),
+        );
+      } finally {
+        await closeServer(holder);
+      }
+      return;
+    }
+
+    const holder = await listenOnHost(0, "::1");
+    const addr = holder.address();
+    assert.ok(addr && typeof addr === "object");
+    const port = addr.port;
+    try {
+      await assert.rejects(
+        () => assertDevPortFree(port),
+        (err: unknown) => assertPortInUseError(err, port),
+      );
+      const result = spawnSync(process.execPath, [nextDevMjs], {
+        encoding: "utf8",
+        env: { ...process.env, PORT: String(port) },
+        timeout: 15_000,
+      });
+      assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+      const out = `${result.stdout}${result.stderr}`;
+      assert.match(out, new RegExp(String(port)));
+      assert.match(out, /already in use/i);
+      assert.match(out, /PORT=/);
+    } finally {
+      await closeServer(holder);
+    }
+  });
+
+  it("assertDevPortFree resolves on port 0 (ephemeral free bind, no race)", async () => {
+    // Port 0 asks the OS for a free port inside the probe itself — no
+    // learn-then-probe gap. Also proves createServer injection works.
+    await assertDevPortFree(0);
+    await assertDevPortFree(0, { createServer: net.createServer });
+  });
+
+  it("next-dev.mjs exits non-zero when the port is held on all addresses", async () => {
+    const holder = await listenAllAddresses(0);
     const addr = holder.address();
     assert.ok(addr && typeof addr === "object");
     const port = addr.port;
@@ -246,7 +326,6 @@ describe("busy port pre-flight", () => {
       const result = spawnSync(process.execPath, [nextDevMjs], {
         encoding: "utf8",
         env: { ...process.env, PORT: String(port) },
-        // Pre-flight must fail before next starts — keep a tight bound, no sleeps.
         timeout: 15_000,
       });
       assert.notEqual(
@@ -258,10 +337,15 @@ describe("busy port pre-flight", () => {
       assert.match(out, new RegExp(String(port)));
       assert.match(out, /already in use/i);
       assert.match(out, /PORT=/);
-      // Must not have started a long-running next process (timeout would set status null/error).
       assert.notEqual(result.signal, "SIGTERM");
     } finally {
       await closeServer(holder);
     }
+  });
+
+  it("next-dev.mjs does not pass -H (Next keeps default all-address bind)", () => {
+    const src = fs.readFileSync(nextDevMjs, "utf8");
+    assert.doesNotMatch(src, /["']-H["']|["']--hostname["']/);
+    assert.match(src, /assertDevPortFree\(port\)/);
   });
 });

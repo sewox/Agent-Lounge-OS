@@ -3,6 +3,7 @@
  * Works on macOS, Windows, and Linux without shell-specific ${PORT:-3000}.
  * Extra CLI args after the script are forwarded to `next dev`.
  * Pre-flight bind check fails loudly if the port is busy (no fallback port).
+ * Does not pass `-H` — Next keeps its default all-address bind.
  */
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -11,7 +12,6 @@ import { fileURLToPath } from "node:url";
 import {
   assertDevPortFree,
   buildNextDevArgs,
-  resolveDevHost,
   resolveDevPort,
 } from "./dev-port.mjs";
 
@@ -29,10 +29,8 @@ try {
   fail(err);
 }
 
-const host = resolveDevHost(process.env);
-
 try {
-  await assertDevPortFree(port, host);
+  await assertDevPortFree(port);
 } catch (err) {
   fail(err);
 }
