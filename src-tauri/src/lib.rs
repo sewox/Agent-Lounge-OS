@@ -8,7 +8,7 @@ pub mod services;
 
 use std::path::PathBuf;
 
-use db::ExperienceStore;
+use db::{strip_original_content_for_ui, strip_original_content_for_ui_vec, ExperienceStore};
 use infra::BusManager;
 use kernel::{
     default_model_lock, inject_knowledge_hit, DecisionGate, DecisionGatePhase, DecisionGateStatus,
@@ -1208,14 +1208,16 @@ async fn list_experiences(
     include_archived: Option<bool>,
     offset: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
-    state
+    let rows = state
         .list_experiences_page(
             limit.unwrap_or(20),
             include_archived.unwrap_or(false),
             offset.unwrap_or(0),
         )
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    // B2: never send pre-hygiene original_content over UI IPC (MCP unchanged).
+    Ok(strip_original_content_for_ui_vec(rows))
 }
 
 #[tauri::command]
@@ -1234,7 +1236,8 @@ async fn get_experience(
     state: tauri::State<'_, ExperienceStore>,
     id: String,
 ) -> Result<Option<LoungeExperience>, String> {
-    state.get(id).await.map_err(|err| err.to_string())
+    let row = state.get(id).await.map_err(|err| err.to_string())?;
+    Ok(row.map(strip_original_content_for_ui))
 }
 
 #[tauri::command]
@@ -1364,10 +1367,11 @@ async fn list_review_queue(
     state: tauri::State<'_, ExperienceStore>,
     filter: Option<db::ReviewQueueFilter>,
 ) -> Result<Vec<LoungeExperience>, String> {
-    state
+    let rows = state
         .list_review_queue(filter.unwrap_or_default())
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    Ok(strip_original_content_for_ui_vec(rows))
 }
 
 #[tauri::command]
@@ -1580,10 +1584,11 @@ async fn search_experiences(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
-    state
+    let rows = state
         .search_experiences(query, limit)
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    Ok(strip_original_content_for_ui_vec(rows))
 }
 
 #[tauri::command]

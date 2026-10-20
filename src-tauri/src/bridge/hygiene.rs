@@ -54,9 +54,15 @@ fn re_token() -> &'static Regex {
 fn re_home_path() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // /Users/<u>, /home/<u>, /root(/…), /var/home/<u>, C:\Users\<u>, C:/Users/<u>
         Regex::new(concat!(
-            r"(?i)(?:/Users/[^/\s]+|/(?:home|root)/[^/\s]+|",
-            r"(?:[A-Z]:)?\\Users\\[^\\\s]+)",
+            r"(?i)(?:",
+            r"/Users/[^/\s]+",
+            r"|/var/home/[^/\s]+",
+            r"|/home/[^/\s]+",
+            r"|/root(?:/[^/\s]+)?",
+            r"|(?:[A-Z]:)?[/\\]Users[/\\][^/\\\s]+",
+            r")",
         ))
         .expect("home path regex")
     })
@@ -333,6 +339,33 @@ mod tests {
         assert!(r.text.contains("<home>"));
         assert!(!r.text.contains("/Users/alice"));
         assert!(!r.text.contains("ghp_"));
+    }
+
+    #[test]
+    fn masks_extended_home_roots() {
+        let samples = [
+            "/Users/ci/projects/secret",
+            "/home/sercan/dev",
+            "/root",
+            "/root/.config/lounge",
+            "/var/home/fedora/work",
+            r"C:\Users\sercan\dev",
+            "C:/Users/sercan/dev",
+        ];
+        for sample in samples {
+            let r = scrub(sample);
+            assert!(r.masked, "expected mask for {sample}");
+            assert!(r.text.contains("<home>"), "{sample} → {}", r.text);
+            assert!(!r.text.contains("/Users/"), "{sample}");
+            assert!(!r.text.contains("/home/"), "{sample}");
+            assert!(!r.text.contains("/var/home/"), "{sample}");
+            assert!(!r.text.contains(r"C:\Users"), "{sample}");
+            assert!(!r.text.contains("C:/Users"), "{sample}");
+            // Bare /root → <home>; /root/foo → <home>/foo already covered by replace.
+            if sample == "/root" {
+                assert_eq!(r.text, "<home>");
+            }
+        }
     }
 
     #[test]

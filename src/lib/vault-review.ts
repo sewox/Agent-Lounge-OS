@@ -51,13 +51,18 @@ export function experienceHasHygieneMask(row: ReviewableExperience): boolean {
 
 /**
  * Strip absolute home roots before any review content reaches the DOM.
+ * Covers /Users, /home, /root, /var/home, C:\Users, C:/Users (B2).
  * Raw pre-hygiene paths must never appear in the review view.
  */
 export function redactHomePaths(text: string): string {
   return text
+    // Drive-letter forms before bare `/Users` (else `C:/Users/…` → `C:<home>/…`).
+    .replace(/C:\\Users\\[^\\\s]+/gi, "<home>")
+    .replace(/C:\/Users\/[^/\s]+/gi, "<home>")
     .replace(/\/Users\/[^/\s]+/gi, "<home>")
+    .replace(/\/var\/home\/[^/\s]+/gi, "<home>")
     .replace(/\/home\/[^/\s]+/gi, "<home>")
-    .replace(/C:\\Users\\[^\\\s]+/gi, "<home>");
+    .replace(/\/root(?=\/|\s|$)/gi, "<home>");
 }
 
 /** Hygiene-masked body for the inspector (once). Never returns raw home paths. */
@@ -124,22 +129,34 @@ export function assertCounterConsistency(
   return unreviewedCount === stats.pending;
 }
 
+/** Match Rust `normalize_search_score` / `review_score_bucket`. */
+export function normalizeSearchScore(score: number): number {
+  return Number.isFinite(score) && score >= 0 ? score : 0;
+}
+
+export function reviewScoreBucket(score: number): number {
+  return Math.floor(normalizeSearchScore(score) / REVIEW_SCORE_BAND);
+}
+
 /**
- * UD-5: relevance primary; within REVIEW_SCORE_BAND, reviewed before unreviewed.
- * Callers supply normalized scores in [0, 1] (same contract as Rust lexical_search_score).
+ * UD-5 total order: bucket desc → reviewed → score desc → created_at desc → id.
+ * Callers supply normalized scores (same contract as Rust lexical_search_score).
  */
 export function sortSearchByReviewedBand<
-  T extends { reviewed?: boolean; created_at: string; score?: number },
+  T extends { id?: string; reviewed?: boolean; created_at: string; score?: number },
 >(rows: T[]): T[] {
   return [...rows].sort((a, b) => {
-    const sa = a.score ?? (a.reviewed === false ? 0.5 : 0.5);
-    const sb = b.score ?? (b.reviewed === false ? 0.5 : 0.5);
-    if (Math.abs(sa - sb) > REVIEW_SCORE_BAND) {
-      return sb - sa;
-    }
+    const sa = normalizeSearchScore(a.score ?? 0.5);
+    const sb = normalizeSearchScore(b.score ?? 0.5);
+    const ba = reviewScoreBucket(sa);
+    const bb = reviewScoreBucket(sb);
+    if (ba !== bb) return bb - ba;
     const ra = a.reviewed === false ? 1 : 0;
     const rb = b.reviewed === false ? 1 : 0;
     if (ra !== rb) return ra - rb;
-    return b.created_at.localeCompare(a.created_at);
+    if (sa !== sb) return sb - sa;
+    const byDate = b.created_at.localeCompare(a.created_at);
+    if (byDate !== 0) return byDate;
+    return String(a.id ?? "").localeCompare(String(b.id ?? ""));
   });
 }

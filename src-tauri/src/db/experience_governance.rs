@@ -15,14 +15,30 @@ use crate::models::{
 pub const SETTING_EXPERIENCE_TTL_DAYS: &str = "experience_ttl_days";
 pub const DEFAULT_EXPERIENCE_TTL_DAYS: u64 = 90;
 
-/// UD-5 / VR4: `reviewed` is only a tiebreaker when two hits' normalized
-/// relevance scores differ by at most this amount. Larger gaps keep relevance
-/// primary — a strongly relevant unreviewed hit stays above a weakly relevant
-/// approved one. Documented in `docs/mcp.md`.
+/// UD-5 / VR4: score **bucket** width for search ranking.
+/// Bucket = `floor(normalize(score) / REVIEW_SCORE_BAND)`. Hits in the **same**
+/// bucket are ordered by `reviewed` → score → `created_at` → `id`. Hits in
+/// different buckets are ordered by bucket (higher score band first) — a total
+/// order. Documented in `docs/mcp.md`.
 pub const REVIEW_SCORE_BAND: f64 = 0.05;
 
 /// Soft same-project preference applied on top of lexical relevance (MCP).
 pub const SEARCH_SAME_PROJECT_BOOST: f64 = 0.04;
+
+/// Clamp non-finite / negative scores so bucket math and `partial_cmp` stay total.
+pub fn normalize_search_score(score: f64) -> f64 {
+    if !score.is_finite() || score < 0.0 {
+        0.0
+    } else {
+        score
+    }
+}
+
+/// Discrete relevance band: `floor(normalize(score) / REVIEW_SCORE_BAND)`.
+pub fn review_score_bucket(score: f64) -> i64 {
+    let s = normalize_search_score(score);
+    (s / REVIEW_SCORE_BAND).floor() as i64
+}
 
 /// Normalized [0, 1] lexical relevance for LIKE-search hits (primary sort key).
 pub fn lexical_search_score(query: &str, row: &LoungeExperience) -> f64 {
@@ -57,26 +73,30 @@ pub fn lexical_search_score(query: &str, row: &LoungeExperience) -> f64 {
     score
 }
 
-/// Relevance descending; within [`REVIEW_SCORE_BAND`], approved before unreviewed;
-/// then newer `created_at`.
+/// Total order for MCP/search hits (never panics under `sort_by` since Rust 1.81):
+/// bucket desc → reviewed → score desc → created_at desc → id asc.
 pub fn cmp_search_with_review_band(
     score_a: f64,
     reviewed_a: bool,
     created_a: &str,
+    id_a: &str,
     score_b: f64,
     reviewed_b: bool,
     created_b: &str,
+    id_b: &str,
 ) -> Ordering {
-    let diff = (score_a - score_b).abs();
-    if diff > REVIEW_SCORE_BAND {
-        return score_b.partial_cmp(&score_a).unwrap_or(Ordering::Equal);
-    }
-    reviewed_b
-        .cmp(&reviewed_a)
+    let sa = normalize_search_score(score_a);
+    let sb = normalize_search_score(score_b);
+    let ba = review_score_bucket(sa);
+    let bb = review_score_bucket(sb);
+    bb.cmp(&ba)
+        .then_with(|| reviewed_b.cmp(&reviewed_a))
+        .then_with(|| sb.partial_cmp(&sa).unwrap_or(Ordering::Equal))
         .then_with(|| created_b.cmp(created_a))
+        .then_with(|| id_a.cmp(id_b))
 }
 
-/// Sort search hits: relevance primary, `reviewed` only inside [`REVIEW_SCORE_BAND`].
+/// Sort search hits: relevance bucket primary, `reviewed` only inside a bucket.
 pub fn sort_experiences_for_search(
     hits: &mut [LoungeExperience],
     query: &str,
@@ -93,8 +113,29 @@ pub fn sort_experiences_for_search(
                 sb = (sb + SEARCH_SAME_PROJECT_BOOST).min(1.0);
             }
         }
-        cmp_search_with_review_band(sa, a.reviewed, &a.created_at, sb, b.reviewed, &b.created_at)
+        cmp_search_with_review_band(
+            sa,
+            a.reviewed,
+            &a.created_at,
+            &a.id,
+            sb,
+            b.reviewed,
+            &b.created_at,
+            &b.id,
+        )
     });
+}
+
+/// UI IPC must never expose pre-hygiene `original_content` (B2). MCP paths are unchanged.
+pub fn strip_original_content_for_ui(mut row: LoungeExperience) -> LoungeExperience {
+    row.original_content = None;
+    row
+}
+
+pub fn strip_original_content_for_ui_vec(rows: Vec<LoungeExperience>) -> Vec<LoungeExperience> {
+    rows.into_iter()
+        .map(strip_original_content_for_ui)
+        .collect()
 }
 /// Optional use-count threshold for auto-archive (0 = disabled).
 pub const SETTING_EXPERIENCE_USE_COUNT_THRESHOLD: &str = "experience_use_count_threshold";
@@ -1819,22 +1860,171 @@ mod tests {
     fn review_score_band_tiebreak_and_relevance_primary() {
         use super::{cmp_search_with_review_band, REVIEW_SCORE_BAND};
         use std::cmp::Ordering;
-        // Within band → approved first.
+        // Same bucket → approved first.
         assert_eq!(
             cmp_search_with_review_band(
                 0.80,
                 true,
                 "a",
+                "id-a",
                 0.80 + REVIEW_SCORE_BAND / 2.0,
                 false,
-                "z"
+                "z",
+                "id-b",
             ),
             Ordering::Less
         );
-        // Outside band → higher score first even if unreviewed.
+        // Different buckets → higher score first even if unreviewed.
         assert_eq!(
-            cmp_search_with_review_band(0.95, false, "a", 0.40, true, "z"),
+            cmp_search_with_review_band(0.95, false, "a", "id-a", 0.40, true, "z", "id-b"),
             Ordering::Less
         );
+        // Cycle repro from review: A(0.80,rev), B(0.84), C(0.88,older) — total order.
+        let a = (0.80, true, "2026-01-01", "a");
+        let b = (0.84, false, "2026-06-01", "b");
+        let c = (0.88, false, "2025-01-01", "c");
+        let cmp = |x: (f64, bool, &str, &str), y: (f64, bool, &str, &str)| {
+            cmp_search_with_review_band(x.0, x.1, x.2, x.3, y.0, y.1, y.2, y.3)
+        };
+        // C (bucket 17) before A/B (bucket 16); A reviewed before B in same bucket.
+        assert_eq!(cmp(c, a), Ordering::Less);
+        assert_eq!(cmp(c, b), Ordering::Less);
+        assert_eq!(cmp(a, b), Ordering::Less);
+    }
+
+    #[test]
+    fn normalize_search_score_clamps_nan_and_negative() {
+        use super::{normalize_search_score, review_score_bucket};
+        assert_eq!(normalize_search_score(f64::NAN), 0.0);
+        assert_eq!(normalize_search_score(f64::NEG_INFINITY), 0.0);
+        assert_eq!(normalize_search_score(-1.0), 0.0);
+        assert_eq!(normalize_search_score(0.42), 0.42);
+        assert_eq!(review_score_bucket(0.80), 16);
+        assert_eq!(review_score_bucket(0.84), 16);
+        assert_eq!(review_score_bucket(0.88), 17);
+    }
+
+    #[test]
+    fn strip_original_content_for_ui_clears_field() {
+        use super::strip_original_content_for_ui;
+        use crate::models::LoungeExperience;
+        let row = LoungeExperience {
+            id: "strip-me".into(),
+            original_content: Some("/Users/ci/secret".into()),
+            ..Default::default()
+        };
+        let clean = strip_original_content_for_ui(row);
+        assert!(clean.original_content.is_none());
+    }
+
+    /// Property: bucket comparator is a total order — no panic under `sort_by`,
+    /// antisymmetric + transitive on samples, and a ≥2-bucket gap always ranks
+    /// the higher score first.
+    #[test]
+    fn review_score_band_comparator_is_total_order_property() {
+        use super::{
+            cmp_search_with_review_band, normalize_search_score, review_score_bucket,
+            REVIEW_SCORE_BAND,
+        };
+        use std::cmp::Ordering;
+
+        #[derive(Clone, Debug)]
+        struct Hit {
+            score: f64,
+            reviewed: bool,
+            created: String,
+            id: String,
+        }
+
+        fn cmp_hit(a: &Hit, b: &Hit) -> Ordering {
+            cmp_search_with_review_band(
+                a.score, a.reviewed, &a.created, &a.id, b.score, b.reviewed, &b.created, &b.id,
+            )
+        }
+
+        // xorshift64 — deterministic, no extra crate.
+        let mut state: u64 = 0xC0FFEE_DEAD_BEEF;
+        let mut next_u64 = || -> u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for trial in 0..400 {
+            let n = (next_u64() % 256) as usize + 1;
+            let mut hits: Vec<Hit> = Vec::with_capacity(n);
+            for i in 0..n {
+                let raw = (next_u64() as f64) / (u64::MAX as f64);
+                let score = match next_u64() % 32 {
+                    0 => f64::NAN,
+                    1 => -raw,
+                    2 => f64::INFINITY,
+                    3 => f64::NEG_INFINITY,
+                    4 => raw * 3.0,
+                    _ => raw,
+                };
+                hits.push(Hit {
+                    score,
+                    reviewed: next_u64() % 2 == 0,
+                    created: format!(
+                        "2026-{:02}-{:02}T{:02}:00:00Z",
+                        (i % 12) + 1,
+                        (i % 28) + 1,
+                        i % 24
+                    ),
+                    id: format!("id-{trial:04}-{i:04}-{:016x}", next_u64()),
+                });
+            }
+
+            // Must not panic (Rust 1.81+ sort_by requires total order).
+            hits.sort_by(cmp_hit);
+
+            // Antisymmetry + equality: a≤b and b≤a ⇒ equal keys after normalize.
+            for w in hits.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                let ab = cmp_hit(a, b);
+                let ba = cmp_hit(b, a);
+                match ab {
+                    Ordering::Equal => assert_eq!(ba, Ordering::Equal),
+                    Ordering::Less => assert_eq!(ba, Ordering::Greater),
+                    Ordering::Greater => assert_eq!(ba, Ordering::Less),
+                }
+            }
+
+            // Transitivity on random triples from this list.
+            if hits.len() >= 3 {
+                for _ in 0..32 {
+                    let i = (next_u64() as usize) % hits.len();
+                    let j = (next_u64() as usize) % hits.len();
+                    let k = (next_u64() as usize) % hits.len();
+                    let (a, b, c) = (&hits[i], &hits[j], &hits[k]);
+                    if cmp_hit(a, b) == Ordering::Less && cmp_hit(b, c) == Ordering::Less {
+                        assert_eq!(
+                            cmp_hit(a, c),
+                            Ordering::Less,
+                            "transitivity failed at trial {trial}: {a:?} < {b:?} < {c:?}"
+                        );
+                    }
+                }
+            }
+
+            // ≥2 bucket gap ⇒ higher raw (normalized) score always first.
+            for a in &hits {
+                for b in &hits {
+                    let sa = normalize_search_score(a.score);
+                    let sb = normalize_search_score(b.score);
+                    let ba = review_score_bucket(sa);
+                    let bb = review_score_bucket(sb);
+                    if ba >= bb + 2 {
+                        assert_eq!(
+                            cmp_hit(a, b),
+                            Ordering::Less,
+                            "bucket gap≥2 ({ba} vs {bb}, band={REVIEW_SCORE_BAND}): higher must lead"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

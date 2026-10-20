@@ -6,6 +6,13 @@ import { vaultMockBrowserSource } from "./vault-mock";
 
 export type FixtureName = "full" | "empty" | "browser" | "reject";
 
+/** Mirror Rust `strip_original_content_for_ui` — UI IPC never returns pre-hygiene body. */
+function stripOriginalContentForUi<T extends { original_content?: string | null }>(
+  row: T,
+): T {
+  return { ...row, original_content: null };
+}
+
 export type QaDestructiveRow = {
   id: string;
   kind: string;
@@ -274,7 +281,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               }
               return right.created_at.localeCompare(left.created_at);
             });
-          return rows.slice(offset, offset + limit);
+          return rows.slice(offset, offset + limit).map(stripOriginalContentForUi);
         }
         case "count_experiences": {
           const includeArchived = Boolean(args?.includeArchived);
@@ -284,7 +291,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "get_experience": {
           const id = String(args?.id ?? "");
-          return f.experiences.find((row) => row.id === id) ?? null;
+          const row = f.experiences.find((item) => item.id === id) ?? null;
+          return row ? stripOriginalContentForUi(row) : null;
         }
         case "update_experience": {
           const id = String(args?.id ?? "");
@@ -548,19 +556,21 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             rows = rows.filter((row) => hasHygiene(row));
           }
           const lim = Math.max(1, Number(filter.limit ?? 200));
-          return rows.slice(0, lim);
+          return rows.slice(0, lim).map(stripOriginalContentForUi);
         }
         case "search_experiences": {
           if (rejectLive) {
             throw new Error("search_experiences unavailable");
           }
           const q = String(args?.query ?? args?.q ?? "").toLowerCase();
-          if (!q) return f.experiences;
-          return f.experiences.filter((row) =>
-            `${row.adr_summary} ${row.project_id} ${row.agent} ${row.tags.join(" ")}`
-              .toLowerCase()
-              .includes(q),
-          );
+          const matched = !q
+            ? f.experiences
+            : f.experiences.filter((row) =>
+                `${row.adr_summary} ${row.project_id} ${row.agent} ${row.tags.join(" ")}`
+                  .toLowerCase()
+                  .includes(q),
+              );
+          return matched.map(stripOriginalContentForUi);
         }
         case "get_dead_symbols": {
           const ignored =

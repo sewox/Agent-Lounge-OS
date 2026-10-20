@@ -133,14 +133,19 @@ describe("vault-review masking", () => {
     assert.equal(redactHomePaths("/Users/ci/projects/secret"), "<home>/projects/secret");
     assert.equal(redactHomePaths("/home/sercan/dev"), "<home>/dev");
     assert.equal(redactHomePaths("C:\\Users\\sercan\\dev"), "<home>\\dev");
+    assert.equal(redactHomePaths("C:/Users/sercan/dev"), "<home>/dev");
+    assert.equal(redactHomePaths("/root"), "<home>");
+    assert.equal(redactHomePaths("/root/.config"), "<home>/.config");
+    assert.equal(redactHomePaths("/var/home/fedora/work"), "<home>/work");
     const dirty = row({
       id: "x",
-      adr_summary: "see /Users/ci/leak",
+      adr_summary: "see /Users/ci/leak and /var/home/u/x",
       original_content: "/Users/ci/raw",
     });
     const clean = sanitizeReviewRow(dirty);
     assert.equal(clean.original_content, null);
     assert.equal(clean.adr_summary.includes("/Users/"), false);
+    assert.equal(clean.adr_summary.includes("/var/home/"), false);
     assert.equal(maskedReviewContent(clean).includes("/Users/"), false);
   });
 });
