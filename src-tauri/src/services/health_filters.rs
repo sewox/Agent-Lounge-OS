@@ -1200,7 +1200,10 @@ impl Foo {
         let missing_s = missing.to_string_lossy().replace('\\', "/");
         let homes = vec![home_s.clone()];
         let masked = mask_home_path_with(&missing_s, &homes);
-        assert_eq!(masked, "~/bin/old-lounge-mcp", "masked={masked} home={home_s}");
+        assert_eq!(
+            masked, "~/bin/old-lounge-mcp",
+            "masked={masked} home={home_s}"
+        );
         assert!(!masked.contains(&home_s.replace('\\', "/")));
         let _ = fs::remove_dir_all(&base);
     }
