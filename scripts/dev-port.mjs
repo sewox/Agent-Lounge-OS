@@ -69,17 +69,12 @@ export function resolveDevPort(env = process.env) {
 }
 
 /**
- * Pre-flight: bind the resolved port with no host argument — same as
- * `next dev -p` without `-H` (every address). On EADDRINUSE, throws
- * PortInUseError — never falls back to another port.
- *
- * @param {string|number} port
- * @param {{ createServer?: typeof net.createServer }} [opts]
+ * @param {number} portNum
+ * @param {string|undefined} host undefined = no-host listen (Next default)
+ * @param {typeof net.createServer} createServer
  * @returns {Promise<void>}
  */
-export function assertDevPortFree(port, opts = {}) {
-  const portNum = Number(port);
-  const createServer = opts.createServer ?? net.createServer;
+function tryBindOnce(portNum, host, createServer) {
   return new Promise((resolve, reject) => {
     const server = createServer();
     server.once("error", (err) => {
@@ -98,14 +93,41 @@ export function assertDevPortFree(port, opts = {}) {
         resolve();
       });
     });
-    // No host — matches Next's default bind when `-H` is omitted.
-    server.listen(portNum);
+    if (host === undefined) {
+      // Match `next dev -p` without `-H` (every address).
+      server.listen(portNum);
+    } else {
+      server.listen(portNum, host);
+    }
   });
 }
 
 /**
+ * Pre-flight: prove the port is free the way Next binds (no host), and also
+ * that IPv4 / IPv6 loopback are free. On macOS/Windows, exclusivity is not
+ * symmetric — a localhost-only holder can leave an all-address probe looking
+ * free (and the reverse), so we check both styles. Never falls back to
+ * another port; never adds `-H` to Next.
+ *
+ * @param {string|number} port
+ * @param {{ createServer?: typeof net.createServer }} [opts]
+ * @returns {Promise<void>}
+ */
+export async function assertDevPortFree(port, opts = {}) {
+  const portNum = Number(port);
+  const createServer = opts.createServer ?? net.createServer;
+
+  await tryBindOnce(portNum, undefined, createServer);
+  await tryBindOnce(portNum, "127.0.0.1", createServer);
+
+  if (await canBindIpv6Loopback({ createServer })) {
+    await tryBindOnce(portNum, "::1", createServer);
+  }
+}
+
+/**
  * Deterministic probe: can this process bind IPv6 loopback (`::1`)?
- * Used by tests — not a skip gate; callers assert the boolean result.
+ * Used by tests and by assertDevPortFree — not a skip gate.
  *
  * @param {{ createServer?: typeof net.createServer }} [opts]
  * @returns {Promise<boolean>}
