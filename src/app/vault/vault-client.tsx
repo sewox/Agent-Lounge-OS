@@ -12,35 +12,42 @@ function parseView(raw: string | null): VaultView {
   return raw === "review" ? "review" : "map";
 }
 
+/**
+ * Map view keeps the pre-review height chain (`h-full` → VaultPanel) so D960
+ * stretch rows do not overflow-overlap. Review view owns the Map|Review nav
+ * as its own L3 panel; map view hosts the same links inside VaultPanel chrome.
+ */
 export default function VaultPageClient() {
   const params = useSearchParams();
   const view = parseView(params.get("view"));
   const { t } = useTranslation("vault");
 
-  return (
-    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col gap-2">
-      <nav
-        aria-label={t("review.viewsNav")}
-        data-qa={view === "review" ? "panel" : "vault-view-nav"}
-        data-panel-slot={view === "review" ? "vault-view-nav" : undefined}
-        className="flex shrink-0 flex-wrap items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-low p-1"
-      >
-        <VaultViewLink href="/vault" active={view === "map"} label={t("review.viewMap")} />
-        <VaultViewLink
-          href="/vault?view=review"
-          active={view === "review"}
-          label={t("review.viewReview")}
-        />
-      </nav>
-      <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
-        {view === "review" ? (
+  if (view === "review") {
+    return (
+      <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col gap-2">
+        <nav
+          aria-label={t("review.viewsNav")}
+          data-qa="panel"
+          data-panel-slot="vault-view-nav"
+          className="flex shrink-0 flex-wrap items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-low p-1"
+        >
+          <VaultViewLink href="/vault" active={false} label={t("review.viewMap")} />
+          <VaultViewLink
+            href="/vault?view=review"
+            active
+            label={t("review.viewReview")}
+          />
+        </nav>
+        <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col">
           <VaultReviewPanel />
-        ) : (
-          <div className="flex h-full min-h-0 w-full flex-col">
-            <VaultPanel />
-          </div>
-        )}
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <VaultPanel />
     </div>
   );
 }

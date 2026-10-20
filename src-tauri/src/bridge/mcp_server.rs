@@ -3181,7 +3181,10 @@ mod tests {
         assert!(experiences.len() >= 2);
         // Additive field — every hit exposes reviewed (backward compatible).
         for row in experiences {
-            assert!(row.get("reviewed").is_some(), "reviewed must be present: {row}");
+            assert!(
+                row.get("reviewed").is_some(),
+                "reviewed must be present: {row}"
+            );
             assert!(row.get("id").is_some());
             assert!(row.get("project_id").is_some());
         }
@@ -3190,7 +3193,10 @@ mod tests {
             .map(|row| row["reviewed"].as_bool().unwrap())
             .collect();
         assert!(reviewed_flags.contains(&true));
-        assert!(reviewed_flags.contains(&false), "unreviewed still searchable");
+        assert!(
+            reviewed_flags.contains(&false),
+            "unreviewed still searchable"
+        );
         let first_approved = reviewed_flags.iter().position(|r| *r).unwrap();
         let first_pending = reviewed_flags.iter().position(|r| !*r).unwrap();
         assert!(

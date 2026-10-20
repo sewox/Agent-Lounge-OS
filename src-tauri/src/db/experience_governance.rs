@@ -1624,7 +1624,10 @@ mod tests {
         assert!(queue.iter().any(|r| r.id == plain_id));
 
         let stats = store.count_review_stats().await.unwrap();
-        assert_eq!(stats.pending, store.count_unreviewed_experiences().await.unwrap());
+        assert_eq!(
+            stats.pending,
+            store.count_unreviewed_experiences().await.unwrap()
+        );
         assert!(stats.hygiene >= 1);
     }
 
@@ -1665,7 +1668,10 @@ mod tests {
             .unwrap();
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert!(ids.contains(&approved_id.as_str()));
-        assert!(ids.contains(&pending_id.as_str()), "unreviewed still returned");
+        assert!(
+            ids.contains(&pending_id.as_str()),
+            "unreviewed still returned"
+        );
         let ai = ids.iter().position(|id| *id == approved_id).unwrap();
         let pi = ids.iter().position(|id| *id == pending_id).unwrap();
         assert!(ai < pi, "reviewed must rank above unreviewed in band");
