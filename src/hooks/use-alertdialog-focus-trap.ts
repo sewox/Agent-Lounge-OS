@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, type RefObject } from "react";
+import { useEffectEvent, useLayoutEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -74,9 +74,9 @@ export type AlertdialogFocusTrapOptions = {
   initialFocusSelector?: string;
   onEscape?: () => void;
   /**
-   * When false, Escape is ignored. Read on each keydown via a ref so the trap
-   * effect does not re-subscribe (and must not re-run boot focus) when busy
-   * toggles while the dialog stays open.
+   * When false, Escape is ignored. Latest value is read via `useEffectEvent` so
+   * the trap effect does not re-subscribe (and must not re-run boot focus) when
+   * busy toggles while the dialog stays open.
    */
   escapeEnabled?: boolean;
   /**
@@ -91,7 +91,8 @@ export type AlertdialogFocusTrapOptions = {
  * Synchronous alertdialog focus management:
  * - Initial focus + Tab trap are installed in `useLayoutEffect` (before paint).
  * - No `setTimeout` boot — avoids yanking focus after the user already Tabbed.
- * - Effect depends on `open` (+ optional `instanceKey`); busy/escape use refs.
+ * - Effect depends on `open` (+ optional `instanceKey`); busy/escape via
+ *   `useEffectEvent` so they never re-trigger boot focus.
  * - Cleanup restores focus to the trigger that opened the dialog.
  */
 export function useAlertdialogFocusTrap({
@@ -102,14 +103,24 @@ export function useAlertdialogFocusTrap({
   escapeEnabled = true,
   instanceKey = null,
 }: AlertdialogFocusTrapOptions): void {
-  const onEscapeRef = useRef(onEscape);
-  const escapeEnabledRef = useRef(escapeEnabled);
-  const initialFocusSelectorRef = useRef(initialFocusSelector);
   const previousFocusRef = useRef<HTMLElement | null>(null);
 
-  onEscapeRef.current = onEscape;
-  escapeEnabledRef.current = escapeEnabled;
-  initialFocusSelectorRef.current = initialFocusSelector;
+  const applyInitialFocus = useEffectEvent(() => {
+    resolveInitialFocus(containerRef.current, initialFocusSelector)?.focus();
+  });
+
+  const onKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      if (!escapeEnabled) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      onEscape?.();
+      return;
+    }
+    handleAlertdialogTabKey(event, containerRef.current, document.activeElement);
+  });
 
   useLayoutEffect(() => {
     if (!open) {
@@ -122,27 +133,19 @@ export function useAlertdialogFocusTrap({
         ? (previouslyFocused as HTMLElement)
         : null;
 
-    const root = containerRef.current;
-    resolveInitialFocus(root, initialFocusSelectorRef.current)?.focus();
+    applyInitialFocus();
 
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        if (!escapeEnabledRef.current) {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        onEscapeRef.current?.();
-        return;
-      }
-      handleAlertdialogTabKey(event, containerRef.current, document.activeElement);
+    function listener(event: KeyboardEvent) {
+      onKeyDown(event);
     }
 
-    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keydown", listener, true);
     return () => {
-      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", listener, true);
       previousFocusRef.current?.focus();
       previousFocusRef.current = null;
     };
+    // applyInitialFocus / onKeyDown are useEffectEvent (stable); omit from deps so
+    // escapeEnabled / onEscape updates never re-boot focus while open stays true.
   }, [open, instanceKey, containerRef]);
 }
