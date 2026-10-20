@@ -2446,3 +2446,107 @@ export async function isDesktopDeepLinkRegistered(): Promise<boolean> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<boolean>("is_desktop_deep_link_registered");
 }
+
+// --- PR-Connect-1: agent MCP connect (append-only; parallel Vault-Review-UI safe) ---
+
+export type ConnectAction = "connect" | "disconnect" | "print";
+
+export type ConnectFilePlan = {
+  path: string;
+  path_masked: string;
+  kind: string;
+  exists: boolean;
+  would_create: boolean;
+  jsonc_comment_loss: boolean;
+  before?: string | null;
+  after?: string | null;
+  diff: string;
+  backup_path?: string | null;
+  backup_path_masked?: string | null;
+};
+
+export type ConnectPlan = {
+  client: string;
+  scope: string;
+  action: ConnectAction;
+  dry_run: boolean;
+  command_path?: string | null;
+  command_path_masked?: string | null;
+  files: ConnectFilePlan[];
+  warnings: string[];
+  requires_jsonc_consent: boolean;
+};
+
+export type ConnectResult = {
+  plan: ConnectPlan;
+  applied: boolean;
+  message: string;
+};
+
+export type PlanAgentConnectArgs = {
+  client: string;
+  scope?: "global" | "project";
+  dryRun?: boolean;
+  forceLossyJsonc?: boolean;
+  workspace?: string;
+  action?: ConnectAction;
+};
+
+export async function planAgentConnect(args: PlanAgentConnectArgs): Promise<ConnectPlan> {
+  if (!isTauri()) {
+    throw await tauriUnavailableError();
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<ConnectPlan>("plan_agent_connect_cmd", {
+    client: args.client,
+    scope: args.scope ?? "global",
+    dryRun: args.dryRun ?? true,
+    forceLossyJsonc: args.forceLossyJsonc ?? false,
+    workspace: args.workspace,
+    action: args.action ?? "connect",
+  });
+}
+
+export async function connectAgent(args: PlanAgentConnectArgs): Promise<ConnectResult> {
+  if (!isTauri()) {
+    throw await tauriUnavailableError();
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<ConnectResult>("connect_agent", {
+    client: args.client,
+    scope: args.scope ?? "global",
+    dryRun: args.dryRun ?? false,
+    forceLossyJsonc: args.forceLossyJsonc ?? false,
+    workspace: args.workspace,
+  });
+}
+
+export async function disconnectAgent(args: PlanAgentConnectArgs): Promise<ConnectResult> {
+  if (!isTauri()) {
+    throw await tauriUnavailableError();
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<ConnectResult>("disconnect_agent", {
+    client: args.client,
+    scope: args.scope ?? "global",
+    dryRun: args.dryRun ?? false,
+    forceLossyJsonc: args.forceLossyJsonc ?? false,
+    workspace: args.workspace,
+  });
+}
+
+export async function printAgentConnect(args: {
+  client: string;
+  scope?: "global" | "project";
+  workspace?: string;
+}): Promise<unknown> {
+  if (!isTauri()) {
+    throw await tauriUnavailableError();
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke("print_agent_connect", {
+    client: args.client,
+    scope: args.scope ?? "global",
+    workspace: args.workspace,
+  });
+}

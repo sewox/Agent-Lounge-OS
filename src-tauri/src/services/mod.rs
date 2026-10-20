@@ -1,6 +1,8 @@
 //! LMR (Lounge Model Runner), NATS ve C-binary yaşam döngüsü.
 
+pub mod agent_connect;
 pub mod agent_health;
+pub mod agent_mcp_paths;
 pub mod agent_mcp_probe;
 pub mod approval_notify;
 pub mod approval_sound;
@@ -48,6 +50,12 @@ use tokio::sync::Mutex;
 
 use crate::models::ServiceReport;
 
+pub use agent_connect::{
+    apply_agent_connect, plan_agent_connect, print_agent_connect, run_connect_cli, ConnectAction,
+    ConnectOptions, ConnectPlan, ConnectResult,
+};
+pub use agent_health::AgentHealthRoots;
+pub use agent_mcp_paths::ConnectScope;
 pub use agent_mcp_probe::{probe_agent_mcp_url, AgentMcpProbeResult};
 pub use approval_notify::{
     clear_pending_approval_if_matches, emit_approval_pending, emit_approval_resolved,

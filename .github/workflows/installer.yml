@@ -22,7 +22,7 @@ jobs:
   linux-distros:
     name: Installer Linux (${{ matrix.distro }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -73,10 +73,35 @@ jobs:
               chmod +x install.sh scripts/install/*.sh
               bash scripts/install/test-install-unix.sh'
 
+      # Host Ubuntu smoke once per matrix row would be wasteful — only ubuntu row.
+      - name: Install Rust toolchain
+        if: matrix.distro == 'ubuntu'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.distro == 'ubuntu'
+        with:
+          workspaces: src-tauri
+          prefix-key: connect-cli-smoke-installer
+
+      - name: Install Linux Tauri build deps
+        if: matrix.distro == 'ubuntu'
+        timeout-minutes: 26
+        run: bash scripts/ci/install-linux-build-deps.sh --preset tauri-gtk
+
+      - name: Connect CLI smoke (temp HOME)
+        if: matrix.distro == 'ubuntu'
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/connect-cli-smoke.sh
+          bash scripts/ci/connect-cli-smoke.sh
+
   macos:
     name: Installer macOS
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -86,10 +111,26 @@ jobs:
           chmod +x install.sh scripts/install/*.sh
           bash scripts/install/test-install-unix.sh
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          prefix-key: connect-cli-smoke-installer
+
+      - name: Connect CLI smoke (temp HOME)
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/connect-cli-smoke.sh
+          bash scripts/ci/connect-cli-smoke.sh
+
   windows:
     name: Installer Windows
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -99,3 +140,20 @@ jobs:
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           & .\scripts\install\test-install-windows.ps1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          prefix-key: connect-cli-smoke-installer
+
+      - name: Connect CLI smoke (temp HOME)
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/connect-cli-smoke.sh
+          bash scripts/ci/connect-cli-smoke.sh

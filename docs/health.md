@@ -7,8 +7,9 @@ Route: `/health` with tabs `health` | `agents` | `dead` | `ignore`.
 Shows the Health-1b `lounge_health` report in a **PanelGrid** (list | detail | inspector):
 
 - **List:** agent MCP entries (all clients) plus Title/LMR, CBM, and platform sections
-- **Detail:** status, severity, masked config path, command, configured/expected version & sha256, detail; **Şimdi Doğrula** only on `unverified`
-- **Inspector:** raw fields + actions note
+- **Detail:** status, severity, masked config path, command, configured/expected version & sha256, detail; **Şimdi Doğrula** only on `unverified`; **Bağla** / **Onar** (Connect-1) on missing/stale/non_canonical/hash_mismatch
+- **Inspector:** raw fields + Connect actions
+- **Halt / Durduruldu:** agents tab shows a Halted note; Connect/Repair remain available (local action). See [connect.md](./connect.md).
 
 ### Status badges
 

@@ -1,5 +1,8 @@
 //! Lounge MCP — Cursor / Claude Desktop stdio shim (+ standalone fallback).
 //!
+//! Also hosts Connect-1 CLI subcommands (no separate binary):
+//!   lounge-mcp connect|disconnect|print <agent> [--dry-run] [--global|--project] [--force-lossy-jsonc]
+//!
 //! Tercih edilen yol: Agent Lounge OS (Kernel) `http://127.0.0.1:18791` üzerinde
 //! MCP HTTP sunar; bu binary stdio ↔ HTTP proxy yapar (dashboard ile aynı store).
 //!
@@ -15,18 +18,34 @@ use std::process::ExitCode;
 
 use app_lib::bridge::mcp_server::{resolve_db_path, resolve_nats_url, run_stdio, workspace_root};
 use app_lib::db::ExperienceStore;
+use app_lib::services::run_connect_cli;
 
 /// Embedded for Health-1b read-only version/SHA probes (must remain in the binary).
 #[used]
 static LOUNGE_MCP_VERSION_EMBED: &str = concat!("LOUNGE_MCP_VERSION=", env!("CARGO_PKG_VERSION"));
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    if args.any(|a| a == "--version" || a == "-V") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-V") {
         // Keep embed live for scanners even on --version fast-path.
         let _ = LOUNGE_MCP_VERSION_EMBED;
         println!("{}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+
+    // Connect-1 CLI (local user only — never via MCP/deep-link).
+    if let Some(first) = args.first().map(|s| s.as_str()) {
+        if matches!(first, "connect" | "disconnect" | "print") {
+            let _ = LOUNGE_MCP_VERSION_EMBED;
+            return match run_connect_cli(&args) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("[lounge-mcp] {err}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
     }
 
     eprintln!(
