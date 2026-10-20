@@ -360,16 +360,26 @@ impl MemoryBridge {
     }
 
     /// Health-1a: Cypher COUNT for a Function/Method label (paging guard).
+    /// Uses the same scaled timeout as a full page — COUNT after a large index
+    /// can exceed the bare 15s read budget on loaded CI runners.
     pub async fn fetch_label_count(&self, project: &str, label: &str) -> Result<u64> {
         let query = format!("MATCH (f:{label}) RETURN count(f) AS c");
-        let payload = self.query_graph_json(project, &query).await?;
+        let timeout = health_page_timeout(&self.config(), HEALTH_SCAN_PAGE_SIZE);
+        let payload = self
+            .query_graph_json_with_timeout(project, &query, timeout)
+            .await?;
         Ok(count_from_query(&payload))
     }
 
     /// Health-1a: Cypher COUNT for CALLS edges.
     pub async fn fetch_calls_count(&self, project: &str) -> Result<u64> {
+        let timeout = health_page_timeout(&self.config(), HEALTH_SCAN_PAGE_SIZE);
         let payload = self
-            .query_graph_json(project, "MATCH ()-[r:CALLS]->() RETURN count(r) AS c")
+            .query_graph_json_with_timeout(
+                project,
+                "MATCH ()-[r:CALLS]->() RETURN count(r) AS c",
+                timeout,
+            )
             .await?;
         Ok(count_from_query(&payload))
     }
@@ -745,6 +755,16 @@ pub fn tool_timeout_for(config: &MemoryBridgeConfig, tool_name: &str) -> Duratio
 pub fn health_page_timeout(config: &MemoryBridgeConfig, page_size: u32) -> Duration {
     let chunks = ((page_size as u64).saturating_add(999)) / 1000;
     config.read_timeout + Duration::from_secs(chunks.saturating_mul(HEALTH_PAGE_TIMEOUT_PER_1000))
+}
+
+/// Process-wide serialisation for tests that spawn `codebase-memory-mcp` (stub or
+/// real). #116 only locked inside `health_scan::tests`, so concurrent
+/// `memory_bridge` CLI tests still raced the real-CBM count under the 15s budget.
+#[cfg(test)]
+pub(crate) async fn acquire_cli_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
 }
 
 /// Mutating tool: yalnızca connection refused / port closed → CLI.
@@ -1706,6 +1726,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_empty_index_path() {
+        let _cli = super::acquire_cli_test_lock().await;
         let bridge = MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp");
         let err = bridge.index_workspace("  ".into()).await.unwrap_err();
         assert!(err.to_string().contains("path boş"));
@@ -1738,6 +1759,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_projects_via_cli_stub() {
+        let _cli = super::acquire_cli_test_lock().await;
         // Always runs with an in-tree fixture — no silent skip when sidecar is stub/missing.
         let dir = std::env::temp_dir().join(format!("lounge-cbm-list-{}", uuid::Uuid::new_v4()));
         let script = write_cbm_cli_stub(
@@ -1772,6 +1794,7 @@ exit /b 1
 
     #[tokio::test]
     async fn index_workspace_runs_std_process_command() {
+        let _cli = super::acquire_cli_test_lock().await;
         let dir = std::env::temp_dir().join(format!("lounge-cbm-{}", uuid::Uuid::new_v4()));
         let script = write_cbm_cli_stub(
             &dir,
@@ -1816,6 +1839,7 @@ echo {"project":"demo","ast_nodes":[{"id":"live","name":"live"},{"id":"dead","na
 
     #[tokio::test]
     async fn tauri_command_path_indexes_and_persists_snapshot() {
+        let _cli = super::acquire_cli_test_lock().await;
         // Fixture CLI stub — no silent skip when real sidecar is missing in CI.
         let dir = std::env::temp_dir().join(format!("lounge-cbm-idx-{}", uuid::Uuid::new_v4()));
         let script = write_cbm_cli_stub(
@@ -2184,6 +2208,7 @@ exit /b 0
 
     #[tokio::test]
     async fn cli_hard_timeout_kills_sleeping_child() {
+        let _cli = super::acquire_cli_test_lock().await;
         let dir = std::env::temp_dir().join(format!("lounge-cbm-timeout-{}", uuid::Uuid::new_v4()));
         let script = write_cbm_cli_stub(
             &dir,

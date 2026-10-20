@@ -54,9 +54,19 @@ jobs:
       # Health-1a real_cbm_v011_skip_limit_multi_page needs the pinned v0.11.0 binary
       # on every OS (checksummed). The Rust test can also fetch itself; CI stages it
       # first so Windows/macOS do not depend on in-test download alone.
+      - name: Cache codebase-memory-mcp archive
+        uses: actions/cache@v4
+        with:
+          path: .cache/lounge-cbm
+          key: cbm-v0.11.0-${{ runner.os }}-${{ runner.arch }}
+
       - name: Fetch real codebase-memory-mcp v0.11.0
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CBM_CACHE_DIR: ${{ github.workspace }}/.cache/lounge-cbm
         run: |
+          mkdir -p "$CBM_CACHE_DIR"
           chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
           bash scripts/ci/fetch-codebase-memory-mcp.sh
 

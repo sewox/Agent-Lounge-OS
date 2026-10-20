@@ -82,8 +82,11 @@ jobs:
       - name: Fetch real codebase-memory-mcp (macOS)
         env:
           TAURI_ENV_PLATFORM: macos
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CBM_CACHE_DIR: ${{ github.workspace }}/.cache/lounge-cbm
         run: |
           set -euo pipefail
+          mkdir -p "$CBM_CACHE_DIR"
           chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
           bash scripts/ci/fetch-codebase-memory-mcp.sh
 
@@ -144,8 +147,11 @@ jobs:
         env:
           TAURI_ENV_PLATFORM: windows
           TAURI_ENV_ARCH: x86_64
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CBM_CACHE_DIR: ${{ github.workspace }}/.cache/lounge-cbm
         run: |
           set -euo pipefail
+          mkdir -p "$CBM_CACHE_DIR"
           chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
           bash scripts/ci/fetch-codebase-memory-mcp.sh
 

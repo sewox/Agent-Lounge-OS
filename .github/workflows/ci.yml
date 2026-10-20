@@ -68,8 +68,18 @@ jobs:
           workspaces: src-tauri
 
       # Health-1a real CBM v0.11.0 paging test (checksummed; also used as externalBin).
+      - name: Cache codebase-memory-mcp archive
+        uses: actions/cache@v4
+        with:
+          path: .cache/lounge-cbm
+          key: cbm-v0.11.0-${{ runner.os }}-${{ runner.arch }}-1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683
+
       - name: Fetch real codebase-memory-mcp v0.11.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CBM_CACHE_DIR: ${{ github.workspace }}/.cache/lounge-cbm
         run: |
+          mkdir -p "$CBM_CACHE_DIR"
           chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
           bash scripts/ci/fetch-codebase-memory-mcp.sh
 

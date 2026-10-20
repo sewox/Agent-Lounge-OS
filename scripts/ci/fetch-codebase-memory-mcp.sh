@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Fetch the SHA-pinned codebase-memory-mcp sidecar for the host (or TAURI_ENV_*) platform.
 # Stages bridge/codebase-memory-mcp[.exe] then runs prepare-sidecar.sh (never --stub).
+#
+# Robustness (CI 403 / rate-limit):
+# - Prefer GitHub API asset download authenticated with GITHUB_TOKEN
+# - Fall back to browser download URL with the same Bearer token
+# - SHA256-verify against the pinned digest
+# - Cache verified archives under $CBM_CACHE_DIR (default: ~/.cache/lounge-cbm)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CBM_RELEASE="${CBM_RELEASE:-v0.11.0}"
+CBM_REPO="${CBM_REPO:-DeusData/codebase-memory-mcp}"
+CBM_CACHE_DIR="${CBM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lounge-cbm}"
 
 # Pinned v0.11.0 assets — verified against upstream release checksums.txt:
 # https://github.com/DeusData/codebase-memory-mcp/releases/download/v0.11.0/checksums.txt
@@ -64,22 +72,93 @@ resolve_key() {
   esac
 }
 
+verify_sha() {
+  local file="$1" expect="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "${expect}  ${file}" | sha256sum -c -
+  else
+    local actual
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$actual" == "$expect" ]] || {
+      echo "FAIL: sha256 mismatch (got ${actual}, want ${expect})" >&2
+      return 1
+    }
+  fi
+}
+
+curl_auth() {
+  # Usage: curl_auth [curl args…]
+  local -a args=(-fsSL --retry 3 --retry-delay 2 --retry-all-errors)
+  if [[ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]]; then
+    args+=(-H "Authorization: Bearer ${GITHUB_TOKEN:-$GH_TOKEN}")
+    args+=(-H "X-GitHub-Api-Version: 2022-11-28")
+  else
+    echo "WARN: GITHUB_TOKEN unset — unauthenticated download may 403 on Actions IPs" >&2
+  fi
+  curl "${args[@]}" "$@"
+}
+
+download_asset() {
+  local dest="$1"
+  local browser_url="https://github.com/${CBM_REPO}/releases/download/${CBM_RELEASE}/${ASSET}"
+  local api_release="https://api.github.com/repos/${CBM_REPO}/releases/tags/${CBM_RELEASE}"
+
+  # 1) Authenticated API asset URL (Accept: application/octet-stream) — survives rate limits.
+  if [[ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]]; then
+    local asset_api
+    asset_api="$(
+      curl_auth -H "Accept: application/vnd.github+json" "$api_release" \
+        | ASSET_NAME="$ASSET" python3 -c '
+import json, os, sys
+name = os.environ["ASSET_NAME"]
+data = json.load(sys.stdin)
+for a in data.get("assets") or []:
+    if a.get("name") == name:
+        print(a.get("url") or "")
+        break
+'
+    )"
+    if [[ -n "$asset_api" ]]; then
+      echo "Fetching via GitHub API asset URL (${ASSET})"
+      if curl_auth -H "Accept: application/octet-stream" -o "$dest" "$asset_api"; then
+        return 0
+      fi
+      echo "WARN: API asset download failed; trying browser URL" >&2
+    fi
+  fi
+
+  # 2) Browser download URL (still send Bearer when available).
+  echo "Fetching $browser_url"
+  curl_auth -o "$dest" "$browser_url"
+}
+
 KEY="$(resolve_key)"
 read -r ASSET SHA <<<"$(pin_for "$KEY")"
-URL="https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_RELEASE}/${ASSET}"
 
-mkdir -p "$ROOT/bridge"
+mkdir -p "$ROOT/bridge" "$CBM_CACHE_DIR"
+CACHE_FILE="${CBM_CACHE_DIR}/${CBM_RELEASE}-${ASSET}"
+
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-echo "Fetching real sidecar $URL"
-curl -fsSL "$URL" -o "$TMP/asset"
-if command -v sha256sum >/dev/null 2>&1; then
-  echo "${SHA}  $TMP/asset" | sha256sum -c -
+if [[ -f "$CACHE_FILE" ]]; then
+  if verify_sha "$CACHE_FILE" "$SHA"; then
+    echo "Using cached sidecar archive $CACHE_FILE"
+    cp -f "$CACHE_FILE" "$TMP/asset"
+  else
+    echo "WARN: cache sha mismatch — re-downloading" >&2
+    rm -f "$CACHE_FILE"
+    download_asset "$TMP/asset"
+    verify_sha "$TMP/asset" "$SHA"
+    cp -f "$TMP/asset" "$CACHE_FILE"
+    echo "Cached verified archive → $CACHE_FILE"
+  fi
 else
-  actual="$(shasum -a 256 "$TMP/asset" | awk '{print $1}')"
-  [[ "$actual" == "$SHA" ]] || { echo "FAIL: sha256 mismatch" >&2; exit 1; }
+  download_asset "$TMP/asset"
+  verify_sha "$TMP/asset" "$SHA"
+  cp -f "$TMP/asset" "$CACHE_FILE"
+  echo "Cached verified archive → $CACHE_FILE"
 fi
 
 case "$ASSET" in
@@ -98,7 +177,6 @@ case "$ASSET" in
     BIN="$(find "$TMP" -type f -name 'codebase-memory-mcp.exe' | head -n1)"
     [[ -n "$BIN" && -f "$BIN" ]] || { echo "FAIL: .exe not in archive" >&2; exit 1; }
     install -m 755 "$BIN" "$ROOT/bridge/codebase-memory-mcp.exe"
-    # prepare-sidecar on Windows looks for bridge/codebase-memory-mcp.exe or LOUNGE_MEMORY_BIN
     ;;
   *)
     echo "FAIL: unknown archive type $ASSET" >&2

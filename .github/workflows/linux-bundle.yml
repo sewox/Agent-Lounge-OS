@@ -83,25 +83,27 @@ jobs:
             echo "artifact_name=agent-lounge-linux" >> "$GITHUB_OUTPUT"
           fi
 
+      # Cache verified release archives across runs (keyed by pin).
+      - name: Cache codebase-memory-mcp archive
+        if: steps.mode.outputs.mode == 'real'
+        uses: actions/cache@v4
+        with:
+          path: .cache/lounge-cbm
+          key: cbm-${{ env.CBM_RELEASE }}-${{ env.CBM_ASSET }}-${{ env.CBM_SHA256 }}
+
       - name: Fetch real codebase-memory-mcp (linux-amd64)
         id: sidecar
         if: steps.mode.outputs.mode == 'real'
+        env:
+          # GITHUB_TOKEN avoids Actions-IP 403s on unauthenticated release downloads.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CBM_CACHE_DIR: ${{ github.workspace }}/.cache/lounge-cbm
         run: |
           set -euo pipefail
           EXPECTED="${CBM_RELEASE#v}"
-          URL="https://github.com/DeusData/codebase-memory-mcp/releases/download/${CBM_RELEASE}/${CBM_ASSET}"
-          mkdir -p bridge
-          TMP="$(mktemp -d)"
-          echo "Downloading $URL"
-          curl -fsSL "$URL" -o "$TMP/mcp.tar.gz"
-          echo "${CBM_SHA256}  $TMP/mcp.tar.gz" | sha256sum -c -
-          tar -xzf "$TMP/mcp.tar.gz" -C "$TMP"
-          BIN="$(find "$TMP" -type f -name 'codebase-memory-mcp' | head -n1)"
-          if [[ -z "$BIN" || ! -f "$BIN" ]]; then
-            echo "FAIL: binary not found in archive"
-            exit 1
-          fi
-          install -m 755 "$BIN" bridge/codebase-memory-mcp
+          mkdir -p "$CBM_CACHE_DIR"
+          chmod +x scripts/ci/fetch-codebase-memory-mcp.sh
+          bash scripts/ci/fetch-codebase-memory-mcp.sh
           RAW_VER="$(bridge/codebase-memory-mcp --version 2>&1 | head -n1)"
           VERSION="$(printf '%s' "$RAW_VER" | sed -n 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/p' | head -n1)"
           if [[ -z "$VERSION" ]]; then
