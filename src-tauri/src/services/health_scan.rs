@@ -1157,7 +1157,16 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
     use std::time::Duration;
+
+    /// Serialize CLI-backed health_scan tests (stub + real CBM). On Windows CI,
+    /// parallel `spawn_blocking` + python stub launches under a live CBM index
+    /// can miss the 15s read timeout even when the stub itself is fast.
+    async fn health_scan_cli_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+    }
 
     /// Fast cross-platform stub: pre-rendered JSON pages, no per-call Python.
     /// Function: sym_00000..sym_N-1; Method: meth_00000..meth_M-1;
@@ -1329,11 +1338,19 @@ print({})
 
         #[cfg(windows)]
         {
-            // Quote the dispatcher path; cmd handles backslashes inside quotes.
+            // Prefer `py -3` (setup-python / launcher), then `python`/`python3`.
+            // Bare `python` can be the Microsoft Store alias and hang under
+            // CREATE_NO_WINDOW until the 15s read timeout fires.
             fs::write(
                 &script,
                 format!(
-                    "@echo off\r\npython \"{disp}\" %*\r\n",
+                    "@echo off\r\n\
+setlocal\r\n\
+where py >nul 2>&1 && (py -3 \"{disp}\" %* & exit /b %ERRORLEVEL%)\r\n\
+where python >nul 2>&1 && (python \"{disp}\" %* & exit /b %ERRORLEVEL%)\r\n\
+where python3 >nul 2>&1 && (python3 \"{disp}\" %* & exit /b %ERRORLEVEL%)\r\n\
+echo health-scan stub: no Python interpreter on PATH >&2\r\n\
+exit /b 1\r\n",
                     disp = dispatcher.display()
                 ),
             )
@@ -1414,6 +1431,7 @@ print({})
 
     #[tokio::test]
     async fn t1_paged_scan_methods_broken_indexed_at_and_boundaries() {
+        let _cli = health_scan_cli_lock().await;
         let dir = fixture_dir_under_home("t1");
         let fn_count = 5000usize;
         let method_count = 2500usize;
@@ -1533,6 +1551,7 @@ print({})
 
     #[tokio::test]
     async fn t1_cancel_keeps_prior_snapshot_and_sets_partial_reason() {
+        let _cli = health_scan_cli_lock().await;
         let dir = std::env::temp_dir().join(format!("al-health-t1c-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let script = write_fast_paged_stub(&dir, 5000, 100, HEALTH_SCAN_PAGE_SIZE as usize);
@@ -1615,6 +1634,7 @@ print({})
 
     #[tokio::test]
     async fn progress_emitted_per_page() {
+        let _cli = health_scan_cli_lock().await;
         let dir = std::env::temp_dir().join(format!("al-health-prog-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let script = write_fast_paged_stub(&dir, 2500, 100, HEALTH_SCAN_PAGE_SIZE as usize);
@@ -1657,6 +1677,7 @@ print({})
 
     #[tokio::test]
     async fn count_mismatch_marks_partial_without_promote() {
+        let _cli = health_scan_cli_lock().await;
         let dir = std::env::temp_dir().join(format!("al-health-mismatch-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         // Stub that lies about counts (says 5000) but only serves 100 symbols.
@@ -1705,6 +1726,7 @@ print({})
     /// Real CBM v0.11.0 SKIP/LIMIT evidence (fetches pinned release when absent).
     #[tokio::test]
     async fn real_cbm_v011_skip_limit_multi_page() {
+        let _cli = health_scan_cli_lock().await;
         let cbm = ensure_real_cbm_binary();
         // Index a tiny synthetic crate with > page-size symbols is expensive;
         // instead verify query_graph honors SKIP/LIMIT by indexing a generated tree
