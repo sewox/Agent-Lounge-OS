@@ -31,6 +31,8 @@ import {
   applyReviewFilters,
   assertCounterConsistency,
   experienceHasHygieneMask,
+  maskedReviewContent,
+  sanitizeReviewRow,
   type ReviewStatId,
 } from "@/lib/vault-review";
 
@@ -108,11 +110,13 @@ export function VaultReviewPanel() {
         hygiene_only: hygieneOnly,
         limit: 200,
       };
-      const [rows, stats, canonicalPending] = await Promise.all([
+      const [rowsRaw, stats, canonicalPending] = await Promise.all([
         invoke<LoungeExperience[]>("list_review_queue", { filter }),
         invoke<ReviewStats>("count_review_stats"),
         invoke<number>("count_unreviewed_experiences"),
       ]);
+      // Never carry pre-hygiene original_content into the review React tree.
+      const rows = rowsRaw.map((row) => sanitizeReviewRow(row));
       // VR3: badge / StatsStrip pending / list share one counter source.
       if (!assertCounterConsistency(Number(canonicalPending), { pending: stats.pending })) {
         throw new Error(
@@ -341,13 +345,25 @@ export function VaultReviewPanel() {
       <section
         data-qa="panel"
         data-qa-vault-review="loading"
-        className="flex h-full min-h-0 w-full flex-col gap-3 rounded-lg border border-outline-variant bg-surface-container p-4"
+        className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
         aria-busy="true"
         aria-label={t("review.loading")}
       >
-        <div className="h-4 w-1/3 animate-pulse rounded bg-surface-container-high" />
-        <div className="h-24 animate-pulse rounded bg-surface-container-high" />
-        <div className="h-24 animate-pulse rounded bg-surface-container-high" />
+        <div className="shrink-0 border-b border-outline-variant bg-surface-container-low px-3 py-2">
+          <h2 className="font-body text-panel font-semibold tracking-label uppercase">
+            {t("review.listTitle")}
+          </h2>
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-3">
+          {Array.from({ length: 10 }, (_, i) => (
+            <p
+              key={i}
+              className="min-h-0 flex-1 font-body text-body text-on-surface-variant"
+            >
+              {t("review.loading")}
+            </p>
+          ))}
+        </div>
       </section>
     );
   }
@@ -709,16 +725,6 @@ export function VaultReviewPanel() {
                 {selected.adr_summary || t("noAdr")}
               </pre>
             </section>
-            {selected.original_content ? (
-              <section className="space-y-1">
-                <h4 className="font-body text-meta font-semibold tracking-label uppercase text-outline">
-                  {t("originalContent")}
-                </h4>
-                <pre className="whitespace-pre-wrap break-words rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-body text-on-surface">
-                  {selected.original_content}
-                </pre>
-              </section>
-            ) : null}
             <p className="font-body text-meta text-on-surface-variant">
               {t("review.suggestedBy", { agent: selected.agent })}
             </p>
@@ -840,17 +846,18 @@ export function VaultReviewPanel() {
             {selected.related_task_id || "—"}
           </p>
           <p>
-            <span className="font-body text-outline uppercase">status: </span>
+            <span className="font-body text-outline uppercase">{t("review.statusLabel")} </span>
             {selected.status ?? "active"}
             {selected.archived_by ? ` · ${selected.archived_by}` : ""}
           </p>
-          {selected.original_content ? (
+          <section className="space-y-1" data-qa="review-inspector-masked-content">
+            <h4 className="font-body text-meta font-semibold tracking-label uppercase text-outline">
+              {t("review.maskedContent")}
+            </h4>
             <pre className="whitespace-pre-wrap break-words rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-body">
-              {selected.original_content}
+              {maskedReviewContent(selected) || "—"}
             </pre>
-          ) : (
-            <p className="font-body text-meta text-on-surface-variant">{t("originalContent")}: —</p>
-          )}
+          </section>
           <p className="font-body text-meta text-on-surface-variant">
             {t("review.suggestedBy", { agent: selected.agent })}
           </p>

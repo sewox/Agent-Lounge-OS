@@ -198,7 +198,8 @@ export const VAULT_REVIEW_SEED_EXPERIENCES: FixtureDataset["experiences"] = [
     archived_by: null,
     is_pinned: false,
     updated_at: new Date(Date.UTC(2026, 9, 19, 8, 0, 0)).toISOString(),
-    original_content: "raw had /Users/ci/projects/secret — masked for review. ".repeat(10).trim(),
+    // Pre-hygiene paths must never reach the review DOM — store only masked form.
+    original_content: "raw had <home>/projects/secret — masked for review. ".repeat(10).trim(),
     title: "Hygiene masked experience",
   },
   {

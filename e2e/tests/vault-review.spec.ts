@@ -115,12 +115,35 @@ test.describe("Vault Review UI", () => {
     expect(metrics.l5_pass).toBe(true);
   });
 
+  test("VR-LAYOUT · L1–L6 loading state", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "VR-LAYOUT-loading" });
+    await page.addInitScript(() => {
+      (window as Window & { __QA_FORCE_REVIEW_LOADING__?: boolean }).__QA_FORCE_REVIEW_LOADING__ =
+        true;
+    });
+    await openRoute(page, REVIEW, "full");
+    await expect(page.locator('[data-qa-vault-review="loading"]')).toBeVisible();
+    const metrics = await assertLayoutL1toL6(page, REVIEW, expect);
+    expect(metrics.l1_pass).toBe(true);
+    expect(metrics.l5_pass).toBe(true);
+  });
+
+  test("VR-LAYOUT · L1–L6 non-Tauri browser state", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "VR-LAYOUT-browser" });
+    await openRoute(page, REVIEW, "browser");
+    await expect(page.locator('[data-qa-vault-review="browser"]')).toBeVisible();
+    const metrics = await assertLayoutL1toL6(page, REVIEW, expect);
+    expect(metrics.l1_pass).toBe(true);
+    expect(metrics.l5_pass).toBe(true);
+  });
+
   test("VR-01 · badge navigates to review + counter matches list", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "VR-01" });
-    // Badge on default fixture (single unreviewed) navigates to review view.
+    // Non-interactive badge lives inside the vault nav Link → review view.
     await openRoute(page, "/dashboard", "full");
     const badge = page.locator('[data-qa="unreviewed-count"]');
     await expect(badge).toBeVisible();
+    await expect(badge).toHaveAttribute("aria-hidden", "true");
     await badge.click();
     await expect(page).toHaveURL(/\/vault\?view=review/);
     await expect(page.locator('[data-qa-vault-review="ready"]')).toBeVisible();
@@ -139,6 +162,18 @@ test.describe("Vault Review UI", () => {
     await expect(stripPending).toContainText(String(pendingCount));
     const rows = page.locator('[data-qa="vault-review-row"]');
     await expect(rows).toHaveCount(pendingCount);
+  });
+
+  test("VR-01b · count IPC failure shows unknown badge (not silent 0)", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "VR-01b" });
+    await page.addInitScript(() => {
+      (
+        window as Window & { __QA_FORCE_UNREVIEWED_COUNT_ERROR__?: boolean }
+      ).__QA_FORCE_UNREVIEWED_COUNT_ERROR__ = true;
+    });
+    await openRoute(page, "/dashboard", "full");
+    await expect(page.locator('[data-qa="unreviewed-count-unknown"]')).toBeVisible();
+    await expect(page.locator('[data-qa="unreviewed-count"]')).toHaveCount(0);
   });
 
   test("VR-02 · hygiene sorts first + approve/reject/undo", async ({ page }) => {
@@ -201,7 +236,9 @@ test.describe("Vault Review UI", () => {
     ).toBeVisible();
   });
 
-  test("VR-04 · axe main scope + dotted unreviewed badge", async ({ page }) => {
+  test("VR-04 · axe main + nav + dotted unreviewed + no home-path leak", async ({
+    page,
+  }) => {
     test.info().annotations.push({ type: "id", description: "VR-04" });
     await openReviewSeeded(page);
     await expect(page.locator('[data-qa="unreviewed-badge"]').first()).toBeVisible();
@@ -212,8 +249,20 @@ test.describe("Vault Review UI", () => {
     expect(badgeClass).toMatch(/border-dashed/);
     await revealDetail(page);
     await revealInspector(page);
-    const results = await new AxeBuilder({ page }).include("main").analyze();
-    expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);
+    await expect(page.locator('[data-qa="review-inspector-masked-content"]')).toBeVisible();
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText).not.toMatch(/\/Users\//);
+    expect(bodyText).not.toMatch(/\/home\//);
+    expect(bodyText).not.toMatch(/C:\\Users/i);
+    const mainResults = await new AxeBuilder({ page }).include("main").analyze();
+    expect(mainResults.violations, JSON.stringify(mainResults.violations, null, 2)).toEqual(
+      [],
+    );
+    await expect(page.locator('[data-qa="app-shell-nav"]')).toBeVisible();
+    const navResults = await new AxeBuilder({ page })
+      .include('[data-qa="app-shell-nav"]')
+      .analyze();
+    expect(navResults.violations, JSON.stringify(navResults.violations, null, 2)).toEqual([]);
   });
 
   test("VR-05 · StatsStrip filters + Halted still allows approve", async ({ page }) => {
