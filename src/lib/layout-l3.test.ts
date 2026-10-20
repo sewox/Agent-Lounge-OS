@@ -145,16 +145,36 @@ describe("L3 negative controls — must still FAIL", () => {
       },
     );
 
-    // opacity:0 stack with an otherwise visible child.
+    // opacity:0 stack with an otherwise visible child — sized so rejection is
+    // via opacity, not the zero-size check.
     withDom(
       `<!doctype html><html><body>
-        <div data-qa="status-banner-stack" style="opacity:0" data-rect="0,0,800,0">
+        <div data-qa="status-banner-stack" style="opacity:0" data-rect="0,0,800,400">
           <div data-rect="0,0,800,400">child</div>
         </div>
       </body></html>`,
       () => {
         const rects = collectStatusBannerRects();
         assert.equal(rects.length, 0, `opacity:0 stack must be empty, got ${JSON.stringify(rects)}`);
+      },
+    );
+
+    // opacity:0 ancestor *above* the stack — jsdom walk must reach documentElement.
+    withDom(
+      `<!doctype html><html><body>
+        <div style="opacity:0" data-rect="0,0,800,400">
+          <div data-qa="status-banner-stack" style="display:contents">
+            <div data-rect="0,0,800,400">child</div>
+          </div>
+        </div>
+      </body></html>`,
+      () => {
+        const rects = collectStatusBannerRects();
+        assert.equal(
+          rects.length,
+          0,
+          `opacity:0 ancestor above stack must be empty, got ${JSON.stringify(rects)}`,
+        );
       },
     );
 

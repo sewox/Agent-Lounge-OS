@@ -137,8 +137,12 @@ test.describe("ST — settings", () => {
     const visibleH = Math.min(box!.y + box!.height, vp.height) - Math.max(box!.y, 0);
     expect(visibleH, "routing table must expose ≥48px in the viewport").toBeGreaterThanOrEqual(48);
     const scrollable = await region.evaluate((el) => {
-      let node: HTMLElement | null = el;
+      let node: Element | null = el;
       while (node) {
+        if (!(node instanceof HTMLElement)) {
+          node = node.parentElement;
+          continue;
+        }
         const style = window.getComputedStyle(node);
         const oy = style.overflowY;
         if (
@@ -149,7 +153,7 @@ test.describe("ST — settings", () => {
         }
         node = node.parentElement;
       }
-      return el.scrollHeight > el.clientHeight + 1;
+      return el instanceof HTMLElement && el.scrollHeight > el.clientHeight + 1;
     });
     const bottom = box!.y + box!.height;
     // Keep prior −4px edge (stricter than +1): treat near-fold overflow as needing a scroll parent.
