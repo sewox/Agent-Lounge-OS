@@ -301,3 +301,6 @@ export type LoungeHealthReportFixture = {
   expected_lounge_mcp_version?: string | null;
   expected_lounge_mcp_sha256?: string | null;
 };
+
+/** TEMP negative proof for e2e tsc gate — revert after CI red. */
+export const __e2eTscNegativeProof: number = "not-a-number";
