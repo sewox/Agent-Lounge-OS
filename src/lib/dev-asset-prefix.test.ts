@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  assertDevPortFree,
   buildNextDevArgs,
+  DEFAULT_DEV_HOST,
+  DEFAULT_DEV_PORT,
   InvalidDevPortError,
+  PortInUseError,
   resolveDevAssetPrefix,
   resolveDevPort,
 } from "./dev-asset-prefix.ts";
@@ -15,11 +20,26 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const devPortMjs = path.join(root, "scripts/dev-port.mjs");
 const nextDevMjs = path.join(root, "scripts/next-dev.mjs");
 
+function listen(port: number, host: string): Promise<net.Server> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(port, host, () => resolve(server));
+  });
+}
+
+function closeServer(server: net.Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+}
+
 describe("dev assetPrefix / PORT — single source", () => {
-  it("defaults to 3000 when PORT is unset or empty/whitespace", () => {
-    assert.equal(resolveDevPort({}), "3000");
-    assert.equal(resolveDevPort({ PORT: "" }), "3000");
-    assert.equal(resolveDevPort({ PORT: "   " }), "3000");
+  it("defaults to DEFAULT_DEV_PORT when PORT is unset or empty/whitespace", () => {
+    assert.equal(DEFAULT_DEV_PORT, "3000");
+    assert.equal(resolveDevPort({}), DEFAULT_DEV_PORT);
+    assert.equal(resolveDevPort({ PORT: "" }), DEFAULT_DEV_PORT);
+    assert.equal(resolveDevPort({ PORT: "   " }), DEFAULT_DEV_PORT);
   });
 
   it("follows PORT for the non-prod assetPrefix", () => {
@@ -41,6 +61,20 @@ describe("dev assetPrefix / PORT — single source", () => {
     );
   });
 
+  it("uses DEFAULT_DEV_PORT / DEFAULT_DEV_HOST when assetPrefix opts omit them", () => {
+    assert.equal(
+      resolveDevAssetPrefix({ isProd: false }),
+      `http://${DEFAULT_DEV_HOST}:${DEFAULT_DEV_PORT}`,
+    );
+    const src = fs.readFileSync(
+      path.join(root, "src/lib/dev-asset-prefix.ts"),
+      "utf8",
+    );
+    assert.match(src, /DEFAULT_DEV_PORT/);
+    assert.match(src, /DEFAULT_DEV_HOST/);
+    assert.doesNotMatch(src, /\|\|\s*["']3000["']/);
+  });
+
   it("omits assetPrefix in production", () => {
     assert.equal(
       resolveDevAssetPrefix({ isProd: true, port: "4123" }),
@@ -57,7 +91,6 @@ describe("dev assetPrefix / PORT — single source", () => {
     assert.doesNotMatch(ts, /export function resolveDevPort/);
     const nextDev = fs.readFileSync(nextDevMjs, "utf8");
     assert.match(nextDev, /from\s+["']\.\/dev-port\.mjs["']/);
-    // No second resolver body in next-dev.
     assert.doesNotMatch(nextDev, /export function resolveDevPort/);
   });
 
@@ -170,5 +203,65 @@ describe("next-dev CLI arg passthrough", () => {
     assert.match(src, /buildNextDevArgs/);
     assert.match(src, /process\.argv\.slice\(2\)/);
     assert.match(src, /\[nextBin,\s*\.\.\.nextArgs\]/);
+  });
+});
+
+describe("busy port pre-flight", () => {
+  it("assertDevPortFree rejects with PortInUseError when the port is held", async () => {
+    const holder = await listen(0, DEFAULT_DEV_HOST);
+    const addr = holder.address();
+    assert.ok(addr && typeof addr === "object");
+    const port = addr.port;
+    try {
+      await assert.rejects(
+        () => assertDevPortFree(port, DEFAULT_DEV_HOST),
+        (err: unknown) => {
+          assert.ok(err instanceof PortInUseError);
+          assert.match((err as Error).message, new RegExp(String(port)));
+          assert.match((err as Error).message, /already in use/i);
+          assert.match((err as Error).message, /PORT=/);
+          return true;
+        },
+      );
+    } finally {
+      await closeServer(holder);
+    }
+  });
+
+  it("assertDevPortFree resolves when the port is free", async () => {
+    const probe = await listen(0, DEFAULT_DEV_HOST);
+    const addr = probe.address();
+    assert.ok(addr && typeof addr === "object");
+    const port = addr.port;
+    await closeServer(probe);
+    await assertDevPortFree(port, DEFAULT_DEV_HOST);
+  });
+
+  it("next-dev.mjs exits non-zero with a clear message when the port is busy", async () => {
+    const holder = await listen(0, DEFAULT_DEV_HOST);
+    const addr = holder.address();
+    assert.ok(addr && typeof addr === "object");
+    const port = addr.port;
+    try {
+      const result = spawnSync(process.execPath, [nextDevMjs], {
+        encoding: "utf8",
+        env: { ...process.env, PORT: String(port) },
+        // Pre-flight must fail before next starts — keep a tight bound, no sleeps.
+        timeout: 15_000,
+      });
+      assert.notEqual(
+        result.status,
+        0,
+        `expected non-zero exit; stdout=${result.stdout} stderr=${result.stderr}`,
+      );
+      const out = `${result.stdout}${result.stderr}`;
+      assert.match(out, new RegExp(String(port)));
+      assert.match(out, /already in use/i);
+      assert.match(out, /PORT=/);
+      // Must not have started a long-running next process (timeout would set status null/error).
+      assert.notEqual(result.signal, "SIGTERM");
+    } finally {
+      await closeServer(holder);
+    }
   });
 });

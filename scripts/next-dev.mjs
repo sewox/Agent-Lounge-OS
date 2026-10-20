@@ -2,29 +2,39 @@
  * Cross-platform `next dev` pinned to PORT (default 3000).
  * Works on macOS, Windows, and Linux without shell-specific ${PORT:-3000}.
  * Extra CLI args after the script are forwarded to `next dev`.
+ * Pre-flight bind check fails loudly if the port is busy (no fallback port).
  */
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  assertDevPortFree,
   buildNextDevArgs,
-  InvalidDevPortError,
+  resolveDevHost,
   resolveDevPort,
 } from "./dev-port.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function fail(err) {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+}
+
 let port;
 try {
   port = resolveDevPort(process.env);
 } catch (err) {
-  const message =
-    err instanceof InvalidDevPortError || err instanceof Error
-      ? err.message
-      : String(err);
-  console.error(message);
-  process.exit(1);
+  fail(err);
+}
+
+const host = resolveDevHost(process.env);
+
+try {
+  await assertDevPortFree(port, host);
+} catch (err) {
+  fail(err);
 }
 
 const extraArgs = process.argv.slice(2);

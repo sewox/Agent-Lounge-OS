@@ -203,7 +203,7 @@ HF deposu: [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/l
 
 | Değişken | Anlam |
 |----------|--------|
-| `PORT` | Next.js dev portu + `assetPrefix` (varsayılan **3000**). Tauri `devUrl` için ayrıca `--config` override gerekir — yukarıya bakın. |
+| `PORT` | Next.js dev portu + `assetPrefix` (varsayılan **3000**, geçerli aralık **1–65535**). Tauri `devUrl` için ayrıca `--config` override gerekir — yukarıya bakın. |
 | `LOUNGE_OLLAMA_PORT` | LMR portu (varsayılan **18790**) |
 | `LOUNGE_LMR_DIR` | LMR runtime (varsayılan `data/lmr`) |
 | `LOUNGE_LMR_BINARY` | LMR binary yolu |
