@@ -682,7 +682,10 @@ export function VaultReviewPanel() {
         </form>
       ) : (
         <>
-          <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
+          <div
+            tabIndex={0}
+            className="min-h-0 flex-1 space-y-3 overflow-auto p-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary"
+          >
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="rounded border border-outline-variant px-1.5 font-mono text-meta">
                 {selected.project_id}
@@ -813,7 +816,11 @@ export function VaultReviewPanel() {
   );
 
   const inspectorPane = (
-    <div className="flex h-full min-h-0 flex-col overflow-auto p-3" data-qa="vault-review-inspector">
+    <div
+      tabIndex={0}
+      data-qa="vault-review-inspector"
+      className="flex h-full min-h-0 flex-col overflow-auto p-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary"
+    >
       {!selected ? (
         <p className="font-body text-body text-on-surface-variant">{t("review.noSelection")}</p>
       ) : (
