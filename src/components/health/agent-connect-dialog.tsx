@@ -134,7 +134,8 @@ export function AgentConnectDialog({
             </p>
             <pre
               data-qa="connect-plan-diff"
-              className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface"
+              tabIndex={0}
+              className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
             >
               {plan.files
                 .map((f) => {
@@ -182,7 +183,8 @@ export function AgentConnectDialog({
           <>
             <pre
               data-qa="connect-print-payload"
-              className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface"
+              tabIndex={0}
+              className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-meta text-on-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
             >
               {JSON.stringify(printPayload, null, 2)}
             </pre>

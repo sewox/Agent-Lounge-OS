@@ -423,12 +423,12 @@ fn plan_rule_file(
         ConnectAction::Print => before_raw.clone(),
     };
     // Rule files are our text only — still mask any home substrings; no env secrets.
-    let entry_before = before_raw.as_ref().map(|s| {
-        Value::String(mask_home_in_text_local(s, &homes))
-    });
-    let entry_after = after_raw.as_ref().map(|s| {
-        Value::String(mask_home_in_text_local(s, &homes))
-    });
+    let entry_before = before_raw
+        .as_ref()
+        .map(|s| Value::String(mask_home_in_text_local(s, &homes)));
+    let entry_after = after_raw
+        .as_ref()
+        .map(|s| Value::String(mask_home_in_text_local(s, &homes)));
     let label = mask_path(&path, roots);
     let backup = if exists && action != ConnectAction::Print {
         Some(backup_sibling(&path))
@@ -1167,8 +1167,14 @@ mod tests {
             "no unmasked path key in plan IPC"
         );
         // Full file body fields must be gone.
-        assert!(!ipc.contains("\"before\""), "full before must not be serialized");
-        assert!(!ipc.contains("\"after\""), "full after must not be serialized");
+        assert!(
+            !ipc.contains("\"before\""),
+            "full before must not be serialized"
+        );
+        assert!(
+            !ipc.contains("\"after\""),
+            "full after must not be serialized"
+        );
         assert!(!ipc.contains("write_contents"));
 
         let file = &plan.files[0];
@@ -1192,12 +1198,18 @@ mod tests {
         assert!(!ui_s.contains(secret));
         assert!(!ui_s.contains(home_s.as_str()));
         assert!(ui_print.get("path_unmasked_for_cli").is_none());
-        assert!(ui_print["path"].as_str().unwrap().starts_with("~/") || ui_print["path"].as_str().unwrap().contains('~'));
+        assert!(
+            ui_print["path"].as_str().unwrap().starts_with("~/")
+                || ui_print["path"].as_str().unwrap().contains('~')
+        );
 
         let cli_print = print_agent_connect_for_cli(&roots, &o).unwrap();
         assert!(cli_print.get("path_unmasked_for_cli").is_some());
         let cli_s = serde_json::to_string(&cli_print).unwrap();
-        assert!(!cli_s.contains(secret), "CLI print must still redact env secrets");
+        assert!(
+            !cli_s.contains(secret),
+            "CLI print must still redact env secrets"
+        );
     }
 
     #[test]
