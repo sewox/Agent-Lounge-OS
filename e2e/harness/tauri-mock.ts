@@ -6,13 +6,6 @@ import { vaultMockBrowserSource } from "./vault-mock";
 
 export type FixtureName = "full" | "empty" | "browser" | "reject";
 
-/** Mirror Rust `strip_original_content_for_ui` — UI IPC never returns pre-hygiene body. */
-function stripOriginalContentForUi<T extends { original_content?: string | null }>(
-  row: T,
-): T {
-  return { ...row, original_content: null };
-}
-
 export type QaDestructiveRow = {
   id: string;
   kind: string;
@@ -92,6 +85,13 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return [];
         }
       })();
+
+    /** Mirror Rust `strip_original_content_for_ui` — must live inside init script (no module closure). */
+    function stripOriginalContentForUi<T extends { original_content?: string | null }>(
+      row: T,
+    ): T {
+      return { ...row, original_content: null };
+    }
 
     function persistIgnored(rows: FixtureDataset["deadSymbols"]) {
       (window as Window & { __QA_IGNORED_SYMBOLS__?: FixtureDataset["deadSymbols"] }).__QA_IGNORED_SYMBOLS__ =
