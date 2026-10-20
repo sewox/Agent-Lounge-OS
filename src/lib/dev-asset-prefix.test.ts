@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   resolveDevAssetPrefix,
   resolveDevPort,
@@ -51,10 +51,12 @@ describe("dev assetPrefix / PORT", () => {
   });
 
   it("scripts/dev-port.mjs matches resolveDevPort for the same PORT", () => {
+    // file:// URL required on Windows (absolute D:\ paths are not valid ESM import specifiers).
+    const moduleUrl = pathToFileURL(
+      path.join(root, "scripts/dev-port.mjs"),
+    ).href;
     const probe = `
-      import { resolveDevPort } from ${JSON.stringify(
-        path.join(root, "scripts/dev-port.mjs"),
-      )};
+      import { resolveDevPort } from ${JSON.stringify(moduleUrl)};
       const port = resolveDevPort({ PORT: process.env.PROBE_PORT });
       process.stdout.write(port);
     `;
