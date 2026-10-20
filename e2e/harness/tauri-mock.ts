@@ -386,6 +386,12 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return null;
         }
         case "count_unreviewed_experiences":
+          if (
+            (window as Window & { __QA_FORCE_UNREVIEWED_COUNT_ERROR__?: boolean })
+              .__QA_FORCE_UNREVIEWED_COUNT_ERROR__
+          ) {
+            throw new Error("unreviewed count unavailable");
+          }
           return f.experiences.filter(
             (row) => row.reviewed === false && (row.status ?? "active") === "active",
           ).length;
@@ -431,6 +437,14 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           return { pending, hygiene, approved_today, rejected };
         }
         case "list_review_queue": {
+          if (
+            (window as Window & { __QA_FORCE_REVIEW_LOADING__?: boolean })
+              .__QA_FORCE_REVIEW_LOADING__
+          ) {
+            return new Promise(() => {
+              /* intentionally never resolves — loading state e2e */
+            });
+          }
           if (
             (window as Window & { __QA_FORCE_REVIEW_ERROR__?: boolean })
               .__QA_FORCE_REVIEW_ERROR__

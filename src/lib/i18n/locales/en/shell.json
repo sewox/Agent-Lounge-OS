@@ -4,12 +4,17 @@
     "dashboard": "Dashboard",
     "stream": "Event Stream",
     "vault": "Knowledge Vault",
+    "vaultWithUnreviewed_one": "Knowledge Vault, {{count}} in review queue",
+    "vaultWithUnreviewed_other": "Knowledge Vault, {{count}} in review queue",
+    "vaultUnreviewedUnknown": "Knowledge Vault, review count unavailable",
     "health": "Project Health",
     "fleet": "Worker Fleet",
     "telemetry": "Telemetry",
     "quotas": "Quotas",
     "settings": "Settings"
   },
+  "reviewQueue": "Review queue",
+  "unreviewedCountUnknown": "Review count unavailable",
   "titles": {
     "/stream": "Event Stream",
     "/vault": "Knowledge Vault",

@@ -82,6 +82,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { t: ta } = useTranslation("approvals");
   const {
     unreviewedCount,
+    unreviewedCountStatus,
     report,
     kernel,
     model,
@@ -1047,16 +1048,22 @@ export function AppShell({ children }: { children: ReactNode }) {
               </div>
             </div>
           </div>
-          <nav className="space-y-0.5 font-label text-body">
+          <nav data-qa="app-shell-nav" className="space-y-0.5 font-label text-body">
             {NAV.map((item) => {
               const active =
                 pathname === item.href ||
                 (item.id === "vault" && pathname.startsWith("/vault")) ||
                 (item.id === "dashboard" && pathname === "/");
+              const vaultHref =
+                item.id === "vault" &&
+                unreviewedCountStatus === "ok" &&
+                unreviewedCount > 0
+                  ? "/vault?view=review"
+                  : item.href;
               return (
                 <Link
                   key={item.id}
-                  href={item.href}
+                  href={vaultHref}
                   className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body ${
                     active
                       ? "border-l-2 border-primary bg-surface-container-highest text-primary"
@@ -1067,20 +1074,33 @@ export function AppShell({ children }: { children: ReactNode }) {
                   <span className={`flex-1 font-body ${active ? "font-medium text-on-surface" : ""}`}>
                     {t(item.labelKey)}
                   </span>
-                  {item.id === "vault" && unreviewedCount > 0 ? (
-                    <button
-                      type="button"
-                      data-qa="unreviewed-count"
-                      title="Review queue"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        router.push("/vault?view=review");
-                      }}
-                      className="tnum min-w-[1.25rem] rounded-full border border-dashed border-on-secondary/80 bg-secondary px-1.5 py-0.5 text-center font-mono text-meta text-on-secondary hover:opacity-90"
-                    >
-                      {unreviewedCount}
-                    </button>
+                  {item.id === "vault" && unreviewedCountStatus === "ok" && unreviewedCount > 0 ? (
+                    <>
+                      <span className="sr-only">
+                        {t("nav.vaultWithUnreviewed", { count: unreviewedCount })}
+                      </span>
+                      <span
+                        data-qa="unreviewed-count"
+                        title={t("reviewQueue")}
+                        aria-hidden="true"
+                        className="tnum min-w-[1.25rem] rounded-full border border-dashed border-outline bg-surface-container-highest px-1.5 py-0.5 text-center font-mono text-meta font-semibold text-on-surface"
+                      >
+                        {unreviewedCount}
+                      </span>
+                    </>
+                  ) : null}
+                  {item.id === "vault" && unreviewedCountStatus === "error" ? (
+                    <>
+                      <span className="sr-only">{t("nav.vaultUnreviewedUnknown")}</span>
+                      <span
+                        data-qa="unreviewed-count-unknown"
+                        title={t("unreviewedCountUnknown")}
+                        aria-hidden="true"
+                        className="tnum min-w-[1.25rem] rounded-full border border-dashed border-outline bg-surface-container-highest px-1.5 py-0.5 text-center font-mono text-meta font-semibold text-on-surface"
+                      >
+                        ?
+                      </span>
+                    </>
                   ) : null}
                   {item.id === "stream" ? <span className="h-1.5 w-1.5 animate-ping rounded-full bg-primary" /> : null}
                 </Link>
