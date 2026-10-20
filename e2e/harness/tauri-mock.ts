@@ -281,7 +281,8 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               }
               return right.created_at.localeCompare(left.created_at);
             });
-          return rows.slice(offset, offset + limit).map(stripOriginalContentForUi);
+          // Keep original_content for drawer / restore (NB2) — only review-queue strips.
+          return rows.slice(offset, offset + limit);
         }
         case "count_experiences": {
           const includeArchived = Boolean(args?.includeArchived);
@@ -291,8 +292,7 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "get_experience": {
           const id = String(args?.id ?? "");
-          const row = f.experiences.find((item) => item.id === id) ?? null;
-          return row ? stripOriginalContentForUi(row) : null;
+          return f.experiences.find((item) => item.id === id) ?? null;
         }
         case "update_experience": {
           const id = String(args?.id ?? "");
@@ -563,14 +563,12 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
             throw new Error("search_experiences unavailable");
           }
           const q = String(args?.query ?? args?.q ?? "").toLowerCase();
-          const matched = !q
-            ? f.experiences
-            : f.experiences.filter((row) =>
-                `${row.adr_summary} ${row.project_id} ${row.agent} ${row.tags.join(" ")}`
-                  .toLowerCase()
-                  .includes(q),
-              );
-          return matched.map(stripOriginalContentForUi);
+          if (!q) return f.experiences;
+          return f.experiences.filter((row) =>
+            `${row.adr_summary} ${row.project_id} ${row.agent} ${row.tags.join(" ")}`
+              .toLowerCase()
+              .includes(q),
+          );
         }
         case "get_dead_symbols": {
           const ignored =

@@ -28,7 +28,7 @@ pub use experience_governance::{
     ArchiveClock, ExperienceUpdate, FakeClock, ReviewQueueFilter, ReviewStatFilter, ReviewStats,
     SearchRankKey, SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_MCP_QUALITY_V1,
     MIGRATION_PLACEHOLDER_CLEANUP_V1, MIGRATION_TITLE_BACKFILL_ENQUEUE_V1, REVIEW_SCORE_BAND,
-    SEARCH_SAME_PROJECT_BOOST, SETTING_EXPERIENCE_TTL_DAYS,
+    SETTING_EXPERIENCE_TTL_DAYS,
 };
 pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,

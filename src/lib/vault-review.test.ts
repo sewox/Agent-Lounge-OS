@@ -136,6 +136,7 @@ describe("vault-review masking", () => {
     assert.equal(redactHomePaths("C:/Users/sercan/dev"), "<home>/dev");
     assert.equal(redactHomePaths("/root"), "<home>");
     assert.equal(redactHomePaths("/root/.config"), "<home>/.config");
+    assert.equal(redactHomePaths("/rootfs/var/lib"), "/rootfs/var/lib");
     assert.equal(redactHomePaths("/var/home/fedora/work"), "<home>/work");
     const dirty = row({
       id: "x",

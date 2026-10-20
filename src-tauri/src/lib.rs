@@ -8,7 +8,7 @@ pub mod services;
 
 use std::path::PathBuf;
 
-use db::{strip_original_content_for_ui, strip_original_content_for_ui_vec, ExperienceStore};
+use db::{strip_original_content_for_ui_vec, ExperienceStore};
 use infra::BusManager;
 use kernel::{
     default_model_lock, inject_knowledge_hit, DecisionGate, DecisionGatePhase, DecisionGateStatus,
@@ -1208,16 +1208,16 @@ async fn list_experiences(
     include_archived: Option<bool>,
     offset: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
-    let rows = state
+    // Keep original_content for the experience drawer / restore (NB2).
+    // Only list_review_queue strips it.
+    state
         .list_experiences_page(
             limit.unwrap_or(20),
             include_archived.unwrap_or(false),
             offset.unwrap_or(0),
         )
         .await
-        .map_err(|err| err.to_string())?;
-    // B2: never send pre-hygiene original_content over UI IPC (MCP unchanged).
-    Ok(strip_original_content_for_ui_vec(rows))
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1236,8 +1236,8 @@ async fn get_experience(
     state: tauri::State<'_, ExperienceStore>,
     id: String,
 ) -> Result<Option<LoungeExperience>, String> {
-    let row = state.get(id).await.map_err(|err| err.to_string())?;
-    Ok(row.map(strip_original_content_for_ui))
+    // Drawer needs original_content for display + restore (NB2).
+    state.get(id).await.map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1371,6 +1371,7 @@ async fn list_review_queue(
         .list_review_queue(filter.unwrap_or_default())
         .await
         .map_err(|err| err.to_string())?;
+    // B2 / NB2: strip pre-hygiene original_content only on the review-queue path.
     Ok(strip_original_content_for_ui_vec(rows))
 }
 
@@ -1584,11 +1585,11 @@ async fn search_experiences(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<LoungeExperience>, String> {
-    let rows = state
+    // Same as list/get: preserve original_content for drawer/log fallbacks (NB2).
+    state
         .search_experiences(query, limit)
         .await
-        .map_err(|err| err.to_string())?;
-    Ok(strip_original_content_for_ui_vec(rows))
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

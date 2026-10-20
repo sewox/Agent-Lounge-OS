@@ -715,9 +715,8 @@ impl McpServer {
             }
         }
 
-        // VR4 / UD-5: relevance primary; `reviewed` only inside REVIEW_SCORE_BAND.
-        // Same-project preference is a soft score boost — never replaces relevance.
-        // Additive `reviewed` field below; never drop unreviewed from results.
+        // VR4 / UD-5: hard same-project first (main), then score buckets;
+        // `reviewed` only inside REVIEW_SCORE_BAND. Additive `reviewed` field below.
         crate::db::sort_experiences_for_search(
             &mut hits,
             &query,

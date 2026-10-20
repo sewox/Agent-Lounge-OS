@@ -62,7 +62,8 @@ export function redactHomePaths(text: string): string {
     .replace(/\/Users\/[^/\s]+/gi, "<home>")
     .replace(/\/var\/home\/[^/\s]+/gi, "<home>")
     .replace(/\/home\/[^/\s]+/gi, "<home>")
-    .replace(/\/root(?=\/|\s|$)/gi, "<home>");
+    // Boundary after "root" — never touch `/rootfs`.
+    .replace(/\/root(?=(?:\/|\s|$))/gi, "<home>");
 }
 
 /** Hygiene-masked body for the inspector (once). Never returns raw home paths. */

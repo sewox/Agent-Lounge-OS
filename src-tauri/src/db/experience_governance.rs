@@ -22,9 +22,6 @@ pub const DEFAULT_EXPERIENCE_TTL_DAYS: u64 = 90;
 /// order. Documented in `docs/mcp.md`.
 pub const REVIEW_SCORE_BAND: f64 = 0.05;
 
-/// Soft same-project preference applied on top of lexical relevance (MCP).
-pub const SEARCH_SAME_PROJECT_BOOST: f64 = 0.04;
-
 /// Clamp non-finite / negative scores so bucket math and `partial_cmp` stay total.
 pub fn normalize_search_score(score: f64) -> f64 {
     if !score.is_finite() || score < 0.0 {
@@ -76,6 +73,8 @@ pub fn lexical_search_score(query: &str, row: &LoungeExperience) -> f64 {
 /// One side of [`cmp_search_with_review_band`] (keeps the comparator ≤7 args for clippy).
 #[derive(Clone, Copy, Debug)]
 pub struct SearchRankKey<'a> {
+    /// Hard same-project tier (main behavior): prefer caller's project above buckets.
+    pub same_project: bool,
     pub score: f64,
     pub reviewed: bool,
     pub created_at: &'a str,
@@ -83,44 +82,46 @@ pub struct SearchRankKey<'a> {
 }
 
 /// Total order for MCP/search hits (never panics under `sort_by` since Rust 1.81):
-/// bucket desc → reviewed → score desc → created_at desc → id asc.
+/// same_project → bucket desc → reviewed → score desc → created_at desc → id asc.
 pub fn cmp_search_with_review_band(a: SearchRankKey<'_>, b: SearchRankKey<'_>) -> Ordering {
     let sa = normalize_search_score(a.score);
     let sb = normalize_search_score(b.score);
     let ba = review_score_bucket(sa);
     let bb = review_score_bucket(sb);
-    bb.cmp(&ba)
+    b.same_project
+        .cmp(&a.same_project)
+        .then_with(|| bb.cmp(&ba))
         .then_with(|| b.reviewed.cmp(&a.reviewed))
         .then_with(|| sb.partial_cmp(&sa).unwrap_or(Ordering::Equal))
         .then_with(|| b.created_at.cmp(a.created_at))
         .then_with(|| a.id.cmp(b.id))
 }
 
-/// Sort search hits: relevance bucket primary, `reviewed` only inside a bucket.
+/// Sort search hits: hard same-project first (main), then score buckets / reviewed.
 pub fn sort_experiences_for_search(
     hits: &mut [LoungeExperience],
     query: &str,
     prefer_project: Option<&str>,
 ) {
     hits.sort_by(|a, b| {
-        let mut sa = lexical_search_score(query, a);
-        let mut sb = lexical_search_score(query, b);
-        if let Some(pid) = prefer_project {
-            if a.project_id == pid {
-                sa = (sa + SEARCH_SAME_PROJECT_BOOST).min(1.0);
-            }
-            if b.project_id == pid {
-                sb = (sb + SEARCH_SAME_PROJECT_BOOST).min(1.0);
-            }
-        }
+        let sa = lexical_search_score(query, a);
+        let sb = lexical_search_score(query, b);
+        let same_a = prefer_project
+            .map(|pid| a.project_id == pid)
+            .unwrap_or(false);
+        let same_b = prefer_project
+            .map(|pid| b.project_id == pid)
+            .unwrap_or(false);
         cmp_search_with_review_band(
             SearchRankKey {
+                same_project: same_a,
                 score: sa,
                 reviewed: a.reviewed,
                 created_at: &a.created_at,
                 id: &a.id,
             },
             SearchRankKey {
+                same_project: same_b,
                 score: sb,
                 reviewed: b.reviewed,
                 created_at: &b.created_at,
@@ -1868,12 +1869,14 @@ mod tests {
         assert_eq!(
             cmp_search_with_review_band(
                 SearchRankKey {
+                    same_project: false,
                     score: 0.80,
                     reviewed: true,
                     created_at: "a",
                     id: "id-a",
                 },
                 SearchRankKey {
+                    same_project: false,
                     score: 0.80 + REVIEW_SCORE_BAND / 2.0,
                     reviewed: false,
                     created_at: "z",
@@ -1886,12 +1889,14 @@ mod tests {
         assert_eq!(
             cmp_search_with_review_band(
                 SearchRankKey {
+                    same_project: false,
                     score: 0.95,
                     reviewed: false,
                     created_at: "a",
                     id: "id-a",
                 },
                 SearchRankKey {
+                    same_project: false,
                     score: 0.40,
                     reviewed: true,
                     created_at: "z",
@@ -1902,18 +1907,21 @@ mod tests {
         );
         // Cycle repro from review: A(0.80,rev), B(0.84), C(0.88,older) — total order.
         let a = SearchRankKey {
+            same_project: false,
             score: 0.80,
             reviewed: true,
             created_at: "2026-01-01",
             id: "a",
         };
         let b = SearchRankKey {
+            same_project: false,
             score: 0.84,
             reviewed: false,
             created_at: "2026-06-01",
             id: "b",
         };
         let c = SearchRankKey {
+            same_project: false,
             score: 0.88,
             reviewed: false,
             created_at: "2025-01-01",
@@ -1923,6 +1931,58 @@ mod tests {
         assert_eq!(cmp_search_with_review_band(c, a), Ordering::Less);
         assert_eq!(cmp_search_with_review_band(c, b), Ordering::Less);
         assert_eq!(cmp_search_with_review_band(a, b), Ordering::Less);
+    }
+
+    #[test]
+    fn same_project_hard_tier_outranks_higher_score_other_project() {
+        use super::{cmp_search_with_review_band, sort_experiences_for_search, SearchRankKey};
+        use crate::models::LoungeExperience;
+        use std::cmp::Ordering;
+        // Weak same-project beat strong other-project (main hard tier).
+        assert_eq!(
+            cmp_search_with_review_band(
+                SearchRankKey {
+                    same_project: true,
+                    score: 0.20,
+                    reviewed: false,
+                    created_at: "a",
+                    id: "same",
+                },
+                SearchRankKey {
+                    same_project: false,
+                    score: 0.99,
+                    reviewed: true,
+                    created_at: "z",
+                    id: "other",
+                },
+            ),
+            Ordering::Less
+        );
+
+        let mut hits = vec![
+            LoungeExperience {
+                id: "other-hi".into(),
+                project_id: "other".into(),
+                title: "needle-xyz".into(),
+                adr_summary: "needle-xyz strong".into(),
+                reviewed: true,
+                created_at: "2026-01-02T00:00:00Z".into(),
+                ..Default::default()
+            },
+            LoungeExperience {
+                id: "same-lo".into(),
+                project_id: "mine".into(),
+                title: "unrelated".into(),
+                adr_summary: "weak".into(),
+                tags: vec!["needle-xyz".into()],
+                reviewed: false,
+                created_at: "2026-01-01T00:00:00Z".into(),
+                ..Default::default()
+            },
+        ];
+        sort_experiences_for_search(&mut hits, "needle-xyz", Some("mine"));
+        assert_eq!(hits[0].id, "same-lo", "same project must hard-rank first");
+        assert_eq!(hits[1].id, "other-hi");
     }
 
     #[test]
@@ -1963,6 +2023,7 @@ mod tests {
 
         #[derive(Clone, Debug)]
         struct Hit {
+            same_project: bool,
             score: f64,
             reviewed: bool,
             created: String,
@@ -1972,12 +2033,14 @@ mod tests {
         fn cmp_hit(a: &Hit, b: &Hit) -> Ordering {
             cmp_search_with_review_band(
                 SearchRankKey {
+                    same_project: a.same_project,
                     score: a.score,
                     reviewed: a.reviewed,
                     created_at: &a.created,
                     id: &a.id,
                 },
                 SearchRankKey {
+                    same_project: b.same_project,
                     score: b.score,
                     reviewed: b.reviewed,
                     created_at: &b.created,
@@ -2009,6 +2072,7 @@ mod tests {
                     _ => raw,
                 };
                 hits.push(Hit {
+                    same_project: next_u64() % 2 == 0,
                     score,
                     reviewed: next_u64() % 2 == 0,
                     created: format!(
@@ -2053,9 +2117,12 @@ mod tests {
                 }
             }
 
-            // ≥2 bucket gap ⇒ higher raw (normalized) score always first.
+            // ≥2 bucket gap within the same project tier ⇒ higher score first.
             for a in &hits {
                 for b in &hits {
+                    if a.same_project != b.same_project {
+                        continue;
+                    }
                     let sa = normalize_search_score(a.score);
                     let sb = normalize_search_score(b.score);
                     let ba = review_score_bucket(sa);

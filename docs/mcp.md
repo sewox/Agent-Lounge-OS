@@ -221,18 +221,18 @@ LOUNGE_MCP_STANDALONE=1 cargo run --manifest-path src-tauri/Cargo.toml --bin lou
 
 Ranking uses a **total order** (safe for Rust 1.81+ `sort_by`):
 
-1. **Bucket** desc — `bucket = floor(normalize(score) / REVIEW_SCORE_BAND)`
-2. **`reviewed`** — approved before unreviewed (same bucket only)
-3. **Score** desc (tie-break inside the bucket)
-4. **`created_at`** desc
-5. **`id`** asc (final total-order key)
+1. **Same project** — caller's project hard-first (main behavior; not a soft score boost)
+2. **Bucket** desc — `bucket = floor(normalize(score) / REVIEW_SCORE_BAND)`
+3. **`reviewed`** — approved before unreviewed (same bucket only)
+4. **Score** desc (tie-break inside the bucket)
+5. **`created_at`** desc
+6. **`id`** asc (final total-order key)
 
 `normalize(score)` clamps NaN / −∞ / negative to `0.0`. A gap of **≥ 2 buckets** always ranks the higher score first, regardless of `reviewed`. Same-bucket pairs may re-order by approval without forming cycles.
 
 | Constant | Value | Role |
 |----------|-------|------|
 | `REVIEW_SCORE_BAND` | `0.05` | Width of one relevance **bucket**. `reviewed` is only a tiebreaker **inside** the same bucket — never across buckets. |
-| `SEARCH_SAME_PROJECT_BOOST` | `0.04` | Soft preference for the caller's project; never replaces relevance. |
 
 Defined in `src-tauri/src/db/experience_governance.rs` (`lexical_search_score`, `review_score_bucket`, `cmp_search_with_review_band`, `sort_experiences_for_search`).
 

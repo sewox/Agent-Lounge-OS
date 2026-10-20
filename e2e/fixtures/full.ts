@@ -128,7 +128,11 @@ const experiences: FixtureDataset["experiences"] = [
     archived_by: i === 15 ? "ttl" : null,
     is_pinned: i === 2,
     updated_at: new Date(Date.UTC(2026, 8, 18, 8 + i, 10, 0)).toISOString(),
-    original_content: null,
+    // exp-1 keeps a distinct original so the drawer can show + restore it (NB2).
+    original_content:
+      i === 0
+        ? "ORIGINAL BODY before edit — Indexed dispatcher.rs snapshot for restore."
+        : null,
   })),
   // Extra Agent-Lounge-OS experiences so drill-down lists stay >12 (EX-08).
   ...Array.from({ length: 12 }, (_, i) => ({
