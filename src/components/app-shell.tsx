@@ -44,6 +44,7 @@ import {
   type ServiceHealth,
   type ToolQuota,
 } from "@/lib/lounge";
+import { useAlertdialogFocusTrap } from "@/hooks/use-alertdialog-focus-trap";
 import { usePlatform } from "@/hooks/use-platform";
 import { paletteShortcutLabel } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
@@ -129,9 +130,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const shortcutLabel = paletteShortcutLabel(platform);
   const alertRef = useRef<HTMLDivElement | null>(null);
   const destructiveDialogRef = useRef<HTMLDivElement | null>(null);
-  const destructivePreviousFocus = useRef<HTMLElement | null>(null);
   const haltDialogRef = useRef<HTMLDivElement | null>(null);
-  const haltPreviousFocus = useRef<HTMLElement | null>(null);
   const layaPhase = useRef(decisionGate?.phase);
 
   useEffect(() => {
@@ -265,130 +264,35 @@ export function AppShell({ children }: { children: ReactNode }) {
   const quotaHold = Boolean(approval && isQuotaApproval(approval.kind));
   const destructiveHold = Boolean(headDestructive);
 
-  // Destructive alertdialog: initial focus, Esc → reject, Tab focus trap.
-  useEffect(() => {
-    if (!destructiveHold || !headDestructive) {
-      return;
-    }
-    const pendingId = headDestructive.id;
-    destructivePreviousFocus.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  // Destructive alertdialog: sync initial focus + Tab trap (no setTimeout boot).
+  // instanceKey = pending id so FIFO advance re-focuses Reject once, still sync.
+  useAlertdialogFocusTrap({
+    open: Boolean(destructiveHold && headDestructive),
+    instanceKey: headDestructive?.id ?? null,
+    containerRef: destructiveDialogRef,
+    initialFocusSelector: '[data-qa="destructive-reject"]',
+    escapeEnabled: true,
+    onEscape: () => {
+      if (headDestructive) {
+        void resolveDestructive(headDestructive.id, false);
+      }
+    },
+  });
 
-    function focusableNodes(): HTMLElement[] {
-      if (!destructiveDialogRef.current) {
-        return [];
-      }
-      return [
-        ...destructiveDialogRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ].filter((node) => !node.hasAttribute("disabled") && node.tabIndex !== -1);
-    }
-
-    const boot = window.setTimeout(() => {
-      const rejectBtn = destructiveDialogRef.current?.querySelector<HTMLElement>(
-        '[data-qa="destructive-reject"]',
-      );
-      (rejectBtn ?? destructiveDialogRef.current?.querySelector<HTMLElement>("button"))?.focus();
-    }, 0);
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        void resolveDestructive(pendingId, false);
-        return;
-      }
-      if (event.key !== "Tab") {
-        return;
-      }
-      const focusable = focusableNodes();
-      if (focusable.length === 0) {
-        return;
-      }
-      const first = focusable[0]!;
-      const last = focusable[focusable.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      window.clearTimeout(boot);
-      window.removeEventListener("keydown", onKeyDown, true);
-      destructivePreviousFocus.current?.focus();
-    };
-  }, [destructiveHold, headDestructive, resolveDestructive]);
-
-  // Halt/Resume alertdialog: Escape closes, Tab focus trap.
-  useEffect(() => {
-    if (!haltDialog) {
-      return;
-    }
-    haltPreviousFocus.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-    function focusableNodes(): HTMLElement[] {
-      if (!haltDialogRef.current) {
-        return [];
-      }
-      return [
-        ...haltDialogRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ].filter((node) => !node.hasAttribute("disabled") && node.tabIndex !== -1);
-    }
-
-    const boot = window.setTimeout(() => {
-      const cancelBtn = haltDialogRef.current?.querySelector<HTMLElement>(
-        '[data-qa="halt-dialog-cancel"]',
-      );
-      const input = haltDialogRef.current?.querySelector<HTMLElement>(
-        '[data-qa="halt-reason-input"]',
-      );
-      (input ?? cancelBtn ?? haltDialogRef.current?.querySelector<HTMLElement>("button"))?.focus();
-    }, 0);
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!haltBusy) {
-          setHaltDialog(null);
-          setHaltError(null);
-        }
-        return;
-      }
-      if (event.key !== "Tab") {
-        return;
-      }
-      const focusable = focusableNodes();
-      if (focusable.length === 0) {
-        return;
-      }
-      const first = focusable[0]!;
-      const last = focusable[focusable.length - 1]!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      window.clearTimeout(boot);
-      window.removeEventListener("keydown", onKeyDown, true);
-      haltPreviousFocus.current?.focus();
-    };
-  }, [haltDialog, haltBusy]);
+  // Halt/Resume alertdialog: sync initial focus + Tab trap.
+  // Depends only on open (+ mode); haltBusy is escapeEnabled via ref so a busy
+  // toggle cannot re-run boot focus or restore the trigger mid-dialog.
+  useAlertdialogFocusTrap({
+    open: haltDialog !== null,
+    instanceKey: haltDialog,
+    containerRef: haltDialogRef,
+    initialFocusSelector: '[data-qa="halt-reason-input"]',
+    escapeEnabled: !haltBusy,
+    onEscape: () => {
+      setHaltDialog(null);
+      setHaltError(null);
+    },
+  });
 
   const serviceDegraded = coreServicesDegraded(report);
   const degradedNames = degradedCoreServiceNames(report);
