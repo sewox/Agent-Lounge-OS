@@ -374,8 +374,7 @@ export function VaultReviewPanel() {
     );
   }
 
-  const listPane = (
-    <div className="flex h-full min-h-0 flex-col">
+  const statsAndFilters = (
       <div className="shrink-0 space-y-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
         <h2
           id={listLabelId}
@@ -464,18 +463,37 @@ export function VaultReviewPanel() {
           })}
         </p>
       </div>
+  );
 
-      {state.phase === "empty" ? (
+  if (state.phase === "empty") {
+    // Single panel — honest empty (no three-slot empty frames / spacer inflation).
+    // Fill remaining main height so L2/L3 occupancy matches Health ignore empty.
+    return (
+      <section
+        data-qa="panel"
+        data-qa-vault-review="empty"
+        className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+      >
+        {statsAndFilters}
         <div
           data-qa="vault-review-empty"
-          className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center"
+          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 py-8 text-center"
         >
           <p className="max-w-sm font-body text-body text-on-surface">{t("review.empty")}</p>
           <p className="max-w-sm font-body text-meta text-on-surface-variant">
             {t("review.emptyHint")}
           </p>
+          <p className="max-w-md font-mono text-meta text-outline">
+            {t("review.pendingCount", { count: 0 })}
+          </p>
         </div>
-      ) : (
+      </section>
+    );
+  }
+
+  const listPane = (
+    <div className="flex h-full min-h-0 flex-col">
+      {statsAndFilters}
         <div
           role="group"
           tabIndex={0}
@@ -560,7 +578,6 @@ export function VaultReviewPanel() {
             );
           })}
         </div>
-      )}
 
       {checkedIds.length > 0 && statId !== "rejected" && statId !== "approved_today" ? (
         <StickyActionBar
@@ -692,6 +709,27 @@ export function VaultReviewPanel() {
                 {selected.adr_summary || t("noAdr")}
               </pre>
             </section>
+            {selected.original_content ? (
+              <section className="space-y-1">
+                <h4 className="font-body text-meta font-semibold tracking-label uppercase text-outline">
+                  {t("originalContent")}
+                </h4>
+                <pre className="whitespace-pre-wrap break-words rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-body text-on-surface">
+                  {selected.original_content}
+                </pre>
+              </section>
+            ) : null}
+            <p className="font-body text-meta text-on-surface-variant">
+              {t("review.suggestedBy", { agent: selected.agent })}
+            </p>
+            <p className="font-mono text-meta text-outline">
+              {selected.project_id} · {selected.outcome} · {formatExperienceTime(selected.created_at)}
+            </p>
+            <p className="font-body text-meta text-on-surface-variant">{t("useCount")}: {selected.use_count ?? 0}</p>
+            <p className="font-body text-meta text-on-surface-variant">
+              {t("lastUsed")}:{" "}
+              {selected.last_used_at ? formatExperienceTime(selected.last_used_at) : "—"}
+            </p>
             {experienceHasHygieneMask(selected) ? (
               <section
                 data-qa="review-hygiene-findings"
@@ -746,7 +784,7 @@ export function VaultReviewPanel() {
                   type="button"
                   data-qa="review-reject"
                   disabled={busy}
-                  onClick={() => setConfirm("reject")}
+                  onClick={() => void runReject([selected.id])}
                   className="min-h-8 rounded border border-error/50 px-3 py-1 font-body text-body text-error"
                 >
                   {t("review.reject")}
@@ -773,45 +811,52 @@ export function VaultReviewPanel() {
       {!selected ? (
         <p className="font-body text-body text-on-surface-variant">{t("review.noSelection")}</p>
       ) : (
-        <dl className="space-y-2 font-mono text-meta text-on-surface">
-          <div>
-            <dt className="text-outline uppercase">{t("metadata")}</dt>
-            <dd data-qa="review-inspector-id">{selected.id}</dd>
-          </div>
-          <div>
-            <dt className="text-outline uppercase">{t("useCount")}</dt>
-            <dd>{selected.use_count ?? 0}</dd>
-          </div>
-          <div>
-            <dt className="text-outline uppercase">{t("lastUsed")}</dt>
-            <dd>{selected.last_used_at ? formatExperienceTime(selected.last_used_at) : "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-outline uppercase">{t("updated")}</dt>
-            <dd>{selected.updated_at ? formatExperienceTime(selected.updated_at) : "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-outline uppercase">{t("source")}</dt>
-            <dd>{selected.source || "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-outline uppercase">{t("relatedTask")}</dt>
-            <dd>{selected.related_task_id || "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-outline uppercase">status</dt>
-            <dd>
-              {selected.status ?? "active"}
-              {selected.archived_by ? ` · ${selected.archived_by}` : ""}
-            </dd>
-          </div>
+        <div className="space-y-3 font-mono text-meta text-on-surface">
+          <h3 className="font-body text-panel font-semibold tracking-label uppercase text-outline">
+            {t("metadata")}
+          </h3>
+          <p data-qa="review-inspector-id" className="break-all">
+            <span className="font-body text-outline uppercase">{t("metadata")}: </span>
+            {selected.id}
+          </p>
+          <p>
+            <span className="font-body text-outline uppercase">{t("useCount")}: </span>
+            {selected.use_count ?? 0}
+          </p>
+          <p>
+            <span className="font-body text-outline uppercase">{t("lastUsed")}: </span>
+            {selected.last_used_at ? formatExperienceTime(selected.last_used_at) : "—"}
+          </p>
+          <p>
+            <span className="font-body text-outline uppercase">{t("updated")}: </span>
+            {selected.updated_at ? formatExperienceTime(selected.updated_at) : "—"}
+          </p>
+          <p>
+            <span className="font-body text-outline uppercase">{t("source")}: </span>
+            {selected.source || "—"}
+          </p>
+          <p>
+            <span className="font-body text-outline uppercase">{t("relatedTask")}: </span>
+            {selected.related_task_id || "—"}
+          </p>
+          <p>
+            <span className="font-body text-outline uppercase">status: </span>
+            {selected.status ?? "active"}
+            {selected.archived_by ? ` · ${selected.archived_by}` : ""}
+          </p>
           {selected.original_content ? (
-            <div>
-              <dt className="text-outline uppercase">{t("originalContent")}</dt>
-              <dd className="whitespace-pre-wrap break-words">{selected.original_content}</dd>
-            </div>
-          ) : null}
-        </dl>
+            <pre className="whitespace-pre-wrap break-words rounded border border-outline-variant/40 bg-surface-container-low p-2 font-mono text-body">
+              {selected.original_content}
+            </pre>
+          ) : (
+            <p className="font-body text-meta text-on-surface-variant">{t("originalContent")}: —</p>
+          )}
+          <p className="font-body text-meta text-on-surface-variant">
+            {t("review.suggestedBy", { agent: selected.agent })}
+          </p>
+          <p className="font-mono text-meta text-outline">{selected.project_id}</p>
+          <p className="font-mono text-meta text-outline">{selected.outcome}</p>
+        </div>
       )}
     </div>
   );
@@ -821,7 +866,13 @@ export function VaultReviewPanel() {
       data-qa-vault-review={state.phase}
       className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
     >
-      <PanelGrid className="min-h-0 flex-1" list={listPane} detail={detailPane} inspector={inspectorPane} />
+      {/* Same PanelGrid L2 occupancy pattern as AgentsHealthPanel. */}
+      <PanelGrid
+        className="min-h-[28rem] flex-1"
+        list={listPane}
+        detail={detailPane}
+        inspector={inspectorPane}
+      />
 
       {confirm ? (
         <div

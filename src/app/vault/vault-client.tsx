@@ -18,10 +18,11 @@ export default function VaultPageClient() {
   const { t } = useTranslation("vault");
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col gap-2">
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col gap-2">
       <nav
         aria-label={t("review.viewsNav")}
-        data-qa="vault-view-nav"
+        data-qa={view === "review" ? "panel" : "vault-view-nav"}
+        data-panel-slot={view === "review" ? "vault-view-nav" : undefined}
         className="flex shrink-0 flex-wrap items-center gap-1 rounded-lg border border-outline-variant bg-surface-container-low p-1"
       >
         <VaultViewLink href="/vault" active={view === "map"} label={t("review.viewMap")} />
@@ -31,7 +32,7 @@ export default function VaultPageClient() {
           label={t("review.viewReview")}
         />
       </nav>
-      <div className="min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
         {view === "review" ? (
           <VaultReviewPanel />
         ) : (

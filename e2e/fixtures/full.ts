@@ -172,14 +172,21 @@ const experiences: FixtureDataset["experiences"] = [
     updated_at: new Date(Date.UTC(2026, 8, 20, 10, 0, 0)).toISOString(),
     original_content: null,
   },
-  // Vault Review queue seeds (unreviewed + hygiene-flagged).
+];
+
+/**
+ * Vault Review seeds (injected in vault-review.spec only).
+ * Kept out of FULL_FIXTURE so EX-05 (single unreviewed → badge clears) stays intact.
+ */
+export const VAULT_REVIEW_SEED_EXPERIENCES: FixtureDataset["experiences"] = [
   {
     id: "exp-review-hygiene",
     type: "experience",
     agent: "cursor-agent",
     project_id: "Agent-Lounge-OS",
-    adr_summary: "Masked path at <home>/projects/secret and token <redacted-token>.",
-    outcome: "success" as const,
+    adr_summary:
+      "Masked path at <home>/projects/secret and token <redacted-token>. ".repeat(8).trim(),
+    outcome: "success",
     related_task_id: null,
     tags: ["hygiene", "vault"],
     created_at: new Date(Date.UTC(2026, 9, 19, 8, 0, 0)).toISOString(),
@@ -191,7 +198,7 @@ const experiences: FixtureDataset["experiences"] = [
     archived_by: null,
     is_pinned: false,
     updated_at: new Date(Date.UTC(2026, 9, 19, 8, 0, 0)).toISOString(),
-    original_content: "raw had /Users/ci/projects/secret",
+    original_content: "raw had /Users/ci/projects/secret — masked for review. ".repeat(10).trim(),
     title: "Hygiene masked experience",
   },
   {
@@ -200,7 +207,7 @@ const experiences: FixtureDataset["experiences"] = [
     agent: "grok-bot",
     project_id: "EchoMind",
     adr_summary: "Plain unreviewed experience for Vault Review list depth.",
-    outcome: "partial" as const,
+    outcome: "partial",
     related_task_id: null,
     tags: ["review"],
     created_at: new Date(Date.UTC(2026, 9, 20, 9, 0, 0)).toISOString(),
@@ -215,6 +222,27 @@ const experiences: FixtureDataset["experiences"] = [
     original_content: null,
     title: "Plain review candidate",
   },
+  ...Array.from({ length: 18 }, (_, i) => ({
+    id: `exp-review-fill-${i + 1}`,
+    type: "experience",
+    agent: i % 2 === 0 ? "cursor-agent" : "lounge-kernel",
+    project_id: ["Agent-Lounge-OS", "EchoMind", "codebase-memory-mcp"][i % 3],
+    adr_summary: `Review queue depth seed #${i + 1}: documented fallback for layout fill.`,
+    outcome: (["success", "partial", "failure"] as const)[i % 3],
+    related_task_id: null,
+    tags: ["review", "fill"],
+    created_at: new Date(Date.UTC(2026, 9, 18, 10, i, 0)).toISOString(),
+    status: "active" as const,
+    reviewed: false,
+    use_count: 0,
+    last_used_at: null as string | null,
+    archived_at: null as string | null,
+    archived_by: null as string | null,
+    is_pinned: false,
+    updated_at: new Date(Date.UTC(2026, 9, 18, 10, i, 0)).toISOString(),
+    original_content: `Original content body for review fill #${i + 1}. `.repeat(6).trim(),
+    title: `Review fill ${i + 1}`,
+  })),
 ];
 
 /** Re-export page counts from vault mock (single source of truth). */

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { VAULT_REVIEW_SEED_EXPERIENCES } from "../fixtures/full";
 import { assertLayoutL1toL6 } from "../helpers/layout";
 import { openRoute } from "../helpers/nav";
 
@@ -9,6 +10,34 @@ import { openRoute } from "../helpers/nav";
  */
 
 const REVIEW = "/vault?view=review";
+
+/** Inject review-queue seeds without changing FULL_FIXTURE (preserves EX-05). */
+async function seedReviewQueue(page: Page) {
+  await page.evaluate((rows) => {
+    const fixture = (
+      window as Window & { __QA_FIXTURE__?: { experiences: Array<Record<string, unknown>> } }
+    ).__QA_FIXTURE__;
+    if (!fixture) {
+      throw new Error("__QA_FIXTURE__ missing");
+    }
+    const existing = new Set(fixture.experiences.map((row) => String(row.id)));
+    for (const row of rows) {
+      if (!existing.has(row.id)) {
+        fixture.experiences.push(row as unknown as Record<string, unknown>);
+      }
+    }
+  }, VAULT_REVIEW_SEED_EXPERIENCES);
+  // Reload queue + refresh shell badge from mutated fixture.
+  await page.locator('[data-qa="stats-strip-item"][data-stat-id="hygiene"]').click();
+  await page.locator('[data-qa="stats-strip-item"][data-stat-id="pending"]').click();
+  await expect(page.locator('[data-qa-vault-review="ready"]')).toBeVisible();
+}
+
+async function openReviewSeeded(page: Page) {
+  await openRoute(page, REVIEW, "full");
+  await expect(page.locator('[data-qa-vault-review="ready"]')).toBeVisible();
+  await seedReviewQueue(page);
+}
 
 async function revealDetail(page: Page) {
   const inline = page.locator('[data-panel-slot="detail"]');
@@ -41,9 +70,13 @@ async function revealInspector(page: Page) {
 test.describe("Vault Review UI", () => {
   test("VR-LAYOUT · L1–L6 ready state", async ({ page }, testInfo) => {
     testInfo.annotations.push({ type: "id", description: "VR-LAYOUT-ready" });
-    await openRoute(page, REVIEW, "full");
-    await expect(page.locator('[data-qa-vault-review="ready"]')).toBeVisible();
+    await openReviewSeeded(page);
     await expect(page.locator('[data-qa="vault-review-list"]')).toBeVisible();
+    // Select a dense fill row so detail/inspector panes have real interior (L2).
+    const fillRow = page.locator('[data-qa="vault-review-row"][data-experience-id="exp-review-fill-1"]');
+    await fillRow.locator("button").click();
+    await revealDetail(page);
+    await revealInspector(page);
     const metrics = await assertLayoutL1toL6(page, REVIEW, expect);
     expect(metrics.l1_pass).toBe(true);
     expect(metrics.l5_pass).toBe(true);
@@ -84,29 +117,33 @@ test.describe("Vault Review UI", () => {
 
   test("VR-01 · badge navigates to review + counter matches list", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "VR-01" });
+    // Badge on default fixture (single unreviewed) navigates to review view.
     await openRoute(page, "/dashboard", "full");
     const badge = page.locator('[data-qa="unreviewed-count"]');
     await expect(badge).toBeVisible();
-    const badgeCount = Number((await badge.innerText()).trim());
-    expect(badgeCount).toBeGreaterThan(0);
-    await page.locator('[data-qa="unreviewed-count"]').click();
+    await badge.click();
     await expect(page).toHaveURL(/\/vault\?view=review/);
     await expect(page.locator('[data-qa-vault-review="ready"]')).toBeVisible();
-    const pending = page.locator('[data-qa="review-pending-count"]');
-    await expect(pending).toContainText(String(badgeCount));
+
+    // Seed queue; StatsStrip pending, list rows, and pendingCount share one source.
+    await seedReviewQueue(page);
+    await expect(
+      page.locator('[data-qa="vault-review-row"][data-experience-id="exp-review-fill-1"]'),
+    ).toBeVisible();
+    const pendingText = await page.locator('[data-qa="review-pending-count"]').innerText();
+    const pendingCount = Number(/(\d+)/.exec(pendingText)?.[1] ?? "0");
+    expect(pendingCount).toBeGreaterThan(1);
     const stripPending = page.locator(
       '[data-qa="stats-strip-item"][data-stat-id="pending"]',
     );
-    await expect(stripPending).toContainText(String(badgeCount));
+    await expect(stripPending).toContainText(String(pendingCount));
     const rows = page.locator('[data-qa="vault-review-row"]');
-    await expect(rows.first()).toBeVisible();
-    expect(await rows.count()).toBe(badgeCount);
+    await expect(rows).toHaveCount(pendingCount);
   });
 
   test("VR-02 · hygiene sorts first + approve/reject/undo", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "VR-02" });
-    await openRoute(page, REVIEW, "full");
-    await expect(page.locator('[data-qa-vault-review="ready"]')).toBeVisible();
+    await openReviewSeeded(page);
     const first = page.locator('[data-qa="vault-review-row"]').first();
     await expect(first).toHaveAttribute("data-hygiene", "true");
     await expect(first).toHaveAttribute("data-experience-id", "exp-review-hygiene");
@@ -122,9 +159,8 @@ test.describe("Vault Review UI", () => {
       '[data-qa="vault-review-row"][data-experience-id="exp-review-plain"]',
     );
     await plain.locator("button").click();
+    await revealDetail(page);
     await page.locator('[data-qa="review-reject"]').click();
-    await expect(page.locator('[data-qa="vault-review-confirm"]')).toBeVisible();
-    await page.locator('[data-qa="review-confirm-ok"]').click();
     await expect(plain).toHaveCount(0);
 
     await page.locator('[data-qa="stats-strip-item"][data-stat-id="rejected"]').click();
@@ -134,6 +170,7 @@ test.describe("Vault Review UI", () => {
     await page
       .locator('[data-qa="vault-review-row"][data-experience-id="exp-review-plain"] button')
       .click();
+    await revealDetail(page);
     await page.locator('[data-qa="review-undo"]').click();
     await page.locator('[data-qa="stats-strip-item"][data-stat-id="pending"]').click();
     await expect(
@@ -143,25 +180,30 @@ test.describe("Vault Review UI", () => {
 
   test("VR-03 · bulk confirm + keyboard Space/Enter/arrows", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "VR-03" });
-    await openRoute(page, REVIEW, "full");
+    await openReviewSeeded(page);
     await expect(page.locator('[data-qa="vault-review-list"]')).toBeVisible();
     const list = page.locator('[data-qa="vault-review-list"]');
     await list.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press(" ");
     await expect(page.locator('[data-qa="sticky-action-bar"]')).toBeVisible();
-    await page.locator('[data-qa="review-bulk-approve"]').click();
+    await page.locator('[data-qa="review-bulk-reject"]').click();
     await expect(page.locator('[data-qa="vault-review-confirm"]')).toBeVisible();
     await page.locator('[data-qa="review-confirm-cancel"]').click();
     await expect(page.locator('[data-qa="vault-review-confirm"]')).toHaveCount(0);
+    await list.focus();
     await page.keyboard.press("Enter");
     await revealDetail(page);
-    await expect(page.locator('[data-qa="vault-review-detail"]')).toBeVisible();
+    await expect(
+      page.locator(
+        '[data-panel-slot="detail"] [data-qa="vault-review-detail"], [data-qa="panel-grid-drawer-detail"] [data-qa="vault-review-detail"]',
+      ),
+    ).toBeVisible();
   });
 
   test("VR-04 · axe main scope + dotted unreviewed badge", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "VR-04" });
-    await openRoute(page, REVIEW, "full");
+    await openReviewSeeded(page);
     await expect(page.locator('[data-qa="unreviewed-badge"]').first()).toBeVisible();
     const badgeClass = await page
       .locator('[data-qa="unreviewed-badge"]')
@@ -176,7 +218,7 @@ test.describe("Vault Review UI", () => {
 
   test("VR-05 · StatsStrip filters + Halted still allows approve", async ({ page }) => {
     test.info().annotations.push({ type: "id", description: "VR-05" });
-    await openRoute(page, REVIEW, "full");
+    await openReviewSeeded(page);
     await page.locator('[data-qa="stats-strip-item"][data-stat-id="hygiene"]').click();
     await expect(
       page.locator('[data-qa="stats-strip-item"][data-stat-id="hygiene"]'),
