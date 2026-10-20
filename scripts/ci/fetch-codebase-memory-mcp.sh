@@ -87,28 +87,26 @@ verify_sha() {
 }
 
 curl_auth() {
-  # Usage: curl_auth [curl args…]
-  local -a args=(-fsSL --retry 3 --retry-delay 2 --retry-all-errors)
-  if [[ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]]; then
-    args+=(-H "Authorization: Bearer ${GITHUB_TOKEN:-$GH_TOKEN}")
-    args+=(-H "X-GitHub-Api-Version: 2022-11-28")
-  else
-    echo "WARN: GITHUB_TOKEN unset — unauthenticated download may 403 on Actions IPs" >&2
+  # Usage: curl_auth [curl args…] — no retries; fail loudly on first error.
+  local -a args=(-fsSL)
+  if [[ -z "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]]; then
+    echo "FAIL: GITHUB_TOKEN (or GH_TOKEN) is required to download ${ASSET}" >&2
+    return 1
   fi
+  args+=(-H "Authorization: Bearer ${GITHUB_TOKEN:-$GH_TOKEN}")
+  args+=(-H "X-GitHub-Api-Version: 2022-11-28")
   curl "${args[@]}" "$@"
 }
 
 download_asset() {
   local dest="$1"
-  local browser_url="https://github.com/${CBM_REPO}/releases/download/${CBM_RELEASE}/${ASSET}"
   local api_release="https://api.github.com/repos/${CBM_REPO}/releases/tags/${CBM_RELEASE}"
 
-  # 1) Authenticated API asset URL (Accept: application/octet-stream) — survives rate limits.
-  if [[ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]]; then
-    local asset_api
-    asset_api="$(
-      curl_auth -H "Accept: application/vnd.github+json" "$api_release" \
-        | ASSET_NAME="$ASSET" python3 -c '
+  # Authenticated Releases API asset download only (no browser-URL fallback, no retries).
+  local asset_api
+  asset_api="$(
+    curl_auth -H "Accept: application/vnd.github+json" "$api_release" \
+      | ASSET_NAME="$ASSET" python3 -c '
 import json, os, sys
 name = os.environ["ASSET_NAME"]
 data = json.load(sys.stdin)
@@ -117,19 +115,13 @@ for a in data.get("assets") or []:
         print(a.get("url") or "")
         break
 '
-    )"
-    if [[ -n "$asset_api" ]]; then
-      echo "Fetching via GitHub API asset URL (${ASSET})"
-      if curl_auth -H "Accept: application/octet-stream" -o "$dest" "$asset_api"; then
-        return 0
-      fi
-      echo "WARN: API asset download failed; trying browser URL" >&2
-    fi
+  )"
+  if [[ -z "$asset_api" ]]; then
+    echo "FAIL: asset ${ASSET} not found on ${CBM_REPO} ${CBM_RELEASE}" >&2
+    return 1
   fi
-
-  # 2) Browser download URL (still send Bearer when available).
-  echo "Fetching $browser_url"
-  curl_auth -o "$dest" "$browser_url"
+  echo "Fetching via GitHub API asset URL (${ASSET})"
+  curl_auth -H "Accept: application/octet-stream" -o "$dest" "$asset_api"
 }
 
 KEY="$(resolve_key)"

@@ -1984,10 +1984,7 @@ edition = "2021"
         if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
             let t = token.trim();
             if !t.is_empty() {
-                req = req.header(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {t}"),
-                );
+                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {t}"));
             }
         }
         let bytes = req

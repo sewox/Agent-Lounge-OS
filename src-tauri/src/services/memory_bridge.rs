@@ -764,7 +764,9 @@ pub fn health_page_timeout(config: &MemoryBridgeConfig, page_size: u32) -> Durat
 pub(crate) async fn acquire_cli_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     use std::sync::OnceLock;
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 /// Mutating tool: yalnızca connection refused / port closed → CLI.
