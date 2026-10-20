@@ -158,7 +158,7 @@ jobs:
   mcp-probe:
     name: MCP probe (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -179,6 +179,28 @@ jobs:
         working-directory: tools/mcp-probe
         shell: bash
         run: MCP_PROBE_DELAYS=0.05,0.1 npm run run-matrix
+
+      # PR-Connect-1: lounge-mcp CLI connect/print/disconnect under temp HOME (3 OS).
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          prefix-key: connect-cli-smoke
+
+      - name: Install Linux Tauri build deps
+        if: runner.os == 'Linux'
+        timeout-minutes: 26
+        run: bash scripts/ci/install-linux-build-deps.sh --preset tauri-gtk
+
+      - name: Connect CLI smoke (temp HOME)
+        shell: bash
+        run: |
+          chmod +x scripts/ci/connect-cli-smoke.sh
+          bash scripts/ci/connect-cli-smoke.sh
 
   ci:
     name: CI

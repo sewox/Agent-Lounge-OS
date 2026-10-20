@@ -9,7 +9,11 @@ import {
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import { PanelGrid } from "@/components/design-system";
+import { PanelGrid, StatusPill } from "@/components/design-system";
+import {
+  AgentConnectDialog,
+  connectActionForStatus,
+} from "@/components/health/agent-connect-dialog";
 import { AgentStatusBadge } from "@/components/health/agent-status-badge";
 import {
   maskAgentEntryForUi,
@@ -17,12 +21,17 @@ import {
   statusLabelKey,
 } from "@/lib/health-agents";
 import {
+  connectAgent,
   fetchLoungeHealth,
+  getHaltState,
   isTauri,
+  planAgentConnect,
+  printAgentConnect,
   probeAgentMcpUrl,
   type AgentHealthEntry,
   type AgentMcpProbeResult,
   type AgentMcpStatus,
+  type ConnectPlan,
   type LoungeHealthReport,
 } from "@/lib/lounge";
 
@@ -51,6 +60,14 @@ export function AgentsHealthPanel() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [probe, setProbe] = useState<AgentMcpProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
+  const [halted, setHalted] = useState(false);
+  const [connectClient, setConnectClient] = useState<string | null>(null);
+  const [connectRepair, setConnectRepair] = useState(false);
+  const [connectMode, setConnectMode] = useState<"plan" | "jsonc" | "print">("plan");
+  const [connectPlan, setConnectPlan] = useState<ConnectPlan | null>(null);
+  const [printPayload, setPrintPayload] = useState<unknown>(null);
+  const [connectBusy, setConnectBusy] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
   const listLabelId = useId();
 
   const load = useCallback(async () => {
@@ -61,7 +78,8 @@ export function AgentsHealthPanel() {
     setState({ phase: "loading" });
     setProbe(null);
     try {
-      const report = await fetchLoungeHealth();
+      const [report, halt] = await Promise.all([fetchLoungeHealth(), getHaltState()]);
+      setHalted(Boolean(halt.halted));
       const hasAgents = report.agents.length > 0;
       setState(hasAgents ? { phase: "ready", report } : { phase: "empty", report });
     } catch (error) {
@@ -80,6 +98,87 @@ export function AgentsHealthPanel() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [load]);
+
+  const closeConnect = useCallback(() => {
+    if (connectBusy) return;
+    setConnectClient(null);
+    setConnectPlan(null);
+    setPrintPayload(null);
+    setConnectError(null);
+    setConnectMode("plan");
+  }, [connectBusy]);
+
+  const openConnect = useCallback(
+    async (client: string, repair: boolean) => {
+      setConnectClient(client);
+      setConnectRepair(repair);
+      setConnectMode("plan");
+      setConnectError(null);
+      setConnectBusy(true);
+      try {
+        const plan = await planAgentConnect({
+          client,
+          scope: "global",
+          dryRun: true,
+          action: "connect",
+        });
+        setConnectPlan(plan);
+        if (plan.requires_jsonc_consent) {
+          setConnectMode("jsonc");
+        } else {
+          setConnectMode("plan");
+        }
+      } catch (error) {
+        setConnectError(error instanceof Error ? error.message : String(error));
+        setConnectMode("plan");
+      } finally {
+        setConnectBusy(false);
+      }
+    },
+    [],
+  );
+
+  const applyConnect = useCallback(
+    async (forceLossyJsonc: boolean) => {
+      if (!connectClient) return;
+      setConnectBusy(true);
+      setConnectError(null);
+      try {
+        await connectAgent({
+          client: connectClient,
+          scope: "global",
+          dryRun: false,
+          forceLossyJsonc,
+        });
+        setConnectClient(null);
+        setConnectPlan(null);
+        await load();
+      } catch (error) {
+        setConnectError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setConnectBusy(false);
+      }
+    },
+    [connectClient, load],
+  );
+
+  const onPrintOnly = useCallback(async () => {
+    if (!connectClient) return;
+    setConnectBusy(true);
+    setConnectError(null);
+    try {
+      const payload = await printAgentConnect({
+        client: connectClient,
+        scope: "global",
+      });
+      setPrintPayload(payload);
+      setConnectMode("print");
+    } catch (error) {
+      setConnectError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setConnectBusy(false);
+    }
+  }, [connectClient]);
 
   const report =
     state.phase === "ready" || state.phase === "empty" ? state.report : null;
@@ -195,21 +294,51 @@ export function AgentsHealthPanel() {
     );
   }
 
+  const connectDialog = (
+    <AgentConnectDialog
+      open={connectClient !== null}
+      mode={connectMode}
+      repair={connectRepair}
+      client={connectClient ?? ""}
+      plan={connectPlan}
+      printPayload={printPayload}
+      busy={connectBusy}
+      error={connectError}
+      onCancel={closeConnect}
+      onConfirmApply={() => void applyConnect(false)}
+      onWriteAnyway={() => void applyConnect(true)}
+      onPrintOnly={() => void onPrintOnly()}
+    />
+  );
+
+  const haltBanner = halted ? (
+    <div
+      data-qa="agents-halted-note"
+      className="flex shrink-0 items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2"
+    >
+      <StatusPill tone="halted">{t("agents.haltedStatus")}</StatusPill>
+      <p className="font-body text-meta text-on-surface-variant">{t("agents.haltedNote")}</p>
+    </div>
+  ) : null;
+
   if (state.phase === "empty") {
     return (
       <section
         data-qa-agents-health="empty"
         className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
       >
+        {haltBanner}
         <PanelGrid
           className="min-h-[28rem] flex-1"
           list={
             <EmptyList
               message={t("agents.empty")}
+              connectHint={t("agents.emptyConnectHint")}
               title={t("agents.listTitle")}
               systemItems={items}
               selectedId={selected?.id ?? null}
               onSelect={selectItem}
+              onConnectCursor={() => void openConnect("cursor", false)}
               t={t}
             />
           }
@@ -220,13 +349,20 @@ export function AgentsHealthPanel() {
               probe={probe}
               probing={probing}
               onProbe={() => void onProbe()}
+              onConnect={(client, repair) => void openConnect(client, repair)}
               t={t}
             />
           }
           inspector={
-            <InspectorPane item={selected} report={state.report} t={t} />
+            <InspectorPane
+              item={selected}
+              report={state.report}
+              onConnect={(client, repair) => void openConnect(client, repair)}
+              t={t}
+            />
           }
         />
+        {connectDialog}
       </section>
     );
   }
@@ -237,6 +373,7 @@ export function AgentsHealthPanel() {
       data-qa-agents-health="ready"
       className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden"
     >
+      {haltBanner}
       <PanelGrid
         className="min-h-[28rem] flex-1"
         list={
@@ -309,28 +446,41 @@ export function AgentsHealthPanel() {
             probe={probe}
             probing={probing}
             onProbe={() => void onProbe()}
+            onConnect={(client, repair) => void openConnect(client, repair)}
             t={t}
           />
         }
-        inspector={<InspectorPane item={selected} report={report!} t={t} />}
+        inspector={
+          <InspectorPane
+            item={selected}
+            report={report!}
+            onConnect={(client, repair) => void openConnect(client, repair)}
+            t={t}
+          />
+        }
       />
+      {connectDialog}
     </section>
   );
 }
 
 function EmptyList({
   message,
+  connectHint,
   title,
   systemItems,
   selectedId,
   onSelect,
+  onConnectCursor,
   t,
 }: {
   message: string;
+  connectHint: string;
   title: string;
   systemItems: ListItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onConnectCursor: () => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   return (
@@ -344,6 +494,17 @@ function EmptyList({
       >
         {message}
       </p>
+      <div className="shrink-0 border-b border-outline-variant/40 px-3 py-2">
+        <p className="font-body text-meta text-on-surface-variant">{connectHint}</p>
+        <button
+          type="button"
+          data-qa="agents-empty-connect"
+          onClick={onConnectCursor}
+          className="mt-2 min-h-8 rounded border border-primary/40 bg-primary-container px-3 py-1 font-body text-body font-medium text-on-primary-container focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {t("agents.connect")}
+        </button>
+      </div>
       <div role="group" data-qa="agents-health-list" className="min-h-0 flex-1 overflow-auto">
         {systemItems
           .filter((i) => i.kind !== "agent")
@@ -420,6 +581,7 @@ function DetailPane({
   probe,
   probing,
   onProbe,
+  onConnect,
   t,
 }: {
   item: ListItem | null;
@@ -427,6 +589,7 @@ function DetailPane({
   probe: AgentMcpProbeResult | null;
   probing: boolean;
   onProbe: () => void;
+  onConnect: (client: string, repair: boolean) => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   return (
@@ -446,6 +609,7 @@ function DetailPane({
             probe={probe}
             probing={probing}
             onProbe={onProbe}
+            onConnect={onConnect}
             t={t}
           />
         ) : item.kind === "title" ? (
@@ -476,16 +640,19 @@ function AgentDetail({
   probe,
   probing,
   onProbe,
+  onConnect,
   t,
 }: {
   entry: AgentHealthEntry;
   probe: AgentMcpProbeResult | null;
   probing: boolean;
   onProbe: () => void;
+  onConnect: (client: string, repair: boolean) => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   const status = entry.status as AgentMcpStatus;
   const showProbe = status === "unverified";
+  const connectKind = connectActionForStatus(status);
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
@@ -496,6 +663,17 @@ function AgentDetail({
         />
         <span className="font-mono text-meta text-outline">{entry.severity}</span>
       </div>
+      {connectKind ? (
+        <button
+          type="button"
+          data-qa={connectKind === "repair" ? "agents-repair" : "agents-connect"}
+          data-client={entry.client}
+          onClick={() => onConnect(entry.client, connectKind === "repair")}
+          className="min-h-8 rounded border border-primary/40 bg-primary-container px-3 py-1 font-body text-body font-medium text-on-primary-container focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {connectKind === "repair" ? t("agents.repair") : t("agents.connect")}
+        </button>
+      ) : null}
       <Field label={t("agents.fieldClient")} value={entry.client} />
       <Field
         label={t("agents.fieldConfigPath")}
@@ -660,10 +838,12 @@ function PlatformDetail({
 function InspectorPane({
   item,
   report,
+  onConnect,
   t,
 }: {
   item: ListItem | null;
   report: LoungeHealthReport;
+  onConnect: (client: string, repair: boolean) => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   const raw =
@@ -679,6 +859,9 @@ function InspectorPane({
           : item?.kind === "platform"
             ? report.platform
             : null;
+
+  const connectKind =
+    item?.kind === "agent" ? connectActionForStatus(item.entry.status) : null;
 
   return (
     <div data-qa="agents-health-inspector" className="flex h-full min-h-0 flex-col">
@@ -703,11 +886,26 @@ function InspectorPane({
           <div className="font-mono text-meta uppercase tracking-wider text-outline">
             {t("agents.actions")}
           </div>
-          <p className="mt-1 font-body text-meta text-on-surface-variant">
-            {item?.kind === "agent" && item.entry.status === "unverified"
-              ? t("agents.probeHint")
-              : "—"}
-          </p>
+          {connectKind && item?.kind === "agent" ? (
+            <button
+              type="button"
+              data-qa={
+                connectKind === "repair"
+                  ? "agents-inspector-repair"
+                  : "agents-inspector-connect"
+              }
+              onClick={() => onConnect(item.entry.client, connectKind === "repair")}
+              className="mt-2 min-h-8 rounded border border-primary/40 px-3 py-1 font-body text-body text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+            >
+              {connectKind === "repair" ? t("agents.repair") : t("agents.connect")}
+            </button>
+          ) : (
+            <p className="mt-1 font-body text-meta text-on-surface-variant">
+              {item?.kind === "agent" && item.entry.status === "unverified"
+                ? t("agents.probeHint")
+                : "—"}
+            </p>
+          )}
           <p className="mt-2 font-body text-meta text-outline">{t("agents.empty")}</p>
           <p className="font-body text-meta text-outline">{t("diagnosticsHint")}</p>
           <p className="font-body text-meta text-outline">

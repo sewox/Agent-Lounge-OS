@@ -629,28 +629,64 @@ pub fn mask_home_path(path: &str) -> String {
 
 /// Like [`mask_home_path`], but uses explicit home candidates (no process env read).
 /// Prefer this in injectable health/tests so parallel suites never race on HOME.
+///
+/// Matches both canonical and lexical forms so a nonexistent path under a
+/// symlinked home (macOS `/var/folders` → `/private/var/folders`) or an 8.3
+/// short-name home (Windows `RUNNER~1`) still masks when only one side was
+/// resolved by the filesystem.
 pub fn mask_home_path_with(path: &str, homes: &[String]) -> String {
     let display = display_normalize_path(path);
-    let path_key = path_home_compare_key(path);
-    if path_key.is_empty() {
+    let path_keys = path_home_match_keys(path);
+    if path_keys.iter().all(|k| k.is_empty()) {
         return display;
     }
 
+    let mut home_keys: Vec<String> = Vec::new();
     for home_raw in homes {
-        let home_key = path_home_compare_key(home_raw);
-        if home_key.is_empty() {
-            continue;
+        for key in path_home_match_keys(home_raw) {
+            if key.is_empty() {
+                continue;
+            }
+            if !home_keys.iter().any(|h| h == &key) {
+                home_keys.push(key);
+            }
         }
-        if path_key == home_key {
-            return "~/".into();
-        }
-        let prefix = format!("{}/", home_key.trim_end_matches('/'));
-        if let Some(rest) = path_key.strip_prefix(&prefix) {
-            // Preserve relative segment separators as `/` (already slash-unified).
-            return format!("~/{rest}");
+    }
+    // Longest home first so an inject-root home beats a shorter temp-dir ancestor.
+    home_keys.sort_by_key(|h| std::cmp::Reverse(h.len()));
+
+    for path_key in &path_keys {
+        for home_key in &home_keys {
+            if path_key == home_key {
+                return "~/".into();
+            }
+            let prefix = format!("{}/", home_key.trim_end_matches('/'));
+            if let Some(rest) = path_key.strip_prefix(&prefix) {
+                // Preserve relative segment separators as `/` (already slash-unified).
+                return format!("~/{rest}");
+            }
         }
     }
     display
+}
+
+/// Canonical + lexical compare keys for a path (deduped).
+fn path_home_match_keys(raw: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let canon = path_home_compare_key(raw);
+    if !canon.is_empty() {
+        keys.push(canon);
+    }
+    let mut lexical = display_normalize_path(raw)
+        .trim_end_matches('/')
+        .to_string();
+    if cfg!(windows) {
+        lexical = lexical.to_ascii_lowercase();
+    }
+    if !lexical.is_empty() && !keys.iter().any(|k| k == &lexical) {
+        keys.push(lexical);
+    }
+    keys
 }
 
 /// Mask HOME prefixes inside free-form error/detail text (boundary-aware).
@@ -1150,6 +1186,26 @@ impl Foo {
         // Must not mangle a different user path that merely contains the home string.
         let other = format!("{home}2/extra/src/lib.rs");
         assert_eq!(mask_home_path(&other), other.replace('\\', "/"));
+    }
+
+    #[test]
+    fn mask_home_path_masks_nonexistent_child_when_home_canonicalizes() {
+        // macOS CI: home under /var/folders may canonicalize to /private/var/folders.
+        // A nonexistent child path stays lexical (/var/...) — must still mask.
+        let base = tempfile_dir("mask-nonexist");
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let home_s = home.to_string_lossy().into_owned();
+        let missing = home.join("bin").join("old-lounge-mcp");
+        let missing_s = missing.to_string_lossy().replace('\\', "/");
+        let homes = vec![home_s.clone()];
+        let masked = mask_home_path_with(&missing_s, &homes);
+        assert_eq!(
+            masked, "~/bin/old-lounge-mcp",
+            "masked={masked} home={home_s}"
+        );
+        assert!(!masked.contains(&home_s.replace('\\', "/")));
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
