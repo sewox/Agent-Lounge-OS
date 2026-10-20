@@ -781,18 +781,32 @@ mod tests {
         fs::create_dir_all(&appdata).unwrap();
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(&xdg).unwrap();
-        // Parent dirs for global creates
+        // Parent dirs for global creates — cover Linux (XDG), macOS (Application Support),
+        // and Windows (APPDATA) so injectable roots work on every CI OS.
         fs::create_dir_all(home.join(".cursor")).unwrap();
         fs::create_dir_all(home.join(".gemini/config")).unwrap();
         fs::create_dir_all(home.join(".gemini/antigravity")).unwrap();
         fs::create_dir_all(home.join(".claude")).unwrap();
         fs::create_dir_all(home.join(".grok")).unwrap();
         fs::create_dir_all(home.join(".codeium/windsurf")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Claude")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Grok")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Grok Bot")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Code/User")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Windsurf")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Antigravity/User")).unwrap();
         fs::create_dir_all(xdg.join("Claude")).unwrap();
         fs::create_dir_all(xdg.join("Code/User")).unwrap();
         fs::create_dir_all(xdg.join("Windsurf")).unwrap();
         fs::create_dir_all(xdg.join("Grok")).unwrap();
+        fs::create_dir_all(xdg.join("Grok Bot")).unwrap();
         fs::create_dir_all(xdg.join("Antigravity/User")).unwrap();
+        fs::create_dir_all(appdata.join("Claude")).unwrap();
+        fs::create_dir_all(appdata.join("Grok")).unwrap();
+        fs::create_dir_all(appdata.join("Grok Bot")).unwrap();
+        fs::create_dir_all(appdata.join("Code/User")).unwrap();
+        fs::create_dir_all(appdata.join("Windsurf")).unwrap();
+        fs::create_dir_all(appdata.join("Antigravity/User")).unwrap();
         let roots = AgentHealthRoots {
             home,
             appdata: Some(appdata),
