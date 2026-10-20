@@ -1,16 +1,12 @@
 /**
- * Dev `assetPrefix` for Next ↔ Tauri. Must track the same PORT as
- * `scripts/next-dev.mjs` / `scripts/dev-port.mjs` (default 3000).
+ * Dev `assetPrefix` for Next ↔ Tauri.
+ * Port resolution lives only in `scripts/dev-port.mjs` (imported below).
  */
-export function resolveDevPort(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
-): string {
-  const raw = env.PORT;
-  if (raw === undefined || raw === "") {
-    return "3000";
-  }
-  return String(raw);
-}
+export {
+  buildNextDevArgs,
+  InvalidDevPortError,
+  resolveDevPort,
+} from "../../scripts/dev-port.mjs";
 
 export function resolveDevAssetPrefix(opts: {
   isProd: boolean;

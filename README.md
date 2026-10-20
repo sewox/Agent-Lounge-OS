@@ -171,7 +171,7 @@ npm install
 npm run tauri dev
 ```
 
-`npm run dev` / `beforeDevCommand` Next’i `PORT` üzerinden pinler (varsayılan **3000**); `next.config.ts` `assetPrefix` aynı `PORT`’u okur. Başka bir süreç 3000’i tutuyorsa:
+`npm run dev` / `beforeDevCommand` Next’i `PORT` üzerinden pinler (varsayılan **3000**; tek kaynak: `scripts/dev-port.mjs`). `next.config.ts` `assetPrefix` aynı değeri okur. Geçersiz `PORT` (tam sayı değil veya 1–65535 dışı) yüksek sesle fail eder. Port meşgulse `next dev -p` de fail eder (retry/skip yok). Ekstra CLI argümanları `next-dev.mjs` üzerinden `next dev`’e iletilir. Başka bir süreç 3000’i tutuyorsa portu değiştirin; Tauri `devUrl` override’ı hâlâ **manuel**dir:
 
 ```bash
 # macOS / Linux
@@ -181,7 +181,7 @@ PORT=3001 npm run tauri -- dev --config '{"build":{"devUrl":"http://localhost:30
 $env:PORT=3001; npm run tauri -- dev --config '{\"build\":{\"devUrl\":\"http://localhost:3001\"}}'
 ```
 
-`PORT` yalnız Next/`assetPrefix` tarafını değiştirir; Tauri penceresinin yüklediği URL için `devUrl` override (`--config`) gerekir. `beforeDevCommand` zaten `npm run dev` olduğu için ekstra bir env-driven komut gerekmez — `PORT` yeterli.
+`PORT` yalnız Next/`assetPrefix` tarafını değiştirir; Tauri penceresinin yüklediği URL için `devUrl` override (`--config`) gerekir.
 
 İlk açılışta Kernel NATS ve LMR sağlık durumunu kontrol eder. Host Ollama (`:11434`) çalışıyor olsa bile LMR kendi portunda (`:18790`) ve kendi `data/lmr` dizininde kalır.
 

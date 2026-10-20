@@ -1,19 +1,38 @@
 /**
  * Cross-platform `next dev` pinned to PORT (default 3000).
  * Works on macOS, Windows, and Linux without shell-specific ${PORT:-3000}.
+ * Extra CLI args after the script are forwarded to `next dev`.
  */
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveDevPort } from "./dev-port.mjs";
+import {
+  buildNextDevArgs,
+  InvalidDevPortError,
+  resolveDevPort,
+} from "./dev-port.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const port = resolveDevPort(process.env);
+
+let port;
+try {
+  port = resolveDevPort(process.env);
+} catch (err) {
+  const message =
+    err instanceof InvalidDevPortError || err instanceof Error
+      ? err.message
+      : String(err);
+  console.error(message);
+  process.exit(1);
+}
+
+const extraArgs = process.argv.slice(2);
 const require = createRequire(import.meta.url);
 const nextBin = require.resolve("next/dist/bin/next");
+const nextArgs = buildNextDevArgs(port, extraArgs);
 
-const child = spawn(process.execPath, [nextBin, "dev", "-p", port], {
+const child = spawn(process.execPath, [nextBin, ...nextArgs], {
   cwd: root,
   stdio: "inherit",
   env: process.env,
