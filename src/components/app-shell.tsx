@@ -1054,16 +1054,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                 pathname === item.href ||
                 (item.id === "vault" && pathname.startsWith("/vault")) ||
                 (item.id === "dashboard" && pathname === "/");
-              const vaultHref =
-                item.id === "vault" &&
-                unreviewedCountStatus === "ok" &&
-                unreviewedCount > 0
-                  ? "/vault?view=review"
-                  : item.href;
               return (
                 <Link
                   key={item.id}
-                  href={vaultHref}
+                  href={item.href}
                   className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body ${
                     active
                       ? "border-l-2 border-primary bg-surface-container-highest text-primary"
@@ -1079,11 +1073,21 @@ export function AppShell({ children }: { children: ReactNode }) {
                       <span className="sr-only">
                         {t("nav.vaultWithUnreviewed", { count: unreviewedCount })}
                       </span>
+                      {/*
+                        Decorative count (aria-hidden). Pointer activation opens review
+                        without a nested button/link (B3); keyboard users follow the
+                        Vault link to /vault then Map|Review. href stays /vault (SH-01/CTL-01).
+                      */}
                       <span
                         data-qa="unreviewed-count"
                         title={t("reviewQueue")}
                         aria-hidden="true"
-                        className="tnum min-w-[1.25rem] rounded-full border border-dashed border-outline bg-surface-container-highest px-1.5 py-0.5 text-center font-mono text-meta font-semibold text-on-surface"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          router.push("/vault?view=review");
+                        }}
+                        className="tnum min-w-[1.25rem] cursor-pointer rounded-full border border-dashed border-outline bg-surface-container-highest px-1.5 py-0.5 text-center font-mono text-meta font-semibold text-on-surface"
                       >
                         {unreviewedCount}
                       </span>

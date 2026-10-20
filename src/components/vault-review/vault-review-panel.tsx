@@ -863,6 +863,15 @@ export function VaultReviewPanel() {
           </p>
           <p className="font-mono text-meta text-outline">{selected.project_id}</p>
           <p className="font-mono text-meta text-outline">{selected.outcome}</p>
+          <p className="font-body text-meta text-on-surface-variant">
+            {t("title")}: {selected.title || "—"}
+          </p>
+          <p className="font-body text-meta text-on-surface-variant">
+            {t("tags")}: {(selected.tags ?? []).join(", ") || "—"}
+          </p>
+          <p className="font-body text-meta text-on-surface-variant">
+            {t("created")}: {formatExperienceTime(selected.created_at)}
+          </p>
         </div>
       )}
     </div>
