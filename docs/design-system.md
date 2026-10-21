@@ -40,6 +40,7 @@ Optional props (additive; defaults preserve the table above / PR-DS-0 behavior f
 - `listFillsOneMode` — when true, the list slot is `flex-1` in one-mode (default `false`).
 - `drawerBodyOverflow` — `"auto"` (default) or `"hidden"` for nested virtual scrollers.
 - `manageDrawerFocus` — when true, focus moves into the drawer and Escape closes it (default `false`).
+- `forceMode` — optional override of container-driven mode (embedded dashboard uses `two`).
 
 Breakpoints are measured on the grid container via `ResizeObserver`, not on `window` alone.
 

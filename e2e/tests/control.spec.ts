@@ -65,6 +65,38 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
       await expect(page).toHaveURL(new RegExp(`${route.path.replace("/", "\\/")}`));
       await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
       await expect(page.locator('[data-qa="halt-toggle"]')).toBeVisible();
+      // Vault map L2 needs real leaf-column content (empty detail is layout-empty, not fill).
+      if (route.path === "/vault") {
+        const project = page
+          .locator('[data-qa="vault-project-row"]')
+          .filter({ hasText: /Agent-Lounge-OS/i })
+          .first();
+        await expect(project).toBeVisible();
+        await project.locator('[data-qa="vault-project-open"]').click();
+        await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+          "data-view",
+          "pages",
+        );
+        const inspectorInline = page.locator('[data-panel-slot="inspector"]');
+        if (!(await inspectorInline.isVisible())) {
+          const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+          if (await closeBtn.isVisible()) {
+            await closeBtn.click();
+          }
+          await page.locator('[data-qa="open-inspector-drawer"]').click();
+          await expect(page.locator('[data-qa="panel-grid-drawer-inspector"]')).toBeVisible();
+        }
+        const detailInline = page.locator('[data-panel-slot="detail"]');
+        if (!(await detailInline.isVisible())) {
+          const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+          if (await closeBtn.isVisible()) {
+            await closeBtn.click();
+            await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
+          }
+          await page.locator('[data-qa="open-detail-drawer"]').click();
+          await expect(page.locator('[data-qa="panel-grid-drawer-detail"]')).toBeVisible();
+        }
+      }
       await assertLayoutL1toL6(page, route.path, expect);
     }
 

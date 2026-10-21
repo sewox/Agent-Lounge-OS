@@ -55,6 +55,11 @@ export type PanelGridProps = {
    * restores on close. Default false (PR-DS-0) — no page-wide key handler.
    */
   manageDrawerFocus?: boolean;
+  /**
+   * Override container-driven mode (e.g. embedded dashboard always `two`).
+   * Default undefined — use `resolvePanelMode` (PR-DS-0).
+   */
+  forceMode?: PanelMode;
   /** Localized labels for drawer chrome (defaults keep English DS-0 strings). */
   detailDrawerLabel?: string;
   inspectorDrawerLabel?: string;
@@ -86,6 +91,7 @@ export function PanelGrid({
   listFillsOneMode = false,
   drawerBodyOverflow = "auto",
   manageDrawerFocus = false,
+  forceMode,
   detailDrawerLabel = "Open detail",
   inspectorDrawerLabel = "Open inspector",
   detailDrawerTitle = "Detail",
@@ -119,7 +125,7 @@ export function PanelGrid({
     return () => ro.disconnect();
   }, []);
 
-  const mode = resolvePanelMode(box.width || 1, box.height || 1);
+  const mode = forceMode ?? resolvePanelMode(box.width || 1, box.height || 1);
 
   useEffect(() => {
     onModeChange?.(mode);

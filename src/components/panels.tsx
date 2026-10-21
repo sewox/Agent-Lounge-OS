@@ -1154,18 +1154,31 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       <PanelGrid
         className="min-h-[28rem] flex-1"
         ratios={VAULT_MAP_RATIOS}
-        portraitShowsInspector
-        listFillsOneMode
+        // Full /vault: three slots + portrait triple. Embedded dashboard: list | experiences
+        // forced to `two` (no empty dead column / no one-mode drawer) for honest L2 fill.
+        portraitShowsInspector={!embedded}
+        forceMode={embedded ? "two" : undefined}
+        listFillsOneMode={!embedded}
         drawerBodyOverflow="hidden"
         manageDrawerFocus
-        detailDrawerLabel={tv("layout.openDetail")}
+        detailDrawerLabel={
+          embedded ? tv("layout.openExperiences") : tv("layout.openDetail")
+        }
         inspectorDrawerLabel={tv("layout.openExperiences")}
-        detailDrawerTitle={tv("layout.detailHeading")}
+        detailDrawerTitle={
+          embedded ? tv("layout.experiencesHeading") : tv("layout.detailHeading")
+        }
         inspectorDrawerTitle={tv("layout.experiencesHeading")}
         closeDrawerLabel={tv("layout.closeDrawer")}
         list={listPane}
-        detail={<VaultDeadSymbolsPane selected={selected} symbols={deadForNode} />}
-        inspector={experiencesPane}
+        detail={
+          embedded ? (
+            experiencesPane
+          ) : (
+            <VaultDeadSymbolsPane selected={selected} symbols={deadForNode} />
+          )
+        }
+        inspector={embedded ? undefined : experiencesPane}
       />
       <div
         data-qa={embedded ? "vault-map-footer" : "panel"}
