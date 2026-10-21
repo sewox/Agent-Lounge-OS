@@ -52,6 +52,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Local CI / CBM download cache (never commit)
+.cache/
+
 # Tauri / Rust
 src-tauri/target
 src-tauri/gen

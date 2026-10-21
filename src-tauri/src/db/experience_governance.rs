@@ -903,11 +903,32 @@ fn search_filtered_blocking(
     }
 
     // Vault-1: active rows via FTS5. Archived rows are excluded from the FTS
-    // index by design — O2 archive fallback uses folded LIKE instead.
-    if status == Some(EXPERIENCE_STATUS_ARCHIVED) {
-        return search_archived_folded_like(conn, trimmed, limit);
+    // index by design — folded LIKE covers archived (and status=None scans).
+    match status {
+        Some(EXPERIENCE_STATUS_ARCHIVED) => search_archived_folded_like(conn, trimmed, limit),
+        Some(EXPERIENCE_STATUS_ACTIVE) | None => {
+            let mut hits = super::vault_fts::search_experiences_fts(conn, trimmed, limit, status)?;
+            // status=None must still surface archived rows (column-governance tests /
+            // admin scans). Active hits come from FTS; merge folded-LIKE archived.
+            if status.is_none() {
+                let archived = search_archived_folded_like(conn, trimmed, limit)?;
+                let mut seen: std::collections::HashSet<String> =
+                    hits.iter().map(|h| h.id.clone()).collect();
+                for row in archived {
+                    if seen.insert(row.id.clone()) {
+                        hits.push(row);
+                    }
+                }
+                sort_experiences_for_search(&mut hits, trimmed, None);
+                hits.truncate(limit);
+            }
+            Ok(hits)
+        }
+        Some(_) => {
+            // Unknown status filter — folded scan of that status only.
+            search_status_folded_like(conn, trimmed, limit, status.unwrap())
+        }
     }
-    super::vault_fts::search_experiences_fts(conn, trimmed, limit, status)
 }
 
 /// Archive-only search (O2). Archived experiences are not in `vault_fts`.
@@ -915,6 +936,16 @@ fn search_archived_folded_like(
     conn: &Connection,
     needle: &str,
     limit: usize,
+) -> Result<Vec<crate::models::LoungeExperience>> {
+    search_status_folded_like(conn, needle, limit, EXPERIENCE_STATUS_ARCHIVED)
+}
+
+/// Status-filtered folded LIKE (used when the row is absent from FTS).
+fn search_status_folded_like(
+    conn: &Connection,
+    needle: &str,
+    limit: usize,
+    status: &str,
 ) -> Result<Vec<crate::models::LoungeExperience>> {
     super::vault_fts::register_turkish_fold_fn(conn);
     let folded = super::vault_fts::turkish_fold(needle);
@@ -938,10 +969,7 @@ fn search_archived_folded_like(
         LIMIT ?3
         "#;
     let mut stmt = conn.prepare(sql)?;
-    let mapped = stmt.query_map(
-        params![EXPERIENCE_STATUS_ARCHIVED, folded, fetch_cap as i64],
-        map_lounge_row,
-    )?;
+    let mapped = stmt.query_map(params![status, folded, fetch_cap as i64], map_lounge_row)?;
     let mut out = Vec::new();
     for row in mapped {
         out.push(row?);

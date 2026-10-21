@@ -552,6 +552,9 @@ fn create_settings_sql() -> &'static str {
 
 fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
+    // FTS triggers (from a prior open) may fire during later migrations; the
+    // fold UDF must exist on this connection before any experiences/project_index writes.
+    crate::db::vault_fts::register_turkish_fold_fn(conn);
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;
     crate::db::project_identity::migrate_project_identity(conn)?;
