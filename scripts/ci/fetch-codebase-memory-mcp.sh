@@ -2,9 +2,8 @@
 # Fetch the SHA-pinned codebase-memory-mcp sidecar for the host (or TAURI_ENV_*) platform.
 # Stages bridge/codebase-memory-mcp[.exe] then runs prepare-sidecar.sh (never --stub).
 #
-# Robustness (CI 403 / rate-limit):
-# - Prefer GitHub API asset download authenticated with GITHUB_TOKEN
-# - Fall back to browser download URL with the same Bearer token
+# Download path (authenticated only; no browser-URL fallback, no retries):
+# - GitHub API asset download authenticated with GITHUB_TOKEN
 # - SHA256-verify against the pinned digest
 # - Cache verified archives under $CBM_CACHE_DIR (default: ~/.cache/lounge-cbm)
 # Local run: GH_TOKEN=$(gh auth token) bash scripts/ci/fetch-codebase-memory-mcp.sh
