@@ -53,14 +53,14 @@ export default defineConfig({
     },
     {
       name: "D960",
-      testMatch: /vault-dashboard|vault-projects|health-settings|shell-cross/,
+      testMatch: /vault-dashboard|vault-projects|vault-layout|health-settings|shell-cross/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 960, height: 800 }, deviceScaleFactor: 1 },
     },
     {
       name: "D4-scale",
       // Real 130% UI scale via storageState (al-os-ui-scale=1.3) + deviceScaleFactor.
       // a11y seal: layout-fill/no-overflow must hold at enlarged rem (root font-size > 16px).
-      testMatch: /layout|vault-dashboard|health-settings/,
+      testMatch: /layout|vault-dashboard|vault-layout|health-settings/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1280, height: 800 },

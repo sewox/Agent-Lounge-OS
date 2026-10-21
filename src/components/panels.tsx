@@ -15,7 +15,9 @@ import { DestructiveGateSettingsPanel } from "@/components/destructive-gate-sett
 import { EditorSettingsPanel } from "@/components/editor-settings-panel";
 import { RemoteAccessCard } from "@/components/remote-access-card";
 import { ExperienceGovernanceSettingsPanel } from "@/components/experience-governance-settings";
+import { PanelGrid } from "@/components/design-system";
 import { SemanticMap } from "@/components/SemanticMap";
+import { VaultDeadSymbolsPane } from "@/components/vault-dead-symbols-list";
 import {
   formatDisplayPath,
   formatExperienceLogSummary,
@@ -70,9 +72,14 @@ import {
   type VaultProjectRow,
 } from "@/lib/vault-projects";
 import { selectCriticalQuotas, type UiScale } from "@/lib/ui-prefs";
-import { DeadSymbolsVaultLink } from "@/components/dead-symbols-panel";
 import { IndexEmptyState } from "@/components/index-empty-state";
 import { deadSymbolStrings as dsStrings } from "@/lib/strings/dead-symbols";
+
+/** Vault map PanelGrid ratios (OPEN-3 / msg125): list : detail [: experiences]. */
+const VAULT_MAP_RATIOS = {
+  two: [1, 1.5] as const,
+  three: [1, 1.5, 1] as const,
+};
 
 type SubjectFilter = "all" | "task" | "exp";
 type QuotaFilter = "all" | QuotaKind;
@@ -692,11 +699,413 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
 
   const shell = embedded
     ? "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-surface-container"
-    : "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container";
+    : "flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden";
+
+  const listPane = (
+    <div
+      data-qa="vault-list-pane"
+      className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-auto bg-surface-container-low/40 p-2.5"
+    >
+      <h2 className="mb-2 shrink-0 font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+        {tv("layout.listHeading")}
+      </h2>
+      <SemanticMap
+        semanticMap={semanticMap}
+        projects={projects}
+        experiences={experiences}
+        graphTotals={graphTotals}
+        selected={selected}
+        aggregates={vaultAggregates}
+        aggregatesLoading={aggregatesLoading}
+        aggregatesError={aggregatesError}
+        onRetryAggregates={() => setAggregatesTick((n) => n + 1)}
+        projectPages={serverPages}
+        projectPagesTotal={serverPagesTotal}
+        pagesLoading={pagesLoading}
+        pagesError={pagesError}
+        onPageSearch={handlePageSearch}
+        onLoadMorePages={handleLoadMorePages}
+        onRetryPages={() =>
+          void fetchProjectPages(pageQueryState.query, pageQueryState.sort, 0, false)
+        }
+        fileSymbols={fileSymbols}
+        fileSymbolsLoading={fileSymbolsLoading}
+        onOpenPage={handleOpenPage}
+        onClosePage={handleClosePage}
+        openProjectName={openProjectName}
+        onOpenProject={(name) => {
+          setOpenProjectName(name);
+          setServerPages(null);
+          setServerPagesTotal(null);
+          setPagesError(null);
+          setFileSymbols(null);
+          if (name) {
+            setSelected({
+              id: `project:${name}`,
+              name,
+              kind: "project",
+              project: name,
+              file: null,
+            });
+            switchProject(name);
+            setLogPage(0);
+          } else {
+            setSelected(null);
+            switchProject(null);
+            setLogPage(0);
+          }
+        }}
+        onSelect={(next) => {
+          setSelected(next);
+          setLogPage(0);
+          if (next?.kind === "project") {
+            switchProject(next.name);
+          } else if (!next) {
+            switchProject(null);
+          }
+        }}
+      />
+    </div>
+  );
+
+  const experiencesPane = (
+    <div
+      data-qa="vault-experiences-pane"
+      className="flex h-full min-h-0 w-full flex-col overflow-hidden p-2.5 font-body"
+    >
+      <div
+        data-qa="vault-experience-header"
+        className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2"
+      >
+        <div className="min-w-0">
+          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+            {tv("layout.experiencesHeading")}
+          </h2>
+          <div className="font-mono text-meta text-on-surface-variant">
+            {tv("totalExperiences", { count: experienceTotal })}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowArchived(!showArchived)}
+            className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
+          >
+            {showArchived ? tv("hideArchived") : tv("showArchived")}
+          </button>
+          {unreviewedCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => void markAllExperiencesReviewed()}
+              className="min-h-8 rounded border border-secondary/40 px-2 py-1 font-body text-meta text-secondary hover:bg-secondary/10"
+            >
+              {tv("markAllReviewed")}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {selectedProjectPath ? (
+        <div
+          data-qa="vault-project-path"
+          className="mb-2 shrink-0 break-all font-mono text-meta text-on-surface-variant"
+          title={formatDisplayPath(selectedProjectPath)}
+        >
+          <span className="uppercase tracking-label text-outline">{tv("projectPath")}</span>
+          {" · "}
+          {formatDisplayPath(selectedProjectPath)}
+        </div>
+      ) : null}
+      <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
+        <span>
+          {openProjectName
+            ? tv("experiencesForProject", { name: openProjectName })
+            : tv("experienceLog")}
+        </span>
+        <span
+          className={
+            whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
+          }
+        >
+          {whispered.size > 0
+            ? tv("whisperLive", { count: whispered.size })
+            : openProjectName
+              ? tv("filter", { name: openProjectName })
+              : tv("projectCount", { count: experienceProjectRows.length })}
+        </span>
+      </div>
+      <div
+        role="list"
+        aria-label={tv("layout.experiencesListLabel")}
+        className={`min-h-0 flex-1 overflow-auto font-body text-body ${
+          !openProjectName && experienceProjectRows.length > 0 && experienceProjectRows.length <= 8
+            ? "flex flex-col gap-2"
+            : "space-y-2"
+        }`}
+      >
+        {!openProjectName ? (
+          experienceProjectRows.length === 0 ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center">
+              <p
+                data-qa="layout-empty"
+                className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+              >
+                {tv("noExperiences")}
+              </p>
+            </div>
+          ) : (
+            <>
+              {experienceProjectRows.map((row) => (
+                <div
+                  key={`exp-proj:${row.name}`}
+                  role="listitem"
+                  data-qa="vault-experience-project-row"
+                  data-project={row.name}
+                  tabIndex={0}
+                  onDoubleClick={() => {
+                    setOpenProjectName(row.name);
+                    setSelected({
+                      id: `project:${row.name}`,
+                      name: row.name,
+                      kind: "project",
+                      project: row.name,
+                      file: null,
+                    });
+                    switchProject(row.name);
+                    setLogPage(0);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      setOpenProjectName(row.name);
+                      setSelected({
+                        id: `project:${row.name}`,
+                        name: row.name,
+                        kind: "project",
+                        project: row.name,
+                        file: null,
+                      });
+                      switchProject(row.name);
+                      setLogPage(0);
+                    }
+                  }}
+                  className={`flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high ${
+                    experienceProjectRows.length <= 8 ? "min-h-0 flex-1" : ""
+                  }`}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-mono font-medium text-on-surface" title={row.name}>
+                      {row.name}
+                    </span>
+                    <span className="block truncate font-mono text-meta text-outline">
+                      {tv("pageCountMeta", {
+                        pages: row.pageCount,
+                        experiences: row.experienceCount,
+                      })}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    data-qa="vault-experience-project-open"
+                    onClick={() => {
+                      setOpenProjectName(row.name);
+                      setSelected({
+                        id: `project:${row.name}`,
+                        name: row.name,
+                        kind: "project",
+                        project: row.name,
+                        file: null,
+                      });
+                      switchProject(row.name);
+                      setLogPage(0);
+                    }}
+                    className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container"
+                  >
+                    {tv("openProject")}
+                  </button>
+                </div>
+              ))}
+              <div className="mt-auto shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline">
+                <span className="font-body">
+                  {tv("projectCount", { count: experienceProjectRows.length })} ·{" "}
+                  {tv("totalExperiences", { count: experienceTotal })}
+                </span>
+              </div>
+            </>
+          )
+        ) : experiencesLoading && experiences.length === 0 ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+            >
+              {tv("loading")}
+            </p>
+          </div>
+        ) : experiencesError ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center font-body text-body text-error"
+            >
+              {experiencesError || tv("listError")}
+            </p>
+          </div>
+        ) : logVisible.length === 0 ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+            >
+              {tv("noExperiencesForNode", { name: openProjectName })}
+            </p>
+          </div>
+        ) : (
+          logVisible.map((item) => {
+            const isWhisper = whispered.has(item.id);
+            const alreadyUseful = markedUseful.has(item.id);
+            const archived = isExperienceArchived(item);
+            const heading =
+              (item.title && item.title.trim()) ||
+              formatExperienceLogSummary(item.adr_summary || item.original_content || "", 80);
+            const autoHint =
+              item.title_source === "llm" || item.title_source === "fallback";
+            return (
+              <button
+                key={item.id}
+                type="button"
+                role="listitem"
+                data-qa="experience-card"
+                onClick={() => void openExperience(item.id)}
+                className={`w-full space-y-1 rounded border p-1.5 text-left transition-colors ${
+                  isWhisper
+                    ? "border-primary bg-primary-container/20 shadow-[0_0_0_1px_var(--color-primary)]"
+                    : archived
+                      ? "border-outline-variant/30 bg-surface-container-high/30 opacity-70"
+                      : "border-outline-variant/40 bg-surface-container-high/60 hover:bg-surface-container-high"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span
+                      data-qa="experience-project-chip"
+                      className="shrink-0 rounded border border-outline-variant/50 px-1 font-mono text-meta text-on-surface-variant"
+                    >
+                      {item.project_id}
+                    </span>
+                    {item.is_pinned ? (
+                      <span className="rounded border border-primary/40 px-1 text-meta text-primary">
+                        PIN
+                      </span>
+                    ) : null}
+                    {archived ? (
+                      <span className="rounded border border-outline-variant px-1 text-meta text-outline uppercase">
+                        {tv("archivedLabel")}
+                      </span>
+                    ) : null}
+                    {item.reviewed === false ? (
+                      <span className="rounded border border-dashed border-secondary/60 px-1 text-meta text-secondary uppercase">
+                        {tv("unreviewed")}
+                      </span>
+                    ) : null}
+                    {isWhisper ? (
+                      <span className="rounded border border-primary/50 px-1 text-meta text-primary">
+                        {tv("whisper")}
+                      </span>
+                    ) : null}
+                  </div>
+                  <span
+                    className={`shrink-0 rounded border px-1 text-meta ${outcomeClass(item.outcome)}`}
+                  >
+                    {item.outcome === "success"
+                      ? "Success"
+                      : item.outcome === "partial"
+                        ? "Partial"
+                        : "Failed"}
+                  </span>
+                </div>
+                <div className="flex items-start gap-1">
+                  <div
+                    data-qa="experience-title"
+                    className="min-w-0 flex-1 break-words font-body text-body font-medium text-on-surface"
+                    title={heading}
+                  >
+                    {heading}
+                  </div>
+                  {autoHint ? (
+                    <span
+                      data-qa="experience-title-auto"
+                      className="shrink-0 font-mono text-meta lowercase text-outline"
+                      title={tv("autoTitle")}
+                    >
+                      {tv("autoTitle")}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex items-center justify-between font-mono text-meta text-on-surface-variant">
+                  <span data-qa="experience-last-used">
+                    {tv("lastUsed")}:{" "}
+                    {item.last_used_at ? formatExperienceTime(item.last_used_at) : "—"}
+                  </span>
+                  <span data-qa="experience-use-count" className="tnum">
+                    {tv("useCount")}: {item.use_count ?? 0}
+                  </span>
+                </div>
+                {isWhisper ? (
+                  <div className="flex justify-end pt-0.5">
+                    <button
+                      type="button"
+                      disabled={alreadyUseful}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void (async () => {
+                          await markWhisperUseful(item.id, item.project_id);
+                          setMarkedUseful((prev) => new Set(prev).add(item.id));
+                        })();
+                      }}
+                      className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
+                      aria-label="Bu fısıltıyı faydalı olarak işaretle"
+                    >
+                      {alreadyUseful ? tv("usefulDone") : tv("useful")}
+                    </button>
+                  </div>
+                ) : null}
+              </button>
+            );
+          })
+        )}
+      </div>
+      {experiences.length < experienceTotal ? (
+        <div className="shrink-0 pt-2">
+          <button
+            type="button"
+            data-qa="vault-load-more"
+            disabled={experiencesLoading}
+            onClick={() => void loadMoreExperiences()}
+            className="min-h-8 w-full rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high disabled:opacity-60"
+          >
+            {tv("loadMore")}
+          </button>
+        </div>
+      ) : null}
+      {logPages > 1 ? (
+        <div
+          data-qa="vault-experience-pager"
+          className="mt-2 flex shrink-0 justify-end border-t border-outline-variant/40 pt-2"
+        >
+          <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
+        </div>
+      ) : null}
+    </div>
+  );
 
   return (
-    <section data-qa={embedded ? undefined : "panel"} className={shell}>
-      <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+    // No wrapping shell panel — leaf PanelGrid slots + chrome strips own data-qa="panel".
+    <section className={shell}>
+      <div
+        data-qa={embedded ? undefined : "panel"}
+        data-panel-slot={embedded ? undefined : "vault-map-chrome"}
+        className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5"
+      >
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="tree" />
@@ -742,409 +1151,111 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <GraphUiButton />
         </div>
       </div>
-      <div className="flex min-h-0 w-full flex-1 flex-col xl:flex-row">
-        <div
-          data-qa="panel"
-          className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-auto border-b border-outline-variant bg-surface-container-low/40 p-2.5 xl:border-r xl:border-b-0"
-        >
-          <SemanticMap
-            semanticMap={semanticMap}
-            projects={projects}
-            experiences={experiences}
-            graphTotals={graphTotals}
-            selected={selected}
-            aggregates={vaultAggregates}
-            aggregatesLoading={aggregatesLoading}
-            aggregatesError={aggregatesError}
-            onRetryAggregates={() => setAggregatesTick((n) => n + 1)}
-            projectPages={serverPages}
-            projectPagesTotal={serverPagesTotal}
-            pagesLoading={pagesLoading}
-            pagesError={pagesError}
-            onPageSearch={handlePageSearch}
-            onLoadMorePages={handleLoadMorePages}
-            onRetryPages={() =>
-              void fetchProjectPages(pageQueryState.query, pageQueryState.sort, 0, false)
-            }
-            fileSymbols={fileSymbols}
-            fileSymbolsLoading={fileSymbolsLoading}
-            onOpenPage={handleOpenPage}
-            onClosePage={handleClosePage}
-            openProjectName={openProjectName}
-            onOpenProject={(name) => {
-              setOpenProjectName(name);
-              setServerPages(null);
-              setServerPagesTotal(null);
-              setPagesError(null);
-              setFileSymbols(null);
-              if (name) {
-                setSelected({
-                  id: `project:${name}`,
-                  name,
-                  kind: "project",
-                  project: name,
-                  file: null,
-                });
-                switchProject(name);
-                setLogPage(0);
-              } else {
-                setSelected(null);
-                switchProject(null);
-                setLogPage(0);
-              }
-            }}
-            onSelect={(next) => {
-              setSelected(next);
-              setLogPage(0);
-              if (next?.kind === "project") {
-                switchProject(next.name);
-              } else if (!next) {
-                switchProject(null);
-              }
-            }}
-          />
-        </div>
-        <div
-          data-qa="panel"
-          className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2.5 font-body"
-        >
+      {embedded ? (
+        // Dashboard embedded vault: same SemanticMap | experiences flex as main (no PanelGrid).
+        <div className="flex min-h-0 w-full flex-1 flex-col xl:flex-row">
           <div
-            data-qa="vault-experience-header"
-            className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2"
+            data-qa="panel"
+            className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-auto border-b border-outline-variant bg-surface-container-low/40 p-2.5 xl:border-b-0 xl:border-r"
           >
-            <div className="font-mono text-meta text-on-surface-variant">
-              {tv("totalExperiences", { count: experienceTotal })}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowArchived(!showArchived)}
-                className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high"
-              >
-                {showArchived ? tv("hideArchived") : tv("showArchived")}
-              </button>
-              {unreviewedCount > 0 ? (
-                <button
-                  type="button"
-                  onClick={() => void markAllExperiencesReviewed()}
-                  className="min-h-8 rounded border border-secondary/40 px-2 py-1 font-body text-meta text-secondary hover:bg-secondary/10"
-                >
-                  {tv("markAllReviewed")}
-                </button>
-              ) : null}
-            </div>
-          </div>
-          {selectedProjectPath ? (
-            <div
-              data-qa="vault-project-path"
-              className="mb-2 shrink-0 break-all font-mono text-meta text-on-surface-variant"
-            >
-              <span className="uppercase tracking-label text-outline">{tv("projectPath")}</span>
-              {" · "}
-              {formatDisplayPath(selectedProjectPath)}
-            </div>
-          ) : null}
-          {selected ? (
-            <div className="mb-2 shrink-0 space-y-1 border-b border-outline-variant/40 pb-2">
-              <div className="flex items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
-                <span>{tv("deadSymbols")}</span>
-                <span className={deadForNode.length > 0 ? "text-error" : "text-outline"}>
-                  {deadForNode.length > 0 ? tv("warnings", { count: deadForNode.length }) : tv("clean")}
-                </span>
-              </div>
-              {deadForNode.length === 0 ? (
-                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-2 text-center font-mono text-meta text-on-surface-variant">
-                  Bu düğüm için dead symbol yok · {selected.name}
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  <div className="max-h-24 space-y-1 overflow-auto font-mono text-meta">
-                    {deadForNode.slice(0, 3).map((symbol) => (
-                      <div
-                        key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
-                        className="flex items-start justify-between gap-2 rounded border border-error/30 bg-error/5 px-1.5 py-1"
-                      >
-                        <div className="min-w-0">
-                          <div className="truncate font-medium text-error">{symbol.name}</div>
-                          <div className="truncate text-meta text-on-surface-variant">
-                            {symbol.file
-                              ? `${formatDisplayPath(symbol.file)}${
-                                  symbol.line != null ? `:${symbol.line}` : ""
-                                }`
-                              : symbol.detail || symbol.kind}
-                          </div>
-                        </div>
-                        <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
-                          {symbol.kind || "dead"}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  <DeadSymbolsVaultLink
-                    count={deadForNode.length}
-                    project={selected.kind === "project" ? selected.name : selected.project}
-                  />
-                </div>
-              )}
-            </div>
-          ) : null}
-          <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
-            <span>
-              {openProjectName
-                ? tv("experiencesForProject", { name: openProjectName })
-                : tv("experienceLog")}
-            </span>
-            <span
-              className={
-                whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
+            <SemanticMap
+              semanticMap={semanticMap}
+              projects={projects}
+              experiences={experiences}
+              graphTotals={graphTotals}
+              selected={selected}
+              aggregates={vaultAggregates}
+              aggregatesLoading={aggregatesLoading}
+              aggregatesError={aggregatesError}
+              onRetryAggregates={() => setAggregatesTick((n) => n + 1)}
+              projectPages={serverPages}
+              projectPagesTotal={serverPagesTotal}
+              pagesLoading={pagesLoading}
+              pagesError={pagesError}
+              onPageSearch={handlePageSearch}
+              onLoadMorePages={handleLoadMorePages}
+              onRetryPages={() =>
+                void fetchProjectPages(pageQueryState.query, pageQueryState.sort, 0, false)
               }
-            >
-              {whispered.size > 0
-                ? tv("whisperLive", { count: whispered.size })
-                : openProjectName
-                  ? tv("filter", { name: openProjectName })
-                  : tv("projectCount", { count: experienceProjectRows.length })}
-            </span>
+              fileSymbols={fileSymbols}
+              fileSymbolsLoading={fileSymbolsLoading}
+              onOpenPage={handleOpenPage}
+              onClosePage={handleClosePage}
+              openProjectName={openProjectName}
+              onOpenProject={(name) => {
+                setOpenProjectName(name);
+                setServerPages(null);
+                setServerPagesTotal(null);
+                setPagesError(null);
+                setFileSymbols(null);
+                if (name) {
+                  setSelected({
+                    id: `project:${name}`,
+                    name,
+                    kind: "project",
+                    project: name,
+                    file: null,
+                  });
+                  switchProject(name);
+                  setLogPage(0);
+                } else {
+                  setSelected(null);
+                  switchProject(null);
+                  setLogPage(0);
+                }
+              }}
+              onSelect={(next) => {
+                setSelected(next);
+                setLogPage(0);
+                if (next?.kind === "project") {
+                  switchProject(next.name);
+                } else if (!next) {
+                  switchProject(null);
+                }
+              }}
+            />
           </div>
           <div
-            className={`min-h-0 flex-1 overflow-auto font-body text-body ${
-              !openProjectName && experienceProjectRows.length > 0 && experienceProjectRows.length <= 8
-                ? "flex flex-col gap-2"
-                : "space-y-2"
-            }`}
+            data-qa="panel"
+            className="flex min-h-0 w-full flex-1 flex-col overflow-hidden"
           >
-            {!openProjectName ? (
-              experienceProjectRows.length === 0 ? (
-                <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                  {tv("noExperiences")}
-                </div>
-              ) : (
-                <>
-                  {experienceProjectRows.map((row) => (
-                    <div
-                      key={`exp-proj:${row.name}`}
-                      role="listitem"
-                      data-qa="vault-experience-project-row"
-                      data-project={row.name}
-                      tabIndex={0}
-                      onDoubleClick={() => {
-                        setOpenProjectName(row.name);
-                        setSelected({
-                          id: `project:${row.name}`,
-                          name: row.name,
-                          kind: "project",
-                          project: row.name,
-                          file: null,
-                        });
-                        switchProject(row.name);
-                        setLogPage(0);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          setOpenProjectName(row.name);
-                          setSelected({
-                            id: `project:${row.name}`,
-                            name: row.name,
-                            kind: "project",
-                            project: row.name,
-                            file: null,
-                          });
-                          switchProject(row.name);
-                          setLogPage(0);
-                        }
-                      }}
-                      className={`flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high ${
-                        experienceProjectRows.length <= 8 ? "min-h-0 flex-1" : ""
-                      }`}
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-mono font-medium text-on-surface">
-                          {row.name}
-                        </span>
-                        <span className="block truncate font-mono text-meta text-outline">
-                          {tv("pageCountMeta", {
-                            pages: row.pageCount,
-                            experiences: row.experienceCount,
-                          })}
-                        </span>
-                      </span>
-                      <button
-                        type="button"
-                        data-qa="vault-experience-project-open"
-                        onClick={() => {
-                          setOpenProjectName(row.name);
-                          setSelected({
-                            id: `project:${row.name}`,
-                            name: row.name,
-                            kind: "project",
-                            project: row.name,
-                            file: null,
-                          });
-                          switchProject(row.name);
-                          setLogPage(0);
-                        }}
-                        className="min-h-8 shrink-0 rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container"
-                      >
-                        {tv("openProject")}
-                      </button>
-                    </div>
-                  ))}
-                  <div className="mt-auto shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline">
-                    <span className="font-body">
-                      {tv("projectCount", { count: experienceProjectRows.length })} ·{" "}
-                      {tv("totalExperiences", { count: experienceTotal })}
-                    </span>
-                  </div>
-                </>
-              )
-            ) : experiencesLoading && experiences.length === 0 ? (
-              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                {tv("loading")}
-              </div>
-            ) : experiencesError ? (
-              <div className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center text-body text-error">
-                {experiencesError || tv("listError")}
-              </div>
-            ) : logVisible.length === 0 ? (
-              <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
-                {tv("noExperiencesForNode", { name: openProjectName })}
-              </div>
-            ) : (
-              logVisible.map((item) => {
-                const isWhisper = whispered.has(item.id);
-                const alreadyUseful = markedUseful.has(item.id);
-                const archived = isExperienceArchived(item);
-                const heading =
-                  (item.title && item.title.trim()) ||
-                  formatExperienceLogSummary(item.adr_summary || item.original_content || "", 80);
-                const autoHint =
-                  item.title_source === "llm" || item.title_source === "fallback";
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    data-qa="experience-card"
-                    onClick={() => void openExperience(item.id)}
-                    className={`w-full space-y-1 rounded border p-1.5 text-left transition-colors ${
-                      isWhisper
-                        ? "border-primary bg-primary-container/20 shadow-[0_0_0_1px_var(--color-primary)]"
-                        : archived
-                          ? "border-outline-variant/30 bg-surface-container-high/30 opacity-70"
-                          : "border-outline-variant/40 bg-surface-container-high/60 hover:bg-surface-container-high"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <span
-                          data-qa="experience-project-chip"
-                          className="shrink-0 rounded border border-outline-variant/50 px-1 font-mono text-meta text-on-surface-variant"
-                        >
-                          {item.project_id}
-                        </span>
-                        {item.is_pinned ? (
-                          <span className="rounded border border-primary/40 px-1 text-meta text-primary">
-                            PIN
-                          </span>
-                        ) : null}
-                        {archived ? (
-                          <span className="rounded border border-outline-variant px-1 text-meta text-outline uppercase">
-                            {tv("archivedLabel")}
-                          </span>
-                        ) : null}
-                        {item.reviewed === false ? (
-                          <span className="rounded border border-dashed border-secondary/60 px-1 text-meta text-secondary uppercase">
-                            {tv("unreviewed")}
-                          </span>
-                        ) : null}
-                        {isWhisper ? (
-                          <span className="rounded border border-primary/50 px-1 text-meta text-primary">
-                            {tv("whisper")}
-                          </span>
-                        ) : null}
-                      </div>
-                      <span
-                        className={`shrink-0 rounded border px-1 text-meta ${outcomeClass(item.outcome)}`}
-                      >
-                        {item.outcome === "success"
-                          ? "Success"
-                          : item.outcome === "partial"
-                            ? "Partial"
-                            : "Failed"}
-                      </span>
-                    </div>
-                    <div className="flex items-start gap-1">
-                      <div
-                        data-qa="experience-title"
-                        className="min-w-0 flex-1 break-words font-body text-body font-medium text-on-surface"
-                      >
-                        {heading}
-                      </div>
-                      {autoHint ? (
-                        <span
-                          data-qa="experience-title-auto"
-                          className="shrink-0 font-mono text-meta lowercase text-outline"
-                          title={tv("autoTitle")}
-                        >
-                          {tv("autoTitle")}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="flex items-center justify-between font-mono text-meta text-on-surface-variant">
-                      <span data-qa="experience-last-used">
-                        {tv("lastUsed")}:{" "}
-                        {item.last_used_at
-                          ? formatExperienceTime(item.last_used_at)
-                          : "—"}
-                      </span>
-                      <span data-qa="experience-use-count" className="tnum">
-                        {tv("useCount")}: {item.use_count ?? 0}
-                      </span>
-                    </div>
-                    {isWhisper ? (
-                      <div className="flex justify-end pt-0.5">
-                        <button
-                          type="button"
-                          disabled={alreadyUseful}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void (async () => {
-                              await markWhisperUseful(item.id, item.project_id);
-                              setMarkedUseful((prev) => new Set(prev).add(item.id));
-                            })();
-                          }}
-                          className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
-                          aria-label="Bu fısıltıyı faydalı olarak işaretle"
-                        >
-                          {alreadyUseful ? tv("usefulDone") : tv("useful")}
-                        </button>
-                      </div>
-                    ) : null}
-                  </button>
-                );
-              })
-            )}
+            {experiencesPane}
           </div>
-          {experiences.length < experienceTotal ? (
-            <div className="shrink-0 pt-2">
-              <button
-                type="button"
-                data-qa="vault-load-more"
-                disabled={experiencesLoading}
-                onClick={() => void loadMoreExperiences()}
-                className="min-h-8 w-full rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high disabled:opacity-60"
-              >
-                {tv("loadMore")}
-              </button>
-            </div>
-          ) : null}
         </div>
-      </div>
-      <div className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline">
+      ) : (
+        <PanelGrid
+          className="min-h-[28rem] flex-1"
+          ratios={VAULT_MAP_RATIOS}
+          portraitShowsInspector
+          listFillsOneMode
+          drawerBodyOverflow="hidden"
+          manageDrawerFocus
+          detailDrawerLabel={tv("layout.openDetail")}
+          inspectorDrawerLabel={tv("layout.openExperiences")}
+          detailDrawerTitle={tv("layout.detailHeading")}
+          inspectorDrawerTitle={tv("layout.experiencesHeading")}
+          closeDrawerLabel={tv("layout.closeDrawer")}
+          list={listPane}
+          detail={
+            <VaultDeadSymbolsPane
+              selected={selected}
+              symbols={deadForNode}
+              projects={projectRows}
+              allDeadSymbols={deadSymbols}
+              selectedPath={selectedProjectPath}
+            />
+          }
+          inspector={experiencesPane}
+        />
+      )}
+      <div
+        data-qa={embedded ? "vault-map-footer" : "panel"}
+        data-panel-slot="vault-map-footer"
+        className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline"
+      >
         <span>
           codebase-memory-mcp · {repoCount} repos · {tv("totalExperiences", { count: experienceTotal })}
         </span>
-        <Pager page={safeLogPage} pages={logPages} total={log.length} onPage={setLogPage} />
       </div>
       <ExperienceDrawer
         key={experienceDetail?.id ?? "closed"}

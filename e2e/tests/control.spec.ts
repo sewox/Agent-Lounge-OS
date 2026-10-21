@@ -65,6 +65,7 @@ test.describe("PR-Control-1 Halt + deep-link approval chrome", () => {
       await expect(page).toHaveURL(new RegExp(`${route.path.replace("/", "\\/")}`));
       await expect(page.locator('[data-qa="halted-banner"]')).toBeVisible();
       await expect(page.locator('[data-qa="halt-toggle"]')).toBeVisible();
+      // Landing view — same as main (no pre-measure vault drill-down).
       await assertLayoutL1toL6(page, route.path, expect);
     }
 

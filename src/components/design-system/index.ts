@@ -1,4 +1,8 @@
-export { PanelGrid, type PanelGridProps } from "./panel-grid";
+export {
+  PanelGrid,
+  type PanelGridProps,
+  type PanelGridRatios,
+} from "./panel-grid";
 export {
   resolvePanelMode,
   modeShowsDetailInline,

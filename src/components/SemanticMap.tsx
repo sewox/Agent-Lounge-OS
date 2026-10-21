@@ -22,6 +22,12 @@ import {
   type SemanticMapSelection,
 } from "@/lib/lounge";
 import {
+  computeTokenRowHeight,
+  PAGE_ROW_HEIGHT_REM,
+  readRootFontSizePx,
+  subscribeRootFontSize,
+} from "@/lib/row-height";
+import {
   buildVaultProjectRows,
   debounceMs,
   filterAndSortPages,
@@ -45,7 +51,15 @@ import {
 } from "@/lib/vault-projects";
 
 const PROJECT_PAGE = 24;
-const PAGE_ROW_HEIGHT = 36;
+
+function usePageRowHeightPx(): number {
+  const rootPx = useSyncExternalStore(
+    subscribeRootFontSize,
+    () => readRootFontSizePx(),
+    () => 16,
+  );
+  return computeTokenRowHeight(rootPx, PAGE_ROW_HEIGHT_REM);
+}
 
 type GraphTotals = {
   nodes: number;
@@ -289,6 +303,7 @@ function VirtualPageList({
   onOpenPage?: (path: string) => void;
 }) {
   const { t } = useTranslation("vault");
+  const rowHeight = usePageRowHeightPx();
   const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(320);
@@ -305,7 +320,7 @@ function VirtualPageList({
     return () => ro?.disconnect();
   }, [scrollerEl]);
 
-  const win = windowSlice(pages, scrollTop, viewportHeight, PAGE_ROW_HEIGHT, 8);
+  const win = windowSlice(pages, scrollTop, viewportHeight, rowHeight, 8);
   const visible = pages.slice(win.start, win.end);
 
   if (pages.length === 0 && !loading) {
@@ -337,7 +352,7 @@ function VirtualPageList({
         setScrollTop(el.scrollTop);
         if (
           onNearEnd &&
-          el.scrollHeight - el.scrollTop - el.clientHeight < PAGE_ROW_HEIGHT * 12
+          el.scrollHeight - el.scrollTop - el.clientHeight < rowHeight * 12
         ) {
           onNearEnd();
         }
@@ -360,7 +375,7 @@ function VirtualPageList({
                     ? "bg-primary-container/20 text-primary"
                     : "text-on-surface hover:bg-surface-container-high/70"
                 }`}
-                style={{ height: PAGE_ROW_HEIGHT }}
+                style={{ height: rowHeight }}
               >
                 <span className="min-w-0">
                   <span className="block truncate font-mono font-medium">

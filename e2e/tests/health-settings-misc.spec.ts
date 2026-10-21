@@ -579,24 +579,52 @@ test.describe("AP / CP / misc", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
+
+    async function revealVaultSlot(slot: "detail" | "inspector") {
+      const inline = page.locator(`[data-panel-slot="${slot}"]`);
+      if (await inline.isVisible()) {
+        return;
+      }
+      const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+      if (await closeBtn.isVisible()) {
+        await closeBtn.click();
+        await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
+      }
+      const openQa =
+        slot === "detail" ? "open-detail-drawer" : "open-inspector-drawer";
+      await page.locator(`[data-qa="${openQa}"]`).click();
+      await expect(
+        page.locator(`[data-qa="panel-grid-drawer-${slot}"]`),
+      ).toBeVisible();
+    }
+
     // Select project row (not drill-down Open) so the path strip appears.
     await page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /Agent-Lounge-OS/i })
       .first()
       .click();
+    await revealVaultSlot("inspector");
     const winRoot = "C:\\Users\\sercan\\dev\\Agent-Lounge-OS";
     await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(winRoot);
     // Real dead-symbol file path with drive letter + backslashes stays unaltered in the vault list.
-    await expect(page.locator("main")).toContainText(
+    await revealVaultSlot("detail");
+    await expect(page.locator('[data-qa="vault-dead-pane"]')).toContainText(
       "C:\\Users\\sercan\\dev\\Agent-Lounge-OS\\src-tauri\\src\\kernel\\dispatcher.rs",
     );
+    // Close drawer so the project list is clickable again on one/two modes.
+    const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+    if (await closeBtn.isVisible()) {
+      await closeBtn.click();
+      await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
+    }
     // POSIX project root from another indexed repo.
     await page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /EchoMind/i })
       .first()
       .click();
+    await revealVaultSlot("inspector");
     await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(
       "/home/sercan/dev/EchoMind",
     );

@@ -3,6 +3,22 @@ import { openRoute } from "../helpers/nav";
 import { getIpcLog } from "../harness/tauri-mock";
 import { measureLayout, formatLayoutFailure } from "../helpers/layout";
 
+async function revealVaultExperiences(page: import("@playwright/test").Page) {
+  const inline = page.locator('[data-panel-slot="inspector"]');
+  if (await inline.isVisible()) {
+    return;
+  }
+  const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+  if (await closeBtn.isVisible()) {
+    await closeBtn.click();
+    await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
+  }
+  const openBtn = page.locator('[data-qa="open-inspector-drawer"]');
+  await expect(openBtn).toBeVisible();
+  await openBtn.click();
+  await expect(page.locator('[data-qa="panel-grid-drawer-inspector"]')).toBeVisible();
+}
+
 async function openVaultProject(page: import("@playwright/test").Page, name: string) {
   const row = page
     .locator('[data-qa="vault-project-row"]')
@@ -14,12 +30,19 @@ async function openVaultProject(page: import("@playwright/test").Page, name: str
     "data-view",
     "pages",
   );
+  // Experiences live in the inspector slot (drawer on one/two modes).
+  await revealVaultExperiences(page);
 }
 
 test.describe("DB — dashboard", () => {
   test("DB-01 · KPI Dead Symbols equals real count (not 127) [full] @smoke", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
-    const value = await page.locator("main").getByText("DEAD SYMBOLS").locator("xpath=ancestor::*[contains(@class,'rounded')][1]").innerText();
+    // exact:true avoids the Vault detail pane heading ("Dead symbols").
+    const value = await page
+      .locator("main")
+      .getByText("DEAD SYMBOLS", { exact: true })
+      .locator("xpath=ancestor::*[contains(@class,'rounded')][1]")
+      .innerText();
     // With full fixture, deadSymbols.length is 10 — must not be 127.
     expect(value).not.toMatch(/\b127\b/);
     expect(value).toMatch(/\b10\b/);
