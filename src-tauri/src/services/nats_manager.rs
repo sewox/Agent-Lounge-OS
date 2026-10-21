@@ -605,10 +605,7 @@ fn client_port_from_nats_url(url: &str) -> Result<u16> {
 /// Windows CI has shown `child.id()` vs `os.Getpid()` filename skew: a PID-strict
 /// wait then reports "not created" while `nats-server.exe_<other>.ports` already
 /// exists in the exclusive dir.
-fn find_ports_file_in_exclusive_dir(
-    dir: &std::path::Path,
-    pid: u32,
-) -> Option<std::path::PathBuf> {
+fn find_ports_file_in_exclusive_dir(dir: &std::path::Path, pid: u32) -> Option<std::path::PathBuf> {
     let suffix = format!("_{pid}.ports");
     let entries = std::fs::read_dir(dir).ok()?;
     let mut pid_match: Option<std::path::PathBuf> = None;
@@ -661,7 +658,10 @@ pub(crate) fn parse_nats_listen_notice_client_port(log: &str) -> Option<u16> {
     None
 }
 
-fn read_ports_dir_client_port(dir: &std::path::Path, pid: u32) -> Result<Option<u16>, anyhow::Error> {
+fn read_ports_dir_client_port(
+    dir: &std::path::Path,
+    pid: u32,
+) -> Result<Option<u16>, anyhow::Error> {
     if let Some(path) = find_ports_file_in_exclusive_dir(dir, pid) {
         match std::fs::read_to_string(&path) {
             Ok(body) if !body.trim().is_empty() => {
@@ -1333,7 +1333,10 @@ mod tests {
     fn wait_nats_ports_file_client_port_times_out_when_missing() {
         let dir = canonical_temp_dir()
             .unwrap_or_else(|_| std::env::temp_dir())
-            .join(format!("lounge-nats-ports-timeout-{}", uuid::Uuid::new_v4()));
+            .join(format!(
+                "lounge-nats-ports-timeout-{}",
+                uuid::Uuid::new_v4()
+            ));
         std::fs::create_dir_all(&dir).unwrap();
         let err = wait_nats_ports_file_client_port(&dir, 9_999_999, Duration::from_millis(80))
             .expect_err("must time out");
