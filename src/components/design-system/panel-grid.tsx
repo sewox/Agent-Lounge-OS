@@ -57,8 +57,8 @@ export type PanelGridProps = {
   manageDrawerFocus?: boolean;
   /**
    * Override container-driven mode (e.g. embedded dashboard `two` in landscape).
-   * Ignored when the *viewport* is portrait so L6 full-width stacking holds
-   * (embedded grids can be wider-than-tall inside a stacked CollapsiblePanel).
+   * Ignored only when the *viewport* is portrait (L6). Otherwise forceMode wins
+   * even if the container is taller-than-wide (stacked dash panels).
    * Default undefined — use `resolvePanelMode` (PR-DS-0).
    */
   forceMode?: PanelMode;
@@ -120,7 +120,11 @@ export function PanelGrid({
       const entry = entries[0];
       if (!entry) return;
       const { width, height } = entry.contentRect;
-      setBox({ width, height });
+      setBox((prev) =>
+        Math.abs(prev.width - width) < 0.5 && Math.abs(prev.height - height) < 0.5
+          ? prev
+          : { width, height },
+      );
     });
     ro.observe(el);
     const rect = el.getBoundingClientRect();
@@ -130,7 +134,8 @@ export function PanelGrid({
 
   useEffect(() => {
     const syncViewport = () => {
-      setViewportPortrait(window.innerHeight > window.innerWidth);
+      const next = window.innerHeight > window.innerWidth;
+      setViewportPortrait((prev) => (prev === next ? prev : next));
     };
     syncViewport();
     window.addEventListener("resize", syncViewport);
@@ -138,12 +143,9 @@ export function PanelGrid({
   }, []);
 
   const naturalMode = resolvePanelMode(box.width || 1, box.height || 1);
-  // Viewport portrait (not container): keep natural mode so L6 is not broken by
-  // forceMode="two" inside a wide-but-short stacked panel (dashboard D3).
-  const mode =
-    viewportPortrait || naturalMode === "portrait-stack"
-      ? naturalMode
-      : (forceMode ?? naturalMode);
+  // Portrait *viewport* → natural mode (L6). Landscape viewport → forceMode may
+  // override container portrait-stack (embedded dash column is often taller-than-wide).
+  const mode = viewportPortrait ? naturalMode : (forceMode ?? naturalMode);
 
   useEffect(() => {
     onModeChange?.(mode);
