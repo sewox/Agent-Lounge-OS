@@ -33,10 +33,13 @@ Slots: **list** | **detail** | **inspector**.
 | ≥ 1600px | `three` | List + detail + inspector |
 | aspect &lt; 1 (portrait) | `portrait-stack` | List on top, detail below, **draggable splitter**; inspector as drawer |
 
-Optional props (additive; defaults preserve the table above):
+Optional props (additive; defaults preserve the table above / PR-DS-0 behavior for agents-health, vault-review, ds-lab):
 
 - `ratios.two` / `ratios.three` — fr weights (default `1:1.25` / `1:1.2:0.9`). Vault map uses `1:1.5` / `1:1.5:1`.
 - `portraitShowsInspector` — when true, portrait stacks list → detail → inspector inline (no splitter) instead of an inspector drawer.
+- `listFillsOneMode` — when true, the list slot is `flex-1` in one-mode (default `false`).
+- `drawerBodyOverflow` — `"auto"` (default) or `"hidden"` for nested virtual scrollers.
+- `manageDrawerFocus` — when true, focus moves into the drawer and Escape closes it (default `false`).
 
 Breakpoints are measured on the grid container via `ResizeObserver`, not on `window` alone.
 

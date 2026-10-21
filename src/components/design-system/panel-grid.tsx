@@ -40,6 +40,21 @@ export type PanelGridProps = {
    * at the three-mode fr weights instead of a drawer. Default false (PR-DS-0).
    */
   portraitShowsInspector?: boolean;
+  /**
+   * When true, the list slot grows with `flex-1` in one-mode (list-only).
+   * Default false preserves PR-DS-0 sizing for agents-health / vault-review / ds-lab.
+   */
+  listFillsOneMode?: boolean;
+  /**
+   * Drawer body overflow. Default `"auto"` (PR-DS-0). Vault map uses `"hidden"`
+   * so nested virtual lists own scrolling.
+   */
+  drawerBodyOverflow?: "auto" | "hidden";
+  /**
+   * When true, focus moves into the drawer on open, Escape closes it, and focus
+   * restores on close. Default false (PR-DS-0) — no page-wide key handler.
+   */
+  manageDrawerFocus?: boolean;
   /** Localized labels for drawer chrome (defaults keep English DS-0 strings). */
   detailDrawerLabel?: string;
   inspectorDrawerLabel?: string;
@@ -68,6 +83,9 @@ export function PanelGrid({
   defaultSplitRatio = 0.42,
   ratios,
   portraitShowsInspector = false,
+  listFillsOneMode = false,
+  drawerBodyOverflow = "auto",
+  manageDrawerFocus = false,
   detailDrawerLabel = "Open detail",
   inspectorDrawerLabel = "Open inspector",
   detailDrawerTitle = "Detail",
@@ -128,9 +146,10 @@ export function PanelGrid({
   // Portrait: stack all three when inspector is inline; otherwise list/detail + splitter.
   const portraitTriple = mode === "portrait-stack" && detailInline && inspectorInline;
   const portraitSplit = mode === "portrait-stack" && detailInline && !inspectorInline;
+  const listOnlyOneMode = !detailInline && !inspectorInline;
 
   useEffect(() => {
-    if (!openDrawer) return;
+    if (!openDrawer || !manageDrawerFocus) return;
     const panel = drawerPanelRef.current;
     const previous = document.activeElement as HTMLElement | null;
     const focusable = panel?.querySelector<HTMLElement>(
@@ -148,7 +167,7 @@ export function PanelGrid({
       document.removeEventListener("keydown", onKey);
       previous?.focus?.();
     };
-  }, [openDrawer]);
+  }, [openDrawer, manageDrawerFocus]);
 
   const onSplitterPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -184,6 +203,11 @@ export function PanelGrid({
         : mode === "two"
           ? { gridTemplateColumns: frColumns(twoWeights) }
           : undefined;
+
+  const drawerBodyClass =
+    drawerBodyOverflow === "hidden"
+      ? "flex min-h-0 flex-1 flex-col overflow-hidden p-3"
+      : "min-h-0 flex-1 overflow-auto p-3";
 
   return (
     <div
@@ -240,7 +264,7 @@ export function PanelGrid({
           data-qa="panel"
           data-panel-slot="list"
           className={`flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container ${
-            !detailInline && !inspectorInline ? "min-h-0 flex-1" : ""
+            listFillsOneMode && listOnlyOneMode ? "flex-1" : ""
           }`}
         >
           {list}
@@ -322,7 +346,7 @@ export function PanelGrid({
                 {closeDrawerLabel}
               </button>
             </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
+            <div className={drawerBodyClass}>
               {openDrawer === "detail" ? detail : inspector}
             </div>
           </div>

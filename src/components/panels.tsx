@@ -844,9 +844,14 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       >
         {!openProjectName ? (
           experienceProjectRows.length === 0 ? (
-            <p className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant">
-              {tv("noExperiences")}
-            </p>
+            <div className="flex min-h-0 flex-1 items-center justify-center">
+              <p
+                data-qa="layout-empty"
+                className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+              >
+                {tv("noExperiences")}
+              </p>
+            </div>
           ) : (
             <>
               {experienceProjectRows.map((row) => (
@@ -928,17 +933,32 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             </>
           )
         ) : experiencesLoading && experiences.length === 0 ? (
-          <p className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant">
-            {tv("loading")}
-          </p>
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+            >
+              {tv("loading")}
+            </p>
+          </div>
         ) : experiencesError ? (
-          <p className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center font-body text-body text-error">
-            {experiencesError || tv("listError")}
-          </p>
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center font-body text-body text-error"
+            >
+              {experiencesError || tv("listError")}
+            </p>
+          </div>
         ) : logVisible.length === 0 ? (
-          <p className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant">
-            {tv("noExperiencesForNode", { name: openProjectName })}
-          </p>
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant"
+            >
+              {tv("noExperiencesForNode", { name: openProjectName })}
+            </p>
+          </div>
         ) : (
           logVisible.map((item) => {
             const isWhisper = whispered.has(item.id);
@@ -1079,10 +1099,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   return (
-    // Non-embedded shell keeps data-qa="panel" so L3 occupancy includes vault chrome
-    // (header/footer) at D0/D4-scale one-mode; PanelGrid slots remain the column panels.
-    <section data-qa={embedded ? undefined : "panel"} className={shell}>
-      <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
+    // No wrapping shell panel — leaf PanelGrid slots + chrome strips own data-qa="panel".
+    <section className={shell}>
+      <div
+        data-qa={embedded ? undefined : "panel"}
+        data-panel-slot={embedded ? undefined : "vault-map-chrome"}
+        className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5"
+      >
         <div className="flex items-center gap-2">
           <span className="text-primary">
             <Icon name="tree" />
@@ -1128,11 +1151,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <GraphUiButton />
         </div>
       </div>
-      {/* PanelGrid slots own data-qa="panel" (avoid double-counting for L1–L6). */}
       <PanelGrid
         className="min-h-[28rem] flex-1"
         ratios={VAULT_MAP_RATIOS}
         portraitShowsInspector
+        listFillsOneMode
+        drawerBodyOverflow="hidden"
+        manageDrawerFocus
         detailDrawerLabel={tv("layout.openDetail")}
         inspectorDrawerLabel={tv("layout.openExperiences")}
         detailDrawerTitle={tv("layout.detailHeading")}
@@ -1143,7 +1168,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         inspector={experiencesPane}
       />
       <div
-        data-qa="vault-map-footer"
+        data-qa={embedded ? "vault-map-footer" : "panel"}
+        data-panel-slot="vault-map-footer"
         className="flex shrink-0 items-center justify-between border-t border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-meta text-outline"
       >
         <span>

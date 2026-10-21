@@ -76,19 +76,29 @@ export function VaultDeadSymbolsPane({
       </div>
 
       {!selected ? (
-        <p
+        <div
           data-qa="vault-dead-empty"
-          className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+          className="flex min-h-0 flex-1 items-center justify-center"
         >
-          {t("layout.selectForDetail")}
-        </p>
+          <p
+            data-qa="layout-empty"
+            className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+          >
+            {t("layout.selectForDetail")}
+          </p>
+        </div>
       ) : symbols.length === 0 ? (
-        <p
+        <div
           data-qa="vault-dead-empty"
-          className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+          className="flex min-h-0 flex-1 items-center justify-center"
         >
-          {t("noDeadForNode", { name: selected.name })}
-        </p>
+          <p
+            data-qa="layout-empty"
+            className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+          >
+            {t("noDeadForNode", { name: selected.name })}
+          </p>
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-1">
           <div
