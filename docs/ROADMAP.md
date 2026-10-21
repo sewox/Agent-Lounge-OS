@@ -12,6 +12,8 @@ Sayfa ve deneyim aramasını SQLite `LIKE` sorgularından **FTS5** tam metin ind
 
 **Gerekçe:** 800+ sayfalık indekslerde arama gecikmesi ve sıralama kalitesi `LIKE` ile yeterli ölçeklenmiyor. Geçici ara çözüm olarak [#70](https://github.com/sewox/Agent-Lounge-OS/issues/70)'te `LIKE` wildcard kaçışı ele alındı; kalıcı çözüm FTS5 geçişidir.
 
+**Durum (Vault-1):** `vault_fts` (unicode61) + Rust tarafında simetrik Türkçe folding + hibrit skor `0.7*semantic + 0.3*lexical` (BM25 → `1/(1+|bm25|)`). Arşiv kayıtları FTS katmanında elenir; migration backfill + trigger senkronu + downgrade mevcut.
+
 ---
 
 ## Mimari notlar

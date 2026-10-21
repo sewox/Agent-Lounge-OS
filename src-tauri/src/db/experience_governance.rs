@@ -97,15 +97,21 @@ pub fn cmp_search_with_review_band(a: SearchRankKey<'_>, b: SearchRankKey<'_>) -
         .then_with(|| a.id.cmp(b.id))
 }
 
-/// Sort search hits: hard same-project first (main), then score buckets / reviewed.
+/// Sort search hits: hard same-project first (main), then hybrid score buckets / reviewed.
+///
+/// Score = [`crate::db::vault_fts::hybrid_search_score`]: `0.7 * semantic + 0.3 * lexical`
+/// where lexical is the LIKE-era [`lexical_search_score`] and semantic is cosine
+/// similarity of hashed bag-of-words embeddings over title+ADR+tags. When the
+/// embedding cosine is unavailable the hybrid helper treats semantic as `0.0`.
 pub fn sort_experiences_for_search(
     hits: &mut [LoungeExperience],
     query: &str,
     prefer_project: Option<&str>,
 ) {
+    let query_emb = super::embedding::lexical_embedding(query);
     hits.sort_by(|a, b| {
-        let sa = lexical_search_score(query, a);
-        let sb = lexical_search_score(query, b);
+        let sa = hybrid_score_for_lounge(query, &query_emb, a);
+        let sb = hybrid_score_for_lounge(query, &query_emb, b);
         let same_a = prefer_project
             .map(|pid| a.project_id == pid)
             .unwrap_or(false);
@@ -129,6 +135,18 @@ pub fn sort_experiences_for_search(
             },
         )
     });
+}
+
+fn hybrid_score_for_lounge(query: &str, query_emb: &[f32], row: &LoungeExperience) -> f64 {
+    let lexical = lexical_search_score(query, row);
+    let doc = format!("{} {} {}", row.title, row.adr_summary, row.tags.join(" "));
+    let semantic = if doc.trim().is_empty() && query.trim().is_empty() {
+        None
+    } else {
+        let emb = super::embedding::lexical_embedding(&doc);
+        super::embedding::cosine_similarity(query_emb, &emb).map(|s| s as f64)
+    };
+    super::vault_fts::hybrid_search_score(semantic, lexical)
 }
 
 /// UI IPC must never expose pre-hygiene `original_content` (B2). MCP paths are unchanged.
@@ -848,35 +866,82 @@ fn search_filtered_blocking(
     limit: usize,
     status: Option<&str>,
 ) -> Result<Vec<crate::models::LoungeExperience>> {
-    let status_clause = if status.is_some() {
-        "AND status = ?2"
-    } else {
-        ""
-    };
-    // Fetch a wider window, then UD-5 score-band sort + truncate (relevance primary).
+    let trimmed = needle.trim();
+    if trimmed.is_empty() {
+        // Empty query → pinned/newest window (no FTS).
+        let fetch_cap = (limit.saturating_mul(4)).clamp(limit, 256);
+        let status_clause = if status.is_some() {
+            "WHERE status = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"
+            SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
+                   outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+                   status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+                   updated_at, original_content, archived_by, title, title_source, source
+            FROM experiences
+            {status_clause}
+            ORDER BY is_pinned DESC, created_at DESC
+            LIMIT ?{limit_idx}
+            "#,
+            limit_idx = if status.is_some() { 2 } else { 1 }
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mapped = if let Some(status) = status {
+            stmt.query_map(params![status, fetch_cap as i64], map_lounge_row)?
+        } else {
+            stmt.query_map(params![fetch_cap as i64], map_lounge_row)?
+        };
+        let mut out = Vec::new();
+        for row in mapped {
+            out.push(row?);
+        }
+        out.truncate(limit);
+        return Ok(out);
+    }
+
+    // Vault-1: active rows via FTS5. Archived rows are excluded from the FTS
+    // index by design — O2 archive fallback uses folded LIKE instead.
+    if status == Some(EXPERIENCE_STATUS_ARCHIVED) {
+        return search_archived_folded_like(conn, trimmed, limit);
+    }
+    super::vault_fts::search_experiences_fts(conn, trimmed, limit, status)
+}
+
+/// Archive-only search (O2). Archived experiences are not in `vault_fts`.
+fn search_archived_folded_like(
+    conn: &Connection,
+    needle: &str,
+    limit: usize,
+) -> Result<Vec<crate::models::LoungeExperience>> {
+    super::vault_fts::register_turkish_fold_fn(conn);
+    let folded = super::vault_fts::turkish_fold(needle);
     let fetch_cap = (limit.saturating_mul(4)).clamp(limit, 256);
-    // Pre-PR relevance proxy preserved as SQL seed order (pinned, then newest).
-    // `reviewed` must NOT be the primary ORDER BY — see REVIEW_SCORE_BAND.
-    let sql = format!(
-        r#"
+    let sql = r#"
         SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                status, reviewed, use_count, last_used_at, archived_at, is_pinned,
                updated_at, original_content, archived_by, title, title_source, source
         FROM experiences
-        WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || COALESCE(title,'') || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
-          {status_clause}
+        WHERE status = ?1
+          AND (
+            al_turkish_fold(COALESCE(title, '')) LIKE '%' || ?2 || '%'
+            OR al_turkish_fold(COALESCE(tags_json, '')) LIKE '%' || ?2 || '%'
+            OR al_turkish_fold(COALESCE(source, '')) LIKE '%' || ?2 || '%'
+            OR al_turkish_fold(COALESCE(adr_record, '')) LIKE '%' || ?2 || '%'
+            OR al_turkish_fold(COALESCE(topic, '') || ' ' || COALESCE(solution_summary, ''))
+                 LIKE '%' || ?2 || '%'
+          )
         ORDER BY is_pinned DESC, created_at DESC
-        LIMIT ?{limit_idx}
-        "#,
-        limit_idx = if status.is_some() { 3 } else { 2 }
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let mapped = if let Some(status) = status {
-        stmt.query_map(params![needle, status, fetch_cap as i64], map_lounge_row)?
-    } else {
-        stmt.query_map(params![needle, fetch_cap as i64], map_lounge_row)?
-    };
+        LIMIT ?3
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let mapped = stmt.query_map(
+        params![EXPERIENCE_STATUS_ARCHIVED, folded, fetch_cap as i64],
+        map_lounge_row,
+    )?;
     let mut out = Vec::new();
     for row in mapped {
         out.push(row?);
@@ -886,7 +951,9 @@ fn search_filtered_blocking(
     Ok(out)
 }
 
-fn map_lounge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::LoungeExperience> {
+pub(crate) fn map_lounge_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::models::LoungeExperience> {
     Ok(map_full_record(row)?.to_lounge())
 }
 
@@ -2012,13 +2079,15 @@ mod tests {
 
     /// Property: bucket comparator is a total order — no panic under `sort_by`,
     /// antisymmetric + transitive on samples, and a ≥2-bucket gap always ranks
-    /// the higher score first.
+    /// the higher score first. Scores include Vault-1 hybrid combinations
+    /// (`0.7 * semantic + 0.3 * lexical`, including missing-semantic → 0.0).
     #[test]
     fn review_score_band_comparator_is_total_order_property() {
         use super::{
             cmp_search_with_review_band, normalize_search_score, review_score_bucket,
             SearchRankKey, REVIEW_SCORE_BAND,
         };
+        use crate::db::vault_fts::{hybrid_search_score, normalize_bm25};
         use std::cmp::Ordering;
 
         #[derive(Clone, Debug)]
@@ -2069,6 +2138,11 @@ mod tests {
                     2 => f64::INFINITY,
                     3 => f64::NEG_INFINITY,
                     4 => raw * 3.0,
+                    // Vault-1 hybrid: both present.
+                    5 => hybrid_search_score(Some(raw), normalize_bm25(-(1.0 - raw) * 8.0)),
+                    // Vault-1 hybrid: semantic missing → 0.0.
+                    6 => hybrid_search_score(None, normalize_bm25(-(1.0 - raw) * 8.0)),
+                    7 => hybrid_search_score(Some(1.0 - raw), raw),
                     _ => raw,
                 };
                 hits.push(Hit {

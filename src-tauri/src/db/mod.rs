@@ -9,6 +9,7 @@ mod experiences;
 pub mod feedback;
 mod project_identity;
 mod project_index;
+mod vault_fts;
 mod vector_memory;
 
 pub use a2a::{
@@ -42,3 +43,8 @@ pub use project_identity::{
     PROJECT_ID_UNCLASSIFIED, PROJECT_ID_UNINDEXED_PLACEHOLDER,
 };
 pub use project_index::{accepts_cross_platform_path, normalize_path_str, path_has_windows_drive};
+pub use vault_fts::{
+    downgrade_vault_fts, fts5_available, hybrid_search_score, migrate_vault_fts, normalize_bm25,
+    turkish_fold, HYBRID_LEXICAL_WEIGHT, HYBRID_SEMANTIC_WEIGHT, VAULT_FTS_SCHEMA_VERSION,
+    VAULT_FTS_SCHEMA_VERSION_KEY,
+};
