@@ -9,6 +9,7 @@ mod experiences;
 pub mod feedback;
 mod project_identity;
 mod project_index;
+mod vault_fts;
 mod vector_memory;
 
 pub use a2a::{
@@ -24,11 +25,11 @@ pub use embedding::{cosine_similarity, lexical_embedding};
 pub use experience_governance::{
     cmp_search_with_review_band, lexical_search_score, migrate_experience_governance,
     migrate_mcp_quality_v1, normalize_search_score, review_score_bucket,
-    sort_experiences_for_search, strip_original_content_for_ui, strip_original_content_for_ui_vec,
-    ArchiveClock, ExperienceUpdate, FakeClock, ReviewQueueFilter, ReviewStatFilter, ReviewStats,
-    SearchRankKey, SystemClock, DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_MCP_QUALITY_V1,
-    MIGRATION_PLACEHOLDER_CLEANUP_V1, MIGRATION_TITLE_BACKFILL_ENQUEUE_V1, REVIEW_SCORE_BAND,
-    SETTING_EXPERIENCE_TTL_DAYS,
+    sort_experiences_for_search, sort_scored_experiences_for_search, strip_original_content_for_ui,
+    strip_original_content_for_ui_vec, ArchiveClock, ExperienceUpdate, FakeClock,
+    ReviewQueueFilter, ReviewStatFilter, ReviewStats, SearchRankKey, SystemClock,
+    DEFAULT_EXPERIENCE_TTL_DAYS, MIGRATION_MCP_QUALITY_V1, MIGRATION_PLACEHOLDER_CLEANUP_V1,
+    MIGRATION_TITLE_BACKFILL_ENQUEUE_V1, REVIEW_SCORE_BAND, SETTING_EXPERIENCE_TTL_DAYS,
 };
 pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,
@@ -42,3 +43,8 @@ pub use project_identity::{
     PROJECT_ID_UNCLASSIFIED, PROJECT_ID_UNINDEXED_PLACEHOLDER,
 };
 pub use project_index::{accepts_cross_platform_path, normalize_path_str, path_has_windows_drive};
+pub use vault_fts::{
+    downgrade_vault_fts, fts5_available, hybrid_search_score, like_pattern, migrate_vault_fts,
+    normalize_bm25, turkish_fold, HYBRID_LEXICAL_WEIGHT, HYBRID_SEMANTIC_WEIGHT,
+    VAULT_FTS_SCHEMA_VERSION, VAULT_FTS_SCHEMA_VERSION_KEY,
+};

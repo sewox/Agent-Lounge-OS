@@ -97,38 +97,56 @@ pub fn cmp_search_with_review_band(a: SearchRankKey<'_>, b: SearchRankKey<'_>) -
         .then_with(|| a.id.cmp(b.id))
 }
 
-/// Sort search hits: hard same-project first (main), then score buckets / reviewed.
-pub fn sort_experiences_for_search(
-    hits: &mut [LoungeExperience],
-    query: &str,
+/// Sort hits that already carry a hybrid score (Vault-1).
+///
+/// Total order (#119): same-project → `floor(score/0.05)` buckets → reviewed →
+/// score → created_at → id. Does **not** recompute lexical/semantic scores —
+/// callers must pass the hybrid score produced once at retrieval
+/// (FTS BM25 + stored embedding, or folded-LIKE + stored embedding).
+pub fn sort_scored_experiences_for_search(
+    hits: &mut [(LoungeExperience, f64)],
     prefer_project: Option<&str>,
 ) {
     hits.sort_by(|a, b| {
-        let sa = lexical_search_score(query, a);
-        let sb = lexical_search_score(query, b);
         let same_a = prefer_project
-            .map(|pid| a.project_id == pid)
+            .map(|pid| a.0.project_id == pid)
             .unwrap_or(false);
         let same_b = prefer_project
-            .map(|pid| b.project_id == pid)
+            .map(|pid| b.0.project_id == pid)
             .unwrap_or(false);
         cmp_search_with_review_band(
             SearchRankKey {
                 same_project: same_a,
-                score: sa,
-                reviewed: a.reviewed,
-                created_at: &a.created_at,
-                id: &a.id,
+                score: a.1,
+                reviewed: a.0.reviewed,
+                created_at: &a.0.created_at,
+                id: &a.0.id,
             },
             SearchRankKey {
                 same_project: same_b,
-                score: sb,
-                reviewed: b.reviewed,
-                created_at: &b.created_at,
-                id: &b.id,
+                score: b.1,
+                reviewed: b.0.reviewed,
+                created_at: &b.0.created_at,
+                id: &b.0.id,
             },
         )
     });
+}
+
+/// Convenience: attach scores then sort (tests / non-MCP callers).
+/// Prefer [`sort_scored_experiences_for_search`] when scores are already known.
+pub fn sort_experiences_for_search(
+    hits: &mut [LoungeExperience],
+    scores: &[f64],
+    prefer_project: Option<&str>,
+) {
+    debug_assert_eq!(hits.len(), scores.len());
+    let mut scored: Vec<(LoungeExperience, f64)> =
+        hits.iter().cloned().zip(scores.iter().copied()).collect();
+    sort_scored_experiences_for_search(&mut scored, prefer_project);
+    for (dst, (src, _)) in hits.iter_mut().zip(scored) {
+        *dst = src;
+    }
 }
 
 /// UI IPC must never expose pre-hygiene `original_content` (B2). MCP paths are unchanged.
@@ -434,31 +452,33 @@ impl ExperienceStore {
         .context("experience bump usage join")?
     }
 
-    /// Search active first; if empty, fall back to archived (O2). Returns (rows, from_archive).
+    /// Search active first; if empty, fall back to archived (O2).
+    /// Returns scored hits (hybrid computed once at retrieval) + `from_archive`.
     pub async fn search_experiences_with_archive_fallback(
         &self,
         query: String,
         limit: Option<usize>,
-    ) -> Result<(Vec<crate::models::LoungeExperience>, bool)> {
+    ) -> Result<(Vec<(crate::models::LoungeExperience, f64)>, bool)> {
         let active = self
-            .search_experiences_filtered(query.clone(), limit, Some(EXPERIENCE_STATUS_ACTIVE))
+            .search_experiences_scored(query.clone(), limit, Some(EXPERIENCE_STATUS_ACTIVE))
             .await?;
         if !active.is_empty() {
             return Ok((active, false));
         }
         let archived = self
-            .search_experiences_filtered(query, limit, Some(EXPERIENCE_STATUS_ARCHIVED))
+            .search_experiences_scored(query, limit, Some(EXPERIENCE_STATUS_ARCHIVED))
             .await?;
         let from_archive = !archived.is_empty();
         Ok((archived, from_archive))
     }
 
-    pub async fn search_experiences_filtered(
+    /// Hybrid-scored search (FTS BM25 + stored embedding, or folded LIKE + stored embedding).
+    pub async fn search_experiences_scored(
         &self,
         query: String,
         limit: Option<usize>,
         status: Option<&str>,
-    ) -> Result<Vec<crate::models::LoungeExperience>> {
+    ) -> Result<Vec<(crate::models::LoungeExperience, f64)>> {
         let lim = limit.unwrap_or(12).max(1);
         let needle = query.trim().to_string();
         let status = status.map(str::to_string);
@@ -468,7 +488,21 @@ impl ExperienceStore {
             search_filtered_blocking(&conn, &needle, lim, status.as_deref())
         })
         .await
-        .context("experience search filtered join")?
+        .context("experience search scored join")?
+    }
+
+    pub async fn search_experiences_filtered(
+        &self,
+        query: String,
+        limit: Option<usize>,
+        status: Option<&str>,
+    ) -> Result<Vec<crate::models::LoungeExperience>> {
+        Ok(self
+            .search_experiences_scored(query, limit, status)
+            .await?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect())
     }
 
     pub async fn experience_ttl_days(&self) -> Result<u64> {
@@ -847,46 +881,140 @@ fn search_filtered_blocking(
     needle: &str,
     limit: usize,
     status: Option<&str>,
-) -> Result<Vec<crate::models::LoungeExperience>> {
-    let status_clause = if status.is_some() {
-        "AND status = ?2"
-    } else {
-        ""
-    };
-    // Fetch a wider window, then UD-5 score-band sort + truncate (relevance primary).
+) -> Result<Vec<(crate::models::LoungeExperience, f64)>> {
+    let trimmed = needle.trim();
+    if trimmed.is_empty() {
+        // Empty query → pinned/newest window (no FTS); score 0.
+        let fetch_cap = (limit.saturating_mul(4)).clamp(limit, 256);
+        let status_clause = if status.is_some() {
+            "WHERE status = ?1"
+        } else {
+            ""
+        };
+        let sql = format!(
+            r#"
+            SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
+                   outcome, related_task_id, tags_json, created_at, embedding, payload_json,
+                   status, reviewed, use_count, last_used_at, archived_at, is_pinned,
+                   updated_at, original_content, archived_by, title, title_source, source
+            FROM experiences
+            {status_clause}
+            ORDER BY is_pinned DESC, created_at DESC
+            LIMIT ?{limit_idx}
+            "#,
+            limit_idx = if status.is_some() { 2 } else { 1 }
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mapped = if let Some(status) = status {
+            stmt.query_map(params![status, fetch_cap as i64], map_lounge_row)?
+        } else {
+            stmt.query_map(params![fetch_cap as i64], map_lounge_row)?
+        };
+        let mut out = Vec::new();
+        for row in mapped {
+            out.push((row?, 0.0));
+        }
+        out.truncate(limit);
+        return Ok(out);
+    }
+
+    // Vault-1: active rows via FTS5. Archived rows are excluded from the FTS
+    // index by design — folded LIKE covers archived (and status=None scans).
+    match status {
+        Some(EXPERIENCE_STATUS_ARCHIVED) => search_archived_folded_like(conn, trimmed, limit),
+        Some(EXPERIENCE_STATUS_ACTIVE) | None => {
+            let mut hits = super::vault_fts::search_experiences_fts(conn, trimmed, limit, status)?;
+            // status=None must still surface archived rows (column-governance tests /
+            // admin scans). Active hits come from FTS; merge folded-LIKE archived.
+            if status.is_none() {
+                let archived = search_archived_folded_like(conn, trimmed, limit)?;
+                let mut seen: std::collections::HashSet<String> =
+                    hits.iter().map(|(h, _)| h.id.clone()).collect();
+                for row in archived {
+                    if seen.insert(row.0.id.clone()) {
+                        hits.push(row);
+                    }
+                }
+                sort_scored_experiences_for_search(&mut hits, None);
+                hits.truncate(limit);
+            }
+            Ok(hits)
+        }
+        Some(other) => {
+            // Unknown status filter — folded scan of that status only.
+            search_status_folded_like(conn, trimmed, limit, other)
+        }
+    }
+}
+
+/// Archive-only search (O2). Archived experiences are not in `vault_fts`.
+fn search_archived_folded_like(
+    conn: &Connection,
+    needle: &str,
+    limit: usize,
+) -> Result<Vec<(crate::models::LoungeExperience, f64)>> {
+    search_status_folded_like(conn, needle, limit, EXPERIENCE_STATUS_ARCHIVED)
+}
+
+/// Status-filtered folded LIKE (used when the row is absent from FTS).
+/// Hybrid = 0.7 * stored-embedding cosine + 0.3 * LIKE-era lexical (no BM25).
+/// Needle is escaped (`like_pattern` + `ESCAPE '\'`) so `%`/`_` are literal (#70).
+fn search_status_folded_like(
+    conn: &Connection,
+    needle: &str,
+    limit: usize,
+    status: &str,
+) -> Result<Vec<(crate::models::LoungeExperience, f64)>> {
+    super::vault_fts::register_turkish_fold_fn(conn)?;
+    let folded = super::vault_fts::turkish_fold(needle);
+    let pattern = super::vault_fts::like_pattern(&folded);
     let fetch_cap = (limit.saturating_mul(4)).clamp(limit, 256);
-    // Pre-PR relevance proxy preserved as SQL seed order (pinned, then newest).
-    // `reviewed` must NOT be the primary ORDER BY — see REVIEW_SCORE_BAND.
-    let sql = format!(
-        r#"
+    let query_emb = super::embedding::lexical_embedding(needle);
+    let sql = r#"
         SELECT id, project_id, agent_id, topic, solution_summary, adr_record,
                outcome, related_task_id, tags_json, created_at, embedding, payload_json,
                status, reviewed, use_count, last_used_at, archived_at, is_pinned,
                updated_at, original_content, archived_by, title, title_source, source
         FROM experiences
-        WHERE (?1 = '' OR lower(topic || ' ' || solution_summary || ' ' || adr_record || ' ' || COALESCE(title,'') || ' ' || tags_json) LIKE '%' || lower(?1) || '%')
-          {status_clause}
+        WHERE status = ?1
+          AND (
+            al_turkish_fold(COALESCE(title, '')) LIKE ?2 ESCAPE '\'
+            OR al_turkish_fold(COALESCE(tags_json, '')) LIKE ?2 ESCAPE '\'
+            OR al_turkish_fold(COALESCE(source, '')) LIKE ?2 ESCAPE '\'
+            OR al_turkish_fold(COALESCE(adr_record, '')) LIKE ?2 ESCAPE '\'
+            OR al_turkish_fold(COALESCE(topic, '') || ' ' || COALESCE(solution_summary, ''))
+                 LIKE ?2 ESCAPE '\'
+          )
         ORDER BY is_pinned DESC, created_at DESC
-        LIMIT ?{limit_idx}
-        "#,
-        limit_idx = if status.is_some() { 3 } else { 2 }
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let mapped = if let Some(status) = status {
-        stmt.query_map(params![needle, status, fetch_cap as i64], map_lounge_row)?
-    } else {
-        stmt.query_map(params![needle, fetch_cap as i64], map_lounge_row)?
-    };
-    let mut out = Vec::new();
+        LIMIT ?3
+        "#;
+    let mut stmt = conn.prepare(sql)?;
+    let mapped = stmt.query_map(params![status, pattern, fetch_cap as i64], |row| {
+        let blob: Option<Vec<u8>> = row.get(10)?;
+        let exp = map_lounge_row(row)?;
+        Ok((exp, blob))
+    })?;
+    let mut scored = Vec::new();
     for row in mapped {
-        out.push(row?);
+        let (exp, blob) = row?;
+        let lexical = lexical_search_score(needle, &exp);
+        let semantic = blob
+            .as_deref()
+            .and_then(super::embedding::decode_embedding)
+            .filter(|emb| !emb.is_empty())
+            .and_then(|emb| super::embedding::cosine_similarity(&query_emb, &emb))
+            .map(|s| s as f64);
+        let hybrid = super::vault_fts::hybrid_search_score(semantic, lexical);
+        scored.push((exp, hybrid));
     }
-    sort_experiences_for_search(&mut out, needle, None);
-    out.truncate(limit);
-    Ok(out)
+    sort_scored_experiences_for_search(&mut scored, None);
+    scored.truncate(limit);
+    Ok(scored)
 }
 
-fn map_lounge_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::models::LoungeExperience> {
+pub(crate) fn map_lounge_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::models::LoungeExperience> {
     Ok(map_full_record(row)?.to_lounge())
 }
 
@@ -1529,7 +1657,81 @@ mod tests {
             .unwrap();
         assert!(from_archive);
         assert!(!hits.is_empty());
-        assert_eq!(hits[0].id, id);
+        assert_eq!(hits[0].0.id, id);
+    }
+
+    #[tokio::test]
+    async fn archived_like_path_treats_percent_and_underscore_literally() {
+        let store = ExperienceStore::memory().unwrap();
+        let mut literal = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "p", "has_percent%token"),
+            "has_percent%token solution",
+            "has_percent%token adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        literal.id = "lit".into();
+        store.insert_record(literal).await.unwrap();
+        store.archive_experience("lit".into()).await.unwrap();
+
+        let mut decoy = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "p", "hasXpercentXtoken"),
+            "hasXpercentXtoken solution",
+            "hasXpercentXtoken adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        decoy.id = "decoy".into();
+        store.insert_record(decoy).await.unwrap();
+        store.archive_experience("decoy".into()).await.unwrap();
+
+        // `%` must not act as a wildcard (would match decoy too).
+        let hits = store
+            .search_experiences_filtered(
+                "percent%token".into(),
+                Some(10),
+                Some(EXPERIENCE_STATUS_ARCHIVED),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "expected only literal % match: {hits:?}");
+        assert_eq!(hits[0].id, "lit");
+
+        let mut under = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "p", "has_under_score"),
+            "has_under_score solution",
+            "has_under_score adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        under.id = "under".into();
+        store.insert_record(under).await.unwrap();
+        store.archive_experience("under".into()).await.unwrap();
+
+        let mut under_decoy = ExperienceRecord::from_task(
+            &LoungeTask::new("a", "p", "hasXunderXscore"),
+            "hasXunderXscore solution",
+            "hasXunderXscore adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        under_decoy.id = "under-decoy".into();
+        store.insert_record(under_decoy).await.unwrap();
+        store
+            .archive_experience("under-decoy".into())
+            .await
+            .unwrap();
+
+        let hits_u = store
+            .search_experiences_filtered(
+                "under_score".into(),
+                Some(10),
+                Some(EXPERIENCE_STATUS_ARCHIVED),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits_u.len(), 1, "expected only literal _ match: {hits_u:?}");
+        assert_eq!(hits_u[0].id, "under");
     }
 
     #[test]
@@ -1935,7 +2137,9 @@ mod tests {
 
     #[test]
     fn same_project_hard_tier_outranks_higher_score_other_project() {
-        use super::{cmp_search_with_review_band, sort_experiences_for_search, SearchRankKey};
+        use super::{
+            cmp_search_with_review_band, sort_scored_experiences_for_search, SearchRankKey,
+        };
         use crate::models::LoungeExperience;
         use std::cmp::Ordering;
         // Weak same-project beat strong other-project (main hard tier).
@@ -1960,29 +2164,35 @@ mod tests {
         );
 
         let mut hits = vec![
-            LoungeExperience {
-                id: "other-hi".into(),
-                project_id: "other".into(),
-                title: "needle-xyz".into(),
-                adr_summary: "needle-xyz strong".into(),
-                reviewed: true,
-                created_at: "2026-01-02T00:00:00Z".into(),
-                ..Default::default()
-            },
-            LoungeExperience {
-                id: "same-lo".into(),
-                project_id: "mine".into(),
-                title: "unrelated".into(),
-                adr_summary: "weak".into(),
-                tags: vec!["needle-xyz".into()],
-                reviewed: false,
-                created_at: "2026-01-01T00:00:00Z".into(),
-                ..Default::default()
-            },
+            (
+                LoungeExperience {
+                    id: "other-hi".into(),
+                    project_id: "other".into(),
+                    title: "needle-xyz".into(),
+                    adr_summary: "needle-xyz strong".into(),
+                    reviewed: true,
+                    created_at: "2026-01-02T00:00:00Z".into(),
+                    ..Default::default()
+                },
+                0.99,
+            ),
+            (
+                LoungeExperience {
+                    id: "same-lo".into(),
+                    project_id: "mine".into(),
+                    title: "unrelated".into(),
+                    adr_summary: "weak".into(),
+                    tags: vec!["needle-xyz".into()],
+                    reviewed: false,
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    ..Default::default()
+                },
+                0.20,
+            ),
         ];
-        sort_experiences_for_search(&mut hits, "needle-xyz", Some("mine"));
-        assert_eq!(hits[0].id, "same-lo", "same project must hard-rank first");
-        assert_eq!(hits[1].id, "other-hi");
+        sort_scored_experiences_for_search(&mut hits, Some("mine"));
+        assert_eq!(hits[0].0.id, "same-lo", "same project must hard-rank first");
+        assert_eq!(hits[1].0.id, "other-hi");
     }
 
     #[test]
@@ -2012,13 +2222,15 @@ mod tests {
 
     /// Property: bucket comparator is a total order — no panic under `sort_by`,
     /// antisymmetric + transitive on samples, and a ≥2-bucket gap always ranks
-    /// the higher score first.
+    /// the higher score first. Scores include Vault-1 hybrid combinations
+    /// (`0.7 * semantic + 0.3 * lexical`, including missing-semantic → 0.0).
     #[test]
     fn review_score_band_comparator_is_total_order_property() {
         use super::{
             cmp_search_with_review_band, normalize_search_score, review_score_bucket,
             SearchRankKey, REVIEW_SCORE_BAND,
         };
+        use crate::db::vault_fts::{hybrid_search_score, normalize_bm25};
         use std::cmp::Ordering;
 
         #[derive(Clone, Debug)]
@@ -2069,6 +2281,11 @@ mod tests {
                     2 => f64::INFINITY,
                     3 => f64::NEG_INFINITY,
                     4 => raw * 3.0,
+                    // Vault-1 hybrid: both present.
+                    5 => hybrid_search_score(Some(raw), normalize_bm25(-(1.0 - raw) * 8.0)),
+                    // Vault-1 hybrid: semantic missing → 0.0.
+                    6 => hybrid_search_score(None, normalize_bm25(-(1.0 - raw) * 8.0)),
+                    7 => hybrid_search_score(Some(1.0 - raw), raw),
                     _ => raw,
                 };
                 hits.push(Hit {

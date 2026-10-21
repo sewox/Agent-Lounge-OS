@@ -219,10 +219,32 @@ LOUNGE_MCP_STANDALONE=1 cargo run --manifest-path src-tauri/Cargo.toml --bin lou
 
 `lounge_search_experience` keeps **relevance primary**. The additive JSON field `reviewed` (bool) is backward-compatible and does not drop unreviewed hits.
 
-Ranking uses a **total order** (safe for Rust 1.81+ `sort_by`):
+### Vault-1 hybrid score
+
+Retrieval uses SQLite **FTS5** (`vault_fts`, `tokenize = 'unicode61'`) over Experiences and ProjectPages. Indexed experience fields include **title**, **tags**, **source**, and **adr_record** (plus topic/solution in `body`). Archived experiences (`status != active`) are excluded at the FTS layer via triggers.
+
+Turkish folding is applied in Rust at **index and query** time (`al_turkish_fold` / `turkish_fold`) — no ICU. `İ`/`I`/`i`/`ı` all fold to `i`; `ş→s`, `ç→c`, `ğ→g`, `ö→o`, `ü→u`.
+
+Combined relevance is computed **once** at retrieval and carried into the ranker
+(MCP `lounge_search_experience` does **not** recompute LIKE / on-the-fly embeddings):
+
+```text
+hybrid = 0.7 * semantic + 0.3 * lexical
+```
+
+| Component | Normalization | Notes |
+|-----------|---------------|-------|
+| **lexical (FTS)** | `normalize_bm25(bm25) = \|bm25\| / (1 + \|bm25\|)` → `[0, 1]` | FTS5 `bm25()` is typically ≤ 0 (**more negative = better**). Absolute value grows with relevance, so this map is monotonic: e.g. `-5.63` → ≈`0.85`, `-0.27` → ≈`0.21`. Result-set independent (stable for score buckets). |
+| **lexical (archived / non-FTS)** | LIKE-era `lexical_search_score` on folded text (`like_pattern` + `ESCAPE '\'`) | Archived rows are excluded from FTS; `%`/`_` are literal (#70). |
+| **semantic** | cosine of the **stored** row embedding vs the query embedding, clamped by `normalize_search_score` | |
+| **missing semantic** | treated as **`0.0`** | So `hybrid = 0.3 * lexical` when no stored embedding / cosine is unavailable. |
+
+### Total order (#119)
+
+`sort_scored_experiences_for_search` applies a **total order** on the carried hybrid score (safe for Rust 1.81+ `sort_by`):
 
 1. **Same project** — caller's project hard-first (main behavior; not a soft score boost)
-2. **Bucket** desc — `bucket = floor(normalize(score) / REVIEW_SCORE_BAND)`
+2. **Bucket** desc — `bucket = floor(normalize(score) / REVIEW_SCORE_BAND)` where `score` is the hybrid score above
 3. **`reviewed`** — approved before unreviewed (same bucket only)
 4. **Score** desc (tie-break inside the bucket)
 5. **`created_at`** desc
@@ -233,8 +255,10 @@ Ranking uses a **total order** (safe for Rust 1.81+ `sort_by`):
 | Constant | Value | Role |
 |----------|-------|------|
 | `REVIEW_SCORE_BAND` | `0.05` | Width of one relevance **bucket**. `reviewed` is only a tiebreaker **inside** the same bucket — never across buckets. |
+| `HYBRID_SEMANTIC_WEIGHT` | `0.7` | Weight of semantic cosine in the combined score. |
+| `HYBRID_LEXICAL_WEIGHT` | `0.3` | Weight of normalized BM25 (or LIKE lexical) in the combined score. |
 
-Defined in `src-tauri/src/db/experience_governance.rs` (`lexical_search_score`, `review_score_bucket`, `cmp_search_with_review_band`, `sort_experiences_for_search`).
+Defined in `src-tauri/src/db/experience_governance.rs` + `src-tauri/src/db/vault_fts.rs` (`hybrid_search_score`, `normalize_bm25`, `turkish_fold`, `cmp_search_with_review_band`, `sort_scored_experiences_for_search`).
 
 ## Follow-up
 

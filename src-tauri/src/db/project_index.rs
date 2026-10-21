@@ -1483,23 +1483,6 @@ fn vault_identity_labels(conn: &Connection, project_id: &str) -> (String, Option
     (display, warning)
 }
 
-/// Escape `%`, `_`, and `\` for SQLite `LIKE … ESCAPE '\'`.
-fn like_pattern(needle: &str) -> String {
-    let mut out = String::with_capacity(needle.len() + 2);
-    out.push('%');
-    for ch in needle.chars() {
-        match ch {
-            '\\' | '%' | '_' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    out.push('%');
-    out
-}
-
 fn list_project_pages_blocking(
     conn: &Connection,
     project_id: &str,
@@ -1509,8 +1492,9 @@ fn list_project_pages_blocking(
     limit: u64,
 ) -> Result<ProjectPageList> {
     register_path_basename_fn(conn);
-    let needle = query.trim().to_ascii_lowercase();
-    let like = like_pattern(&needle);
+    crate::db::vault_fts::register_turkish_fold_fn(conn)?;
+    let needle_raw = query.trim();
+    let fts_q = crate::db::vault_fts::fts_match_query(needle_raw);
     let order_by = match sort {
         "updated" | "last_updated" => "last_updated DESC, path ASC",
         "-updated" => "last_updated ASC, path ASC",
@@ -1522,8 +1506,8 @@ fn list_project_pages_blocking(
         _ => "path ASC",
     };
 
-    // Search / sort / LIMIT / OFFSET in SQL — avoid loading every GROUP_CONCAT into Rust.
-    let filtered_cte = if needle.is_empty() {
+    // Search / sort / LIMIT / OFFSET in SQL — Vault-1 FTS5 (unicode61 + TR fold).
+    let filtered_cte = if fts_q.is_none() {
         r#"
         pages AS (
           SELECT
@@ -1554,29 +1538,31 @@ fn list_project_pages_blocking(
             AND file_path IS NOT NULL
             AND TRIM(file_path) != ''
           GROUP BY file_path
-          HAVING lower(file_path) LIKE ?2 ESCAPE '\'
-              OR lower(al_path_basename(file_path)) LIKE ?2 ESCAPE '\'
-              OR EXISTS (
-                SELECT 1 FROM project_index n
-                WHERE n.project_id = ?1 COLLATE NOCASE
-                  AND n.kind = 'node'
-                  AND n.file_path = project_index.file_path
-                  AND lower(n.name) LIKE ?2 ESCAPE '\'
-              )
+          HAVING EXISTS (
+            SELECT 1
+            FROM vault_fts
+            JOIN project_index n
+              ON n.id = vault_fts.row_id
+             AND vault_fts.row_kind = 'project_page'
+            WHERE n.project_id = ?1 COLLATE NOCASE
+              AND n.kind = 'node'
+              AND n.file_path = project_index.file_path
+              AND vault_fts MATCH ?2
+          )
         )
         "#
         .to_string()
     };
 
     let count_sql = format!("WITH {filtered_cte} SELECT COUNT(*) FROM pages");
-    let total: u64 = if needle.is_empty() {
-        conn.query_row(&count_sql, params![project_id], |row| row.get::<_, i64>(0))?
-            .max(0) as u64
-    } else {
-        conn.query_row(&count_sql, params![project_id, like], |row| {
+    let total: u64 = if let Some(ref mq) = fts_q {
+        conn.query_row(&count_sql, params![project_id, mq], |row| {
             row.get::<_, i64>(0)
         })?
         .max(0) as u64
+    } else {
+        conn.query_row(&count_sql, params![project_id], |row| row.get::<_, i64>(0))?
+            .max(0) as u64
     };
 
     let list_sql = format!(
@@ -1587,26 +1573,15 @@ fn list_project_pages_blocking(
         ORDER BY {order_by}
         LIMIT ?{lim_idx} OFFSET ?{off_idx}
         "#,
-        lim_idx = if needle.is_empty() { 2 } else { 3 },
-        off_idx = if needle.is_empty() { 3 } else { 4 },
+        lim_idx = if fts_q.is_none() { 2 } else { 3 },
+        off_idx = if fts_q.is_none() { 3 } else { 4 },
     );
 
     let mut stmt = conn.prepare(&list_sql)?;
     let mut raw_pages: Vec<(String, u64, Option<String>)> = Vec::new();
-    if needle.is_empty() {
-        let mapped = stmt.query_map(params![project_id, limit as i64, offset as i64], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as u64,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })?;
-        for row in mapped {
-            raw_pages.push(row?);
-        }
-    } else {
+    if let Some(ref mq) = fts_q {
         let mapped = stmt.query_map(
-            params![project_id, like, limit as i64, offset as i64],
+            params![project_id, mq, limit as i64, offset as i64],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1615,6 +1590,17 @@ fn list_project_pages_blocking(
                 ))
             },
         )?;
+        for row in mapped {
+            raw_pages.push(row?);
+        }
+    } else {
+        let mapped = stmt.query_map(params![project_id, limit as i64, offset as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
         for row in mapped {
             raw_pages.push(row?);
         }
@@ -2614,6 +2600,7 @@ mod tests {
 
     #[test]
     fn like_pattern_escapes_wildcards() {
+        use crate::db::vault_fts::like_pattern;
         assert_eq!(like_pattern("a_b%c\\d"), "%a\\_b\\%c\\\\d%");
         assert_eq!(like_pattern("plain"), "%plain%");
     }
