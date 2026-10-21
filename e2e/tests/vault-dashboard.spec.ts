@@ -3,6 +3,17 @@ import { openRoute } from "../helpers/nav";
 import { getIpcLog } from "../harness/tauri-mock";
 import { measureLayout, formatLayoutFailure } from "../helpers/layout";
 
+async function revealVaultExperiences(page: import("@playwright/test").Page) {
+  const inline = page.locator('[data-panel-slot="inspector"]');
+  if (await inline.isVisible()) {
+    return;
+  }
+  const openBtn = page.locator('[data-qa="open-inspector-drawer"]');
+  await expect(openBtn).toBeVisible();
+  await openBtn.click();
+  await expect(page.locator('[data-qa="panel-grid-drawer-inspector"]')).toBeVisible();
+}
+
 async function openVaultProject(page: import("@playwright/test").Page, name: string) {
   const row = page
     .locator('[data-qa="vault-project-row"]')
@@ -14,6 +25,8 @@ async function openVaultProject(page: import("@playwright/test").Page, name: str
     "data-view",
     "pages",
   );
+  // Experiences live in the inspector slot (drawer on one/two modes).
+  await revealVaultExperiences(page);
 }
 
 test.describe("DB — dashboard", () => {

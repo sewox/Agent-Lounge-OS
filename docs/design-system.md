@@ -33,6 +33,11 @@ Slots: **list** | **detail** | **inspector**.
 | ≥ 1600px | `three` | List + detail + inspector |
 | aspect &lt; 1 (portrait) | `portrait-stack` | List on top, detail below, **draggable splitter**; inspector as drawer |
 
+Optional props (additive; defaults preserve the table above):
+
+- `ratios.two` / `ratios.three` — fr weights (default `1:1.25` / `1:1.2:0.9`). Vault map uses `1:1.5` / `1:1.5:1`.
+- `portraitShowsInspector` — when true, portrait stacks list → detail → inspector inline (no splitter) instead of an inspector drawer.
+
 Breakpoints are measured on the grid container via `ResizeObserver`, not on `window` alone.
 
 Additional viewport proofs (ds-lab e2e; container ≈ viewport − sidebar − main padding):

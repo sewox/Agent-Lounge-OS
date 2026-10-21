@@ -122,6 +122,17 @@
   "graphEnableConfirmOk": "Etkinleştir",
   "graphEnableConfirmCancel": "İptal",
   "loadingVault": "Kasa yükleniyor…",
+  "layout": {
+    "listHeading": "Projeler ve sayfalar",
+    "detailHeading": "Ölü semboller",
+    "experiencesHeading": "Tecrübeler",
+    "openDetail": "Detayı aç",
+    "openExperiences": "Tecrübeleri aç",
+    "closeDrawer": "Kapat",
+    "selectForDetail": "Ölü sembolleri görmek için bir proje veya sayfa seçin.",
+    "deadListLabel": "Ölü sembol listesi",
+    "experiencesListLabel": "Tecrübe listesi"
+  },
   "review": {
     "viewsNav": "Vault görünümleri",
     "viewMap": "Harita",

@@ -17,12 +17,35 @@ import {
   type PanelMode,
 } from "./panel-mode";
 
+export type PanelGridRatios = {
+  /** list : detail — default 1 : 1.25 */
+  two?: readonly [number, number];
+  /** list : detail : inspector — default 1 : 1.2 : 0.9 */
+  three?: readonly [number, number, number];
+};
+
 export type PanelGridProps = {
   list: ReactNode;
   detail?: ReactNode;
   inspector?: ReactNode;
   /** Initial portrait splitter ratio (list height / total). Default 0.42 */
   defaultSplitRatio?: number;
+  /**
+   * Optional column fr weights. Defaults preserve PR-DS-0 ratios
+   * (two: 1/1.25, three: 1/1.2/0.9). Vault map uses 1:1.5 and 1:1.5:1.
+   */
+  ratios?: PanelGridRatios;
+  /**
+   * When true, portrait-stack shows the inspector inline (list → detail → inspector)
+   * at the three-mode fr weights instead of a drawer. Default false (PR-DS-0).
+   */
+  portraitShowsInspector?: boolean;
+  /** Localized labels for drawer chrome (defaults keep English DS-0 strings). */
+  detailDrawerLabel?: string;
+  inspectorDrawerLabel?: string;
+  detailDrawerTitle?: string;
+  inspectorDrawerTitle?: string;
+  closeDrawerLabel?: string;
   className?: string;
   /** Called when container-driven mode changes (tests / telemetry). */
   onModeChange?: (mode: PanelMode) => void;
@@ -31,15 +54,30 @@ export type PanelGridProps = {
 const SPLIT_MIN = 0.2;
 const SPLIT_MAX = 0.8;
 
+const DEFAULT_TWO: readonly [number, number] = [1, 1.25];
+const DEFAULT_THREE: readonly [number, number, number] = [1, 1.2, 0.9];
+
+function frColumns(weights: readonly number[]): string {
+  return weights.map((n) => `minmax(0, ${n}fr)`).join(" ");
+}
+
 export function PanelGrid({
   list,
   detail,
   inspector,
   defaultSplitRatio = 0.42,
+  ratios,
+  portraitShowsInspector = false,
+  detailDrawerLabel = "Open detail",
+  inspectorDrawerLabel = "Open inspector",
+  detailDrawerTitle = "Detail",
+  inspectorDrawerTitle = "Inspector",
+  closeDrawerLabel = "Close",
   className = "",
   onModeChange,
 }: PanelGridProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const drawerPanelRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
   const [drawer, setDrawer] = useState<"detail" | "inspector" | null>(null);
   const [splitRatio, setSplitRatio] = useState(defaultSplitRatio);
@@ -69,8 +107,14 @@ export function PanelGrid({
     onModeChange?.(mode);
   }, [mode, onModeChange]);
 
+  const twoWeights = ratios?.two ?? DEFAULT_TWO;
+  const threeWeights = ratios?.three ?? DEFAULT_THREE;
+
   const detailInline = modeShowsDetailInline(mode) && detail != null;
-  const inspectorInline = modeShowsInspectorInline(mode) && inspector != null;
+  const inspectorInline =
+    inspector != null &&
+    (modeShowsInspectorInline(mode) ||
+      (mode === "portrait-stack" && portraitShowsInspector));
   const detailInDrawer = detail != null && !detailInline;
   const inspectorInDrawer = inspector != null && !inspectorInline;
   // Ignore stale drawer requests once the slot becomes inline.
@@ -80,6 +124,31 @@ export function PanelGrid({
       : drawer === "inspector" && inspectorInDrawer
         ? "inspector"
         : null;
+
+  // Portrait: stack all three when inspector is inline; otherwise list/detail + splitter.
+  const portraitTriple = mode === "portrait-stack" && detailInline && inspectorInline;
+  const portraitSplit = mode === "portrait-stack" && detailInline && !inspectorInline;
+
+  useEffect(() => {
+    if (!openDrawer) return;
+    const panel = drawerPanelRef.current;
+    const previous = document.activeElement as HTMLElement | null;
+    const focusable = panel?.querySelector<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    focusable?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDrawer(null);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      previous?.focus?.();
+    };
+  }, [openDrawer]);
 
   const onSplitterPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -102,12 +171,19 @@ export function PanelGrid({
     }
   }, []);
 
-  const portraitStyle: CSSProperties | undefined =
-    mode === "portrait-stack" && detailInline
+  const bodyStyle: CSSProperties | undefined = portraitTriple
+    ? {
+        gridTemplateRows: frColumns(threeWeights),
+      }
+    : portraitSplit
       ? {
           gridTemplateRows: `${splitRatio}fr auto ${1 - splitRatio}fr`,
         }
-      : undefined;
+      : mode === "three"
+        ? { gridTemplateColumns: frColumns(threeWeights) }
+        : mode === "two"
+          ? { gridTemplateColumns: frColumns(twoWeights) }
+          : undefined;
 
   return (
     <div
@@ -129,7 +205,7 @@ export function PanelGrid({
               className="min-h-8 rounded border border-outline-variant bg-surface-container px-2.5 py-1 font-body text-body text-on-surface hover:bg-surface-container-high"
               onClick={() => setDrawer("detail")}
             >
-              Open detail
+              {detailDrawerLabel}
             </button>
           ) : null}
           {inspectorInDrawer ? (
@@ -139,7 +215,7 @@ export function PanelGrid({
               className="min-h-8 rounded border border-outline-variant bg-surface-container px-2.5 py-1 font-body text-body text-on-surface hover:bg-surface-container-high"
               onClick={() => setDrawer("inspector")}
             >
-              Open inspector
+              {inspectorDrawerLabel}
             </button>
           ) : null}
         </div>
@@ -149,14 +225,16 @@ export function PanelGrid({
         data-qa="panel-grid-body"
         className={
           mode === "three"
-            ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,0.9fr)] gap-3"
+            ? "grid min-h-0 flex-1 gap-3"
             : mode === "two"
-              ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)] gap-3"
-              : mode === "portrait-stack" && detailInline
-                ? "grid min-h-0 flex-1 gap-0"
-                : "flex min-h-0 flex-1 flex-col"
+              ? "grid min-h-0 flex-1 gap-3"
+              : portraitTriple
+                ? "grid min-h-0 flex-1 gap-3"
+                : portraitSplit
+                  ? "grid min-h-0 flex-1 gap-0"
+                  : "flex min-h-0 flex-1 flex-col"
         }
-        style={portraitStyle}
+        style={bodyStyle}
       >
         <section
           data-qa="panel"
@@ -166,7 +244,7 @@ export function PanelGrid({
           {list}
         </section>
 
-        {mode === "portrait-stack" && detailInline ? (
+        {portraitSplit ? (
           <div
             role="separator"
             aria-orientation="horizontal"
@@ -221,6 +299,7 @@ export function PanelGrid({
           onClick={() => setDrawer(null)}
         >
           <div
+            ref={drawerPanelRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
@@ -230,7 +309,7 @@ export function PanelGrid({
           >
             <div className="flex shrink-0 items-center justify-between border-b border-outline-variant px-3 py-2">
               <h2 id={titleId} className="font-body text-panel font-semibold tracking-label uppercase">
-                {openDrawer === "detail" ? "Detail" : "Inspector"}
+                {openDrawer === "detail" ? detailDrawerTitle : inspectorDrawerTitle}
               </h2>
               <button
                 type="button"
@@ -238,10 +317,10 @@ export function PanelGrid({
                 className="min-h-8 rounded border border-outline-variant px-2 py-1 font-body text-body"
                 onClick={() => setDrawer(null)}
               >
-                Close
+                {closeDrawerLabel}
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto p-3">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-3">
               {openDrawer === "detail" ? detail : inspector}
             </div>
           </div>
