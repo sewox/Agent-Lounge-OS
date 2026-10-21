@@ -928,17 +928,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             </>
           )
         ) : experiencesLoading && experiences.length === 0 ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
+          <p className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant">
             {tv("loading")}
-          </div>
+          </p>
         ) : experiencesError ? (
-          <div className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center text-body text-error">
+          <p className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center font-body text-body text-error">
             {experiencesError || tv("listError")}
-          </div>
+          </p>
         ) : logVisible.length === 0 ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-body text-on-surface-variant">
+          <p className="flex min-h-0 flex-1 items-center justify-center rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center font-body text-body text-on-surface-variant">
             {tv("noExperiencesForNode", { name: openProjectName })}
-          </div>
+          </p>
         ) : (
           logVisible.map((item) => {
             const isWhisper = whispered.has(item.id);
