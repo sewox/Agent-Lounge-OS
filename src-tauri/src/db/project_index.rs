@@ -1483,25 +1483,6 @@ fn vault_identity_labels(conn: &Connection, project_id: &str) -> (String, Option
     (display, warning)
 }
 
-/// Escape `%`, `_`, and `\` for SQLite `LIKE … ESCAPE '\'`.
-/// Retained for unit coverage of the pre-FTS escape helper (Vault LIKE era).
-#[cfg(test)]
-fn like_pattern(needle: &str) -> String {
-    let mut out = String::with_capacity(needle.len() + 2);
-    out.push('%');
-    for ch in needle.chars() {
-        match ch {
-            '\\' | '%' | '_' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    out.push('%');
-    out
-}
-
 fn list_project_pages_blocking(
     conn: &Connection,
     project_id: &str,
@@ -1511,7 +1492,7 @@ fn list_project_pages_blocking(
     limit: u64,
 ) -> Result<ProjectPageList> {
     register_path_basename_fn(conn);
-    crate::db::vault_fts::register_turkish_fold_fn(conn);
+    crate::db::vault_fts::register_turkish_fold_fn(conn)?;
     let needle_raw = query.trim();
     let fts_q = crate::db::vault_fts::fts_match_query(needle_raw);
     let order_by = match sort {
@@ -2619,6 +2600,7 @@ mod tests {
 
     #[test]
     fn like_pattern_escapes_wildcards() {
+        use crate::db::vault_fts::like_pattern;
         assert_eq!(like_pattern("a_b%c\\d"), "%a\\_b\\%c\\\\d%");
         assert_eq!(like_pattern("plain"), "%plain%");
     }

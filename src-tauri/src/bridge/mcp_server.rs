@@ -704,36 +704,35 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
 
-        let (mut hits, from_archive) = self
+        let (mut scored, from_archive) = self
             .store
             .search_experiences_with_archive_fallback(query.clone(), limit.or(Some(24)))
             .await?;
 
         if restrict {
             if let Some(ref project_id) = project {
-                hits.retain(|row| row.project_id == *project_id);
+                scored.retain(|(row, _)| row.project_id == *project_id);
             }
         }
 
-        // VR4 / UD-5: hard same-project first (main), then score buckets;
-        // `reviewed` only inside REVIEW_SCORE_BAND. Additive `reviewed` field below.
-        crate::db::sort_experiences_for_search(
-            &mut hits,
-            &query,
+        // VR4 / UD-5 / Vault-1: hybrid score computed once at retrieval; only apply
+        // the #119 total order here (same-project → buckets → reviewed → …).
+        crate::db::sort_scored_experiences_for_search(
+            &mut scored,
             if restrict { None } else { project.as_deref() },
         );
 
         if let Some(cap) = limit.or(Some(12)) {
-            hits.truncate(cap);
+            scored.truncate(cap);
         }
 
-        for row in &hits {
+        for (row, _) in &scored {
             let _ = self.store.bump_experience_usage(row.id.clone()).await;
         }
 
-        let experiences: Vec<Value> = hits
+        let experiences: Vec<Value> = scored
             .iter()
-            .map(|row| {
+            .map(|(row, _)| {
                 let same_project = project
                     .as_ref()
                     .map(|pid| row.project_id == *pid)
@@ -3239,5 +3238,65 @@ mod tests {
             "strong unreviewed must lead outside REVIEW_SCORE_BAND: {experiences:?}"
         );
         assert!(experiences.iter().any(|r| r["reviewed"] == true));
+    }
+
+    /// Vault-1 B2: MCP order must use the carried hybrid score (FTS BM25 + stored
+    /// embedding), not a re-sort via LIKE lexical / on-the-fly embeddings.
+    #[tokio::test]
+    async fn search_mcp_hybrid_score_orders_strong_bm25_first() {
+        use crate::models::{ExperienceOutcome, ExperienceRecord, LoungeTask};
+
+        let store = ExperienceStore::memory().expect("db");
+        let mut strong = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "proj-a", "hybrid-mcp-needle hybrid-mcp-needle"),
+            "hybrid-mcp-needle hybrid-mcp-needle solution",
+            "hybrid-mcp-needle adr",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        strong.id = "mcp-strong".into();
+        strong.reviewed = false;
+        strong.created_at = "2026-01-01T00:00:00+00:00".into();
+        store.insert_record(strong).await.unwrap();
+
+        let mut weak = ExperienceRecord::from_task(
+            &LoungeTask::new(
+                "cursor",
+                "proj-b",
+                "lorem ipsum dolor sit amet consectetur adipiscing",
+            ),
+            "unrelated padding solution body with filler words only",
+            "lorem padding hybrid-mcp-needle once",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        weak.id = "mcp-weak".into();
+        weak.reviewed = true;
+        weak.created_at = "2026-06-01T00:00:00+00:00".into();
+        store.insert_record(weak).await.unwrap();
+
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+        let resp = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lounge_search_experience","arguments":{"query":"hybrid-mcp-needle","limit":10}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let val: Value = serde_json::from_str(&resp).unwrap();
+        assert_ne!(val["result"]["isError"], true, "{val}");
+        let experiences = val["result"]["structuredContent"]["experiences"]
+            .as_array()
+            .expect("experiences array");
+        assert!(
+            experiences.len() >= 2,
+            "expected both hits: {experiences:?}"
+        );
+        assert_eq!(
+            experiences[0]["id"].as_str(),
+            Some("mcp-strong"),
+            "strong BM25 hybrid must lead at MCP tool level: {experiences:?}"
+        );
+        assert_eq!(experiences[1]["id"].as_str(), Some("mcp-weak"));
     }
 }

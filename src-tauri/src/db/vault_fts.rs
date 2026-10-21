@@ -4,8 +4,8 @@
 //! - Turkish folding is applied in Rust at **index** and **query** time via
 //!   `al_turkish_fold` (symmetric: İ/I/i/ı → i, plus ş/s ç/c ğ/g ö/o ü/u).
 //! - Hybrid score: `0.7 * semantic + 0.3 * lexical` with BM25 mapped to [0, 1]
-//!   by reciprocal absolute: `1 / (1 + |bm25|)`. Missing semantic ⇒ `0.0`
-//!   (so hybrid collapses to `0.3 * lexical`).
+//!   by `|bm25| / (1 + |bm25|)` (monotonic in relevance: more-negative BM25 →
+//!   higher score). Missing semantic ⇒ `0.0` (hybrid = `0.3 * lexical`).
 //! - Archived experiences (`status != 'active'`) are excluded at the FTS layer
 //!   (triggers never index them; archive UPDATE deletes the FTS row).
 
@@ -14,9 +14,7 @@ use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::embedding::{cosine_similarity, decode_embedding, lexical_embedding};
-use super::experience_governance::{
-    cmp_search_with_review_band, normalize_search_score, SearchRankKey,
-};
+use super::experience_governance::normalize_search_score;
 use crate::models::{LoungeExperience, EXPERIENCE_STATUS_ACTIVE};
 
 /// Settings key for the Vault FTS schema version.
@@ -56,17 +54,19 @@ pub fn turkish_fold(input: &str) -> String {
     out
 }
 
-/// BM25 → [0, 1] via reciprocal absolute: `1 / (1 + |bm25|)`.
+/// BM25 → [0, 1] via `|bm25| / (1 + |bm25|)`.
 ///
-/// FTS5 `bm25()` is typically ≤ 0 (more negative = better). Absolute value
-/// grows as relevance falls, so this maps strong hits toward 1 and weak
-/// hits toward 0 without depending on the result-set min/max (stable for
-/// score-bucket ranking). Non-finite inputs clamp to 0.
+/// FTS5 `bm25()` is typically ≤ 0 (**more negative = better**). Absolute
+/// value therefore grows with relevance, and this map is strictly
+/// increasing in `|bm25|`: a strong hit like `-5.63` scores ≈ `0.85` while
+/// a weak hit like `-0.27` scores ≈ `0.21`. Result-set independent (stable
+/// for score-bucket ranking). Non-finite inputs clamp to 0.
 pub fn normalize_bm25(bm25: f64) -> f64 {
     if !bm25.is_finite() {
         return 0.0;
     }
-    1.0 / (1.0 + bm25.abs())
+    let a = bm25.abs();
+    a / (1.0 + a)
 }
 
 /// Hybrid relevance: `0.7 * semantic + 0.3 * lexical`.
@@ -80,9 +80,12 @@ pub fn hybrid_search_score(semantic: Option<f64>, lexical: f64) -> f64 {
     HYBRID_SEMANTIC_WEIGHT * sem + HYBRID_LEXICAL_WEIGHT * lex
 }
 
-/// Register `al_turkish_fold` (idempotent — errors from re-register are ignored).
-pub fn register_turkish_fold_fn(conn: &Connection) {
-    let _ = conn.create_scalar_function(
+/// Register `al_turkish_fold`. Propagates registration errors (does not swallow).
+///
+/// SQLite replaces an existing function of the same name, so re-registering on
+/// an already-prepared connection is fine and still returns `Ok`.
+pub fn register_turkish_fold_fn(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
         "al_turkish_fold",
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
@@ -90,7 +93,26 @@ pub fn register_turkish_fold_fn(conn: &Connection) {
             let input: String = ctx.get(0)?;
             Ok::<_, rusqlite::Error>(turkish_fold(&input))
         },
-    );
+    )
+    .context("register al_turkish_fold")?;
+    Ok(())
+}
+
+/// Escape `%`, `_`, and `\` for SQLite `LIKE … ESCAPE '\'` (Vault #70).
+pub fn like_pattern(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for ch in needle.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push('%');
+    out
 }
 
 /// True when this bundled SQLite build exposes FTS5 (`ENABLE_FTS5`).
@@ -114,7 +136,7 @@ pub fn fts5_available(conn: &Connection) -> Result<bool> {
 
 /// Upgrade to Vault FTS schema v1: table, triggers, backfill. Idempotent.
 pub fn migrate_vault_fts(conn: &Connection) -> Result<()> {
-    register_turkish_fold_fn(conn);
+    register_turkish_fold_fn(conn)?;
 
     let current: Option<String> = conn
         .query_row(
@@ -352,14 +374,18 @@ pub fn fts_match_query(raw: &str) -> Option<String> {
     }
 }
 
-/// FTS experience search with hybrid scoring (semantic cosine + normalized BM25).
+/// FTS experience search with hybrid scoring (stored embedding cosine + normalized BM25).
+///
+/// Returns `(hit, hybrid_score)` pairs. The hybrid score is computed **once** here
+/// and must be carried into [`super::experience_governance::sort_scored_experiences_for_search`]
+/// — callers must not recompute LIKE/on-the-fly lexical scores.
 pub fn search_experiences_fts(
     conn: &Connection,
     needle: &str,
     limit: usize,
     status: Option<&str>,
-) -> Result<Vec<LoungeExperience>> {
-    register_turkish_fold_fn(conn);
+) -> Result<Vec<(LoungeExperience, f64)>> {
+    register_turkish_fold_fn(conn)?;
     let Some(match_q) = fts_match_query(needle) else {
         return Ok(Vec::new());
     };
@@ -399,6 +425,7 @@ pub fn search_experiences_fts(
         let semantic = blob
             .as_deref()
             .and_then(decode_embedding)
+            .filter(|emb| !emb.is_empty())
             .and_then(|emb| cosine_similarity(&query_emb, &emb))
             .map(|s| s as f64);
         // No stored embedding → semantic missing (None), not a zero vector guess.
@@ -406,26 +433,9 @@ pub fn search_experiences_fts(
         scored.push((exp, hybrid));
     }
 
-    scored.sort_by(|a, b| {
-        cmp_search_with_review_band(
-            SearchRankKey {
-                same_project: false,
-                score: a.1,
-                reviewed: a.0.reviewed,
-                created_at: &a.0.created_at,
-                id: &a.0.id,
-            },
-            SearchRankKey {
-                same_project: false,
-                score: b.1,
-                reviewed: b.0.reviewed,
-                created_at: &b.0.created_at,
-                id: &b.0.id,
-            },
-        )
-    });
+    super::experience_governance::sort_scored_experiences_for_search(&mut scored, None);
     scored.truncate(limit);
-    Ok(scored.into_iter().map(|(e, _)| e).collect())
+    Ok(scored)
 }
 
 #[cfg(test)]
@@ -438,7 +448,7 @@ mod tests {
     const KIND_EXPERIENCE: &str = "experience";
 
     fn fts_row_count(conn: &Connection, kind: Option<&str>) -> Result<i64> {
-        register_turkish_fold_fn(conn);
+        register_turkish_fold_fn(conn)?;
         match kind {
             Some(k) => Ok(conn.query_row(
                 "SELECT COUNT(*) FROM vault_fts WHERE row_kind = ?1",
@@ -450,7 +460,7 @@ mod tests {
     }
 
     fn fts_has_experience(conn: &Connection, id: &str) -> Result<bool> {
-        register_turkish_fold_fn(conn);
+        register_turkish_fold_fn(conn)?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM vault_fts WHERE row_kind = ?1 AND row_id = ?2",
             params![KIND_EXPERIENCE, id],
@@ -528,13 +538,57 @@ mod tests {
     }
 
     #[test]
-    fn normalize_bm25_maps_to_unit_interval() {
-        assert!((normalize_bm25(0.0) - 1.0).abs() < 1e-12);
-        assert!(normalize_bm25(-2.0) < normalize_bm25(-0.5));
-        assert!(normalize_bm25(f64::NAN) == 0.0);
-        assert!(normalize_bm25(f64::INFINITY) == 0.0);
+    fn normalize_bm25_maps_to_unit_interval_monotonic_in_relevance() {
+        // More-negative BM25 (better) → higher normalized score.
+        assert!((normalize_bm25(0.0) - 0.0).abs() < 1e-12);
+        assert!(normalize_bm25(-5.63) > normalize_bm25(-0.27));
+        assert!(normalize_bm25(-2.0) > normalize_bm25(-0.5));
+        assert!((normalize_bm25(-5.63) - (5.63 / 6.63)).abs() < 1e-9);
+        assert!((normalize_bm25(-0.27) - (0.27 / 1.27)).abs() < 1e-9);
+        assert_eq!(normalize_bm25(f64::NAN), 0.0);
+        assert_eq!(normalize_bm25(f64::INFINITY), 0.0);
         let v = normalize_bm25(-10.0);
         assert!((0.0..=1.0).contains(&v));
+    }
+
+    #[tokio::test]
+    async fn strong_bm25_match_ranks_above_weak() {
+        let store = seed_store();
+        // Strong: query tokens dominate title/ADR.
+        store
+            .insert_record(sample_record(
+                "strong",
+                "unique-bm25-needle unique-bm25-needle",
+                "active",
+            ))
+            .await
+            .unwrap();
+        // Weak: single token buried in a long unrelated body.
+        let mut weak = sample_record(
+            "weak",
+            "lorem ipsum dolor sit amet consectetur adipiscing elit sed do",
+            "active",
+        );
+        weak.adr_record = "lorem ipsum unique-bm25-needle padding only once".into();
+        weak.topic = "unrelated topic padding".into();
+        weak.title = "unrelated title padding".into();
+        weak.solution_summary = "padding solution body with filler words".into();
+        weak.embedding = lexical_embedding(&weak.topic);
+        store.insert_record(weak).await.unwrap();
+
+        let conn = store.conn.lock().expect("lock");
+        let hits = search_experiences_fts(&conn, "unique-bm25-needle", 10, Some("active")).unwrap();
+        assert!(hits.len() >= 2, "expected both hits: {hits:?}");
+        assert_eq!(
+            hits[0].0.id, "strong",
+            "strong BM25 must rank first: {hits:?}"
+        );
+        assert!(
+            hits[0].1 > hits[1].1,
+            "hybrid score must reflect BM25 order: strong={} weak={}",
+            hits[0].1,
+            hits[1].1
+        );
     }
 
     #[test]
@@ -620,7 +674,7 @@ mod tests {
             // Query-time fold: dotted İ matches indexed folded text.
             let hits = search_experiences_fts(&conn, "calisma", 10, Some("active")).unwrap();
             assert_eq!(hits.len(), 1);
-            assert_eq!(hits[0].id, "t1");
+            assert_eq!(hits[0].0.id, "t1");
         }
 
         // Archive → removed from FTS.
@@ -661,7 +715,7 @@ mod tests {
         for needle in ["UniquTitleX", "UniquTagY", "UniquSourceZ", "UniquAdrW"] {
             let hits = search_experiences_fts(&conn, needle, 5, Some("active")).unwrap();
             assert_eq!(hits.len(), 1, "expected hit for {needle}");
-            assert_eq!(hits[0].id, "f1");
+            assert_eq!(hits[0].0.id, "f1");
         }
     }
 
@@ -676,6 +730,7 @@ mod tests {
         // ASCII-folded query finds diacritic document (symmetric fold).
         let hits = search_experiences_fts(&conn, "ogun sise", 5, Some("active")).unwrap();
         assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.id, "tr1");
         // Dotted capital İ in query matches.
         let hits2 = search_experiences_fts(&conn, "ÖĞÜN", 5, Some("active")).unwrap();
         assert_eq!(hits2.len(), 1);

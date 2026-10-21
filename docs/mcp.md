@@ -225,7 +225,8 @@ Retrieval uses SQLite **FTS5** (`vault_fts`, `tokenize = 'unicode61'`) over Expe
 
 Turkish folding is applied in Rust at **index and query** time (`al_turkish_fold` / `turkish_fold`) — no ICU. `İ`/`I`/`i`/`ı` all fold to `i`; `ş→s`, `ç→c`, `ğ→g`, `ö→o`, `ü→u`.
 
-Combined relevance fed into the ranker:
+Combined relevance is computed **once** at retrieval and carried into the ranker
+(MCP `lounge_search_experience` does **not** recompute LIKE / on-the-fly embeddings):
 
 ```text
 hybrid = 0.7 * semantic + 0.3 * lexical
@@ -233,13 +234,14 @@ hybrid = 0.7 * semantic + 0.3 * lexical
 
 | Component | Normalization | Notes |
 |-----------|---------------|-------|
-| **lexical** | `normalize_bm25(bm25) = 1 / (1 + \|bm25\|)` → `[0, 1]` | FTS5 `bm25()` is typically ≤ 0 (more negative = better). Reciprocal absolute is **result-set independent** (stable for score buckets). |
-| **semantic** | cosine similarity of hashed bag-of-words embeddings, clamped by `normalize_search_score` | |
-| **missing semantic** | treated as **`0.0`** | So `hybrid = 0.3 * lexical` when no embedding / cosine is unavailable. |
+| **lexical (FTS)** | `normalize_bm25(bm25) = \|bm25\| / (1 + \|bm25\|)` → `[0, 1]` | FTS5 `bm25()` is typically ≤ 0 (**more negative = better**). Absolute value grows with relevance, so this map is monotonic: e.g. `-5.63` → ≈`0.85`, `-0.27` → ≈`0.21`. Result-set independent (stable for score buckets). |
+| **lexical (archived / non-FTS)** | LIKE-era `lexical_search_score` on folded text (`like_pattern` + `ESCAPE '\'`) | Archived rows are excluded from FTS; `%`/`_` are literal (#70). |
+| **semantic** | cosine of the **stored** row embedding vs the query embedding, clamped by `normalize_search_score` | |
+| **missing semantic** | treated as **`0.0`** | So `hybrid = 0.3 * lexical` when no stored embedding / cosine is unavailable. |
 
 ### Total order (#119)
 
-Ranking uses a **total order** (safe for Rust 1.81+ `sort_by`):
+`sort_scored_experiences_for_search` applies a **total order** on the carried hybrid score (safe for Rust 1.81+ `sort_by`):
 
 1. **Same project** — caller's project hard-first (main behavior; not a soft score boost)
 2. **Bucket** desc — `bucket = floor(normalize(score) / REVIEW_SCORE_BAND)` where `score` is the hybrid score above
@@ -254,9 +256,9 @@ Ranking uses a **total order** (safe for Rust 1.81+ `sort_by`):
 |----------|-------|------|
 | `REVIEW_SCORE_BAND` | `0.05` | Width of one relevance **bucket**. `reviewed` is only a tiebreaker **inside** the same bucket — never across buckets. |
 | `HYBRID_SEMANTIC_WEIGHT` | `0.7` | Weight of semantic cosine in the combined score. |
-| `HYBRID_LEXICAL_WEIGHT` | `0.3` | Weight of normalized BM25 in the combined score. |
+| `HYBRID_LEXICAL_WEIGHT` | `0.3` | Weight of normalized BM25 (or LIKE lexical) in the combined score. |
 
-Defined in `src-tauri/src/db/experience_governance.rs` + `src-tauri/src/db/vault_fts.rs` (`hybrid_search_score`, `normalize_bm25`, `turkish_fold`, `cmp_search_with_review_band`, `sort_experiences_for_search`).
+Defined in `src-tauri/src/db/experience_governance.rs` + `src-tauri/src/db/vault_fts.rs` (`hybrid_search_score`, `normalize_bm25`, `turkish_fold`, `cmp_search_with_review_band`, `sort_scored_experiences_for_search`).
 
 ## Follow-up
 
