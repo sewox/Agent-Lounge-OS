@@ -239,7 +239,9 @@ export function PanelGrid({
         <section
           data-qa="panel"
           data-panel-slot="list"
-          className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container"
+          className={`flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container ${
+            !detailInline && !inspectorInline ? "min-h-0 flex-1" : ""
+          }`}
         >
           {list}
         </section>

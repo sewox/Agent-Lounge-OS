@@ -21,11 +21,20 @@ async function openVaultProject(page: Page, name: string) {
   );
 }
 
+async function closePanelDrawer(page: Page) {
+  const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+  if (await closeBtn.isVisible()) {
+    await closeBtn.click();
+    await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
+  }
+}
+
 async function revealExperiences(page: Page) {
   const inline = page.locator('[data-panel-slot="inspector"]');
   if (await inline.isVisible()) {
     return;
   }
+  await closePanelDrawer(page);
   const openBtn = page.locator('[data-qa="open-inspector-drawer"]');
   await expect(openBtn).toBeVisible();
   await openBtn.click();
@@ -37,6 +46,7 @@ async function revealDetail(page: Page) {
   if (await inline.isVisible()) {
     return;
   }
+  await closePanelDrawer(page);
   const openBtn = page.locator('[data-qa="open-detail-drawer"]');
   await expect(openBtn).toBeVisible();
   await openBtn.click();

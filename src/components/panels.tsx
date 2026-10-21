@@ -1079,7 +1079,9 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   return (
-    <section className={shell}>
+    // Non-embedded shell keeps data-qa="panel" so L3 occupancy includes vault chrome
+    // (header/footer) at D0/D4-scale one-mode; PanelGrid slots remain the column panels.
+    <section data-qa={embedded ? undefined : "panel"} className={shell}>
       <div className="flex shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container-low p-2.5">
         <div className="flex items-center gap-2">
           <span className="text-primary">
@@ -1128,7 +1130,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       </div>
       {/* PanelGrid slots own data-qa="panel" (avoid double-counting for L1–L6). */}
       <PanelGrid
-        className="min-h-0 flex-1"
+        className="min-h-[28rem] flex-1"
         ratios={VAULT_MAP_RATIOS}
         portraitShowsInspector
         detailDrawerLabel={tv("layout.openDetail")}
