@@ -56,7 +56,9 @@ export type PanelGridProps = {
    */
   manageDrawerFocus?: boolean;
   /**
-   * Override container-driven mode (e.g. embedded dashboard always `two`).
+   * Override container-driven mode (e.g. embedded dashboard `two` in landscape).
+   * Ignored when the *viewport* is portrait so L6 full-width stacking holds
+   * (embedded grids can be wider-than-tall inside a stacked CollapsiblePanel).
    * Default undefined — use `resolvePanelMode` (PR-DS-0).
    */
   forceMode?: PanelMode;
@@ -103,6 +105,7 @@ export function PanelGrid({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const drawerPanelRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
+  const [viewportPortrait, setViewportPortrait] = useState(false);
   const [drawer, setDrawer] = useState<"detail" | "inspector" | null>(null);
   const [splitRatio, setSplitRatio] = useState(defaultSplitRatio);
   const dragging = useRef(false);
@@ -125,7 +128,22 @@ export function PanelGrid({
     return () => ro.disconnect();
   }, []);
 
-  const mode = forceMode ?? resolvePanelMode(box.width || 1, box.height || 1);
+  useEffect(() => {
+    const syncViewport = () => {
+      setViewportPortrait(window.innerHeight > window.innerWidth);
+    };
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
+  const naturalMode = resolvePanelMode(box.width || 1, box.height || 1);
+  // Viewport portrait (not container): keep natural mode so L6 is not broken by
+  // forceMode="two" inside a wide-but-short stacked panel (dashboard D3).
+  const mode =
+    viewportPortrait || naturalMode === "portrait-stack"
+      ? naturalMode
+      : (forceMode ?? naturalMode);
 
   useEffect(() => {
     onModeChange?.(mode);

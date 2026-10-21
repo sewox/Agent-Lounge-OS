@@ -1155,7 +1155,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         className="min-h-[28rem] flex-1"
         ratios={VAULT_MAP_RATIOS}
         // Full /vault: three slots + portrait triple. Embedded dashboard: list | experiences
-        // forced to `two` (no empty dead column / no one-mode drawer) for honest L2 fill.
+        // forced to `two` in landscape viewports only (L6 keeps natural one/stack on portrait).
         portraitShowsInspector={!embedded}
         forceMode={embedded ? "two" : undefined}
         listFillsOneMode={!embedded}
