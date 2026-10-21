@@ -37,9 +37,13 @@ jobs:
           - distro: fedora
             image: fedora:41
             setup: dnf install -y bash ca-certificates curl findutils e2fsprogs
+          # Leap 16.0: 15.6 repo signing key expired 2026-06-19; CDN update-repo
+          # timeouts then yielded zypper 106 (repos skipped) under set -eu even after
+          # packages installed. Explicit refresh fails closed — no --no-gpg-checks,
+          # no disabled repos, no gpg-auto-import, no blanket 106 accept.
           - distro: opensuse
-            image: opensuse/leap:15.6
-            setup: zypper --non-interactive install -y bash curl findutils gzip tar e2fsprogs
+            image: opensuse/leap:16.0
+            setup: zypper --non-interactive refresh && zypper --non-interactive install -y bash curl findutils gzip tar e2fsprogs
           - distro: arch
             image: archlinux:latest
             setup: pacman -Sy --noconfirm bash curl findutils tar gzip e2fsprogs
