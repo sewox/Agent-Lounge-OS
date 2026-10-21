@@ -103,7 +103,16 @@ test.describe("KB-UI-1a Vault map layout", () => {
     await openRoute(page, "/vault", "full");
     await expect(page.locator('[data-qa="panel-grid"]')).toBeVisible();
 
-    // Empty detail: natural-size copy centered by the pane — not a stretched filler.
+    // Landing detail: real project overview (not layout-empty / not stretched filler).
+    await revealDetail(page);
+    await expect(page.locator('[data-qa="vault-detail-overview"]')).toBeVisible();
+    await expect(page.locator('[data-qa="vault-overview-row"]').first()).toBeVisible();
+    await expect(page.locator('[data-qa="layout-empty"]')).toHaveCount(0);
+    const landing = await measureLayout(page, "/vault");
+    expect(landing.l2_sparseInterior, formatLayoutFailure(landing)).toBe(false);
+
+    // Empty fixture: natural-size empty copy centered by the pane.
+    await openRoute(page, "/vault", "empty");
     await revealDetail(page);
     const empty = page.locator('[data-qa="vault-dead-empty"] [data-qa="layout-empty"]');
     await expect(empty).toBeVisible();
@@ -114,14 +123,19 @@ test.describe("KB-UI-1a Vault map layout", () => {
     expect(paneBox).toBeTruthy();
     expect(emptyBox!.height).toBeLessThan((paneBox!.height || 1) * 0.45);
 
+    await openRoute(page, "/vault", "full");
     await closePanelDrawer(page);
     await openVaultProject(page, "Agent-Lounge-OS");
     await revealDetail(page);
     await revealExperiences(page);
-    // Real content: virtual page rows + dead-symbol rows + experience cards.
+    // Real content: virtual page rows + dead-symbol rows / summary + experience cards.
     await expect(page.locator('[data-qa="vault-page-row"]').first()).toBeVisible();
     await expect(
-      page.locator('[data-qa="vault-dead-row"], [data-qa="experience-card"]').first(),
+      page
+        .locator(
+          '[data-qa="vault-dead-row"], [data-qa="vault-detail-summary"], [data-qa="experience-card"]',
+        )
+        .first(),
     ).toBeVisible();
 
     const metrics = await assertLayoutL1toL6(page, "/vault", expect);

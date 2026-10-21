@@ -1151,35 +1151,103 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           <GraphUiButton />
         </div>
       </div>
-      <PanelGrid
-        className="min-h-[28rem] flex-1"
-        ratios={VAULT_MAP_RATIOS}
-        // Full /vault: three slots + portrait triple. Embedded dashboard: list | experiences
-        // forced to `two` in landscape viewports only (L6 keeps natural one/stack on portrait).
-        portraitShowsInspector={!embedded}
-        forceMode={embedded ? "two" : undefined}
-        listFillsOneMode={!embedded}
-        drawerBodyOverflow="hidden"
-        manageDrawerFocus
-        detailDrawerLabel={
-          embedded ? tv("layout.openExperiences") : tv("layout.openDetail")
-        }
-        inspectorDrawerLabel={tv("layout.openExperiences")}
-        detailDrawerTitle={
-          embedded ? tv("layout.experiencesHeading") : tv("layout.detailHeading")
-        }
-        inspectorDrawerTitle={tv("layout.experiencesHeading")}
-        closeDrawerLabel={tv("layout.closeDrawer")}
-        list={listPane}
-        detail={
-          embedded ? (
-            experiencesPane
-          ) : (
-            <VaultDeadSymbolsPane selected={selected} symbols={deadForNode} />
-          )
-        }
-        inspector={embedded ? undefined : experiencesPane}
-      />
+      {embedded ? (
+        // Dashboard embedded vault: same SemanticMap | experiences flex as main (no PanelGrid).
+        <div className="flex min-h-0 w-full flex-1 flex-col xl:flex-row">
+          <div
+            data-qa="panel"
+            className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-auto border-b border-outline-variant bg-surface-container-low/40 p-2.5 xl:border-b-0 xl:border-r"
+          >
+            <SemanticMap
+              semanticMap={semanticMap}
+              projects={projects}
+              experiences={experiences}
+              graphTotals={graphTotals}
+              selected={selected}
+              aggregates={vaultAggregates}
+              aggregatesLoading={aggregatesLoading}
+              aggregatesError={aggregatesError}
+              onRetryAggregates={() => setAggregatesTick((n) => n + 1)}
+              projectPages={serverPages}
+              projectPagesTotal={serverPagesTotal}
+              pagesLoading={pagesLoading}
+              pagesError={pagesError}
+              onPageSearch={handlePageSearch}
+              onLoadMorePages={handleLoadMorePages}
+              onRetryPages={() =>
+                void fetchProjectPages(pageQueryState.query, pageQueryState.sort, 0, false)
+              }
+              fileSymbols={fileSymbols}
+              fileSymbolsLoading={fileSymbolsLoading}
+              onOpenPage={handleOpenPage}
+              onClosePage={handleClosePage}
+              openProjectName={openProjectName}
+              onOpenProject={(name) => {
+                setOpenProjectName(name);
+                setServerPages(null);
+                setServerPagesTotal(null);
+                setPagesError(null);
+                setFileSymbols(null);
+                if (name) {
+                  setSelected({
+                    id: `project:${name}`,
+                    name,
+                    kind: "project",
+                    project: name,
+                    file: null,
+                  });
+                  switchProject(name);
+                  setLogPage(0);
+                } else {
+                  setSelected(null);
+                  switchProject(null);
+                  setLogPage(0);
+                }
+              }}
+              onSelect={(next) => {
+                setSelected(next);
+                setLogPage(0);
+                if (next?.kind === "project") {
+                  switchProject(next.name);
+                } else if (!next) {
+                  switchProject(null);
+                }
+              }}
+            />
+          </div>
+          <div
+            data-qa="panel"
+            className="flex min-h-0 w-full flex-1 flex-col overflow-hidden"
+          >
+            {experiencesPane}
+          </div>
+        </div>
+      ) : (
+        <PanelGrid
+          className="min-h-[28rem] flex-1"
+          ratios={VAULT_MAP_RATIOS}
+          portraitShowsInspector
+          listFillsOneMode
+          drawerBodyOverflow="hidden"
+          manageDrawerFocus
+          detailDrawerLabel={tv("layout.openDetail")}
+          inspectorDrawerLabel={tv("layout.openExperiences")}
+          detailDrawerTitle={tv("layout.detailHeading")}
+          inspectorDrawerTitle={tv("layout.experiencesHeading")}
+          closeDrawerLabel={tv("layout.closeDrawer")}
+          list={listPane}
+          detail={
+            <VaultDeadSymbolsPane
+              selected={selected}
+              symbols={deadForNode}
+              projects={projectRows}
+              allDeadSymbols={deadSymbols}
+              selectedPath={selectedProjectPath}
+            />
+          }
+          inspector={experiencesPane}
+        />
+      )}
       <div
         data-qa={embedded ? "vault-map-footer" : "panel"}
         data-panel-slot="vault-map-footer"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { DeadSymbolsVaultLink } from "@/components/dead-symbols-panel";
 import { formatDisplayPath } from "@/lib/experience";
@@ -11,6 +11,7 @@ import {
   readRootFontSizePx,
   subscribeRootFontSize,
 } from "@/lib/row-height";
+import type { VaultProjectRow } from "@/lib/vault-projects";
 import { windowSlice } from "@/lib/vault-projects";
 
 function useDeadRowHeightPx(): number {
@@ -22,16 +23,30 @@ function useDeadRowHeightPx(): number {
   return computeTokenRowHeight(rootPx, DEAD_SYMBOL_ROW_HEIGHT_REM);
 }
 
+function deadCountForProject(symbols: DeadSymbol[], projectName: string): number {
+  const key = projectName.toLowerCase();
+  return symbols.filter((symbol) => {
+    const pid = (symbol.project_id ?? "").toLowerCase();
+    return !pid || pid === key || pid.includes(key);
+  }).length;
+}
+
 /**
- * Virtualized dead-symbol list for the Vault map detail column.
- * Row content stays as-is for KB-UI-1a; formatting polish is KB-UI-1b (K8).
+ * Vault map detail column: project overview on landing, virtualized dead list
+ * when a node is selected. Empty/loading copy stays natural-size (KB-UI-1a B1).
  */
 export function VaultDeadSymbolsPane({
   selected,
   symbols,
+  projects,
+  allDeadSymbols,
+  selectedPath,
 }: {
   selected: SemanticMapSelection | null;
   symbols: DeadSymbol[];
+  projects: VaultProjectRow[];
+  allDeadSymbols: DeadSymbol[];
+  selectedPath?: string | null;
 }) {
   const { t } = useTranslation("vault");
   const rowHeight = useDeadRowHeightPx();
@@ -50,8 +65,24 @@ export function VaultDeadSymbolsPane({
     return () => ro?.disconnect();
   }, [scrollerEl]);
 
+  const overviewRows = useMemo(
+    () =>
+      projects.map((row) => ({
+        ...row,
+        deadCount: deadCountForProject(allDeadSymbols, row.name),
+      })),
+    [allDeadSymbols, projects],
+  );
+  const stretchOverview = overviewRows.length > 0 && overviewRows.length <= 8;
+
   const win = windowSlice(symbols, scrollTop, viewportHeight, rowHeight, 6);
   const visible = symbols.slice(win.start, win.end);
+
+  const selectedProject = useMemo(() => {
+    if (!selected) return null;
+    const name = selected.kind === "project" ? selected.name : selected.project;
+    return projects.find((row) => row.name === name) ?? null;
+  }, [projects, selected]);
 
   return (
     <div
@@ -60,7 +91,7 @@ export function VaultDeadSymbolsPane({
     >
       <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
         <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-          {t("layout.detailHeading")}
+          {selected ? t("layout.detailHeading") : t("layout.overviewHeading")}
         </h2>
         <span
           className={
@@ -71,33 +102,95 @@ export function VaultDeadSymbolsPane({
             ? symbols.length > 0
               ? t("warnings", { count: symbols.length })
               : t("clean")
-            : null}
+            : t("projectCount", { count: overviewRows.length })}
         </span>
       </div>
 
       {!selected ? (
-        <div
-          data-qa="vault-dead-empty"
-          className="flex min-h-0 flex-1 items-center justify-center"
-        >
-          <p
-            data-qa="layout-empty"
-            className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+        overviewRows.length === 0 ? (
+          <div
+            data-qa="vault-dead-empty"
+            className="flex min-h-0 flex-1 items-center justify-center"
           >
-            {t("layout.selectForDetail")}
-          </p>
-        </div>
+            <p
+              data-qa="layout-empty"
+              className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+            >
+              {t("layout.selectForDetail")}
+            </p>
+          </div>
+        ) : (
+          <div
+            role="list"
+            aria-label={t("layout.overviewListLabel")}
+            data-qa="vault-detail-overview"
+            className={`min-h-0 flex-1 overflow-auto font-body text-body ${
+              stretchOverview ? "flex flex-col gap-1.5" : "space-y-1.5"
+            }`}
+          >
+            {overviewRows.map((row) => (
+              <div
+                key={`overview:${row.name}`}
+                role="listitem"
+                data-qa="vault-overview-row"
+                data-project={row.name}
+                className={`rounded border border-outline-variant/40 bg-surface-container-high/50 px-2 py-2 ${
+                  stretchOverview ? "min-h-0 flex-1" : ""
+                }`}
+              >
+                <span className="block truncate font-mono font-medium text-on-surface" title={row.name}>
+                  {row.name}
+                </span>
+                <span className="mt-0.5 block truncate font-mono text-meta text-outline">
+                  {t("pageCountMeta", {
+                    pages: row.pageCount,
+                    experiences: row.experienceCount,
+                  })}
+                  {` · ${t("astNodes", { count: row.nodeCount })}`}
+                </span>
+                <span
+                  className={`mt-1 block font-mono text-meta ${
+                    row.deadCount > 0 ? "text-error" : "text-outline"
+                  }`}
+                >
+                  {row.deadCount > 0
+                    ? t("warnings", { count: row.deadCount })
+                    : t("clean")}
+                </span>
+              </div>
+            ))}
+          </div>
+        )
       ) : symbols.length === 0 ? (
         <div
-          data-qa="vault-dead-empty"
-          className="flex min-h-0 flex-1 items-center justify-center"
+          data-qa="vault-detail-summary"
+          className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto"
         >
-          <p
-            data-qa="layout-empty"
-            className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
-          >
-            {t("noDeadForNode", { name: selected.name })}
-          </p>
+          <div className="min-h-0 flex-1 rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-3">
+            <p className="font-mono text-body font-medium text-on-surface">{selected.name}</p>
+            {selectedPath ? (
+              <p
+                className="mt-1 break-all font-mono text-meta text-on-surface-variant"
+                title={formatDisplayPath(selectedPath)}
+              >
+                {formatDisplayPath(selectedPath)}
+              </p>
+            ) : null}
+            {selectedProject ? (
+              <p className="mt-2 font-mono text-meta text-outline">
+                {t("pageCountMeta", {
+                  pages: selectedProject.pageCount,
+                  experiences: selectedProject.experienceCount,
+                })}
+                {` · ${t("astNodes", { count: selectedProject.nodeCount })} · ${t("edges", {
+                  count: selectedProject.edgeCount,
+                })}`}
+              </p>
+            ) : null}
+            <p className="mt-3 font-body text-body text-on-surface-variant">
+              {t("noDeadForNode", { name: selected.name })}
+            </p>
+          </div>
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-1">

@@ -55,13 +55,6 @@ export type PanelGridProps = {
    * restores on close. Default false (PR-DS-0) — no page-wide key handler.
    */
   manageDrawerFocus?: boolean;
-  /**
-   * Override container-driven mode (e.g. embedded dashboard `two` in landscape).
-   * Ignored only when the *viewport* is portrait (L6). Otherwise forceMode wins
-   * even if the container is taller-than-wide (stacked dash panels).
-   * Default undefined — use `resolvePanelMode` (PR-DS-0).
-   */
-  forceMode?: PanelMode;
   /** Localized labels for drawer chrome (defaults keep English DS-0 strings). */
   detailDrawerLabel?: string;
   inspectorDrawerLabel?: string;
@@ -93,7 +86,6 @@ export function PanelGrid({
   listFillsOneMode = false,
   drawerBodyOverflow = "auto",
   manageDrawerFocus = false,
-  forceMode,
   detailDrawerLabel = "Open detail",
   inspectorDrawerLabel = "Open inspector",
   detailDrawerTitle = "Detail",
@@ -105,7 +97,6 @@ export function PanelGrid({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const drawerPanelRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
-  const [viewportPortrait, setViewportPortrait] = useState(false);
   const [drawer, setDrawer] = useState<"detail" | "inspector" | null>(null);
   const [splitRatio, setSplitRatio] = useState(defaultSplitRatio);
   const dragging = useRef(false);
@@ -132,20 +123,7 @@ export function PanelGrid({
     return () => ro.disconnect();
   }, []);
 
-  useEffect(() => {
-    const syncViewport = () => {
-      const next = window.innerHeight > window.innerWidth;
-      setViewportPortrait((prev) => (prev === next ? prev : next));
-    };
-    syncViewport();
-    window.addEventListener("resize", syncViewport);
-    return () => window.removeEventListener("resize", syncViewport);
-  }, []);
-
-  const naturalMode = resolvePanelMode(box.width || 1, box.height || 1);
-  // Portrait *viewport* → natural mode (L6). Landscape viewport → forceMode may
-  // override container portrait-stack (embedded dash column is often taller-than-wide).
-  const mode = viewportPortrait ? naturalMode : (forceMode ?? naturalMode);
+  const mode = resolvePanelMode(box.width || 1, box.height || 1);
 
   useEffect(() => {
     onModeChange?.(mode);

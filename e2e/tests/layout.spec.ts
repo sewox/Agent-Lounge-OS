@@ -19,7 +19,11 @@ test.describe("*-LAYOUT L1–L6 every route × viewport", () => {
     test(`${route.id.toUpperCase()}-LAYOUT · ${route.path}`, async ({ page }, testInfo) => {
       testInfo.annotations.push({ type: "id", description: `${route.id.toUpperCase()}-LAYOUT` });
       await openRoute(page, route.path, "full");
-      // Vault map leaf panels need real column content for honest L2 (no shell panel / no stretched empties).
+      // Landing view — same as main (no pre-measure drill-down / drawer open).
+      const metrics = await assertLayoutL1toL6(page, route.path, expect);
+      appendMetric(metrics);
+
+      // Optional extra: vault map after drill-down still holds L1–L6 (does not replace landing).
       if (route.path === "/vault") {
         const project = page
           .locator('[data-qa="vault-project-row"]')
@@ -51,9 +55,9 @@ test.describe("*-LAYOUT L1–L6 every route × viewport", () => {
           await expect(page.locator('[data-qa="panel-grid-drawer-detail"]')).toBeVisible();
         }
         await expect(page.locator('[data-qa="vault-page-row"]').first()).toBeVisible();
+        const afterDrill = await assertLayoutL1toL6(page, route.path, expect);
+        appendMetric(afterDrill);
       }
-      const metrics = await assertLayoutL1toL6(page, route.path, expect);
-      appendMetric(metrics);
 
       fs.mkdirSync(SHOT_DIR, { recursive: true });
       const shotName = `${route.id}__${testInfo.project.name}__${metrics.viewport.width}x${metrics.viewport.height}.jpg`;

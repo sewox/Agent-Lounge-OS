@@ -216,30 +216,11 @@ test.describe("VP — vault project grouping", () => {
     await openRoute(page, "/vault", "full");
     const m1 = await measureLayout(page, "/vault");
     testInfo.annotations.push({ type: "layout-projects", description: formatLayoutFailure(m1) });
-    // Project list: detail may be an honest empty state (not counted as L2 fill).
-    expect(m1.l1_pass && m1.l3_pass, formatLayoutFailure(m1)).toBe(true);
+    expect(
+      m1.l1_pass && m1.l3_pass && !m1.l2_sparseInterior,
+      formatLayoutFailure(m1),
+    ).toBe(true);
     await openVaultProject(page, "Agent-Lounge-OS");
-    // Fill leaf columns before sparse-interior check (drawers on one/two modes).
-    const detailInline = page.locator('[data-panel-slot="detail"]');
-    if (!(await detailInline.isVisible())) {
-      const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
-      if (await closeBtn.isVisible()) {
-        await closeBtn.click();
-      }
-      await page.locator('[data-qa="open-detail-drawer"]').click();
-      await expect(page.locator('[data-qa="panel-grid-drawer-detail"]')).toBeVisible();
-    }
-    const inspectorInline = page.locator('[data-panel-slot="inspector"]');
-    if (!(await inspectorInline.isVisible())) {
-      const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
-      if (await closeBtn.isVisible()) {
-        await closeBtn.click();
-        await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
-      }
-      await page.locator('[data-qa="open-inspector-drawer"]').click();
-      await expect(page.locator('[data-qa="panel-grid-drawer-inspector"]')).toBeVisible();
-    }
-    await expect(page.locator('[data-qa="vault-page-row"]').first()).toBeVisible();
     const m2 = await measureLayout(page, "/vault");
     testInfo.annotations.push({ type: "layout-pages", description: formatLayoutFailure(m2) });
     expect(m2.l1_pass && m2.l3_pass && !m2.l2_sparseInterior, formatLayoutFailure(m2)).toBe(
