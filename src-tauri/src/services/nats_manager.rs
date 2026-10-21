@@ -398,7 +398,13 @@ impl NatsService {
             .with_context(|| format!("NATS gate başarısız: {}", binary.display()))?;
         let mut command = Command::from(std_cmd);
         command.stdin(Stdio::null()).kill_on_drop(true);
-        attach_nats_log(&mut command);
+        // Ephemeral: log into the exclusive ports dir so we can parse the
+        // synchronous listen notice if the async ports file is late/misnamed.
+        if let Some(dir) = &ports_dir {
+            attach_ports_dir_log(&mut command, dir);
+        } else {
+            attach_nats_log(&mut command);
+        }
         apply_no_window(&mut command);
 
         let mut child = command
@@ -592,20 +598,119 @@ fn client_port_from_nats_url(url: &str) -> Result<u16> {
     Ok(port)
 }
 
-fn find_ports_file_for_pid(dir: &std::path::Path, pid: u32) -> Option<std::path::PathBuf> {
+/// Locate a nats-server ports file under an **exclusive** `--ports_file_dir`.
+///
+/// Prefer `<exe>_<pid>.ports`, but if the directory is ours alone (UUID temp dir),
+/// accept the sole `*.ports` file even when the filename PID does not match.
+/// Windows CI has shown `child.id()` vs `os.Getpid()` filename skew: a PID-strict
+/// wait then reports "not created" while `nats-server.exe_<other>.ports` already
+/// exists in the exclusive dir.
+fn find_ports_file_in_exclusive_dir(
+    dir: &std::path::Path,
+    pid: u32,
+) -> Option<std::path::PathBuf> {
     let suffix = format!("_{pid}.ports");
     let entries = std::fs::read_dir(dir).ok()?;
+    let mut pid_match: Option<std::path::PathBuf> = None;
+    let mut ports_files: Vec<std::path::PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        if !name.ends_with(".ports") {
+            continue;
+        }
+        let path = entry.path();
         if name.ends_with(&suffix) {
-            return Some(entry.path());
+            pid_match = Some(path.clone());
+        }
+        ports_files.push(path);
+    }
+    if let Some(path) = pid_match {
+        return Some(path);
+    }
+    if ports_files.len() == 1 {
+        return ports_files.pop();
+    }
+    None
+}
+
+/// Parse the synchronous AcceptLoop notice:
+/// `Listening for client connections on 127.0.0.1:41234`
+///
+/// nats-server writes this **before** the async `--ports_file_dir` goroutine
+/// finishes (and that goroutine can silently give up after 5s). Using the notice
+/// makes ephemeral port discovery deterministic when the ports file is late or
+/// named with an unexpected PID.
+pub(crate) fn parse_nats_listen_notice_client_port(log: &str) -> Option<u16> {
+    const MARKER: &str = "Listening for client connections on ";
+    for line in log.lines() {
+        let Some(rest) = line.split(MARKER).nth(1) else {
+            continue;
+        };
+        let rest = rest.trim();
+        let port_str = if let Some(bracket_end) = rest.rfind(']') {
+            rest[bracket_end + 1..].strip_prefix(':')?
+        } else {
+            rest.rsplit_once(':')?.1
+        };
+        let port: u16 = port_str.trim().parse().ok()?;
+        if port != 0 {
+            return Some(port);
         }
     }
     None
 }
 
-/// Poll until nats-server writes `<exe>_<pid>.ports` under `dir`, then parse the client port.
+fn read_ports_dir_client_port(dir: &std::path::Path, pid: u32) -> Result<Option<u16>, anyhow::Error> {
+    if let Some(path) = find_ports_file_in_exclusive_dir(dir, pid) {
+        match std::fs::read_to_string(&path) {
+            Ok(body) if !body.trim().is_empty() => {
+                return parse_nats_ports_file_client_port(&body).map(Some);
+            }
+            Ok(_) => {
+                return Err(anyhow::anyhow!("nats ports file empty: {}", path.display()));
+            }
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "read nats ports file {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    // Fallback: synchronous listen notice captured into the exclusive dir log.
+    let log_path = dir.join("nats-server.log");
+    if let Ok(body) = std::fs::read_to_string(&log_path) {
+        if let Some(port) = parse_nats_listen_notice_client_port(&body) {
+            return Ok(Some(port));
+        }
+    }
+    Ok(None)
+}
+
+fn describe_ports_dir(dir: &std::path::Path) -> String {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            let mut names: Vec<String> = entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            if names.is_empty() {
+                "(empty)".into()
+            } else {
+                names.join(", ")
+            }
+        }
+        Err(err) => format!("(read_dir failed: {err})"),
+    }
+}
+
+/// Poll until nats-server publishes its client port under `dir`, then return it.
+///
+/// Discovery order (deterministic, no blind timeout bump):
+/// 1. Exclusive-dir `*.ports` JSON (PID match preferred, sole file accepted)
+/// 2. Synchronous "Listening for client connections on …" line in `nats-server.log`
 ///
 /// Clear error on timeout or a persistently malformed file. Works on macOS, Windows, and Linux
 /// (`nats-server_<pid>.ports` or `nats-server.exe_<pid>.ports`).
@@ -617,46 +722,107 @@ pub(crate) fn wait_nats_ports_file_client_port(
     let deadline = std::time::Instant::now() + timeout;
     let mut last_err: Option<anyhow::Error> = None;
     while std::time::Instant::now() < deadline {
-        if let Some(path) = find_ports_file_for_pid(dir, pid) {
-            match std::fs::read_to_string(&path) {
-                Ok(body) if !body.trim().is_empty() => {
-                    match parse_nats_ports_file_client_port(&body) {
-                        Ok(port) => return Ok(port),
-                        Err(err) => last_err = Some(err),
-                    }
-                }
-                Ok(_) => {
-                    last_err = Some(anyhow::anyhow!("nats ports file empty: {}", path.display()));
-                }
-                Err(err) => {
-                    last_err = Some(anyhow::anyhow!(
-                        "read nats ports file {}: {err}",
-                        path.display()
-                    ));
-                }
-            }
+        match read_ports_dir_client_port(dir, pid) {
+            Ok(Some(port)) => return Ok(port),
+            Ok(None) => {}
+            Err(err) => last_err = Some(err),
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+    let listing = describe_ports_dir(dir);
     match last_err {
         Some(err) => Err(err).with_context(|| {
             format!(
-                "nats ports file for pid {pid} in {} not usable within {timeout:?}",
+                "nats ports file for pid {pid} in {} not usable within {timeout:?}; dir=[{listing}]",
                 dir.display()
             )
         }),
         None => anyhow::bail!(
-            "nats ports file for pid {pid} not created in {} within {timeout:?}",
+            "nats ports file for pid {pid} not created in {} within {timeout:?}; dir=[{listing}]",
             dir.display()
         ),
     }
 }
 
+/// Temp base with Windows 8.3 short names (`RUNNER~1`) resolved to the long path.
+///
+/// `std::env::temp_dir()` on GitHub `windows-latest` often returns
+/// `C:\Users\RUNNER~1\...`. Passing that verbatim to nats-server is fragile;
+/// canonicalize once so `--ports_file_dir` and our waiter share one stable path.
+fn canonical_temp_dir() -> Result<std::path::PathBuf> {
+    let raw = std::env::temp_dir();
+    std::fs::create_dir_all(&raw)
+        .with_context(|| format!("ensure temp_dir exists: {}", raw.display()))?;
+    let canon = std::fs::canonicalize(&raw)
+        .with_context(|| format!("canonicalize temp_dir {}", raw.display()))?;
+    Ok(strip_windows_verbatim_prefix(canon))
+}
+
+fn strip_windows_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            // UNC: \\?\UNC\server\share → \\server\share
+            if let Some(unc) = rest.strip_prefix("UNC\\") {
+                return std::path::PathBuf::from(format!(r"\\{unc}"));
+            }
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    path
+}
+
 fn make_ports_file_dir() -> Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join(format!("lounge-nats-ports-{}", uuid::Uuid::new_v4()));
+    let base = canonical_temp_dir()?;
+    let dir = base.join(format!("lounge-nats-ports-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create nats ports_file_dir {}", dir.display()))?;
-    Ok(dir)
+    // Canonicalize the unique dir itself so the path we hand to nats-server matches
+    // the path we poll (no 8.3 ↔ long-name split views).
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    Ok(strip_windows_verbatim_prefix(dir))
+}
+
+/// Open exclusive-dir log handles for nats-server stdout/stderr (listen-notice fallback).
+fn open_ports_dir_log_stdio(ports_dir: &std::path::Path) -> (Stdio, Stdio) {
+    let path = ports_dir.join("nats-server.log");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => match file.try_clone() {
+            Ok(clone) => (Stdio::from(file), Stdio::from(clone)),
+            Err(_) => (Stdio::from(file), Stdio::null()),
+        },
+        Err(_) => (Stdio::null(), Stdio::null()),
+    }
+}
+
+/// Redirect tokio `Command` stdout/stderr into the exclusive ports dir.
+fn attach_ports_dir_log(command: &mut Command, ports_dir: &std::path::Path) {
+    let (stdout, stderr) = open_ports_dir_log_stdio(ports_dir);
+    command.stdout(stdout);
+    command.stderr(stderr);
+}
+
+/// Redirect `std::process::Command` stdout/stderr into the exclusive ports dir.
+#[cfg(test)]
+fn attach_ports_dir_log_std(command: &mut std::process::Command, ports_dir: &std::path::Path) {
+    let (stdout, stderr) = open_ports_dir_log_stdio(ports_dir);
+    command.stdout(stdout);
+    command.stderr(stderr);
+}
+
+#[cfg(test)]
+fn apply_no_window_std(_command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 /// True when a nats-server listening on `port` has `--pass` in its argv (legacy leak).
@@ -1165,10 +1331,9 @@ mod tests {
 
     #[test]
     fn wait_nats_ports_file_client_port_times_out_when_missing() {
-        let dir = std::env::temp_dir().join(format!(
-            "lounge-nats-ports-timeout-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = canonical_temp_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("lounge-nats-ports-timeout-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let err = wait_nats_ports_file_client_port(&dir, 9_999_999, Duration::from_millis(80))
             .expect_err("must time out");
@@ -1182,8 +1347,9 @@ mod tests {
 
     #[test]
     fn wait_nats_ports_file_client_port_rejects_malformed_before_timeout() {
-        let dir =
-            std::env::temp_dir().join(format!("lounge-nats-ports-bad-{}", uuid::Uuid::new_v4()));
+        let dir = canonical_temp_dir()
+            .unwrap_or_else(|_| std::env::temp_dir())
+            .join(format!("lounge-nats-ports-bad-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nats-server_4242.ports");
         std::fs::write(&path, "{{{").unwrap();
@@ -1194,6 +1360,65 @@ mod tests {
             text.contains("malformed") || text.contains("JSON") || text.contains("not usable"),
             "{text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression: Windows CI reported "ports file not created" while an exclusive
+    /// dir already held `nats-server.exe_<other_pid>.ports` — PID-strict matching
+    /// ignored the sole file. Discovery must accept that file.
+    #[test]
+    fn wait_nats_ports_file_accepts_sole_file_when_pid_suffix_mismatches() {
+        let dir = make_ports_file_dir().expect("exclusive ports dir");
+        // Filename PID (9999) ≠ waiter pid (1111) — the Windows skew failure mode.
+        let path = dir.join("nats-server.exe_9999.ports");
+        std::fs::write(&path, r#"{"nats":["nats://127.0.0.1:41234"]}"#).unwrap();
+        let port = wait_nats_ports_file_client_port(&dir, 1111, Duration::from_millis(200))
+            .expect("sole exclusive-dir ports file must resolve despite pid mismatch");
+        assert_eq!(port, 41234);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_nats_listen_notice_client_port_extracts_port() {
+        let log = "[INF] Listening for client connections on 127.0.0.1:43757\n\
+                   [INF] Server is ready\n";
+        assert_eq!(parse_nats_listen_notice_client_port(log), Some(43757));
+        let v6 = "Listening for client connections on [::1]:41234\n";
+        assert_eq!(parse_nats_listen_notice_client_port(v6), Some(41234));
+        assert_eq!(parse_nats_listen_notice_client_port("no listen line"), None);
+    }
+
+    /// Regression: when the async ports-file goroutine never writes (or writes
+    /// under a mismatched name) but AcceptLoop already logged the listen notice,
+    /// wait must still return the port from the exclusive-dir log.
+    #[test]
+    fn wait_nats_ports_file_falls_back_to_listen_notice_log() {
+        let dir = make_ports_file_dir().expect("exclusive ports dir");
+        // No *.ports file — only the synchronous listen notice.
+        std::fs::write(
+            dir.join("nats-server.log"),
+            "[3311] Listening for client connections on 127.0.0.1:45123\n",
+        )
+        .unwrap();
+        let port = wait_nats_ports_file_client_port(&dir, 42, Duration::from_millis(200))
+            .expect("listen notice in exclusive-dir log must resolve the port");
+        assert_eq!(port, 45123);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn make_ports_file_dir_is_canonical_without_short_name_tilde() {
+        let dir = make_ports_file_dir().expect("ports dir");
+        let rendered = dir.to_string_lossy();
+        assert!(
+            !rendered.contains('~'),
+            "ports_file_dir must not use Windows 8.3 short names (RUNNER~1): {rendered}"
+        );
+        assert!(
+            !rendered.starts_with(r#"\\?"#),
+            "verbatim \\\\?\\ prefix must be stripped before passing to nats-server: {rendered}"
+        );
+        assert!(dir.is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1482,12 +1707,10 @@ mod tests {
             .internal_daemon()
             .into_std_command()
             .context("nats-server GuardedCommand")?;
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn nats-server")?;
+        command.stdin(Stdio::null());
+        attach_ports_dir_log_std(&mut command, &ports_dir);
+        apply_no_window_std(&mut command);
+        let child = command.spawn().context("spawn nats-server")?;
         let pid = child.id();
         let port = match wait_nats_ports_file_client_port(&ports_dir, pid, PORTS_FILE_WAIT) {
             Ok(port) => port,
@@ -1559,12 +1782,10 @@ mod tests {
             .internal_daemon()
             .into_std_command()
             .context("legacy nats GuardedCommand")?;
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn legacy nats-server")?;
+        command.stdin(Stdio::null());
+        attach_ports_dir_log_std(&mut command, &ports_dir);
+        apply_no_window_std(&mut command);
+        let child = command.spawn().context("spawn legacy nats-server")?;
         let pid = child.id();
         let port = match wait_nats_ports_file_client_port(&ports_dir, pid, PORTS_FILE_WAIT) {
             Ok(port) => port,
