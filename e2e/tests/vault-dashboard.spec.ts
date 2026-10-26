@@ -340,10 +340,9 @@ test.describe("EX — vault experiences", () => {
     const kindClass = await deadRow.locator('[data-qa="vault-dead-kind"]').getAttribute("class");
     expect(kindClass || "").not.toMatch(/uppercase/);
 
-    // OPEN-2: no raw hybrid/BM25 scores in vault map UI.
-    await expect(page.locator('[data-qa="vault-experiences-pane"]')).not.toContainText(
-      /bm25|hybrid.?score|score=\d/i,
-    );
+    // OPEN-2: no raw hybrid/BM25 scores in vault map UI (scores stay MCP/backend-only).
+    const vaultChrome = await page.locator('[data-qa="vault-map"], main').first().innerText();
+    expect(vaultChrome).not.toMatch(/bm25|hybrid.?score|score=\d/i);
   });
 
   test("EX-05b · Mark all reviewed clears badge from backend count", async ({ page }) => {
