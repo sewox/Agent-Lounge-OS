@@ -279,7 +279,7 @@ test.describe("EX — vault experiences", () => {
     expect(before).toBeGreaterThan(0);
     const unreviewedCard = page
       .locator('[data-qa="experience-card"]')
-      .filter({ hasText: /unreviewed/i })
+      .filter({ has: page.locator('[data-qa="experience-unreviewed-badge"]') })
       .first();
     await unreviewedCard.click();
     const drawer = page.locator("[data-qa=experience-drawer]");
@@ -287,6 +287,63 @@ test.describe("EX — vault experiences", () => {
     await expect(drawer.getByRole("button", { name: /Mark reviewed/i })).toHaveCount(0);
     await drawer.getByRole("button", { name: /✕|Close/i }).click();
     await expect(badge).toHaveCount(0);
+  });
+
+  test("KB1b-01 · displayName heading, scoped counts, freshness, dead-row format", async ({
+    page,
+  }) => {
+    await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
+    const projectName = page
+      .locator('[data-qa="vault-project-row"]')
+      .filter({ hasText: /Agent-Lounge-OS/i })
+      .locator('[data-qa="vault-project-display-name"]')
+      .first();
+    await expect(projectName).toBeVisible();
+    await expect(projectName).toHaveAttribute("lang", "en");
+    const title = await projectName.getAttribute("title");
+    expect(title && title.length > 0).toBeTruthy();
+
+    await openVaultProject(page, "Agent-Lounge-OS");
+
+    const heading = page.locator('[data-qa="vault-experiences-heading"]');
+    await expect(heading).toBeVisible();
+    await expect(heading).toContainText(/Agent-Lounge-OS/);
+    await expect(heading).toHaveClass(/truncate/);
+
+    // No duplicate filter · slug chrome after K6.
+    await expect(page.getByText(/filter · Agent-Lounge-OS/i)).toHaveCount(0);
+
+    const count = page.locator('[data-qa="vault-experience-count"]');
+    await expect(count).toBeVisible();
+    await expect(count).toHaveText(/\d+\s*\/\s*\d+/);
+
+    const freshness = page.locator('[data-qa="vault-backend-freshness"]');
+    await expect(freshness).toBeVisible();
+    await expect(freshness).not.toHaveText(/^memory_bridge \+ sqlite$/);
+    await expect(freshness).toContainText(/memory bridge \+ sqlite/i);
+
+    // Detail (dead symbols) may sit in a drawer on one/two panel modes.
+    const detailInline = page.locator('[data-panel-slot="detail"]');
+    if (!(await detailInline.isVisible())) {
+      const closeBtn = page.locator('[data-qa="close-panel-drawer"]');
+      if (await closeBtn.isVisible()) {
+        await closeBtn.click();
+      }
+      await page.locator('[data-qa="open-detail-drawer"]').click();
+      await expect(page.locator('[data-qa="panel-grid-drawer-detail"]')).toBeVisible();
+    }
+    const deadRow = page.locator('[data-qa="vault-dead-row"]').first();
+    await expect(deadRow).toBeVisible();
+    await expect(deadRow.locator('[lang="en"]').first()).toBeVisible();
+    await expect(deadRow.locator('[data-qa="vault-dead-kind"]')).toBeVisible();
+    const kindClass = await deadRow.locator('[data-qa="vault-dead-kind"]').getAttribute("class");
+    expect(kindClass || "").not.toMatch(/uppercase/);
+
+    // OPEN-2: no raw hybrid/BM25 scores in vault map UI.
+    await expect(page.locator('[data-qa="vault-experiences-pane"]')).not.toContainText(
+      /bm25|hybrid.?score|score=\d/i,
+    );
   });
 
   test("EX-05b · Mark all reviewed clears badge from backend count", async ({ page }) => {

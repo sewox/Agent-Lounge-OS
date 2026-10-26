@@ -1306,6 +1306,24 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
           WHERE COALESCE(status, 'active') = 'active'
           GROUP BY project_id COLLATE NOCASE
         ),
+        dead_stats AS (
+          SELECT
+            d.project_id AS name,
+            COUNT(*) AS dead_count
+          FROM project_index d
+          WHERE d.kind IN ('dead', 'broken')
+            AND NOT EXISTS (
+              SELECT 1 FROM ignored_symbols i
+              WHERE i.name = d.name
+                AND COALESCE(i.project_id, '') = COALESCE(d.project_id, '')
+                AND COALESCE(i.file_path, '') = COALESCE(d.file_path, '')
+                AND COALESCE(i.kind, '') = CASE
+                      WHEN d.kind = 'broken' THEN 'broken'
+                      ELSE 'unused'
+                    END
+            )
+          GROUP BY d.project_id COLLATE NOCASE
+        ),
         combined AS (
           SELECT
             i.name,
@@ -1317,9 +1335,11 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             i.has_meta,
             COALESCE(e.experience_count, 0) AS experience_count,
             COALESCE(e.unreviewed_count, 0) AS unreviewed_count,
+            COALESCE(d.dead_count, 0) AS dead_count,
             e.exp_updated AS exp_updated
           FROM indexed i
           LEFT JOIN exp_stats e ON i.name = e.name COLLATE NOCASE
+          LEFT JOIN dead_stats d ON i.name = d.name COLLATE NOCASE
           UNION ALL
           SELECT
             e.name,
@@ -1331,6 +1351,7 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             0,
             e.experience_count,
             e.unreviewed_count,
+            0,
             e.exp_updated
           FROM exp_stats e
           WHERE NOT EXISTS (
@@ -1347,6 +1368,7 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
           c.has_meta,
           c.experience_count,
           c.unreviewed_count,
+          c.dead_count,
           c.exp_updated
         FROM combined c
         LEFT JOIN project_flags pf ON c.name = pf.project_id COLLATE NOCASE
@@ -1379,6 +1401,7 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
           MAX(CASE WHEN kind = 'meta' THEN 1 ELSE 0 END) AS has_meta,
           0 AS experience_count,
           0 AS unreviewed_count,
+          SUM(CASE WHEN kind IN ('dead', 'broken') THEN 1 ELSE 0 END) AS dead_count,
           NULL AS exp_updated
         FROM project_index
         GROUP BY project_id
@@ -1403,7 +1426,8 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             row.get::<_, i64>(6)? as u64,
             row.get::<_, i64>(7)? as u64,
             row.get::<_, i64>(8)? as u64,
-            row.get::<_, Option<String>>(9)?,
+            row.get::<_, i64>(9)? as u64,
+            row.get::<_, Option<String>>(10)?,
         ))
     })?;
 
@@ -1419,6 +1443,7 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             has_meta,
             experience_count,
             unreviewed_count,
+            dead_count,
             exp_updated,
         ) = row?;
         let (declared_nodes, declared_edges) = declared.get(&name).copied().unwrap_or((0, 0));
@@ -1446,7 +1471,9 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             edge_count,
             experience_count,
             unreviewed_count,
+            dead_count,
             last_updated: last,
+            indexed_at: index_updated.filter(|s| !s.is_empty()),
             source_type: source_type.into(),
             canonical_id: Some(name),
             identity_warning,

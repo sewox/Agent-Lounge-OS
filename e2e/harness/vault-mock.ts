@@ -45,7 +45,7 @@ window.__QA_VAULT_MOCK__ = {
     for (const project of f.projects || []) {
       const exps = (f.experiences || []).filter(
         (row) =>
-          (row.project_id || "").toLowerCase() === project.name.toLowerCase() &&
+          row.project_id === project.name &&
           (row.status ?? "active") === "active",
       );
       const unreviewed = exps.filter((row) => row.reviewed === false).length;
@@ -56,6 +56,9 @@ window.__QA_VAULT_MOCK__ = {
           .sort()
           .at(-1) ?? null;
       const pageCount = window.__QA_VAULT_MOCK__._pageTotal(f, project.name);
+      const deadCount = (f.deadSymbols || []).filter(
+        (row) => !row.project_id || row.project_id === project.name,
+      ).length;
       byName.set(project.name, {
         name: project.name,
         repo_path: project.root_path,
@@ -64,8 +67,12 @@ window.__QA_VAULT_MOCK__ = {
         edge_count: project.edges,
         experience_count: exps.length,
         unreviewed_count: unreviewed,
+        dead_count: deadCount,
         last_updated: lastUpdated,
+        indexed_at: lastUpdated,
         source_type: pageCount > 0 || project.nodes > 0 ? "indexed" : "discovered",
+        // Fixtures key pages/experiences by display name; real host uses path ids.
+        canonical_id: project.name,
       });
     }
     for (const exp of f.experiences || []) {
@@ -74,7 +81,7 @@ window.__QA_VAULT_MOCK__ = {
       if ((exp.status ?? "active") !== "active") continue;
       const exps = (f.experiences || []).filter(
         (row) =>
-          (row.project_id || "").toLowerCase() === name.toLowerCase() &&
+          row.project_id === name &&
           (row.status ?? "active") === "active",
       );
       if (exps.length === 0) continue;
@@ -93,8 +100,11 @@ window.__QA_VAULT_MOCK__ = {
         edge_count: 0,
         experience_count: exps.length,
         unreviewed_count: unreviewed,
+        dead_count: 0,
         last_updated: lastUpdated,
+        indexed_at: null,
         source_type: "imported",
+        canonical_id: name,
       });
     }
     return [...byName.values()];

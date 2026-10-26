@@ -1,3 +1,5 @@
+import { detectPlatform, type LoungePlatform } from "@/lib/platform";
+
 export type ServiceHealth = {
   id: string;
   name: string;
@@ -1235,14 +1237,45 @@ export function isHeartbeatSubject(subject: string): boolean {
   return /heartbeat/i.test(subject);
 }
 
+export type SelectionMatchOptions = {
+  /**
+   * Exact Project-ID-Core identity keys (canonicalId, display name, basename).
+   * Required for honest project-scoped filtering — never substring LIKE (OPEN-5).
+   */
+  projectKeys?: string[];
+  /** Platform case policy for project id equality (default: detectPlatform). */
+  platform?: LoungePlatform;
+};
+
+function projectKeyMatches(
+  candidate: string | null | undefined,
+  keys: string[],
+  platform: LoungePlatform,
+): boolean {
+  const value = candidate?.trim() ?? "";
+  if (!value || keys.length === 0) {
+    return false;
+  }
+  return keys.some((key) => {
+    const needle = key.trim();
+    if (!needle) return false;
+    if (platform === "linux") {
+      return value === needle;
+    }
+    return value.localeCompare(needle, undefined, { sensitivity: "accent" }) === 0;
+  });
+}
+
 /**
  * Düğüm tıklanınca: name / file basename / project, adr_summary + tags (+ agent, project_id) içinde.
+ * Proje seçiminde yalnızca exact canonical project matching (OPEN-5) — substring yok.
  * Seçim yoksa yalnızca metin sorgusu uygulanır.
  */
 export function experiencesMatchingSelection(
   experiences: LoungeExperience[],
   selection: SemanticMapSelection | null,
   query = "",
+  options?: SelectionMatchOptions,
 ): LoungeExperience[] {
   const q = query.trim().toLowerCase();
   let rows = experiences;
@@ -1256,13 +1289,23 @@ export function experiencesMatchingSelection(
   if (!selection) {
     return rows;
   }
+
+  if (selection.kind === "project") {
+    const keys =
+      options?.projectKeys && options.projectKeys.length > 0
+        ? options.projectKeys
+        : [selection.project, selection.name].filter(
+            (value): value is string => Boolean(value?.trim()),
+          );
+    const platform = options?.platform ?? detectPlatform();
+    return rows.filter((item) => projectKeyMatches(item.project_id, keys, platform));
+  }
+
   const tokens = [
     selection.name,
     selection.id,
     selection.file,
     pathBasename(selection.file),
-    // Proje adı yalnızca project düğümünde; fn/file seçiminde tüm repo experience'larını şişirmesin.
-    selection.kind === "project" ? selection.project : null,
   ]
     .map((token) => token?.trim().toLowerCase() ?? "")
     .filter((token) => token.length >= 2);
@@ -1288,6 +1331,7 @@ export function deadSymbolsMatchingSelection(
   deadSymbols: DeadSymbol[],
   semanticMap: SemanticMap,
   selection: SemanticMapSelection | null,
+  options?: SelectionMatchOptions,
 ): DeadSymbol[] {
   if (!selection) {
     return [];
@@ -1304,10 +1348,20 @@ export function deadSymbolsMatchingSelection(
   }
 
   if (selection.kind === "project") {
-    const projectKey = (selection.project || selection.name || "").toLowerCase();
+    const keys =
+      options?.projectKeys && options.projectKeys.length > 0
+        ? options.projectKeys
+        : [selection.project, selection.name].filter(
+            (value): value is string => Boolean(value?.trim()),
+          );
+    const platform = options?.platform ?? detectPlatform();
     return pool.filter((symbol) => {
-      const pid = (symbol.project_id ?? "").toLowerCase();
-      return !pid || !projectKey || pid === projectKey || pid.includes(projectKey);
+      const pid = symbol.project_id?.trim() ?? "";
+      // Rows without project_id stay visible when filtering by project (legacy).
+      if (!pid) {
+        return true;
+      }
+      return projectKeyMatches(pid, keys, platform);
     });
   }
 

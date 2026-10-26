@@ -36,6 +36,7 @@ import {
   getVaultFiltersSnapshot,
   pagesFromSemanticProject,
   resetVaultFilters,
+  resolveVaultDisplayName,
   subscribeVaultFilters,
   symbolsFromSemanticFile,
   windowSlice,
@@ -251,7 +252,14 @@ function ProjectRow({
       <span className="flex min-w-0 items-center gap-1.5">
         <Icon name="folder" className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0">
-          <span className="block truncate font-medium font-mono">{row.name || "unnamed"}</span>
+          <span
+            className="block truncate font-medium font-mono"
+            lang="en"
+            title={row.canonicalId || row.name || "unnamed"}
+            data-qa="vault-project-display-name"
+          >
+            {resolveVaultDisplayName(row)}
+          </span>
           <span className="block truncate font-mono text-meta text-outline">
             {t("pageCountMeta", { pages: row.pageCount, experiences: row.experienceCount })}
             {` · ${t("astNodes", { count: row.nodeCount })} · ${t("edges", { count: row.edgeCount })}`}
@@ -792,7 +800,7 @@ export function SemanticMap({
       data-view="projects"
       className="flex min-h-0 w-full flex-1 flex-col overflow-hidden"
     >
-      <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
+      <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline">
         <span>{t("indexedFiles")}</span>
         <span className="text-on-surface-variant">
           {graphTotals.files > 0

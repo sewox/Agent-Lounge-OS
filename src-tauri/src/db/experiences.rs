@@ -305,12 +305,15 @@ impl ExperienceStore {
 
     /// List experiences ordered by `is_pinned DESC, created_at DESC`.
     /// When `include_archived` is false (default), only `active` rows are returned.
+    /// Optional `project_id` is resolved via Project-ID-Core (`prefer_canonical`) and
+    /// matched exactly (never substring `LIKE`).
     pub async fn list_experiences(
         &self,
         limit: usize,
         include_archived: bool,
     ) -> Result<Vec<LoungeExperience>> {
-        self.list_experiences_page(limit, include_archived, 0).await
+        self.list_experiences_page(limit, include_archived, 0, None)
+            .await
     }
 
     pub async fn list_experiences_page(
@@ -318,21 +321,32 @@ impl ExperienceStore {
         limit: usize,
         include_archived: bool,
         offset: usize,
+        project_id: Option<String>,
     ) -> Result<Vec<LoungeExperience>> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            latest_blocking(&conn, limit, include_archived, offset)
+            latest_blocking(
+                &conn,
+                limit,
+                include_archived,
+                offset,
+                project_id.as_deref(),
+            )
         })
         .await
         .context("experience list join")?
     }
 
-    pub async fn count_experiences(&self, include_archived: bool) -> Result<u64> {
+    pub async fn count_experiences(
+        &self,
+        include_archived: bool,
+        project_id: Option<String>,
+    ) -> Result<u64> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
-            count_experiences_blocking(&conn, include_archived)
+            count_experiences_blocking(&conn, include_archived, project_id.as_deref())
         })
         .await
         .context("experience count join")?
@@ -942,26 +956,52 @@ fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceR
     Ok(row)
 }
 
+fn resolve_experience_project_filter(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(raw) = project_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(crate::db::project_identity::prefer_canonical(
+        conn, raw,
+    )?))
+}
+
 fn latest_blocking(
     conn: &Connection,
     limit: usize,
     include_archived: bool,
     offset: usize,
+    project_id: Option<&str>,
 ) -> Result<Vec<LoungeExperience>> {
-    let status_clause = if include_archived {
-        ""
+    let resolved = resolve_experience_project_filter(conn, project_id)?;
+    let mut clauses: Vec<&str> = Vec::new();
+    if !include_archived {
+        clauses.push("COALESCE(status, 'active') = 'active'");
+    }
+    if resolved.is_some() {
+        // Exact match after prefer_canonical — never substring LIKE (OPEN-5).
+        clauses.push("project_id = ?3");
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
     } else {
-        "WHERE COALESCE(status, 'active') = 'active'"
+        format!("WHERE {}", clauses.join(" AND "))
     };
     // Governance columns are the single source of truth — never prefer stale payload_json.
     let sql = format!(
         "SELECT {RECORD_SELECT_COLS}
          FROM experiences
-         {status_clause}
+         {where_clause}
          ORDER BY is_pinned DESC, created_at DESC LIMIT ?1 OFFSET ?2"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit as i64, offset as i64], map_record)?;
+    let rows = if let Some(pid) = resolved.as_deref() {
+        stmt.query_map(params![limit as i64, offset as i64, pid], map_record)?
+    } else {
+        stmt.query_map(params![limit as i64, offset as i64], map_record)?
+    };
     let mut out = Vec::new();
     for row in rows {
         out.push(row?.to_lounge());
@@ -969,15 +1009,30 @@ fn latest_blocking(
     Ok(out)
 }
 
-fn count_experiences_blocking(conn: &Connection, include_archived: bool) -> Result<u64> {
-    let n: i64 = if include_archived {
-        conn.query_row("SELECT COUNT(*) FROM experiences", [], |row| row.get(0))?
-    } else {
-        conn.query_row(
+fn count_experiences_blocking(
+    conn: &Connection,
+    include_archived: bool,
+    project_id: Option<&str>,
+) -> Result<u64> {
+    let resolved = resolve_experience_project_filter(conn, project_id)?;
+    let n: i64 = match (include_archived, resolved.as_deref()) {
+        (true, None) => conn.query_row("SELECT COUNT(*) FROM experiences", [], |row| row.get(0))?,
+        (false, None) => conn.query_row(
             "SELECT COUNT(*) FROM experiences WHERE COALESCE(status, 'active') = 'active'",
             [],
             |row| row.get(0),
-        )?
+        )?,
+        (true, Some(pid)) => conn.query_row(
+            "SELECT COUNT(*) FROM experiences WHERE project_id = ?1",
+            params![pid],
+            |row| row.get(0),
+        )?,
+        (false, Some(pid)) => conn.query_row(
+            "SELECT COUNT(*) FROM experiences
+             WHERE COALESCE(status, 'active') = 'active' AND project_id = ?1",
+            params![pid],
+            |row| row.get(0),
+        )?,
     };
     Ok(n.max(0) as u64)
 }
@@ -1597,13 +1652,41 @@ mod tests {
             .await
             .unwrap();
 
-        let page = store.list_experiences_page(2, false, 0).await.unwrap();
+        let page = store
+            .list_experiences_page(2, false, 0, None)
+            .await
+            .unwrap();
         assert_eq!(page.len(), 2);
         assert!(page[0].is_pinned, "pinned row sorts first");
-        let total = store.count_experiences(false).await.unwrap();
+        let total = store.count_experiences(false, None).await.unwrap();
         assert_eq!(total, 5);
-        let page2 = store.list_experiences_page(2, false, 2).await.unwrap();
+        let page2 = store
+            .list_experiences_page(2, false, 2, None)
+            .await
+            .unwrap();
         assert_eq!(page2.len(), 2);
         assert!(!page2.iter().any(|r| r.is_pinned) || page2[0].id != page[0].id);
+
+        // OPEN-5: project-scoped count/list use exact project_id match.
+        let scoped = store
+            .count_experiences(false, Some("proj-page".into()))
+            .await
+            .unwrap();
+        assert_eq!(scoped, 5);
+        let other = store
+            .count_experiences(false, Some("other-proj".into()))
+            .await
+            .unwrap();
+        assert_eq!(other, 0);
+        let scoped_page = store
+            .list_experiences_page(10, false, 0, Some("proj-page".into()))
+            .await
+            .unwrap();
+        assert_eq!(scoped_page.len(), 5);
+        let empty_page = store
+            .list_experiences_page(10, false, 0, Some("other-proj".into()))
+            .await
+            .unwrap();
+        assert!(empty_page.is_empty());
     }
 }

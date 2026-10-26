@@ -271,8 +271,14 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
           const offset = typeof args?.offset === "number" ? args.offset : 0;
           // Match Tauri 2 camelCase IPC args (includeArchived), not snake_case.
           const includeArchived = Boolean(args?.includeArchived);
+          const projectId = String(args?.projectId ?? args?.project_id ?? "").trim();
           const rows = f.experiences
             .filter((row) => includeArchived || (row.status ?? "active") !== "archived")
+            .filter((row) => {
+              if (!projectId) return true;
+              // Exact Project-ID-Core match (OPEN-5) — never substring.
+              return row.project_id === projectId;
+            })
             .slice()
             .sort((left, right) => {
               const pinDelta = Number(Boolean(right.is_pinned)) - Number(Boolean(left.is_pinned));
@@ -286,9 +292,14 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         }
         case "count_experiences": {
           const includeArchived = Boolean(args?.includeArchived);
-          return f.experiences.filter(
-            (row) => includeArchived || (row.status ?? "active") !== "archived",
-          ).length;
+          const projectId = String(args?.projectId ?? args?.project_id ?? "").trim();
+          return f.experiences.filter((row) => {
+            if (!includeArchived && (row.status ?? "active") === "archived") {
+              return false;
+            }
+            if (!projectId) return true;
+            return row.project_id === projectId;
+          }).length;
         }
         case "get_experience": {
           const id = String(args?.id ?? "");
@@ -579,12 +590,21 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
               [row.project_id ?? "", row.name, row.kind, row.file ?? "", String(row.line ?? "")].join("|"),
             ),
           );
-          return f.deadSymbols.filter(
-            (row) =>
-              !ignoredKeys.has(
-                [row.project_id ?? "", row.name, row.kind, row.file ?? "", String(row.line ?? "")].join("|"),
-              ),
-          );
+          const projectId = String(args?.projectId ?? args?.project_id ?? "").trim();
+          return f.deadSymbols.filter((row) => {
+            if (
+              ignoredKeys.has(
+                [row.project_id ?? "", row.name, row.kind, row.file ?? "", String(row.line ?? "")].join(
+                  "|",
+                ),
+              )
+            ) {
+              return false;
+            }
+            if (!projectId) return true;
+            // Exact Project-ID-Core match (OPEN-5).
+            return !row.project_id || row.project_id === projectId;
+          });
         }
         case "list_ignored_symbols":
           return (

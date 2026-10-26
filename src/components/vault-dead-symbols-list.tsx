@@ -4,15 +4,20 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { DeadSymbolsVaultLink } from "@/components/dead-symbols-panel";
 import { formatDisplayPath } from "@/lib/experience";
+import { formatSymbolFileLine } from "@/lib/dead-symbols";
 import type { DeadSymbol, SemanticMapSelection } from "@/lib/lounge";
+import { shortSymbolName } from "@/lib/lounge";
 import {
   computeTokenRowHeight,
   DEAD_SYMBOL_ROW_HEIGHT_REM,
   readRootFontSizePx,
   subscribeRootFontSize,
 } from "@/lib/row-height";
-import type { VaultProjectRow } from "@/lib/vault-projects";
-import { windowSlice } from "@/lib/vault-projects";
+import {
+  resolveVaultDisplayName,
+  windowSlice,
+  type VaultProjectRow,
+} from "@/lib/vault-projects";
 
 function useDeadRowHeightPx(): number {
   const rootPx = useSyncExternalStore(
@@ -21,6 +26,17 @@ function useDeadRowHeightPx(): number {
     () => 16,
   );
   return computeTokenRowHeight(rootPx, DEAD_SYMBOL_ROW_HEIGHT_REM);
+}
+
+function deadKindLabel(
+  kind: string | null | undefined,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
+  const normalized = (kind || "dead").toLowerCase();
+  if (normalized === "unused" || normalized === "broken" || normalized === "dead") {
+    return t(`deadKind.${normalized}`);
+  }
+  return kind || t("deadKind.dead");
 }
 
 /**
@@ -70,8 +86,8 @@ export function VaultDeadSymbolsPane({
       data-qa="vault-dead-pane"
       className="flex h-full min-h-0 w-full flex-col overflow-hidden p-2.5 font-body"
     >
-      <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
-        <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+      <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline">
+        <h2 className="font-body text-panel font-semibold tracking-label text-on-surface">
           {t("layout.detailHeading")}
         </h2>
         <span
@@ -102,10 +118,17 @@ export function VaultDeadSymbolsPane({
       ) : symbols.length === 0 ? (
         <div data-qa="vault-detail-summary" className="space-y-2 overflow-auto">
           <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-3">
-            <p className="font-mono text-body font-medium text-on-surface">{selected.name}</p>
+            <p
+              className="font-mono text-body font-medium text-on-surface"
+              lang="en"
+              title={selectedMeta?.canonicalId || selected.name}
+            >
+              {selectedMeta ? resolveVaultDisplayName(selectedMeta) : selected.name}
+            </p>
             {selectedPath ? (
               <p
                 className="mt-1 break-all font-mono text-meta text-on-surface-variant"
+                lang="en"
                 title={formatDisplayPath(selectedPath)}
               >
                 {formatDisplayPath(selectedPath)}
@@ -123,7 +146,9 @@ export function VaultDeadSymbolsPane({
               </p>
             ) : null}
             <p className="mt-3 font-body text-body text-on-surface-variant">
-              {t("noDeadForNode", { name: selected.name })}
+              {t("noDeadForNode", {
+                name: selectedMeta ? resolveVaultDisplayName(selectedMeta) : selected.name,
+              })}
             </p>
           </div>
         </div>
@@ -140,40 +165,52 @@ export function VaultDeadSymbolsPane({
           >
             <div style={{ height: win.totalHeight, position: "relative" }}>
               <div style={{ transform: `translateY(${win.offsetY}px)` }}>
-                {visible.map((symbol) => (
-                  <div
-                    role="listitem"
-                    key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
-                    data-qa="vault-dead-row"
-                    className="flex items-start justify-between gap-2 border-b border-error/20 bg-error/5 px-1.5 py-1"
-                    style={{ height: rowHeight }}
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate font-medium text-error" title={symbol.name}>
-                        {symbol.name}
+                {visible.map((symbol) => {
+                  const shortName = shortSymbolName(symbol.name) || symbol.name;
+                  const fileLine = formatSymbolFileLine(symbol);
+                  const kindText = deadKindLabel(symbol.kind, t);
+                  const detail = symbol.detail?.trim() || "";
+                  const location = symbol.file
+                    ? fileLine
+                    : detail || kindText;
+                  const secondaryTitle = [location, detail].filter(Boolean).join(" · ");
+                  return (
+                    <div
+                      role="listitem"
+                      key={`${symbol.name}:${symbol.file ?? ""}:${symbol.line ?? ""}:${symbol.kind}`}
+                      data-qa="vault-dead-row"
+                      className="flex items-start justify-between gap-2 border-b border-error/20 bg-error/5 px-1.5 py-1"
+                      style={{ height: rowHeight }}
+                    >
+                      <div className="min-w-0">
+                        <div
+                          className="truncate font-medium text-error"
+                          lang="en"
+                          title={symbol.name}
+                          aria-label={symbol.name}
+                        >
+                          {shortName}
+                        </div>
+                        <div
+                          className="truncate text-meta text-on-surface-variant"
+                          lang="en"
+                          title={secondaryTitle}
+                        >
+                          {location}
+                          {detail && symbol.file ? (
+                            <span className="text-outline">{` · ${detail}`}</span>
+                          ) : null}
+                        </div>
                       </div>
-                      <div
-                        className="truncate text-meta text-on-surface-variant"
-                        title={
-                          symbol.file
-                            ? `${formatDisplayPath(symbol.file)}${
-                                symbol.line != null ? `:${symbol.line}` : ""
-                              }`
-                            : symbol.detail || symbol.kind
-                        }
+                      <span
+                        data-qa="vault-dead-kind"
+                        className="shrink-0 rounded border border-error/40 px-1 text-meta text-error"
                       >
-                        {symbol.file
-                          ? `${formatDisplayPath(symbol.file)}${
-                              symbol.line != null ? `:${symbol.line}` : ""
-                            }`
-                          : symbol.detail || symbol.kind}
-                      </div>
+                        {kindText}
+                      </span>
                     </div>
-                    <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
-                      {symbol.kind || "dead"}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
