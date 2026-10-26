@@ -1,4 +1,8 @@
-import { detectPlatform, type LoungePlatform } from "@/lib/platform";
+import {
+  projectIdentityEquals,
+  UNKNOWN_PLATFORM,
+  type LoungePlatform,
+} from "@/lib/platform";
 
 export type ServiceHealth = {
   id: string;
@@ -1243,7 +1247,7 @@ export type SelectionMatchOptions = {
    * Required for honest project-scoped filtering — never substring LIKE (OPEN-5).
    */
   projectKeys?: string[];
-  /** Platform case policy for project id equality (default: detectPlatform). */
+  /** Platform case policy for project id equality (default: unknown → case-sensitive). */
   platform?: LoungePlatform;
 };
 
@@ -1259,10 +1263,7 @@ function projectKeyMatches(
   return keys.some((key) => {
     const needle = key.trim();
     if (!needle) return false;
-    if (platform === "linux") {
-      return value === needle;
-    }
-    return value.localeCompare(needle, undefined, { sensitivity: "accent" }) === 0;
+    return projectIdentityEquals(value, needle, platform);
   });
 }
 
@@ -1297,7 +1298,7 @@ export function experiencesMatchingSelection(
         : [selection.project, selection.name].filter(
             (value): value is string => Boolean(value?.trim()),
           );
-    const platform = options?.platform ?? detectPlatform();
+    const platform = options?.platform ?? UNKNOWN_PLATFORM;
     return rows.filter((item) => projectKeyMatches(item.project_id, keys, platform));
   }
 
@@ -1354,7 +1355,7 @@ export function deadSymbolsMatchingSelection(
         : [selection.project, selection.name].filter(
             (value): value is string => Boolean(value?.trim()),
           );
-    const platform = options?.platform ?? detectPlatform();
+    const platform = options?.platform ?? UNKNOWN_PLATFORM;
     return pool.filter((symbol) => {
       const pid = symbol.project_id?.trim() ?? "";
       // Rows without project_id stay visible when filtering by project (legacy).

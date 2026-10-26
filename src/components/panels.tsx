@@ -26,6 +26,7 @@ import {
   sortExperiencesForDisplay,
 } from "@/lib/experience";
 import { useIsTauri } from "@/hooks/use-is-tauri";
+import { usePlatform } from "@/hooks/use-platform";
 import { useUiScale } from "@/components/ui-scale-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
@@ -56,6 +57,7 @@ import {
   quotaToneClass,
   resolveDeadSymbolCount,
   type AgentEfficiencyReport,
+  type LoungeExperience,
   type QuotaExhaustedAction,
   type QuotaKind,
   type SemanticMapSelection,
@@ -487,10 +489,12 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     experienceDetailError,
     closeExperience,
   } = useLounge();
-  const { t: tv } = useTranslation("vault");
+  const { t: tv, i18n } = useTranslation("vault");
   // Map↔Review switcher lives in this existing header row (no extra chrome height)
   // so D960 SemanticMap stretch rows keep enough vertical room.
   const tauriReady = useIsTauri();
+  const platform = usePlatform();
+  const dateLocale = i18n.language?.startsWith("en") ? "en-US" : "tr-TR";
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const [selectionProject, setSelectionProject] = useState(selectedProject);
   const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
@@ -508,7 +512,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const [pageQueryState, setPageQueryState] = useState({ query: "", sort: "path" as PageSortKey });
   const [fileSymbols, setFileSymbols] = useState<FileSymbolRow[] | null>(null);
   const [fileSymbolsLoading, setFileSymbolsLoading] = useState(false);
+  /** OPEN-5: project-scoped list/count from backend (not the global 100-item page). */
+  const [scopedExperiences, setScopedExperiences] = useState<LoungeExperience[] | null>(null);
+  const [scopedTotal, setScopedTotal] = useState<number | null>(null);
+  const [scopedLoading, setScopedLoading] = useState(false);
+  const [scopedError, setScopedError] = useState<string | null>(null);
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
+  const VAULT_EXPERIENCE_PAGE = 100;
 
   if (selectionProject !== selectedProject) {
     setSelectionProject(selectedProject);
@@ -683,6 +693,108 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         : null,
     [openProjectName, projectRows],
   );
+  const openProjectQueryId = useMemo(
+    () => vaultProjectQueryId(openProjectRow, openProjectName),
+    [openProjectName, openProjectRow],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    // Defer setState so the initial write is not synchronous inside the effect
+    // (react-hooks/set-state-in-effect; same pattern as vault auto-select).
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      if (!tauriReady || !openProjectQueryId) {
+        setScopedExperiences(null);
+        setScopedTotal(null);
+        setScopedError(null);
+        setScopedLoading(false);
+        return;
+      }
+      setScopedLoading(true);
+      setScopedError(null);
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const [rows, total] = await Promise.all([
+            invoke<LoungeExperience[]>("list_experiences", {
+              limit: VAULT_EXPERIENCE_PAGE,
+              offset: 0,
+              includeArchived: showArchived,
+              projectId: openProjectQueryId,
+            }),
+            invoke<number>("count_experiences", {
+              includeArchived: showArchived,
+              projectId: openProjectQueryId,
+            }).catch(() => null),
+          ]);
+          if (cancelled) return;
+          setScopedExperiences(sortExperiencesForDisplay(rows));
+          setScopedTotal(total != null ? Number(total) : rows.length);
+        } catch (err) {
+          if (cancelled) return;
+          setScopedExperiences([]);
+          setScopedTotal(0);
+          setScopedError(err instanceof Error ? err.message : tv("listError"));
+        } finally {
+          if (!cancelled) {
+            setScopedLoading(false);
+          }
+        }
+      })();
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [openProjectQueryId, showArchived, tauriReady, tv]);
+
+  const loadMoreScopedExperiences = useCallback(async () => {
+    if (!tauriReady || !openProjectQueryId || scopedLoading) {
+      return;
+    }
+    if (!scopedExperiences || scopedTotal == null) {
+      return;
+    }
+    if (scopedExperiences.length >= scopedTotal) {
+      return;
+    }
+    setScopedLoading(true);
+    setScopedError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const rows = await invoke<LoungeExperience[]>("list_experiences", {
+        limit: VAULT_EXPERIENCE_PAGE,
+        offset: scopedExperiences.length,
+        includeArchived: showArchived,
+        projectId: openProjectQueryId,
+      });
+      setScopedExperiences((current) => {
+        const base = current ?? [];
+        const seen = new Set(base.map((row) => row.id));
+        const merged = [...base];
+        for (const row of rows) {
+          if (!seen.has(row.id)) {
+            merged.push(row);
+          }
+        }
+        return sortExperiencesForDisplay(merged);
+      });
+    } catch (err) {
+      setScopedError(err instanceof Error ? err.message : tv("listError"));
+    } finally {
+      setScopedLoading(false);
+    }
+  }, [
+    openProjectQueryId,
+    scopedExperiences,
+    scopedLoading,
+    scopedTotal,
+    showArchived,
+    tauriReady,
+    tv,
+  ]);
+
   const selectedProjectRow = useMemo(() => {
     if (!selected) {
       return null;
@@ -713,14 +825,19 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     const fromAgg = projectRows.find((row) => row.name === selected.name)?.repoPath;
     return fromProjects || fromMap || fromAgg || null;
   }, [projects, projectRows, selected, semanticMap.projects]);
+  const experiencePool =
+    openProjectName && openProjectQueryId && tauriReady && scopedExperiences != null
+      ? scopedExperiences
+      : experiences;
   const log = useMemo(
     () =>
       sortExperiencesForDisplay(
-        experiencesMatchingSelection(experiences, selected, query, {
+        experiencesMatchingSelection(experiencePool, selected, query, {
           projectKeys: selectedProjectKeys,
+          platform,
         }),
       ),
-    [experiences, query, selected, selectedProjectKeys],
+    [experiencePool, platform, query, selected, selectedProjectKeys],
   );
   const experienceProjectRows = useMemo(() => {
     if (openProjectName) {
@@ -732,8 +849,9 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     () =>
       deadSymbolsMatchingSelection(deadSymbols, semanticMap, selected, {
         projectKeys: selectedProjectKeys,
+        platform,
       }),
-    [deadSymbols, semanticMap, selected, selectedProjectKeys],
+    [deadSymbols, platform, semanticMap, selected, selectedProjectKeys],
   );
   const openProjectDisplayName = useMemo(
     () =>
@@ -744,7 +862,20 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           : null,
     [openProjectName, openProjectRow],
   );
-  const projectExperienceCount = openProjectRow?.experienceCount ?? log.length;
+  const usingScopedExperiences = Boolean(openProjectName && openProjectQueryId && tauriReady);
+  const projectExperienceCount = usingScopedExperiences
+    ? (scopedTotal ?? openProjectRow?.experienceCount ?? log.length)
+    : (openProjectRow?.experienceCount ?? log.length);
+  const paneExperienceTotal = usingScopedExperiences
+    ? (scopedTotal ?? experienceTotal)
+    : experienceTotal;
+  const paneExperiencesLoading = usingScopedExperiences
+    ? scopedLoading || scopedExperiences == null
+    : experiencesLoading;
+  const paneExperiencesError = usingScopedExperiences ? scopedError : experiencesError;
+  const paneExperienceList = usingScopedExperiences
+    ? (scopedExperiences ?? [])
+    : experiences;
   const experiencesHeadingTitle = openProjectDisplayName
     ? tv("experiencesForProject", { name: openProjectDisplayName })
     : tv("experienceLog");
@@ -759,10 +890,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     }
     const parsed = Date.parse(stamp);
     const formatted = Number.isFinite(parsed)
-      ? new Date(parsed).toLocaleString()
+      ? new Date(parsed).toLocaleString(dateLocale)
       : stamp;
     return tv("lastIndexed", { date: formatted });
-  }, [openProjectRow, projectRows, selectedProjectRow, tv]);
+  }, [dateLocale, openProjectRow, projectRows, selectedProjectRow, tv]);
 
   // Landing (/vault, not embedded): default-select last-selected or first indexed project
   // and open its pages so leaf columns hold real content at natural card heights (no stretch).
@@ -924,7 +1055,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   projectCount: projectExperienceCount,
                   totalCount: experienceTotal,
                 })
-              : tv("totalExperiences", { count: experienceTotal })}
+              : tv("totalExperiences", { count: paneExperienceTotal })}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -1065,7 +1196,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               </div>
             </>
           )
-        ) : experiencesLoading && experiences.length === 0 ? (
+        ) : paneExperiencesLoading && paneExperienceList.length === 0 ? (
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <p
               data-qa="layout-empty"
@@ -1074,13 +1205,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               {tv("loading")}
             </p>
           </div>
-        ) : experiencesError ? (
+        ) : paneExperiencesError ? (
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <p
               data-qa="layout-empty"
               className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center font-body text-body text-error"
             >
-              {experiencesError || tv("listError")}
+              {paneExperiencesError || tv("listError")}
             </p>
           </div>
         ) : logVisible.length === 0 ? (
@@ -1211,7 +1342,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                         })();
                       }}
                       className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
-                      aria-label="Bu fısıltıyı faydalı olarak işaretle"
+                      aria-label={tv("markWhisperUseful")}
                     >
                       {alreadyUseful ? tv("usefulDone") : tv("useful")}
                     </button>
@@ -1222,13 +1353,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           })
         )}
       </div>
-      {experiences.length < experienceTotal ? (
+      {paneExperienceList.length < paneExperienceTotal ? (
         <div className="shrink-0 pt-2">
           <button
             type="button"
             data-qa="vault-load-more"
-            disabled={experiencesLoading}
-            onClick={() => void loadMoreExperiences()}
+            disabled={paneExperiencesLoading}
+            onClick={() =>
+              void (usingScopedExperiences
+                ? loadMoreScopedExperiences()
+                : loadMoreExperiences())
+            }
             className="min-h-8 w-full rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high disabled:opacity-60"
           >
             {tv("loadMore")}

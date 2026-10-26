@@ -57,6 +57,7 @@
   "outcomeSuccess": "Success",
   "outcomePartial": "Partial",
   "outcomeFailed": "Failed",
+  "markWhisperUseful": "Mark this whisper as useful",
   "deadKind": {
     "unused": "unused",
     "broken": "broken",

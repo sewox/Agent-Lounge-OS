@@ -956,16 +956,80 @@ fn get_record_blocking(conn: &Connection, id: &str) -> Result<Option<ExperienceR
     Ok(row)
 }
 
-fn resolve_experience_project_filter(
+/// Expand a project filter into exact identity keys: prefer_canonical, path
+/// canonicalize, and every alias that maps to the resolved canonical (OPEN-5).
+/// Never uses substring / LIKE matching.
+fn resolve_experience_project_keys(
     conn: &Connection,
     project_id: Option<&str>,
-) -> Result<Option<String>> {
+) -> Result<Option<Vec<String>>> {
+    use crate::db::accepts_cross_platform_path;
+    use crate::db::project_identity::{canonicalize_repo_path, prefer_canonical};
+    use std::collections::BTreeSet;
+
     let Some(raw) = project_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    Ok(Some(crate::db::project_identity::prefer_canonical(
-        conn, raw,
-    )?))
+
+    let mut keys = BTreeSet::new();
+    keys.insert(raw.to_string());
+    let preferred = prefer_canonical(conn, raw)?;
+    keys.insert(preferred.clone());
+
+    if accepts_cross_platform_path(raw) {
+        let path_key = canonicalize_repo_path(raw);
+        if !path_key.is_empty() {
+            keys.insert(path_key.clone());
+            keys.insert(prefer_canonical(conn, &path_key)?);
+            if let Some(id) = conn
+                .query_row(
+                    "SELECT canonical_id FROM projects WHERE repo_path = ?1 LIMIT 1",
+                    params![path_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            {
+                keys.insert(id);
+            }
+        }
+    }
+
+    // Pull aliases that point at any resolved canonical so alias-keyed rows match.
+    let canon_list: Vec<String> = keys.iter().cloned().collect();
+    for canonical in canon_list {
+        let sql = if cfg!(target_os = "linux") {
+            "SELECT alias_display FROM project_aliases WHERE canonical_id = ?1"
+        } else {
+            "SELECT alias_display FROM project_aliases WHERE canonical_id = ?1 COLLATE NOCASE"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![canonical], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let alias = row?;
+            if !alias.trim().is_empty() {
+                keys.insert(alias);
+            }
+        }
+    }
+
+    Ok(Some(
+        keys.into_iter().filter(|s| !s.trim().is_empty()).collect(),
+    ))
+}
+
+fn project_id_match_clause(key_count: usize) -> String {
+    debug_assert!(key_count > 0);
+    if cfg!(target_os = "linux") {
+        let placeholders = (0..key_count).map(|_| "?").collect::<Vec<_>>().join(", ");
+        format!("project_id IN ({placeholders})")
+    } else {
+        // macOS / Windows: case-insensitive exact match (Project-ID-Core).
+        let parts = (0..key_count)
+            .map(|_| "project_id = ? COLLATE NOCASE")
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!("({parts})")
+    }
 }
 
 fn latest_blocking(
@@ -975,14 +1039,17 @@ fn latest_blocking(
     offset: usize,
     project_id: Option<&str>,
 ) -> Result<Vec<LoungeExperience>> {
-    let resolved = resolve_experience_project_filter(conn, project_id)?;
-    let mut clauses: Vec<&str> = Vec::new();
+    let keys = resolve_experience_project_keys(conn, project_id)?;
+    let mut clauses: Vec<String> = Vec::new();
     if !include_archived {
-        clauses.push("COALESCE(status, 'active') = 'active'");
+        clauses.push("COALESCE(status, 'active') = 'active'".into());
     }
-    if resolved.is_some() {
-        // Exact match after prefer_canonical — never substring LIKE (OPEN-5).
-        clauses.push("project_id = ?3");
+    if let Some(ref keys) = keys {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Exact identity match after prefer_canonical / alias expand — never LIKE.
+        clauses.push(project_id_match_clause(keys.len()));
     }
     let where_clause = if clauses.is_empty() {
         String::new()
@@ -994,11 +1061,17 @@ fn latest_blocking(
         "SELECT {RECORD_SELECT_COLS}
          FROM experiences
          {where_clause}
-         ORDER BY is_pinned DESC, created_at DESC LIMIT ?1 OFFSET ?2"
+         ORDER BY is_pinned DESC, created_at DESC LIMIT ? OFFSET ?"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = if let Some(pid) = resolved.as_deref() {
-        stmt.query_map(params![limit as i64, offset as i64, pid], map_record)?
+    let rows = if let Some(ref keys) = keys {
+        let mut bind: Vec<rusqlite::types::Value> = keys
+            .iter()
+            .map(|k| rusqlite::types::Value::Text(k.clone()))
+            .collect();
+        bind.push(rusqlite::types::Value::Integer(limit as i64));
+        bind.push(rusqlite::types::Value::Integer(offset as i64));
+        stmt.query_map(rusqlite::params_from_iter(bind), map_record)?
     } else {
         stmt.query_map(params![limit as i64, offset as i64], map_record)?
     };
@@ -1014,25 +1087,31 @@ fn count_experiences_blocking(
     include_archived: bool,
     project_id: Option<&str>,
 ) -> Result<u64> {
-    let resolved = resolve_experience_project_filter(conn, project_id)?;
-    let n: i64 = match (include_archived, resolved.as_deref()) {
+    let keys = resolve_experience_project_keys(conn, project_id)?;
+    let n: i64 = match (include_archived, keys.as_ref()) {
         (true, None) => conn.query_row("SELECT COUNT(*) FROM experiences", [], |row| row.get(0))?,
         (false, None) => conn.query_row(
             "SELECT COUNT(*) FROM experiences WHERE COALESCE(status, 'active') = 'active'",
             [],
             |row| row.get(0),
         )?,
-        (true, Some(pid)) => conn.query_row(
-            "SELECT COUNT(*) FROM experiences WHERE project_id = ?1",
-            params![pid],
-            |row| row.get(0),
-        )?,
-        (false, Some(pid)) => conn.query_row(
-            "SELECT COUNT(*) FROM experiences
-             WHERE COALESCE(status, 'active') = 'active' AND project_id = ?1",
-            params![pid],
-            |row| row.get(0),
-        )?,
+        (_, Some(keys)) if keys.is_empty() => 0,
+        (include_arch, Some(keys)) => {
+            let mut clauses: Vec<String> = Vec::new();
+            if !include_arch {
+                clauses.push("COALESCE(status, 'active') = 'active'".into());
+            }
+            clauses.push(project_id_match_clause(keys.len()));
+            let sql = format!(
+                "SELECT COUNT(*) FROM experiences WHERE {}",
+                clauses.join(" AND ")
+            );
+            let bind: Vec<rusqlite::types::Value> = keys
+                .iter()
+                .map(|k| rusqlite::types::Value::Text(k.clone()))
+                .collect();
+            conn.query_row(&sql, rusqlite::params_from_iter(bind), |row| row.get(0))?
+        }
     };
     Ok(n.max(0) as u64)
 }
@@ -1688,5 +1767,71 @@ mod tests {
             .await
             .unwrap();
         assert!(empty_page.is_empty());
+    }
+
+    #[tokio::test]
+    async fn count_and_list_resolve_alias_and_canonical_path() {
+        use crate::db::project_identity::{canonicalize_repo_path, upsert_alias};
+
+        let store = ExperienceStore::memory().unwrap();
+        let repo = "/tmp/Agent-Lounge-OS-alias-test";
+        let canonical = canonicalize_repo_path(repo);
+
+        // Seed an experience under the slug alias (pre-canonical write shape).
+        let record = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", "agent-lounge-os", "alias topic"),
+            "sol",
+            "adr alias",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        let id = record.id.clone();
+        store.insert_record(record).await.unwrap();
+
+        // And one under the canonical path id.
+        let mut canon_row = ExperienceRecord::from_task(
+            &LoungeTask::new("cursor", &canonical, "canonical topic"),
+            "sol2",
+            "adr canonical",
+            ExperienceOutcome::Success,
+            vec![],
+        );
+        canon_row.id = format!("{id}-canon");
+        store.insert_record(canon_row).await.unwrap();
+
+        {
+            let conn = store.conn.lock().expect("db lock");
+            upsert_alias(&conn, "agent-lounge-os", &canonical).unwrap();
+        }
+
+        // Query by alias → includes alias-keyed + canonical-keyed rows.
+        let by_alias = store
+            .count_experiences(false, Some("agent-lounge-os".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            by_alias, 2,
+            "alias filter must expand to canonical + aliases"
+        );
+
+        let listed = store
+            .list_experiences_page(10, false, 0, Some("agent-lounge-os".into()))
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+
+        // Query by canonical path → same expansion.
+        let by_canon = store
+            .count_experiences(false, Some(canonical.clone()))
+            .await
+            .unwrap();
+        assert_eq!(by_canon, 2);
+
+        // Unrelated project stays empty (exact match, never substring).
+        let other = store
+            .count_experiences(false, Some("agent-lounge".into()))
+            .await
+            .unwrap();
+        assert_eq!(other, 0);
     }
 }

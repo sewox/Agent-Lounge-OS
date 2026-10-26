@@ -7,7 +7,11 @@ import type {
   SemanticProject,
 } from "@/lib/lounge";
 import { pathBasename } from "@/lib/lounge";
-import { detectPlatform, type LoungePlatform } from "@/lib/platform";
+import {
+  projectIdentityEquals,
+  UNKNOWN_PLATFORM,
+  type LoungePlatform,
+} from "@/lib/platform";
 
 export const VAULT_FILTERS_KEY = "al-os-vault-project-filters";
 
@@ -151,29 +155,27 @@ export function vaultProjectIdentityKeys(row: Pick<
 
 /**
  * Canonical project id equality: case-insensitive on macOS/Windows,
- * case-sensitive on Linux — never substring / LIKE matching (OPEN-5).
+ * case-sensitive on Linux / unknown — never substring / LIKE matching (OPEN-5).
+ * Callers in UI must pass `usePlatform()`; pure helpers default to `"unknown"`.
  */
 export function projectIdsMatch(
   left: string | null | undefined,
   right: string | null | undefined,
-  platform: LoungePlatform = detectPlatform(),
+  platform: LoungePlatform = UNKNOWN_PLATFORM,
 ): boolean {
   const a = left?.trim() ?? "";
   const b = right?.trim() ?? "";
   if (!a || !b) {
     return false;
   }
-  if (platform === "linux") {
-    return a === b;
-  }
-  return a.localeCompare(b, undefined, { sensitivity: "accent" }) === 0;
+  return projectIdentityEquals(a, b, platform);
 }
 
 /** True when `candidate` matches any identity key for the project row. */
 export function matchesVaultProject(
   candidate: string | null | undefined,
   row: Pick<VaultProjectRow, "name" | "repoPath" | "canonicalId">,
-  platform: LoungePlatform = detectPlatform(),
+  platform: LoungePlatform = UNKNOWN_PLATFORM,
 ): boolean {
   return vaultProjectIdentityKeys(row).some((key) => projectIdsMatch(candidate, key, platform));
 }
@@ -295,8 +297,8 @@ function resolveSourceType(input: {
 function experienceStats(
   experiences: LoungeExperience[],
   projectKeys: string[],
+  platform: LoungePlatform = UNKNOWN_PLATFORM,
 ): { count: number; unreviewed: number; lastUpdated: string | null } {
-  const platform = detectPlatform();
   let count = 0;
   let unreviewed = 0;
   let lastUpdated: string | null = null;

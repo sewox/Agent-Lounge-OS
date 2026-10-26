@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import { DeadSymbolsVaultLink } from "@/components/dead-symbols-panel";
 import { formatDisplayPath } from "@/lib/experience";
-import { formatSymbolFileLine } from "@/lib/dead-symbols";
 import type { DeadSymbol, SemanticMapSelection } from "@/lib/lounge";
 import { shortSymbolName } from "@/lib/lounge";
 import {
@@ -167,13 +166,15 @@ export function VaultDeadSymbolsPane({
               <div style={{ transform: `translateY(${win.offsetY}px)` }}>
                 {visible.map((symbol) => {
                   const shortName = shortSymbolName(symbol.name) || symbol.name;
-                  const fileLine = formatSymbolFileLine(symbol);
                   const kindText = deadKindLabel(symbol.kind, t);
                   const detail = symbol.detail?.trim() || "";
-                  const location = symbol.file
-                    ? fileLine
+                  // PATH-01: full display path (not basename) so Windows roots survive.
+                  const fullLocation = symbol.file
+                    ? `${formatDisplayPath(symbol.file)}${
+                        symbol.line != null ? `:${symbol.line}` : ""
+                      }`
                     : detail || kindText;
-                  const secondaryTitle = [location, detail].filter(Boolean).join(" · ");
+                  const secondaryTitle = [fullLocation, detail].filter(Boolean).join(" · ");
                   return (
                     <div
                       role="listitem"
@@ -196,7 +197,7 @@ export function VaultDeadSymbolsPane({
                           lang="en"
                           title={secondaryTitle}
                         >
-                          {location}
+                          {fullLocation}
                           {detail && symbol.file ? (
                             <span className="text-outline">{` · ${detail}`}</span>
                           ) : null}
