@@ -1583,12 +1583,17 @@ mod tests {
 
     /// Known ROUTING logit for `write_tiny_laya_fixture` (CPU F32, hashed fills).
     /// Refresh when the fixture generator or candle path changes.
-    const EXPECTED_TINY_ROUTING_LOGIT: f32 = -0.000_304_325_72;
+    const EXPECTED_TINY_ROUTING_LOGIT: f32 = -0.000_780_925_33;
 
     /// Default-suite Candle forward pass on a tiny in-process fixture (no download).
     ///
     /// Replaces the retired ignored live-weights test. Real weights run under
     /// `--features laya-live` via `.github/workflows/nightly-laya.yml`.
+    ///
+    /// Fixture uses `hidden_size=128` / `num_attention_heads=2` so MultiHead
+    /// (`nhead = hidden/64 = 2`) exercises Q/K/V transpose contiguity with
+    /// `batch >= 2` and `seq_len > 1` — catching `MatMulUnexpectedStriding` in
+    /// standard `cargo test` rather than only nightly live weights.
     #[test]
     fn laya_infer_tiny_fixture() {
         use crate::kernel::laya::write_tiny_laya_fixture;
@@ -1596,13 +1601,36 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("lounge-laya-tiny-{}", uuid::Uuid::new_v4()));
         write_tiny_laya_fixture(&dir).expect("write tiny laya fixture");
+
+        let enc_cfg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("encoder/config.json")).expect("encoder config"),
+        )
+        .expect("parse encoder config");
+        let hidden = enc_cfg["hidden_size"].as_u64().expect("hidden_size") as usize;
+        let n_heads = enc_cfg["num_attention_heads"]
+            .as_u64()
+            .expect("num_attention_heads") as usize;
+        assert!(
+            hidden >= 128 && n_heads >= 2 && hidden / 64 >= 2,
+            "fixture must be multi-head (hidden={hidden}, heads={n_heads}, MultiHead nhead={})",
+            hidden / 64
+        );
+
         let session = LayaSession::load_cpu(&dir).expect("load tiny fixture");
         let msg = sample_msg();
         let packed = pack_message(&session.tokenizer, &msg, &session.cfg);
+        assert!(
+            packed.len() >= 2,
+            "batch must be >= 2 for multi-batch contiguity coverage"
+        );
         assert_eq!(packed.len(), 3);
         assert_eq!(packed[0].markers.len(), 3);
         assert_eq!(packed[1].markers.len(), 3);
         assert_eq!(packed[2].markers.len(), 2);
+        assert!(
+            packed.iter().all(|p| p.ids.len() > 1),
+            "every row must have seq_len > 1 to hit head/sequence transpose"
+        );
 
         let t0 = Instant::now();
         let logits = session.infer_batch(packed.clone()).expect("forward pass");
