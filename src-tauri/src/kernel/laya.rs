@@ -341,19 +341,30 @@ impl MultiHead {
         let head = e / self.nhead;
         let qkv = xs.apply(&self.in_proj)?;
         let chunks = qkv.chunk(3, D::Minus1)?;
+        // candle-core CPU matmul rejects non-contiguous batch strides after
+        // head/sequence transpose when nhead > 1 and seq_len > 1.
+        // candle-core CPU matmul rejects non-contiguous batch strides after
+        // head/sequence transpose when nhead > 1 and seq_len > 1.
         let to_heads = |t: Tensor| -> CandleResult<Tensor> {
-            t.reshape((b, s, self.nhead, head))?.transpose(1, 2)
+            t.reshape((b, s, self.nhead, head))?
+                .transpose(1, 2)?
+                .contiguous()
         };
         let q = to_heads(chunks[0].clone())?;
         let k = to_heads(chunks[1].clone())?;
         let v = to_heads(chunks[2].clone())?;
         let scale = (head as f64).sqrt();
-        let att = (q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? / scale)?;
+        let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+        let att = (q.matmul(&k_t)? / scale)?;
         let keep = keep_mask.to_dtype(DType::F32)?.unsqueeze(1)?.unsqueeze(2)?;
         let inverted = (1.0 - keep)?;
         let att = att.broadcast_add(&(inverted * f32::MIN as f64)?)?;
         let att = softmax(&att, D::Minus1)?;
-        let xs = att.matmul(&v)?.transpose(1, 2)?.reshape((b, s, e))?;
+        let xs = att
+            .matmul(&v)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((b, s, e))?;
         xs.apply(&self.out_proj)
     }
 }
@@ -773,8 +784,8 @@ impl TokenEncode for HashTokenizer {
 ///
 /// Writes `encoder/config.json`, WordLevel `tokenizer/tokenizer.json`,
 /// `rl_agent_config.json`, and a `model.safetensors` built via `VarMap` with
-/// fixed weights (no download). Hidden size 32 / 1 BERT layer keeps the
-/// forward pass well under ~10ms on CPU.
+/// fixed weights (no download). Hidden size 128 / 2 attention heads / 1 BERT
+/// layer exercises multi-head transpose contiguity on CPU while staying fast.
 #[cfg(test)]
 pub fn write_tiny_laya_fixture(dir: &Path) -> Result<()> {
     use candle_nn::VarMap;
@@ -783,12 +794,15 @@ pub fn write_tiny_laya_fixture(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir.join("tokenizer")).context("tiny laya tokenizer dir")?;
     std::fs::create_dir_all(dir.join("encoder")).context("tiny laya encoder dir")?;
 
+    // hidden=128 → DecisionModel MultiHead uses nhead = hidden/64 = 2, so the
+    // Q/K/V head↔sequence transpose path is covered (single-head fixtures miss
+    // MatMulUnexpectedStriding). num_attention_heads=2 matches ModernBert.
     let encoder = serde_json::json!({
         "vocab_size": 64,
-        "hidden_size": 32,
+        "hidden_size": 128,
         "num_hidden_layers": 1,
-        "num_attention_heads": 4,
-        "intermediate_size": 64,
+        "num_attention_heads": 2,
+        "intermediate_size": 256,
         "max_position_embeddings": 64,
         "layer_norm_eps": 1e-5,
         "pad_token_id": 0,
