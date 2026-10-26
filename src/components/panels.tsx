@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GraphUiButton } from "@/components/graph-ui-button";
 import { GraphUiSettings } from "@/components/graph-ui-settings";
@@ -492,6 +492,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const [selectionProject, setSelectionProject] = useState(selectedProject);
   const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
   const [openProjectName, setOpenProjectName] = useState<string | null>(null);
+  /** Full /vault map: auto-select once so the detail column has real content (Gemini msg126). */
+  const didAutoSelectVault = useRef(false);
   const [vaultAggregates, setVaultAggregates] = useState<VaultProjectRow[] | null>(null);
   const [aggregatesLoading, setAggregatesLoading] = useState(false);
   const [aggregatesError, setAggregatesError] = useState<string | null>(null);
@@ -690,6 +692,55 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     [deadSymbols, semanticMap, selected],
   );
 
+  // Landing (/vault, not embedded): default-select last-selected or first indexed project
+  // and open its pages so leaf columns hold real content at natural card heights (no stretch).
+  useEffect(() => {
+    if (embedded || didAutoSelectVault.current) {
+      return;
+    }
+    if (aggregatesLoading || aggregatesError) {
+      // Stay on project list so aggregates error/retry chrome remains reachable (VP-09).
+      return;
+    }
+    const indexedNames = projectRows
+      .filter((row) => (row.pageCount > 0 || row.nodeCount > 0) && row.name)
+      .map((row) => row.name);
+    const allNames = projectRows.map((row) => row.name).filter(Boolean);
+    const names = indexedNames.length > 0 ? indexedNames : allNames;
+    if (names.length === 0) {
+      return;
+    }
+    const fromSelection =
+      selected?.kind === "project" && selected.name && names.includes(selected.name)
+        ? selected.name
+        : null;
+    const fromLounge =
+      selectedProject && names.includes(selectedProject) ? selectedProject : null;
+    const pick = fromSelection ?? fromLounge ?? names[0]!;
+    didAutoSelectVault.current = true;
+    setSelected({
+      id: `project:${pick}`,
+      name: pick,
+      kind: "project",
+      project: pick,
+      file: null,
+    });
+    switchProject(pick);
+    setOpenProjectName(pick);
+    setServerPages(null);
+    setServerPagesTotal(null);
+    setPagesError(null);
+    setFileSymbols(null);
+  }, [
+    aggregatesError,
+    aggregatesLoading,
+    embedded,
+    projectRows,
+    selected,
+    selectedProject,
+    switchProject,
+  ]);
+
   const [logPage, setLogPage] = useState(0);
   const logPages = pageCount(log.length);
   const safeLogPage = Math.min(logPage, logPages - 1);
@@ -750,8 +801,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
             switchProject(name);
             setLogPage(0);
           } else {
-            setSelected(null);
-            switchProject(null);
+            // Back to project list — keep selection so detail stays honest (msg126).
             setLogPage(0);
           }
         }}
@@ -836,11 +886,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       <div
         role="list"
         aria-label={tv("layout.experiencesListLabel")}
-        className={`min-h-0 flex-1 overflow-auto font-body text-body ${
-          !openProjectName && experienceProjectRows.length > 0 && experienceProjectRows.length <= 8
-            ? "flex flex-col gap-2"
-            : "space-y-2"
-        }`}
+        className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body"
       >
         {!openProjectName ? (
           experienceProjectRows.length === 0 ? (
@@ -888,9 +934,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                       setLogPage(0);
                     }
                   }}
-                  className={`flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high ${
-                    experienceProjectRows.length <= 8 ? "min-h-0 flex-1" : ""
-                  }`}
+                  className="flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high"
                 >
                   <span className="min-w-0">
                     <span className="block truncate font-mono font-medium text-on-surface" title={row.name}>
@@ -924,7 +968,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   </button>
                 </div>
               ))}
-              <div className="mt-auto shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline">
+              <div className="shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline">
                 <span className="font-body">
                   {tv("projectCount", { count: experienceProjectRows.length })} ·{" "}
                   {tv("totalExperiences", { count: experienceTotal })}
@@ -1199,8 +1243,6 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   switchProject(name);
                   setLogPage(0);
                 } else {
-                  setSelected(null);
-                  switchProject(null);
                   setLogPage(0);
                 }
               }}
@@ -1241,7 +1283,6 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               selected={selected}
               symbols={deadForNode}
               projects={projectRows}
-              allDeadSymbols={deadSymbols}
               selectedPath={selectedProjectPath}
             />
           }

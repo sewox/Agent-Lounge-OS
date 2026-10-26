@@ -23,8 +23,16 @@ test.describe("*-LAYOUT L1–L6 every route × viewport", () => {
       const metrics = await assertLayoutL1toL6(page, route.path, expect);
       appendMetric(metrics);
 
-      // Optional extra: vault map after drill-down still holds L1–L6 (does not replace landing).
+      // Optional extra: vault map after explicit project open still holds L1–L6.
       if (route.path === "/vault") {
+        const back = page.locator('[data-qa="vault-back-projects"]');
+        if (await back.isVisible()) {
+          await back.click();
+          await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+            "data-view",
+            "projects",
+          );
+        }
         const project = page
           .locator('[data-qa="vault-project-row"]')
           .filter({ hasText: /Agent-Lounge-OS/i })

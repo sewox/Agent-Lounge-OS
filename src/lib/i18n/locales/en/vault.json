@@ -125,14 +125,12 @@
   "layout": {
     "listHeading": "Projects & pages",
     "detailHeading": "Dead symbols",
-    "overviewHeading": "Project overview",
     "experiencesHeading": "Experiences",
     "openDetail": "Open detail",
     "openExperiences": "Open experiences",
     "closeDrawer": "Close",
     "selectForDetail": "Select a project or page to inspect dead symbols.",
     "deadListLabel": "Dead symbols list",
-    "overviewListLabel": "Project overview",
     "experiencesListLabel": "Experience list"
   },
   "review": {

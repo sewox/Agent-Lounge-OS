@@ -19,7 +19,19 @@ async function revealVaultExperiences(page: import("@playwright/test").Page) {
   await expect(page.locator('[data-qa="panel-grid-drawer-inspector"]')).toBeVisible();
 }
 
+async function backToVaultProjects(page: import("@playwright/test").Page) {
+  const back = page.locator('[data-qa="vault-back-projects"]');
+  if (await back.isVisible()) {
+    await back.click();
+    await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+      "data-view",
+      "projects",
+    );
+  }
+}
+
 async function openVaultProject(page: import("@playwright/test").Page, name: string) {
+  await backToVaultProjects(page);
   const row = page
     .locator('[data-qa="vault-project-row"]')
     .filter({ hasText: new RegExp(name, "i") })

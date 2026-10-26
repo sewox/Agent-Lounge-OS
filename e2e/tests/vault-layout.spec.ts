@@ -12,7 +12,19 @@ import type { LoungeExperience } from "../fixtures/types";
  * (pages / dead-symbol rows / experience cards) — not stretched empty states.
  */
 
+async function backToVaultProjects(page: Page) {
+  const back = page.locator('[data-qa="vault-back-projects"]');
+  if (await back.isVisible()) {
+    await back.click();
+    await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+      "data-view",
+      "projects",
+    );
+  }
+}
+
 async function openVaultProject(page: Page, name: string) {
+  await backToVaultProjects(page);
   const row = page
     .locator('[data-qa="vault-project-row"]')
     .filter({ hasText: new RegExp(name, "i") })
@@ -103,11 +115,16 @@ test.describe("KB-UI-1a Vault map layout", () => {
     await openRoute(page, "/vault", "full");
     await expect(page.locator('[data-qa="panel-grid"]')).toBeVisible();
 
-    // Landing detail: real project overview (not layout-empty / not stretched filler).
+    // Landing: auto-selects last/first indexed project — detail holds real content, not layout-empty.
     await revealDetail(page);
-    await expect(page.locator('[data-qa="vault-detail-overview"]')).toBeVisible();
-    await expect(page.locator('[data-qa="vault-overview-row"]').first()).toBeVisible();
     await expect(page.locator('[data-qa="layout-empty"]')).toHaveCount(0);
+    await expect(
+      page.locator('[data-qa="vault-dead-row"], [data-qa="vault-detail-summary"]').first(),
+    ).toBeVisible();
+    await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+      "data-view",
+      "pages",
+    );
     const landing = await measureLayout(page, "/vault");
     expect(landing.l2_sparseInterior, formatLayoutFailure(landing)).toBe(false);
 
@@ -125,10 +142,10 @@ test.describe("KB-UI-1a Vault map layout", () => {
 
     await openRoute(page, "/vault", "full");
     await closePanelDrawer(page);
+    // Landing already opens a project; ensure Agent-Lounge-OS pages + detail + experiences.
     await openVaultProject(page, "Agent-Lounge-OS");
     await revealDetail(page);
     await revealExperiences(page);
-    // Real content: virtual page rows + dead-symbol rows / summary + experience cards.
     await expect(page.locator('[data-qa="vault-page-row"]').first()).toBeVisible();
     await expect(
       page

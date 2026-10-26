@@ -23,29 +23,20 @@ function useDeadRowHeightPx(): number {
   return computeTokenRowHeight(rootPx, DEAD_SYMBOL_ROW_HEIGHT_REM);
 }
 
-function deadCountForProject(symbols: DeadSymbol[], projectName: string): number {
-  const key = projectName.toLowerCase();
-  return symbols.filter((symbol) => {
-    const pid = (symbol.project_id ?? "").toLowerCase();
-    return !pid || pid === key || pid.includes(key);
-  }).length;
-}
-
 /**
- * Vault map detail column: project overview on landing, virtualized dead list
- * when a node is selected. Empty/loading copy stays natural-size (KB-UI-1a B1).
+ * Vault map detail column: virtualized dead list for the selected node.
+ * Empty copy is natural-size (KB-UI-1a B1) — only when nothing is selected
+ * or the workspace has no projects. No stretched cards / frontend dead counts.
  */
 export function VaultDeadSymbolsPane({
   selected,
   symbols,
   projects,
-  allDeadSymbols,
   selectedPath,
 }: {
   selected: SemanticMapSelection | null;
   symbols: DeadSymbol[];
   projects: VaultProjectRow[];
-  allDeadSymbols: DeadSymbol[];
   selectedPath?: string | null;
 }) {
   const { t } = useTranslation("vault");
@@ -65,20 +56,10 @@ export function VaultDeadSymbolsPane({
     return () => ro?.disconnect();
   }, [scrollerEl]);
 
-  const overviewRows = useMemo(
-    () =>
-      projects.map((row) => ({
-        ...row,
-        deadCount: deadCountForProject(allDeadSymbols, row.name),
-      })),
-    [allDeadSymbols, projects],
-  );
-  const stretchOverview = overviewRows.length > 0 && overviewRows.length <= 8;
-
   const win = windowSlice(symbols, scrollTop, viewportHeight, rowHeight, 6);
   const visible = symbols.slice(win.start, win.end);
 
-  const selectedProject = useMemo(() => {
+  const selectedMeta = useMemo(() => {
     if (!selected) return null;
     const name = selected.kind === "project" ? selected.name : selected.project;
     return projects.find((row) => row.name === name) ?? null;
@@ -91,7 +72,7 @@ export function VaultDeadSymbolsPane({
     >
       <div className="mb-2 flex shrink-0 items-center justify-between font-mono text-meta font-semibold tracking-wider text-outline uppercase">
         <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-          {selected ? t("layout.detailHeading") : t("layout.overviewHeading")}
+          {t("layout.detailHeading")}
         </h2>
         <span
           className={
@@ -102,71 +83,25 @@ export function VaultDeadSymbolsPane({
             ? symbols.length > 0
               ? t("warnings", { count: symbols.length })
               : t("clean")
-            : t("projectCount", { count: overviewRows.length })}
+            : null}
         </span>
       </div>
 
       {!selected ? (
-        overviewRows.length === 0 ? (
-          <div
-            data-qa="vault-dead-empty"
-            className="flex min-h-0 flex-1 items-center justify-center"
-          >
-            <p
-              data-qa="layout-empty"
-              className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
-            >
-              {t("layout.selectForDetail")}
-            </p>
-          </div>
-        ) : (
-          <div
-            role="list"
-            aria-label={t("layout.overviewListLabel")}
-            data-qa="vault-detail-overview"
-            className={`min-h-0 flex-1 overflow-auto font-body text-body ${
-              stretchOverview ? "flex flex-col gap-1.5" : "space-y-1.5"
-            }`}
-          >
-            {overviewRows.map((row) => (
-              <div
-                key={`overview:${row.name}`}
-                role="listitem"
-                data-qa="vault-overview-row"
-                data-project={row.name}
-                className={`rounded border border-outline-variant/40 bg-surface-container-high/50 px-2 py-2 ${
-                  stretchOverview ? "min-h-0 flex-1" : ""
-                }`}
-              >
-                <span className="block truncate font-mono font-medium text-on-surface" title={row.name}>
-                  {row.name}
-                </span>
-                <span className="mt-0.5 block truncate font-mono text-meta text-outline">
-                  {t("pageCountMeta", {
-                    pages: row.pageCount,
-                    experiences: row.experienceCount,
-                  })}
-                  {` · ${t("astNodes", { count: row.nodeCount })}`}
-                </span>
-                <span
-                  className={`mt-1 block font-mono text-meta ${
-                    row.deadCount > 0 ? "text-error" : "text-outline"
-                  }`}
-                >
-                  {row.deadCount > 0
-                    ? t("warnings", { count: row.deadCount })
-                    : t("clean")}
-                </span>
-              </div>
-            ))}
-          </div>
-        )
-      ) : symbols.length === 0 ? (
         <div
-          data-qa="vault-detail-summary"
-          className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto"
+          data-qa="vault-dead-empty"
+          className="flex min-h-0 flex-1 items-center justify-center"
         >
-          <div className="min-h-0 flex-1 rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-3">
+          <p
+            data-qa="layout-empty"
+            className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-3 py-4 text-center font-body text-body text-on-surface-variant"
+          >
+            {t("layout.selectForDetail")}
+          </p>
+        </div>
+      ) : symbols.length === 0 ? (
+        <div data-qa="vault-detail-summary" className="space-y-2 overflow-auto">
+          <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2.5 py-3">
             <p className="font-mono text-body font-medium text-on-surface">{selected.name}</p>
             {selectedPath ? (
               <p
@@ -176,14 +111,14 @@ export function VaultDeadSymbolsPane({
                 {formatDisplayPath(selectedPath)}
               </p>
             ) : null}
-            {selectedProject ? (
+            {selectedMeta ? (
               <p className="mt-2 font-mono text-meta text-outline">
                 {t("pageCountMeta", {
-                  pages: selectedProject.pageCount,
-                  experiences: selectedProject.experienceCount,
+                  pages: selectedMeta.pageCount,
+                  experiences: selectedMeta.experienceCount,
                 })}
-                {` · ${t("astNodes", { count: selectedProject.nodeCount })} · ${t("edges", {
-                  count: selectedProject.edgeCount,
+                {` · ${t("astNodes", { count: selectedMeta.nodeCount })} · ${t("edges", {
+                  count: selectedMeta.edgeCount,
                 })}`}
               </p>
             ) : null}

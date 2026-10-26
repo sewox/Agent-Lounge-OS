@@ -598,6 +598,15 @@ test.describe("AP / CP / misc", () => {
       ).toBeVisible();
     }
 
+    // Landing auto-opens pages; return to project list to select by row.
+    const back = page.locator('[data-qa="vault-back-projects"]');
+    if (await back.isVisible()) {
+      await back.click();
+      await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+        "data-view",
+        "projects",
+      );
+    }
     // Select project row (not drill-down Open) so the path strip appears.
     await page
       .locator('[data-qa="vault-project-row"]')
