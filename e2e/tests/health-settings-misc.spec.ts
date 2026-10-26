@@ -598,7 +598,7 @@ test.describe("AP / CP / misc", () => {
       ).toBeVisible();
     }
 
-    // Landing auto-opens pages; return to project list to select by row.
+    // Open (not toggle-select) so selection sticks even if landing already selected it.
     const back = page.locator('[data-qa="vault-back-projects"]');
     if (await back.isVisible()) {
       await back.click();
@@ -607,12 +607,15 @@ test.describe("AP / CP / misc", () => {
         "projects",
       );
     }
-    // Select project row (not drill-down Open) so the path strip appears.
     await page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /Agent-Lounge-OS/i })
-      .first()
+      .locator('[data-qa="vault-project-open"]')
       .click();
+    await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+      "data-view",
+      "pages",
+    );
     await revealVaultSlot("inspector");
     const winRoot = "C:\\Users\\sercan\\dev\\Agent-Lounge-OS";
     await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(winRoot);
@@ -628,10 +631,17 @@ test.describe("AP / CP / misc", () => {
       await expect(page.locator('[data-qa="panel-grid-drawer"]')).toHaveCount(0);
     }
     // POSIX project root from another indexed repo.
+    if (await back.isVisible()) {
+      await back.click();
+      await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+        "data-view",
+        "projects",
+      );
+    }
     await page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /EchoMind/i })
-      .first()
+      .locator('[data-qa="vault-project-open"]')
       .click();
     await revealVaultSlot("inspector");
     await expect(page.locator('[data-qa="vault-project-path"]')).toContainText(

@@ -388,8 +388,9 @@ test.describe("EX — vault experiences", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
-    // Project list shows reconciled totals (not LIMIT-shaped node dumps).
-    const projectText = await page.locator('[data-qa="vault-semantic-map"]').innerText();
+    // Totals live on the project-list summary (landing may already be in pages view).
+    await backToVaultProjects(page);
+    const projectText = await page.locator('[data-qa="vault-projects-summary"]').innerText();
     const treeNodes = Number(
       (projectText.match(/(\d+)\s*AST nodes/i) || projectText.match(/(\d+)\s*nodes/i) || [])[1] ||
         0,
