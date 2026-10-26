@@ -694,6 +694,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
 
   // Landing (/vault, not embedded): default-select last-selected or first indexed project
   // and open its pages so leaf columns hold real content at natural card heights (no stretch).
+  // Defer setState so the initial write is not synchronous inside the effect body
+  // (react-hooks/set-state-in-effect; same pattern as agents-health-panel).
   useEffect(() => {
     if (embedded || didAutoSelectVault.current) {
       return;
@@ -717,20 +719,26 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     const fromLounge =
       selectedProject && names.includes(selectedProject) ? selectedProject : null;
     const pick = fromSelection ?? fromLounge ?? names[0]!;
-    didAutoSelectVault.current = true;
-    setSelected({
-      id: `project:${pick}`,
-      name: pick,
-      kind: "project",
-      project: pick,
-      file: null,
-    });
-    switchProject(pick);
-    setOpenProjectName(pick);
-    setServerPages(null);
-    setServerPagesTotal(null);
-    setPagesError(null);
-    setFileSymbols(null);
+    const timer = window.setTimeout(() => {
+      if (didAutoSelectVault.current) {
+        return;
+      }
+      didAutoSelectVault.current = true;
+      setSelected({
+        id: `project:${pick}`,
+        name: pick,
+        kind: "project",
+        project: pick,
+        file: null,
+      });
+      switchProject(pick);
+      setOpenProjectName(pick);
+      setServerPages(null);
+      setServerPagesTotal(null);
+      setPagesError(null);
+      setFileSymbols(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [
     aggregatesError,
     aggregatesLoading,
