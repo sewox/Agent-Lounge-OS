@@ -668,7 +668,10 @@ test.describe("AP / CP / misc", () => {
     page,
   }) => {
     await openRoute(page, "/stream", "full");
-    const text = await page.locator("main").innerText();
+    const main = page.locator("main");
+    // Wait for stream rows before sampling — empty main makes hb===0 a false pass (CI D3 flake).
+    await expect(main).toContainText(/lounge\.task\.(requested|completed)|lounge\.experience/);
+    const text = await main.innerText();
     const hb = (text.match(/lounge\.(bus|workers)\.heartbeat/gi) || []).length;
     const real = (text.match(/lounge\.task\.(requested|completed)|lounge\.experience/gi) || []).length;
     expect(hb, "heartbeats visible in default view").toBe(0);
