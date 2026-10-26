@@ -388,9 +388,13 @@ test.describe("EX — vault experiences", () => {
     page,
   }) => {
     await openRoute(page, "/vault", "full");
-    // Totals live on the project-list summary (landing may already be in pages view).
+    // Per-project row totals (not graph-wide summary); landing may already be in pages view.
     await backToVaultProjects(page);
-    const projectText = await page.locator('[data-qa="vault-projects-summary"]').innerText();
+    const projectText = await page
+      .locator('[data-qa="vault-project-row"]')
+      .filter({ hasText: /Agent-Lounge-OS/i })
+      .first()
+      .innerText();
     const treeNodes = Number(
       (projectText.match(/(\d+)\s*AST nodes/i) || projectText.match(/(\d+)\s*nodes/i) || [])[1] ||
         0,
