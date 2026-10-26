@@ -1274,12 +1274,19 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
     let _ = crate::db::experience_governance::ensure_project_flags_table(conn);
     let declared = load_declared_totals_map(conn)?;
     let has_experiences = table_exists(conn, "experiences")?;
+    // Project-ID-Core: case-insensitive on macOS/Windows; case-sensitive on Linux.
+    let collate = if cfg!(target_os = "linux") {
+        ""
+    } else {
+        " COLLATE NOCASE"
+    };
 
     // page_count = distinct kind='node' files (aligned with list_project_pages).
     // Experiences-only projects are UNION'd so `imported` is reachable.
     // Hidden / declared / experience stats are batched (no per-project N+1).
     let sql = if has_experiences {
-        r#"
+        format!(
+            r#"
         WITH indexed AS (
           SELECT
             project_id AS name,
@@ -1304,7 +1311,25 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             MAX(COALESCE(updated_at, created_at)) AS exp_updated
           FROM experiences
           WHERE COALESCE(status, 'active') = 'active'
-          GROUP BY project_id COLLATE NOCASE
+          GROUP BY project_id{collate}
+        ),
+        dead_stats AS (
+          SELECT
+            d.project_id AS name,
+            COUNT(*) AS dead_count
+          FROM project_index d
+          WHERE d.kind IN ('dead', 'broken')
+            AND NOT EXISTS (
+              SELECT 1 FROM ignored_symbols i
+              WHERE i.name = d.name
+                AND COALESCE(i.project_id, '') = COALESCE(d.project_id, '')
+                AND COALESCE(i.file_path, '') = COALESCE(d.file_path, '')
+                AND COALESCE(i.kind, '') = CASE
+                      WHEN d.kind = 'broken' THEN 'broken'
+                      ELSE 'unused'
+                    END
+            )
+          GROUP BY d.project_id{collate}
         ),
         combined AS (
           SELECT
@@ -1317,9 +1342,11 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             i.has_meta,
             COALESCE(e.experience_count, 0) AS experience_count,
             COALESCE(e.unreviewed_count, 0) AS unreviewed_count,
+            COALESCE(d.dead_count, 0) AS dead_count,
             e.exp_updated AS exp_updated
           FROM indexed i
-          LEFT JOIN exp_stats e ON i.name = e.name COLLATE NOCASE
+          LEFT JOIN exp_stats e ON i.name = e.name{collate}
+          LEFT JOIN dead_stats d ON i.name = d.name{collate}
           UNION ALL
           SELECT
             e.name,
@@ -1331,10 +1358,11 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             0,
             e.experience_count,
             e.unreviewed_count,
+            0,
             e.exp_updated
           FROM exp_stats e
           WHERE NOT EXISTS (
-            SELECT 1 FROM indexed i WHERE i.name = e.name COLLATE NOCASE
+            SELECT 1 FROM indexed i WHERE i.name = e.name{collate}
           )
         )
         SELECT
@@ -1347,9 +1375,10 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
           c.has_meta,
           c.experience_count,
           c.unreviewed_count,
+          c.dead_count,
           c.exp_updated
         FROM combined c
-        LEFT JOIN project_flags pf ON c.name = pf.project_id COLLATE NOCASE
+        LEFT JOIN project_flags pf ON c.name = pf.project_id{collate}
         WHERE COALESCE(pf.hidden, 0) = 0
         ORDER BY
           COALESCE(
@@ -1361,10 +1390,12 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             c.exp_updated,
             ''
           ) DESC,
-          c.name COLLATE NOCASE
+          c.name{collate}
         "#
+        )
     } else {
-        r#"
+        format!(
+            r#"
         SELECT
           project_id AS name,
           MAX(repo_path) AS repo_path,
@@ -1379,19 +1410,21 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
           MAX(CASE WHEN kind = 'meta' THEN 1 ELSE 0 END) AS has_meta,
           0 AS experience_count,
           0 AS unreviewed_count,
+          SUM(CASE WHEN kind IN ('dead', 'broken') THEN 1 ELSE 0 END) AS dead_count,
           NULL AS exp_updated
         FROM project_index
         GROUP BY project_id
         HAVING NOT EXISTS (
           SELECT 1 FROM project_flags pf
-          WHERE pf.project_id = project_index.project_id COLLATE NOCASE
+          WHERE pf.project_id = project_index.project_id{collate}
             AND COALESCE(pf.hidden, 0) != 0
         )
-        ORDER BY MAX(indexed_at) DESC, project_id COLLATE NOCASE
+        ORDER BY MAX(indexed_at) DESC, project_id{collate}
         "#
+        )
     };
 
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -1403,7 +1436,8 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             row.get::<_, i64>(6)? as u64,
             row.get::<_, i64>(7)? as u64,
             row.get::<_, i64>(8)? as u64,
-            row.get::<_, Option<String>>(9)?,
+            row.get::<_, i64>(9)? as u64,
+            row.get::<_, Option<String>>(10)?,
         ))
     })?;
 
@@ -1419,6 +1453,7 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             has_meta,
             experience_count,
             unreviewed_count,
+            dead_count,
             exp_updated,
         ) = row?;
         let (declared_nodes, declared_edges) = declared.get(&name).copied().unwrap_or((0, 0));
@@ -1446,7 +1481,9 @@ fn list_vault_project_aggregates_blocking(conn: &Connection) -> Result<Vec<Vault
             edge_count,
             experience_count,
             unreviewed_count,
+            dead_count,
             last_updated: last,
+            indexed_at: index_updated.filter(|s| !s.is_empty()),
             source_type: source_type.into(),
             canonical_id: Some(name),
             identity_warning,

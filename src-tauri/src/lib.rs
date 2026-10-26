@@ -1207,14 +1207,17 @@ async fn list_experiences(
     limit: Option<usize>,
     include_archived: Option<bool>,
     offset: Option<usize>,
+    project_id: Option<String>,
 ) -> Result<Vec<LoungeExperience>, String> {
     // Keep original_content for the experience drawer / restore (NB2).
     // Only list_review_queue strips it.
+    // Optional project_id → Project-ID-Core prefer_canonical + exact match (OPEN-5).
     state
         .list_experiences_page(
             limit.unwrap_or(20),
             include_archived.unwrap_or(false),
             offset.unwrap_or(0),
+            project_id,
         )
         .await
         .map_err(|err| err.to_string())
@@ -1224,9 +1227,10 @@ async fn list_experiences(
 async fn count_experiences(
     state: tauri::State<'_, ExperienceStore>,
     include_archived: Option<bool>,
+    project_id: Option<String>,
 ) -> Result<u64, String> {
     state
-        .count_experiences(include_archived.unwrap_or(false))
+        .count_experiences(include_archived.unwrap_or(false), project_id)
         .await
         .map_err(|err| err.to_string())
 }

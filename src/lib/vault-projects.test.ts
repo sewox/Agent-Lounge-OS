@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { LoungeExperience, SemanticMap } from "@/lib/lounge";
+import { formatSymbolFileLine } from "@/lib/dead-symbols";
+import { shortSymbolName } from "@/lib/lounge";
 import {
   buildVaultProjectRows,
   DEFAULT_VAULT_FILTERS,
@@ -8,13 +10,17 @@ import {
   filterVaultProjects,
   getServerVaultFiltersSnapshot,
   getVaultFiltersSnapshot,
+  mapVaultAggregate,
   pagesFromSemanticProject,
   parseVaultFilters,
+  projectIdsMatch,
   readVaultFilters,
   resetVaultFilters,
+  resolveVaultDisplayName,
   subscribeVaultFilters,
   symbolsFromSemanticFile,
   VAULT_FILTERS_KEY,
+  vaultProjectIdentityKeys,
   windowSlice,
   writeVaultFilters,
   type VaultProjectRow,
@@ -275,6 +281,7 @@ describe("vault project row shape", () => {
         edgeCount: 0,
         experienceCount: 0,
         unreviewedCount: 0,
+        deadCount: 0,
         lastUpdated: null,
         sourceType: "indexed",
       },
@@ -289,3 +296,74 @@ describe("vault project row shape", () => {
     assert.equal(rows[0].name, "OnlyAgg");
   });
 });
+
+describe("vault displayName + canonical matching (KB-UI-1b)", () => {
+  it("resolveVaultDisplayName prefers lounge name → basename → slug", () => {
+    assert.equal(
+      resolveVaultDisplayName({
+        name: "Agent Lounge",
+        repoPath: "C:\\Users\\me\\Agent-Lounge-OS",
+        canonicalId: "/Users/me/Agent-Lounge-OS",
+      }),
+      "Agent Lounge",
+    );
+    assert.equal(
+      resolveVaultDisplayName({
+        name: null,
+        repoPath: "C:\\Users\\me\\Agent-Lounge-OS",
+        canonicalId: "/tmp/x",
+      }),
+      "Agent-Lounge-OS",
+    );
+    assert.equal(
+      resolveVaultDisplayName({
+        name: "",
+        repoPath: null,
+        canonicalId: "solo-slug",
+      }),
+      "solo-slug",
+    );
+    assert.equal(projectIdsMatch("Alpha", "alpha", "linux"), false);
+    assert.equal(projectIdsMatch("Alpha", "alpha", "macos"), true);
+    assert.equal(projectIdsMatch("Alpha", "Alph", "macos"), false);
+
+    const mapped = mapVaultAggregate({
+      name: "Display",
+      repo_path: "/tmp/repo",
+      page_count: 2,
+      node_count: 3,
+      edge_count: 1,
+      experience_count: 4,
+      unreviewed_count: 1,
+      dead_count: 7,
+      indexed_at: "2026-01-02T00:00:00.000Z",
+      last_updated: "2026-01-03T00:00:00.000Z",
+      source_type: "indexed",
+      canonical_id: "/tmp/repo",
+    });
+    assert.equal(mapped.deadCount, 7);
+    assert.equal(mapped.indexedAt, "2026-01-02T00:00:00.000Z");
+    assert.equal(mapped.canonicalId, "/tmp/repo");
+    assert.deepEqual(vaultProjectIdentityKeys(mapped).sort(), [
+      "/tmp/repo",
+      "Display",
+      "repo",
+    ].sort());
+  });
+
+  it("shortSymbolName keeps file:line formatting helpers intact", () => {
+    assert.equal(shortSymbolName("crate::module::Symbol"), "Symbol");
+    assert.equal(
+      formatSymbolFileLine({
+        name: "crate::module::Symbol",
+        kind: "unused",
+        file: "src/deep/path.rs",
+        line: 42,
+        detail: null,
+        project_id: "p",
+      }),
+      "path.rs:42",
+    );
+  });
+});
+

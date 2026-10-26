@@ -26,6 +26,7 @@ import {
   sortExperiencesForDisplay,
 } from "@/lib/experience";
 import { useIsTauri } from "@/hooks/use-is-tauri";
+import { usePlatform } from "@/hooks/use-platform";
 import { useUiScale } from "@/components/ui-scale-provider";
 import { eventToneClass, Kpi, LatencySparkline, outcomeClass, Pager, Pip, subjectClass } from "@/components/ui";
 import {
@@ -56,6 +57,7 @@ import {
   quotaToneClass,
   resolveDeadSymbolCount,
   type AgentEfficiencyReport,
+  type LoungeExperience,
   type QuotaExhaustedAction,
   type QuotaKind,
   type SemanticMapSelection,
@@ -65,7 +67,10 @@ import {
   mapFileSymbol,
   mapProjectPage,
   mapVaultAggregate,
+  resolveVaultDisplayName,
   VAULT_PAGE_WINDOW,
+  vaultProjectIdentityKeys,
+  vaultProjectQueryId,
   type FileSymbolRow,
   type PageSortKey,
   type ProjectPageRow,
@@ -484,10 +489,12 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     experienceDetailError,
     closeExperience,
   } = useLounge();
-  const { t: tv } = useTranslation("vault");
+  const { t: tv, i18n } = useTranslation("vault");
   // Map↔Review switcher lives in this existing header row (no extra chrome height)
   // so D960 SemanticMap stretch rows keep enough vertical room.
   const tauriReady = useIsTauri();
+  const platform = usePlatform();
+  const dateLocale = i18n.language?.startsWith("en") ? "en-US" : "tr-TR";
   const [selected, setSelected] = useState<SemanticMapSelection | null>(null);
   const [selectionProject, setSelectionProject] = useState(selectedProject);
   const [markedUseful, setMarkedUseful] = useState<Set<string>>(() => new Set());
@@ -505,7 +512,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
   const [pageQueryState, setPageQueryState] = useState({ query: "", sort: "path" as PageSortKey });
   const [fileSymbols, setFileSymbols] = useState<FileSymbolRow[] | null>(null);
   const [fileSymbolsLoading, setFileSymbolsLoading] = useState(false);
+  /** OPEN-5: project-scoped list/count from backend (not the global 100-item page). */
+  const [scopedExperiences, setScopedExperiences] = useState<LoungeExperience[] | null>(null);
+  const [scopedTotal, setScopedTotal] = useState<number | null>(null);
+  const [scopedLoading, setScopedLoading] = useState(false);
+  const [scopedError, setScopedError] = useState<string | null>(null);
   const whispered = useMemo(() => new Set(whisperedExperienceIds), [whisperedExperienceIds]);
+  const VAULT_EXPERIENCE_PAGE = 100;
 
   if (selectionProject !== selectedProject) {
     setSelectionProject(selectedProject);
@@ -561,11 +574,15 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       }
       try {
         const { invoke } = await import("@tauri-apps/api/core");
+        const fromAgg =
+          vaultAggregates?.find((row) => row.name === openProjectName) ?? null;
+        const projectId =
+          vaultProjectQueryId(fromAgg, openProjectName) ?? openProjectName;
         const result = await invoke<{
           pages?: Record<string, unknown>[];
           total?: number;
         }>("list_project_pages", {
-          projectId: openProjectName,
+          projectId,
           query: pageQuery || null,
           sort,
           offset,
@@ -585,7 +602,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         setPagesLoading(false);
       }
     },
-    [openProjectName, tauriReady, tv],
+    [openProjectName, tauriReady, tv, vaultAggregates],
   );
 
   const handlePageSearch = useCallback(
@@ -626,8 +643,12 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       setFileSymbolsLoading(true);
       try {
         const { invoke } = await import("@tauri-apps/api/core");
+        const fromAgg =
+          vaultAggregates?.find((row) => row.name === openProjectName) ?? null;
+        const projectId =
+          vaultProjectQueryId(fromAgg, openProjectName) ?? openProjectName;
         const rows = await invoke<Record<string, unknown>[]>("list_file_symbols", {
-          projectId: openProjectName,
+          projectId,
           filePath,
         });
         setFileSymbols(rows.map((row) => mapFileSymbol(row)));
@@ -637,7 +658,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         setFileSymbolsLoading(false);
       }
     },
-    [openProjectName, tauriReady],
+    [openProjectName, tauriReady, vaultAggregates],
   );
 
   const handleOpenPage = useCallback(
@@ -665,6 +686,147 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       }),
     [experiences, projects, semanticMap, vaultAggregates],
   );
+  const openProjectRow = useMemo(
+    () =>
+      openProjectName
+        ? projectRows.find((row) => row.name === openProjectName) ?? null
+        : null,
+    [openProjectName, projectRows],
+  );
+  const openProjectQueryId = useMemo(
+    () => vaultProjectQueryId(openProjectRow, openProjectName),
+    [openProjectName, openProjectRow],
+  );
+  /** Re-fetch scoped list after provider archive/pin/review mutations (EX-03). */
+  const experienceRevision = useMemo(
+    () =>
+      experiences
+        .map(
+          (row) =>
+            `${row.id}:${row.status ?? ""}:${row.reviewed ? 1 : 0}:${row.is_pinned ? 1 : 0}`,
+        )
+        .join("|"),
+    [experiences],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    // Defer setState so the initial write is not synchronous inside the effect
+    // (react-hooks/set-state-in-effect; same pattern as vault auto-select).
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      if (!tauriReady || !openProjectQueryId) {
+        setScopedExperiences(null);
+        setScopedTotal(null);
+        setScopedError(null);
+        setScopedLoading(false);
+        return;
+      }
+      setScopedLoading(true);
+      setScopedError(null);
+      void (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const [rows, total] = await Promise.all([
+            invoke<LoungeExperience[]>("list_experiences", {
+              limit: VAULT_EXPERIENCE_PAGE,
+              offset: 0,
+              includeArchived: showArchived,
+              projectId: openProjectQueryId,
+            }),
+            invoke<number>("count_experiences", {
+              includeArchived: showArchived,
+              projectId: openProjectQueryId,
+            }).catch(() => null),
+          ]);
+          if (cancelled) return;
+          setScopedExperiences(sortExperiencesForDisplay(rows));
+          setScopedTotal(total != null ? Number(total) : rows.length);
+        } catch (err) {
+          if (cancelled) return;
+          setScopedExperiences([]);
+          setScopedTotal(0);
+          setScopedError(err instanceof Error ? err.message : tv("listError"));
+        } finally {
+          if (!cancelled) {
+            setScopedLoading(false);
+          }
+        }
+      })();
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [experienceRevision, openProjectQueryId, showArchived, tauriReady, tv]);
+
+  const loadMoreScopedExperiences = useCallback(async () => {
+    if (!tauriReady || !openProjectQueryId || scopedLoading) {
+      return;
+    }
+    if (!scopedExperiences || scopedTotal == null) {
+      return;
+    }
+    if (scopedExperiences.length >= scopedTotal) {
+      return;
+    }
+    setScopedLoading(true);
+    setScopedError(null);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const rows = await invoke<LoungeExperience[]>("list_experiences", {
+        limit: VAULT_EXPERIENCE_PAGE,
+        offset: scopedExperiences.length,
+        includeArchived: showArchived,
+        projectId: openProjectQueryId,
+      });
+      setScopedExperiences((current) => {
+        const base = current ?? [];
+        const seen = new Set(base.map((row) => row.id));
+        const merged = [...base];
+        for (const row of rows) {
+          if (!seen.has(row.id)) {
+            merged.push(row);
+          }
+        }
+        return sortExperiencesForDisplay(merged);
+      });
+    } catch (err) {
+      setScopedError(err instanceof Error ? err.message : tv("listError"));
+    } finally {
+      setScopedLoading(false);
+    }
+  }, [
+    openProjectQueryId,
+    scopedExperiences,
+    scopedLoading,
+    scopedTotal,
+    showArchived,
+    tauriReady,
+    tv,
+  ]);
+
+  const selectedProjectRow = useMemo(() => {
+    if (!selected) {
+      return null;
+    }
+    const name = selected.kind === "project" ? selected.name : selected.project;
+    if (!name) {
+      return null;
+    }
+    return projectRows.find((row) => row.name === name) ?? null;
+  }, [projectRows, selected]);
+  const selectedProjectKeys = useMemo(() => {
+    if (selectedProjectRow) {
+      return vaultProjectIdentityKeys(selectedProjectRow);
+    }
+    if (!selected) {
+      return [] as string[];
+    }
+    return [selected.project, selected.name].filter(
+      (value): value is string => Boolean(value?.trim()),
+    );
+  }, [selected, selectedProjectRow]);
   const selectedProjectPath = useMemo(() => {
     if (!selected || selected.kind !== "project") {
       return null;
@@ -674,12 +836,19 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     const fromAgg = projectRows.find((row) => row.name === selected.name)?.repoPath;
     return fromProjects || fromMap || fromAgg || null;
   }, [projects, projectRows, selected, semanticMap.projects]);
+  const experiencePool =
+    openProjectName && openProjectQueryId && tauriReady && scopedExperiences != null
+      ? scopedExperiences
+      : experiences;
   const log = useMemo(
     () =>
       sortExperiencesForDisplay(
-        experiencesMatchingSelection(experiences, selected, query),
+        experiencesMatchingSelection(experiencePool, selected, query, {
+          projectKeys: selectedProjectKeys,
+          platform,
+        }),
       ),
-    [experiences, selected, query],
+    [experiencePool, platform, query, selected, selectedProjectKeys],
   );
   const experienceProjectRows = useMemo(() => {
     if (openProjectName) {
@@ -688,9 +857,54 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     return projectRows.filter((row) => row.experienceCount > 0 || row.pageCount > 0);
   }, [openProjectName, projectRows]);
   const deadForNode = useMemo(
-    () => deadSymbolsMatchingSelection(deadSymbols, semanticMap, selected),
-    [deadSymbols, semanticMap, selected],
+    () =>
+      deadSymbolsMatchingSelection(deadSymbols, semanticMap, selected, {
+        projectKeys: selectedProjectKeys,
+        platform,
+      }),
+    [deadSymbols, platform, semanticMap, selected, selectedProjectKeys],
   );
+  const openProjectDisplayName = useMemo(
+    () =>
+      openProjectRow
+        ? resolveVaultDisplayName(openProjectRow)
+        : openProjectName
+          ? resolveVaultDisplayName({ name: openProjectName })
+          : null,
+    [openProjectName, openProjectRow],
+  );
+  const usingScopedExperiences = Boolean(openProjectName && openProjectQueryId && tauriReady);
+  const projectExperienceCount = usingScopedExperiences
+    ? (scopedTotal ?? openProjectRow?.experienceCount ?? log.length)
+    : (openProjectRow?.experienceCount ?? log.length);
+  const paneExperienceTotal = usingScopedExperiences
+    ? (scopedTotal ?? experienceTotal)
+    : experienceTotal;
+  const paneExperiencesLoading = usingScopedExperiences
+    ? scopedLoading || scopedExperiences == null
+    : experiencesLoading;
+  const paneExperiencesError = usingScopedExperiences ? scopedError : experiencesError;
+  const paneExperienceList = usingScopedExperiences
+    ? (scopedExperiences ?? [])
+    : experiences;
+  const experiencesHeadingTitle = openProjectDisplayName
+    ? tv("experiencesForProject", { name: openProjectDisplayName })
+    : tv("experienceLog");
+  const indexedAtLabel = useMemo(() => {
+    const stamp =
+      openProjectRow?.indexedAt ||
+      selectedProjectRow?.indexedAt ||
+      projectRows.find((row) => row.indexedAt)?.indexedAt ||
+      null;
+    if (!stamp) {
+      return tv("lastIndexedUnknown");
+    }
+    const parsed = Date.parse(stamp);
+    const formatted = Number.isFinite(parsed)
+      ? new Date(parsed).toLocaleString(dateLocale)
+      : stamp;
+    return tv("lastIndexed", { date: formatted });
+  }, [dateLocale, openProjectRow, projectRows, selectedProjectRow, tv]);
 
   // Landing (/vault, not embedded): default-select last-selected or first indexed project
   // and open its pages so leaf columns hold real content at natural card heights (no stretch).
@@ -836,11 +1050,23 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
         className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-outline-variant/40 pb-2"
       >
         <div className="min-w-0">
-          <h2 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
-            {tv("layout.experiencesHeading")}
+          <h2
+            className="min-w-0 truncate font-body text-panel font-semibold tracking-label text-on-surface"
+            title={experiencesHeadingTitle}
+            data-qa="vault-experiences-heading"
+          >
+            {experiencesHeadingTitle}
           </h2>
-          <div className="font-mono text-meta text-on-surface-variant">
-            {tv("totalExperiences", { count: experienceTotal })}
+          <div
+            className="font-mono text-meta text-on-surface-variant"
+            data-qa="vault-experience-count"
+          >
+            {openProjectName
+              ? tv("experienceCountScoped", {
+                  projectCount: projectExperienceCount,
+                  totalCount: experienceTotal,
+                })
+              : tv("totalExperiences", { count: paneExperienceTotal })}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -867,30 +1093,18 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           data-qa="vault-project-path"
           className="mb-2 shrink-0 break-all font-mono text-meta text-on-surface-variant"
           title={formatDisplayPath(selectedProjectPath)}
+          lang="en"
         >
-          <span className="uppercase tracking-label text-outline">{tv("projectPath")}</span>
+          <span className="tracking-label text-outline">{tv("projectPath")}</span>
           {" · "}
           {formatDisplayPath(selectedProjectPath)}
         </div>
       ) : null}
-      <div className="mb-2 flex shrink-0 items-center justify-between font-body text-meta font-semibold tracking-label text-outline uppercase">
-        <span>
-          {openProjectName
-            ? tv("experiencesForProject", { name: openProjectName })
-            : tv("experienceLog")}
-        </span>
-        <span
-          className={
-            whispered.size > 0 ? "text-primary" : selected ? "text-primary" : "text-secondary"
-          }
-        >
-          {whispered.size > 0
-            ? tv("whisperLive", { count: whispered.size })
-            : openProjectName
-              ? tv("filter", { name: openProjectName })
-              : tv("projectCount", { count: experienceProjectRows.length })}
-        </span>
-      </div>
+      {whispered.size > 0 ? (
+        <div className="mb-2 shrink-0 font-body text-meta font-semibold tracking-label text-primary">
+          {tv("whisperLive", { count: whispered.size })}
+        </div>
+      ) : null}
       <div
         role="list"
         aria-label={tv("layout.experiencesListLabel")}
@@ -945,8 +1159,12 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   className="flex w-full items-center justify-between gap-2 rounded border border-outline-variant/40 bg-surface-container-high/60 px-1.5 py-1.5 text-left hover:bg-surface-container-high"
                 >
                   <span className="min-w-0">
-                    <span className="block truncate font-mono font-medium text-on-surface" title={row.name}>
-                      {row.name}
+                    <span
+                      className="block truncate font-mono font-medium text-on-surface"
+                      title={row.canonicalId || row.name}
+                      lang="en"
+                    >
+                      {resolveVaultDisplayName(row)}
                     </span>
                     <span className="block truncate font-mono text-meta text-outline">
                       {tv("pageCountMeta", {
@@ -976,15 +1194,20 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                   </button>
                 </div>
               ))}
-              <div className="shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline">
+              <div
+                className="shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline"
+                data-qa="vault-experiences-footer"
+              >
                 <span className="font-body">
-                  {tv("projectCount", { count: experienceProjectRows.length })} ·{" "}
-                  {tv("totalExperiences", { count: experienceTotal })}
+                  {tv("footerSummary", {
+                    projects: experienceProjectRows.length,
+                    experiences: experienceTotal,
+                  })}
                 </span>
               </div>
             </>
           )
-        ) : experiencesLoading && experiences.length === 0 ? (
+        ) : paneExperiencesLoading && paneExperienceList.length === 0 ? (
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <p
               data-qa="layout-empty"
@@ -993,13 +1216,13 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               {tv("loading")}
             </p>
           </div>
-        ) : experiencesError ? (
+        ) : paneExperiencesError ? (
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <p
               data-qa="layout-empty"
               className="rounded border border-error/40 bg-error/5 px-2 py-4 text-center font-body text-body text-error"
             >
-              {experiencesError || tv("listError")}
+              {paneExperiencesError || tv("listError")}
             </p>
           </div>
         ) : logVisible.length === 0 ? (
@@ -1041,6 +1264,8 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                     <span
                       data-qa="experience-project-chip"
                       className="shrink-0 rounded border border-outline-variant/50 px-1 font-mono text-meta text-on-surface-variant"
+                      lang="en"
+                      title={item.project_id}
                     >
                       {item.project_id}
                     </span>
@@ -1050,13 +1275,26 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                       </span>
                     ) : null}
                     {archived ? (
-                      <span className="rounded border border-outline-variant px-1 text-meta text-outline uppercase">
+                      <span
+                        data-qa="experience-archived-badge"
+                        className="rounded border border-outline-variant px-1 text-meta text-outline"
+                      >
                         {tv("archivedLabel")}
                       </span>
                     ) : null}
                     {item.reviewed === false ? (
-                      <span className="rounded border border-dashed border-secondary/60 px-1 text-meta text-secondary uppercase">
+                      <span
+                        data-qa="experience-unreviewed-badge"
+                        className="rounded border border-dashed border-secondary/60 px-1 text-meta text-secondary"
+                      >
                         {tv("unreviewed")}
+                      </span>
+                    ) : item.reviewed === true && !archived ? (
+                      <span
+                        data-qa="experience-reviewed-badge"
+                        className="rounded border border-secondary/40 px-1 text-meta text-secondary"
+                      >
+                        {tv("reviewedLabel")}
                       </span>
                     ) : null}
                     {isWhisper ? (
@@ -1069,10 +1307,10 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                     className={`shrink-0 rounded border px-1 text-meta ${outcomeClass(item.outcome)}`}
                   >
                     {item.outcome === "success"
-                      ? "Success"
+                      ? tv("outcomeSuccess")
                       : item.outcome === "partial"
-                        ? "Partial"
-                        : "Failed"}
+                        ? tv("outcomePartial")
+                        : tv("outcomeFailed")}
                   </span>
                 </div>
                 <div className="flex items-start gap-1">
@@ -1115,7 +1353,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
                         })();
                       }}
                       className="min-h-8 rounded border border-primary/40 px-1.5 py-1 font-body text-meta text-primary hover:bg-primary-container/30 disabled:cursor-default disabled:opacity-60"
-                      aria-label="Bu fısıltıyı faydalı olarak işaretle"
+                      aria-label={tv("markWhisperUseful")}
                     >
                       {alreadyUseful ? tv("usefulDone") : tv("useful")}
                     </button>
@@ -1126,13 +1364,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
           })
         )}
       </div>
-      {experiences.length < experienceTotal ? (
+      {paneExperienceList.length < paneExperienceTotal ? (
         <div className="shrink-0 pt-2">
           <button
             type="button"
             data-qa="vault-load-more"
-            disabled={experiencesLoading}
-            onClick={() => void loadMoreExperiences()}
+            disabled={paneExperiencesLoading}
+            onClick={() =>
+              void (usingScopedExperiences
+                ? loadMoreScopedExperiences()
+                : loadMoreExperiences())
+            }
             className="min-h-8 w-full rounded border border-outline-variant px-2 py-1 font-body text-meta text-on-surface-variant hover:bg-surface-container-high disabled:opacity-60"
           >
             {tv("loadMore")}
@@ -1193,11 +1435,18 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
               </Link>
             </nav>
           )}
-          <span className="font-body text-meta text-outline">
+          <span
+            className="max-w-[14rem] truncate font-body text-meta text-outline"
+            data-qa="vault-backend-freshness"
+            title={`${tv("backendSourceLabel")} · ${indexedAtLabel}`}
+          >
             {whispered.size > 0 ? (
-              <span className="text-primary">whisper · live</span>
+              <span className="text-primary">{tv("whisperLive", { count: whispered.size })}</span>
             ) : (
-              "memory_bridge + sqlite"
+              <>
+                {tv("backendSourceLabel")}
+                <span className="text-on-surface-variant">{` · ${indexedAtLabel}`}</span>
+              </>
             )}
           </span>
           <GraphUiButton />

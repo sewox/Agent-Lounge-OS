@@ -302,8 +302,14 @@ pub struct VaultProjectAggregate {
     pub experience_count: u64,
     #[serde(default)]
     pub unreviewed_count: u64,
+    /// Dead + broken symbols for this project (ignored rows excluded).
+    #[serde(default)]
+    pub dead_count: u64,
     #[serde(default)]
     pub last_updated: Option<String>,
+    /// Latest `project_index.indexed_at` for this project (absent when never indexed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<String>,
     /// `indexed` | `discovered` | `imported`
     #[serde(default)]
     pub source_type: String,

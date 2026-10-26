@@ -6,6 +6,12 @@ import type {
   SemanticMap,
   SemanticProject,
 } from "@/lib/lounge";
+import { pathBasename } from "@/lib/lounge";
+import {
+  projectIdentityEquals,
+  UNKNOWN_PLATFORM,
+  type LoungePlatform,
+} from "@/lib/platform";
 
 export const VAULT_FILTERS_KEY = "al-os-vault-project-filters";
 
@@ -99,13 +105,89 @@ export type VaultProjectRow = {
   edgeCount: number;
   experienceCount: number;
   unreviewedCount: number;
+  /** Backend dead+broken count (ignored rows excluded); 0 when unknown. */
+  deadCount: number;
   lastUpdated: string | null;
+  /** Latest index timestamp from backend (`indexed_at`); null when never indexed. */
+  indexedAt?: string | null;
   sourceType: Exclude<VaultSourceType, "all">;
   /** Project-ID-Core canonical key when provided by the host. */
   canonicalId?: string | null;
   /** Warning when records sit under unclassified / unindexed_placeholder. */
   identityWarning?: string | null;
 };
+
+/**
+ * displayName = Lounge project name → repo_path basename (cross-platform) → slug/id.
+ * Canonical slug/id belongs in the `title` tooltip, not as the primary label.
+ */
+export function resolveVaultDisplayName(input: {
+  name?: string | null;
+  repoPath?: string | null;
+  canonicalId?: string | null;
+  slug?: string | null;
+}): string {
+  const lounge = input.name?.trim();
+  if (lounge) {
+    return lounge;
+  }
+  const base = pathBasename(input.repoPath)?.trim();
+  if (base) {
+    return base;
+  }
+  const slug = (input.slug ?? input.canonicalId)?.trim();
+  if (slug) {
+    return slug;
+  }
+  return "unnamed";
+}
+
+/** Identity keys for exact Project-ID-Core matching (never substring). */
+export function vaultProjectIdentityKeys(row: Pick<
+  VaultProjectRow,
+  "name" | "repoPath" | "canonicalId"
+>): string[] {
+  const keys = [row.canonicalId, row.name, pathBasename(row.repoPath)]
+    .map((value) => value?.trim() ?? "")
+    .filter(Boolean);
+  return [...new Set(keys)];
+}
+
+/**
+ * Canonical project id equality: case-insensitive on macOS/Windows,
+ * case-sensitive on Linux / unknown — never substring / LIKE matching (OPEN-5).
+ * Callers in UI must pass `usePlatform()`; pure helpers default to `"unknown"`.
+ */
+export function projectIdsMatch(
+  left: string | null | undefined,
+  right: string | null | undefined,
+  platform: LoungePlatform = UNKNOWN_PLATFORM,
+): boolean {
+  const a = left?.trim() ?? "";
+  const b = right?.trim() ?? "";
+  if (!a || !b) {
+    return false;
+  }
+  return projectIdentityEquals(a, b, platform);
+}
+
+/** True when `candidate` matches any identity key for the project row. */
+export function matchesVaultProject(
+  candidate: string | null | undefined,
+  row: Pick<VaultProjectRow, "name" | "repoPath" | "canonicalId">,
+  platform: LoungePlatform = UNKNOWN_PLATFORM,
+): boolean {
+  return vaultProjectIdentityKeys(row).some((key) => projectIdsMatch(candidate, key, platform));
+}
+
+/** Prefer canonicalId for all backend/MCP/Tauri project-scoped calls. */
+export function vaultProjectQueryId(
+  row: Pick<VaultProjectRow, "name" | "canonicalId"> | null | undefined,
+  fallback?: string | null,
+): string | null {
+  const id = row?.canonicalId?.trim() || row?.name?.trim() || fallback?.trim() || null;
+  return id || null;
+}
 
 export type ProjectPageRow = {
   path: string;
@@ -198,12 +280,6 @@ export function resetVaultFilters(
   return DEFAULT_VAULT_FILTERS;
 }
 
-function pathBasename(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const parts = normalized.split("/").filter(Boolean);
-  return parts[parts.length - 1] || path;
-}
-
 function resolveSourceType(input: {
   pageCount: number;
   nodeCount: number;
@@ -220,14 +296,14 @@ function resolveSourceType(input: {
 
 function experienceStats(
   experiences: LoungeExperience[],
-  projectName: string,
+  projectKeys: string[],
+  platform: LoungePlatform = UNKNOWN_PLATFORM,
 ): { count: number; unreviewed: number; lastUpdated: string | null } {
-  const needle = projectName.toLowerCase();
   let count = 0;
   let unreviewed = 0;
   let lastUpdated: string | null = null;
   for (const row of experiences) {
-    if ((row.project_id || "").toLowerCase() !== needle) {
+    if (!projectKeys.some((key) => projectIdsMatch(row.project_id, key, platform))) {
       continue;
     }
     if ((row.status ?? "active") !== "active") {
@@ -266,8 +342,11 @@ export function buildVaultProjectRows(input: {
     const edgeCount = partial.edgeCount ?? prev?.edgeCount ?? 0;
     const experienceCount = partial.experienceCount ?? prev?.experienceCount ?? 0;
     const unreviewedCount = partial.unreviewedCount ?? prev?.unreviewedCount ?? 0;
+    const deadCount = partial.deadCount ?? prev?.deadCount ?? 0;
     const lastUpdated = pickNewer(partial.lastUpdated ?? null, prev?.lastUpdated ?? null);
+    const indexedAt = pickNewer(partial.indexedAt ?? null, prev?.indexedAt ?? null);
     const repoPath = partial.repoPath ?? prev?.repoPath ?? null;
+    const canonicalId = partial.canonicalId ?? prev?.canonicalId ?? null;
     const sourceType =
       partial.sourceType ??
       prev?.sourceType ??
@@ -280,24 +359,32 @@ export function buildVaultProjectRows(input: {
       edgeCount,
       experienceCount,
       unreviewedCount,
+      deadCount,
       lastUpdated,
+      indexedAt,
       sourceType,
-      canonicalId: partial.canonicalId ?? prev?.canonicalId ?? null,
+      canonicalId,
       identityWarning: partial.identityWarning ?? prev?.identityWarning ?? null,
     });
   };
 
   for (const project of input.semanticMap.projects) {
     const pages = uniquePageCount(project);
-    const stats = experienceStats(input.experiences, project.name);
+    const name = project.name || "unnamed";
+    const repoPath = project.repo_path || null;
+    const stats = experienceStats(
+      input.experiences,
+      [name, pathBasename(repoPath)].filter((value): value is string => Boolean(value?.trim())),
+    );
     upsert({
-      name: project.name || "unnamed",
-      repoPath: project.repo_path || null,
+      name,
+      repoPath,
       pageCount: pages || project.files || 0,
       nodeCount: project.node_count || project.nodes.length,
       edgeCount: project.edge_count || project.references.length,
       experienceCount: stats.count,
       unreviewedCount: stats.unreviewed,
+      deadCount: project.dead?.length ?? 0,
       lastUpdated: stats.lastUpdated,
       sourceType: resolveSourceType({
         pageCount: pages || project.files || 0,
@@ -308,10 +395,15 @@ export function buildVaultProjectRows(input: {
   }
 
   for (const project of input.projects) {
-    const stats = experienceStats(input.experiences, project.name);
+    const name = project.name || "unnamed";
+    const repoPath = project.root_path ?? null;
+    const stats = experienceStats(
+      input.experiences,
+      [name, pathBasename(repoPath)].filter((value): value is string => Boolean(value?.trim())),
+    );
     upsert({
-      name: project.name || "unnamed",
-      repoPath: project.root_path ?? null,
+      name,
+      repoPath,
       pageCount: project.files ?? 0,
       nodeCount: project.nodes,
       edgeCount: project.edges,
@@ -327,7 +419,7 @@ export function buildVaultProjectRows(input: {
     if (!name || byName.has(name)) {
       continue;
     }
-    const stats = experienceStats(input.experiences, name);
+    const stats = experienceStats(input.experiences, [name]);
     upsert({
       name,
       repoPath: null,
@@ -336,8 +428,10 @@ export function buildVaultProjectRows(input: {
       edgeCount: 0,
       experienceCount: stats.count,
       unreviewedCount: stats.unreviewed,
+      deadCount: 0,
       lastUpdated: stats.lastUpdated,
       sourceType: "imported",
+      canonicalId: name,
     });
   }
 
@@ -429,7 +523,7 @@ export function pagesFromSemanticProject(project: SemanticProject | null | undef
     if (!prev) {
       byPath.set(path, {
         path,
-        title: pathBasename(path),
+        title: pathBasename(path) || path,
         snippet: node.name || node.kind || "",
         symbolCount: 1,
         lastUpdated: null,
@@ -505,15 +599,19 @@ export function debounceMs(): number {
 
 /** Map wire aggregate (snake_case) → UI row. */
 export function mapVaultAggregate(raw: Record<string, unknown>): VaultProjectRow {
-  const name = String(raw.name ?? raw.project_id ?? "unnamed");
   const pageCount = Number(raw.page_count ?? raw.pageCount ?? raw.files ?? 0) || 0;
   const nodeCount = Number(raw.node_count ?? raw.nodeCount ?? raw.nodes ?? 0) || 0;
   const edgeCount = Number(raw.edge_count ?? raw.edgeCount ?? raw.edges ?? 0) || 0;
   const experienceCount = Number(raw.experience_count ?? raw.experienceCount ?? 0) || 0;
   const unreviewedCount = Number(raw.unreviewed_count ?? raw.unreviewedCount ?? 0) || 0;
+  const deadCount = Number(raw.dead_count ?? raw.deadCount ?? 0) || 0;
   const lastUpdated =
     (typeof raw.last_updated === "string" && raw.last_updated) ||
     (typeof raw.lastUpdated === "string" && raw.lastUpdated) ||
+    null;
+  const indexedAt =
+    (typeof raw.indexed_at === "string" && raw.indexed_at) ||
+    (typeof raw.indexedAt === "string" && raw.indexedAt) ||
     null;
   const repoPath =
     (typeof raw.repo_path === "string" && raw.repo_path) ||
@@ -533,6 +631,12 @@ export function mapVaultAggregate(raw: Record<string, unknown>): VaultProjectRow
     (typeof raw.identity_warning === "string" && raw.identity_warning) ||
     (typeof raw.identityWarning === "string" && raw.identityWarning) ||
     null;
+  const wireName = String(raw.name ?? raw.project_id ?? "");
+  const name = resolveVaultDisplayName({
+    name: wireName || null,
+    repoPath,
+    canonicalId,
+  });
   return {
     name,
     repoPath,
@@ -541,7 +645,9 @@ export function mapVaultAggregate(raw: Record<string, unknown>): VaultProjectRow
     edgeCount,
     experienceCount,
     unreviewedCount,
+    deadCount,
     lastUpdated,
+    indexedAt,
     sourceType,
     canonicalId,
     identityWarning,
@@ -552,7 +658,7 @@ export function mapProjectPage(raw: Record<string, unknown>): ProjectPageRow {
   const path = String(raw.path ?? "");
   return {
     path,
-    title: String(raw.title ?? pathBasename(path)),
+    title: String(raw.title ?? pathBasename(path) ?? path),
     snippet: String(raw.snippet ?? ""),
     symbolCount: Number(raw.symbol_count ?? raw.symbolCount ?? 0) || 0,
     lastUpdated:
