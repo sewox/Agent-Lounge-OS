@@ -697,6 +697,17 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
     () => vaultProjectQueryId(openProjectRow, openProjectName),
     [openProjectName, openProjectRow],
   );
+  /** Re-fetch scoped list after provider archive/pin/review mutations (EX-03). */
+  const experienceRevision = useMemo(
+    () =>
+      experiences
+        .map(
+          (row) =>
+            `${row.id}:${row.status ?? ""}:${row.reviewed ? 1 : 0}:${row.is_pinned ? 1 : 0}`,
+        )
+        .join("|"),
+    [experiences],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -747,7 +758,7 @@ export function VaultPanel({ embedded = false }: { embedded?: boolean }) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [openProjectQueryId, showArchived, tauriReady, tv]);
+  }, [experienceRevision, openProjectQueryId, showArchived, tauriReady, tv]);
 
   const loadMoreScopedExperiences = useCallback(async () => {
     if (!tauriReady || !openProjectQueryId || scopedLoading) {
