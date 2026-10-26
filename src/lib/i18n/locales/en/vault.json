@@ -122,6 +122,17 @@
   "graphEnableConfirmOk": "Enable",
   "graphEnableConfirmCancel": "Cancel",
   "loadingVault": "Loading vault…",
+  "layout": {
+    "listHeading": "Projects & pages",
+    "detailHeading": "Dead symbols",
+    "experiencesHeading": "Experiences",
+    "openDetail": "Open detail",
+    "openExperiences": "Open experiences",
+    "closeDrawer": "Close",
+    "selectForDetail": "Select a project or page to inspect dead symbols.",
+    "deadListLabel": "Dead symbols list",
+    "experiencesListLabel": "Experience list"
+  },
   "review": {
     "viewsNav": "Vault views",
     "viewMap": "Map",

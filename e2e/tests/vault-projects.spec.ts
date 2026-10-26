@@ -8,7 +8,19 @@ import {
   openRouteHydration,
 } from "../helpers/hydration";
 
+async function backToVaultProjects(page: Page) {
+  const back = page.locator('[data-qa="vault-back-projects"]');
+  if (await back.isVisible()) {
+    await back.click();
+    await expect(page.locator('[data-qa="vault-semantic-map"]')).toHaveAttribute(
+      "data-view",
+      "projects",
+    );
+  }
+}
+
 async function openVaultProject(page: Page, name: string) {
+  await backToVaultProjects(page);
   const row = page
     .locator('[data-qa="vault-project-row"]')
     .filter({ hasText: new RegExp(name, "i") })
@@ -25,6 +37,8 @@ test.describe("VP — vault project grouping", () => {
   test("VP-01 · Semantic map lists projects not individual pages", async ({ page }) => {
     await openRoute(page, "/vault", "full");
     const map = page.locator('[data-qa="vault-semantic-map"]');
+    // Landing auto-opens last/first indexed project (pages); back to assert project list.
+    await backToVaultProjects(page);
     await expect(map).toHaveAttribute("data-view", "projects");
     const projects = page.locator('[data-qa="vault-project-row"]');
     // 3 indexed + 1 experiences-only (solo-import)
@@ -38,6 +52,7 @@ test.describe("VP — vault project grouping", () => {
 
   test("VP-02 · Filters persist in localStorage and reset", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
     await page.locator('[data-qa="vault-filter-name"]').fill("Echo");
     await page.locator('[data-qa="vault-filter-min-pages"]').fill("10");
     await page.waitForTimeout(200);
@@ -51,6 +66,7 @@ test.describe("VP — vault project grouping", () => {
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
     await expect(page.locator('[data-qa="vault-filter-name"]')).toHaveValue("Echo");
     await expect(page.locator('[data-qa="vault-project-row"]')).toHaveCount(1);
 
@@ -61,6 +77,7 @@ test.describe("VP — vault project grouping", () => {
 
   test("VP-03 · Drill-down virtualizes and reaches last page past 500", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
     const row = page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /Agent-Lounge-OS/i })
@@ -117,6 +134,7 @@ test.describe("VP — vault project grouping", () => {
 
   test("VP-06 · Keyboard Enter / Aç button opens project", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
     const row = page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /codebase-memory-mcp/i })
@@ -138,6 +156,7 @@ test.describe("VP — vault project grouping", () => {
 
   test("VP-07 · page_count matches drill-down total", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
     const row = page
       .locator('[data-qa="vault-project-row"]')
       .filter({ hasText: /Agent-Lounge-OS/i })
@@ -155,6 +174,7 @@ test.describe("VP — vault project grouping", () => {
 
   test("VP-08 · experiences-only imported project appears", async ({ page }) => {
     await openRoute(page, "/vault", "full");
+    await backToVaultProjects(page);
     const row = page.locator('[data-qa="vault-project-row"]').filter({ hasText: /solo-import/i });
     await expect(row).toBeVisible();
     await expect(row).toContainText(/0\s*pages|0\s*sayfa/i);
@@ -170,9 +190,11 @@ test.describe("VP — vault project grouping", () => {
       (window as Window & { __QA_VAULT_FAIL__?: boolean }).__QA_VAULT_FAIL__ = false;
     });
     await page.locator('[data-qa="vault-projects-retry"]').click();
-    await expect(page.locator('[data-qa="vault-project-row"]').first()).toBeVisible({
-      timeout: 10_000,
-    });
+    await expect(page.locator('[data-qa="vault-projects-error"]')).toHaveCount(0);
+    // Retry restores data; landing may auto-open pages once aggregates succeed.
+    await expect(
+      page.locator('[data-qa="vault-project-row"], [data-qa="vault-page-row"]').first(),
+    ).toBeVisible({ timeout: 10_000 });
   });
 
   test("VP-10 · pages error UI on drill-down", async ({ page }) => {

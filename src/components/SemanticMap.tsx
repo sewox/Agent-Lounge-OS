@@ -22,6 +22,12 @@ import {
   type SemanticMapSelection,
 } from "@/lib/lounge";
 import {
+  computeTokenRowHeight,
+  PAGE_ROW_HEIGHT_REM,
+  readRootFontSizePx,
+  subscribeRootFontSize,
+} from "@/lib/row-height";
+import {
   buildVaultProjectRows,
   debounceMs,
   filterAndSortPages,
@@ -45,7 +51,15 @@ import {
 } from "@/lib/vault-projects";
 
 const PROJECT_PAGE = 24;
-const PAGE_ROW_HEIGHT = 36;
+
+function usePageRowHeightPx(): number {
+  const rootPx = useSyncExternalStore(
+    subscribeRootFontSize,
+    () => readRootFontSizePx(),
+    () => 16,
+  );
+  return computeTokenRowHeight(rootPx, PAGE_ROW_HEIGHT_REM);
+}
 
 type GraphTotals = {
   nodes: number;
@@ -203,13 +217,11 @@ function ProjectRow({
   active,
   onSelect,
   onOpen,
-  stretch,
 }: {
   row: VaultProjectRow;
   active: boolean;
   onSelect: () => void;
   onOpen: () => void;
-  stretch?: boolean;
 }) {
   const { t } = useTranslation("vault");
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -231,8 +243,6 @@ function ProjectRow({
       }}
       onKeyDown={onKeyDown}
       className={`flex w-full items-center justify-between gap-2 rounded px-1.5 py-1.5 text-left transition-colors outline-none focus-visible:ring-1 focus-visible:ring-primary ${
-        stretch ? "min-h-0 flex-1" : ""
-      } ${
         active
           ? "bg-primary-container/25 text-primary"
           : "text-on-surface hover:bg-surface-container-high/80"
@@ -289,6 +299,7 @@ function VirtualPageList({
   onOpenPage?: (path: string) => void;
 }) {
   const { t } = useTranslation("vault");
+  const rowHeight = usePageRowHeightPx();
   const [scrollerEl, setScrollerEl] = useState<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(320);
@@ -305,7 +316,7 @@ function VirtualPageList({
     return () => ro?.disconnect();
   }, [scrollerEl]);
 
-  const win = windowSlice(pages, scrollTop, viewportHeight, PAGE_ROW_HEIGHT, 8);
+  const win = windowSlice(pages, scrollTop, viewportHeight, rowHeight, 8);
   const visible = pages.slice(win.start, win.end);
 
   if (pages.length === 0 && !loading) {
@@ -337,7 +348,7 @@ function VirtualPageList({
         setScrollTop(el.scrollTop);
         if (
           onNearEnd &&
-          el.scrollHeight - el.scrollTop - el.clientHeight < PAGE_ROW_HEIGHT * 12
+          el.scrollHeight - el.scrollTop - el.clientHeight < rowHeight * 12
         ) {
           onNearEnd();
         }
@@ -360,7 +371,7 @@ function VirtualPageList({
                     ? "bg-primary-container/20 text-primary"
                     : "text-on-surface hover:bg-surface-container-high/70"
                 }`}
-                style={{ height: PAGE_ROW_HEIGHT }}
+                style={{ height: rowHeight }}
               >
                 <span className="min-w-0">
                   <span className="block truncate font-mono font-medium">
@@ -558,7 +569,6 @@ export function SemanticMap({
   const pages = pageCount(filteredProjects.length, PROJECT_PAGE);
   const safeProjectPage = Math.min(projectPage, pages - 1);
   const visibleProjects = pageSlice(filteredProjects, safeProjectPage, PROJECT_PAGE);
-  const stretchRows = visibleProjects.length > 0 && visibleProjects.length <= 8;
 
   const openProject = useMemo(
     () => allProjects.find((row) => row.name === openProjectName) ?? null,
@@ -821,12 +831,7 @@ export function SemanticMap({
           ) : null}
         </div>
       ) : null}
-      <div
-        role="list"
-        className={`min-h-0 flex-1 overflow-auto font-body text-body ${
-          stretchRows ? "flex flex-col gap-1" : "space-y-1"
-        }`}
-      >
+      <div role="list" className="min-h-0 flex-1 space-y-1 overflow-auto font-body text-body">
         {visibleProjects.length === 0 ? (
           <div className="rounded border border-outline-variant/40 bg-surface-container-high/40 px-2 py-4 text-center text-on-surface-variant">
             {t("noProjects")}
@@ -841,7 +846,6 @@ export function SemanticMap({
                 key={`proj:${row.name}:${row.repoPath ?? ""}`}
                 row={row}
                 active={Boolean(isActive)}
-                stretch={stretchRows}
                 onSelect={() =>
                   onSelect(
                     isActive
@@ -862,7 +866,7 @@ export function SemanticMap({
         )}
         <div
           data-qa="vault-projects-summary"
-          className="mt-auto shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline"
+          className="shrink-0 border-t border-outline-variant/40 pt-2 font-mono text-meta text-outline"
         >
           <span className="font-body">
             {t("files", { count: graphTotals.files })} · {t("astNodes", { count: graphTotals.nodes })} ·{" "}

@@ -88,6 +88,7 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
     });
 
     // Interior fill: deepest visible child bottom vs panel frame (catches stretched empty frames).
+    // `[data-qa="layout-empty"]` blocks are honest empty/loading/error copy — never count as fill.
     const panelInteriorFills = panelEls.map((panel) => {
       const pr = panel.getBoundingClientRect();
       if (pr.height < 8) return 1;
@@ -96,6 +97,7 @@ export async function measureLayout(page: Page, route: string): Promise<LayoutMe
         "li, tr, [class*='truncate'], button, a, p, pre, code, h1, h2, h3, h4, span.font-mono, span.font-body",
       );
       for (const kid of Array.from(kids) as HTMLElement[]) {
+        if (kid.closest('[data-qa="layout-empty"]')) continue;
         const r = kid.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) continue;
         if (r.bottom > maxBottom) maxBottom = r.bottom;
