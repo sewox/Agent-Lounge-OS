@@ -85,7 +85,8 @@ function isBoundaryBefore(text: string, index: number): boolean {
 /**
  * Second-line defence (HO-4): mask home roots in path fields **and** free text.
  * Boundary-aware mid-string match for `/Users/<n>`, `/home/<n>`, `X:\Users\<n>`.
- * Does **not** rewrite URL path segments (`http://host/home/...`).
+ * Also masks `file:///Users|home|C:/Users/...` URI homes (journal scrub parity).
+ * Does **not** rewrite HTTP(S) URL path segments (`http://host/home/...`).
  */
 export function maskHomePathForUi(raw: string | null | undefined): string {
   if (raw == null || raw === "") return "";
@@ -93,13 +94,20 @@ export function maskHomePathForUi(raw: string | null | undefined): string {
     return raw.replace(/\\/g, "/");
   }
 
+  // file:// home URIs — treat as filesystem paths, not http URL path segments.
+  let out = raw.replace(
+    /file:\/\/\/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi,
+    "file://~",
+  );
+  out = out.replace(/file:\/\/\/Users\/[^/\s"']+/gi, "file://~");
+  out = out.replace(/file:\/\/\/home\/[^/\s"']+/gi, "file://~");
+
   const patterns: RegExp[] = [
     /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi,
     /\/Users\/[^/\s"']+/gi,
     /\/home\/[^/\s"']+/gi,
   ];
 
-  let out = raw;
   for (const re of patterns) {
     out = out.replace(re, (match, offset: number) => {
       if (typeof offset !== "number") return match;

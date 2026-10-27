@@ -1,5 +1,6 @@
 import type { FixtureDataset } from "./types";
 import { HEALTH_AGENTS_ALL_STATUSES, HEALTH_SCAN_PARTIAL } from "./health-agents";
+import { FULL_JOURNAL_ENTRIES, FULL_JOURNAL_VERIFICATION } from "./journal";
 
 const mkHealth = (
   id: string,
@@ -609,4 +610,6 @@ export const FULL_FIXTURE: FixtureDataset = {
   ],
   loungeHealth: HEALTH_AGENTS_ALL_STATUSES,
   healthScanMeta: HEALTH_SCAN_PARTIAL,
+  journalEntries: FULL_JOURNAL_ENTRIES,
+  journalVerification: FULL_JOURNAL_VERIFICATION,
 };

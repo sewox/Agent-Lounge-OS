@@ -22,5 +22,20 @@
   "listenSurvives": "NATS listen survives navigation",
   "kpiNats60s": "NATS / 60s",
   "kpiMemoryBridge": "memory_bridge",
-  "kpiVaultPersistence": "vault persistence: sqlite"
+  "kpiVaultPersistence": "vault persistence: sqlite",
+  "journalTitle": "Audit Journal",
+  "journalChainVerified": "Chain Verified · {{count}} entries",
+  "journalChainBroken": "Chain broken at seq {{seq}} · {{id}}",
+  "journalFiltersLabel": "Journal filters",
+  "journalFilterAll": "all",
+  "journalFilterTask": "task.*",
+  "journalFilterExperience": "experience.*",
+  "journalFilterControl": "control.*",
+  "journalLoading": "Loading journal…",
+  "journalEmpty": "No journal entries yet",
+  "journalLoadError": "Could not load the journal",
+  "journalSelectHint": "Select a task or event to open the A2A phase timeline",
+  "journalTotalDuration": "Total: {{duration}}",
+  "journalApprovalWait": "Approval wait: {{duration}}",
+  "journalExecution": "Execution: {{duration}}"
 }

@@ -104,6 +104,22 @@ describe("health-agents path masking", () => {
     assert.equal(isPathLike("http://h/home/a"), false);
   });
 
+  it("masks file:// home URI prefixes (macOS / Linux / Windows)", () => {
+    assert.equal(
+      maskHomePathForUi("file:///Users/sercan/secret/repo"),
+      "file://~/secret/repo",
+    );
+    assert.equal(
+      maskHomePathForUi("file:///home/sercan/.cursor/mcp.json"),
+      "file://~/.cursor/mcp.json",
+    );
+    assert.equal(
+      maskHomePathForUi("file:///C:/Users/sercan/AppData/Roaming/x.json"),
+      "file://~/AppData/Roaming/x.json",
+    );
+    assert.ok(!containsUnmaskedHome(maskHomePathForUi("file:///Users/alice/a") ?? ""));
+  });
+
   it("maskAgentEntryForUi masks path fields and detail free text", () => {
     const masked = maskAgentEntryForUi({
       client: "cursor",

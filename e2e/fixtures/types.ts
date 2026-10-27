@@ -239,6 +239,10 @@ export type FixtureDataset = {
   loungeHealth?: LoungeHealthReportFixture | null;
   /** Health-1a scan meta for dead-symbols stale/partial warning. */
   healthScanMeta?: { partial: boolean; indexed_at: string | null } | null;
+  /** Journal-UI-1: SHA-256 event_journal fixture rows (camelCase wire shape). */
+  journalEntries?: import("./journal").JournalEntryFixture[];
+  /** Journal-UI-1: default verify_event_journal report. */
+  journalVerification?: import("./journal").JournalVerificationFixture;
 };
 
 export type AgentMcpStatusFixture =

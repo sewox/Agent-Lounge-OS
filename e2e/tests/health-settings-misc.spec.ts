@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { assertLayoutL1toL6 } from "../helpers/layout";
 import { openRoute } from "../helpers/nav";
 import {
   getIpcLog,
@@ -808,6 +809,111 @@ test.describe("AP / CP / misc", () => {
     await expect(
       page.locator('[data-qa="dash-background-task"][data-task-status="WAIT_TIMEOUT_REACHED"]'),
     ).toBeVisible();
+  });
+});
+
+test.describe("JU — Audit Journal / A2A Phase Timeline", () => {
+  test("JU-01 · chain badge verified + tamper alert (EN/TR)", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "JU-01" });
+    await openRoute(page, "/stream", "full");
+    const badge = page.locator('[data-qa="journal-chain-badge"]');
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveAttribute("data-valid", "true");
+    await expect(badge).toContainText(/Chain Verified|Zincir Doğrulandı/i);
+    await expect(badge).toContainText(/9/);
+
+    const langSwitch = page.locator('[data-qa="locale-switch"]').first();
+    await langSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "tr");
+    await expect(badge).toContainText(/Zincir Doğrulandı · 9 kayıt/);
+
+    await langSwitch.getByRole("radio", { name: /EN|English/i }).click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    await expect(badge).toContainText(/Chain Verified · 9 entries/);
+
+    await page.evaluate(() => {
+      sessionStorage.setItem("__QA_JOURNAL_BROKEN__", "1");
+      (window as Window & { __QA_JOURNAL_BROKEN__?: boolean }).__QA_JOURNAL_BROKEN__ = true;
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.locator("[data-journal-panel]")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('[data-qa="journal-chain-badge"]')).toHaveAttribute(
+      "data-valid",
+      "false",
+    );
+    await expect(page.locator('[data-qa="journal-chain-broken"]')).toBeVisible();
+    await expect(page.locator('[data-qa="journal-chain-broken"]')).toContainText(/2/);
+  });
+
+  test("JU-02 · category filter pills (task / experience / control)", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "JU-02" });
+    await openRoute(page, "/stream", "full");
+    const rows = page.locator('[data-qa="journal-entry-row"]');
+    await expect(rows.first()).toBeVisible();
+
+    await page.locator('[data-qa="journal-filter-task"]').click();
+    const taskCount = await rows.count();
+    expect(taskCount).toBeGreaterThan(0);
+    for (let i = 0; i < taskCount; i++) {
+      await expect(rows.nth(i)).toHaveAttribute("data-action-type", /^task\./);
+    }
+
+    await page.locator('[data-qa="journal-filter-experience"]').click();
+    const expCount = await rows.count();
+    expect(expCount).toBeGreaterThan(0);
+    for (let i = 0; i < expCount; i++) {
+      await expect(rows.nth(i)).toHaveAttribute("data-action-type", /^experience\./);
+    }
+
+    await page.locator('[data-qa="journal-filter-control"]').click();
+    const ctrlCount = await rows.count();
+    expect(ctrlCount).toBeGreaterThan(0);
+    for (let i = 0; i < ctrlCount; i++) {
+      await expect(rows.nth(i)).toHaveAttribute("data-action-type", /^control\./);
+    }
+
+    await page.locator('[data-qa="journal-filter-all"]').click();
+    expect(await rows.count()).toBeGreaterThan(ctrlCount);
+  });
+
+  test("JU-03 · explain_why A2A phase timeline metrics", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "JU-03" });
+    await openRoute(page, "/stream", "full");
+    const taskRow = page
+      .locator('[data-qa="journal-entry-row"][data-task-id="task-a2a-demo"]')
+      .first();
+    await expect(taskRow).toBeVisible();
+    await taskRow.click();
+
+    const metrics = page.locator('[data-qa="journal-why-metrics"]');
+    await expect(metrics).toBeVisible();
+    await expect(page.locator('[data-qa="journal-phase-timeline"]')).toBeVisible();
+    await expect(page.locator('[data-qa="journal-approval-wait"]')).toContainText(
+      /Approval wait:\s*3\.5s|Onay bekledi:\s*3\.5sn/,
+    );
+    await expect(page.locator('[data-qa="journal-execution-time"]')).toContainText(
+      /Execution:\s*2\.5s|Çalışma:\s*2\.5sn/,
+    );
+    await expect(metrics).toContainText(/Total:\s*6\.0s|Toplam:\s*6\.0sn/);
+
+    const langSwitch = page.locator('[data-qa="locale-switch"]').first();
+    await langSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
+    await expect(page.locator("html")).toHaveAttribute("lang", "tr");
+    await expect(page.locator('[data-qa="journal-approval-wait"]')).toContainText(
+      /Onay bekledi:\s*3\.5sn/,
+    );
+    await expect(page.locator('[data-qa="journal-execution-time"]')).toContainText(
+      /Çalışma:\s*2\.5sn/,
+    );
+  });
+
+  test("JU-04 · /stream journal layout L1–L6 (no overflow)", async ({ page }) => {
+    test.info().annotations.push({ type: "id", description: "JU-04" });
+    await openRoute(page, "/stream", "full");
+    await expect(page.locator("[data-journal-panel]")).toBeVisible();
+    await expect(page.locator('[data-qa="journal-chain-badge"]')).toBeVisible();
+    const metrics = await assertLayoutL1toL6(page, "/stream", expect);
+    expect(metrics.l5_horizontalOverflow, "no horizontal overflow").toBe(false);
   });
 });
 
