@@ -311,6 +311,7 @@ impl ExperienceStore {
                 "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE id = ?2",
                 params![now, id],
             )?;
+            journal_experience(&conn, &id, crate::db::journal::ACTION_EXPERIENCE_REVIEWED);
             Ok(())
         })
         .await
@@ -323,10 +324,24 @@ impl ExperienceStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("experience db lock");
             let now = now_rfc3339();
+            let ids: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM experiences WHERE reviewed = 0 AND status = ?1",
+                )?;
+                let rows = stmt.query_map(params![EXPERIENCE_STATUS_ACTIVE], |row| row.get(0))?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row?);
+                }
+                out
+            };
             let n = conn.execute(
                 "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE reviewed = 0 AND status = ?2",
                 params![now, EXPERIENCE_STATUS_ACTIVE],
             )?;
+            for id in ids {
+                journal_experience(&conn, &id, crate::db::journal::ACTION_EXPERIENCE_REVIEWED);
+            }
             Ok(n as u64)
         })
         .await
@@ -348,6 +363,9 @@ impl ExperienceStore {
                     "UPDATE experiences SET reviewed = 1, reviewed_at = COALESCE(reviewed_at, ?1), updated_at = ?1 WHERE id = ?2 AND reviewed = 0 AND status = ?3",
                     params![now, id, EXPERIENCE_STATUS_ACTIVE],
                 )?;
+                if changed > 0 {
+                    journal_experience(&conn, &id, crate::db::journal::ACTION_EXPERIENCE_REVIEWED);
+                }
                 n += changed as u64;
             }
             Ok(n)
@@ -637,11 +655,13 @@ fn set_archive_blocking(conn: &Connection, id: &str, archive: bool) -> Result<()
             "UPDATE experiences SET status = ?1, archived_at = ?2, archived_by = ?3, updated_at = ?2 WHERE id = ?4",
             params![EXPERIENCE_STATUS_ARCHIVED, now, ARCHIVED_BY_USER, id],
         )?;
+        journal_experience(conn, id, crate::db::journal::ACTION_EXPERIENCE_ARCHIVED);
     } else {
         conn.execute(
             "UPDATE experiences SET status = ?1, archived_at = NULL, archived_by = NULL, updated_at = ?2 WHERE id = ?3",
             params![EXPERIENCE_STATUS_ACTIVE, now, id],
         )?;
+        journal_experience(conn, id, crate::db::journal::ACTION_EXPERIENCE_UNARCHIVED);
     }
     Ok(())
 }
@@ -652,6 +672,7 @@ fn reject_blocking(conn: &Connection, id: &str) -> Result<()> {
         "UPDATE experiences SET status = ?1, archived_at = ?2, archived_by = ?3, updated_at = ?2 WHERE id = ?4",
         params![EXPERIENCE_STATUS_ARCHIVED, now, ARCHIVED_BY_REJECTED, id],
     )?;
+    journal_experience(conn, id, crate::db::journal::ACTION_EXPERIENCE_REJECTED);
     Ok(())
 }
 
@@ -664,7 +685,27 @@ fn undo_reject_blocking(conn: &Connection, id: &str) -> Result<()> {
     if n == 0 {
         anyhow::bail!("undo_reject: row not found or not rejected");
     }
+    journal_experience(conn, id, crate::db::journal::ACTION_EXPERIENCE_UNDO_REJECTED);
     Ok(())
+}
+
+fn journal_experience(conn: &Connection, id: &str, action: &str) {
+    let project_id: Option<String> = conn
+        .query_row(
+            "SELECT project_id FROM experiences WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .ok();
+    crate::db::journal::append_journal_best_effort(
+        conn,
+        crate::db::journal::JournalAppendInput::new(
+            "ui",
+            action,
+            serde_json::json!({ "experience_id": id }).to_string(),
+        )
+        .with_project_id(project_id),
+    );
 }
 
 fn today_prefix_utc() -> String {

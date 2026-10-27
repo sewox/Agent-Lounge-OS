@@ -7,6 +7,7 @@ mod experience_governance;
 mod experience_store;
 mod experiences;
 pub mod feedback;
+mod journal;
 mod project_identity;
 mod project_index;
 mod vault_fts;
@@ -35,6 +36,18 @@ pub use experience_store::{
     fast_retrieve, get_relevant_context, knowledge_hit_triggers, FastRetrieveQuery,
 };
 pub use experiences::{column_names, default_db_path, ExperienceStore};
+pub use journal::{
+    append_journal_best_effort, append_journal_entry_conn, append_journal_entry_immediate,
+    canonical_project_id, explain_why, journal_task_lifecycle, migrate_journal, query_journal,
+    timestamp_at_offset_ms, verify_journal_chain, JournalAppendInput, JournalEntry,
+    JournalQueryFilter, JournalVerificationReport, JournalWhyReport, ACTION_CONTROL_HALTED,
+    ACTION_CONTROL_RESUMED, ACTION_EXPERIENCE_ARCHIVED, ACTION_EXPERIENCE_RECORDED,
+    ACTION_EXPERIENCE_REJECTED, ACTION_EXPERIENCE_REVIEWED, ACTION_EXPERIENCE_UNARCHIVED,
+    ACTION_EXPERIENCE_UNDO_REJECTED, ACTION_TASK_APPROVAL_APPROVED, ACTION_TASK_APPROVAL_PENDING,
+    ACTION_TASK_APPROVAL_REJECTED, ACTION_TASK_CANCELLED, ACTION_TASK_CLAIMED,
+    ACTION_TASK_COMPLETED, ACTION_TASK_EXPIRED_OR_ORPHAN, ACTION_TASK_REQUESTED,
+    DEFAULT_JOURNAL_QUERY_LIMIT, GENESIS_PREV_HASH, MAX_JOURNAL_QUERY_LIMIT,
+};
 pub use project_identity::{
     bind_write_project_id, canonicalize_repo_path, choose_display_name, migrate_project_identity,
     migrate_project_ids_to_canonical, prefer_canonical, register_path_project,

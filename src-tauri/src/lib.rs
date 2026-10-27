@@ -495,6 +495,9 @@ pub fn run_with_start_route(start_route: &'static str) {
             get_halt_state,
             halt,
             resume,
+            query_event_journal,
+            verify_event_journal,
+            explain_journal_why,
             register_desktop_deep_link,
             is_desktop_deep_link_registered
         ])
@@ -2068,6 +2071,50 @@ async fn set_graph_ui_port_mode(
         .await
         .map_err(|err| err.to_string())?;
     Ok(parsed.as_str().into())
+}
+
+/// Read-only journal query — callable while Halted.
+#[tauri::command]
+fn query_event_journal(
+    store: tauri::State<'_, ExperienceStore>,
+    task_id: Option<String>,
+    project_id: Option<String>,
+    action_type: Option<String>,
+    actor: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<db::JournalEntry>, String> {
+    store
+        .query_journal(&db::JournalQueryFilter {
+            task_id,
+            project_id,
+            action_type,
+            actor,
+            since,
+            until,
+            limit,
+        })
+        .map_err(|err| err.to_string())
+}
+
+/// Read-only hash-chain verification — callable while Halted.
+#[tauri::command]
+fn verify_event_journal(
+    store: tauri::State<'_, ExperienceStore>,
+) -> Result<db::JournalVerificationReport, String> {
+    store.verify_journal_chain().map_err(|err| err.to_string())
+}
+
+/// Causal trace / lifecycle metrics — callable while Halted.
+#[tauri::command]
+fn explain_journal_why(
+    store: tauri::State<'_, ExperienceStore>,
+    target_id: String,
+) -> Result<db::JournalWhyReport, String> {
+    store
+        .explain_why(&target_id)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

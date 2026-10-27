@@ -119,6 +119,17 @@ pub async fn halt(store: &ExperienceStore, reason: Option<String>, by: &str) -> 
     }
     let state = HaltState::active(reason, by);
     persist(store, &state).await?;
+    let reason_for_journal = state.reason.clone();
+    let actor = by.to_string();
+    if let Err(err) = store.append_journal_entry(
+        crate::db::JournalAppendInput::new(
+            actor,
+            crate::db::ACTION_CONTROL_HALTED,
+            serde_json::json!({ "reason": reason_for_journal }).to_string(),
+        ),
+    ) {
+        log::warn!("event_journal control.halted append failed: {err:#}");
+    }
     log::info!(
         "halt engaged by={} at={} reason_set={}",
         by,
@@ -135,6 +146,14 @@ pub async fn resume(store: &ExperienceStore, by: &str) -> Result<HaltState> {
     }
     let state = HaltState::cleared(by);
     persist(store, &state).await?;
+    let actor = by.to_string();
+    if let Err(err) = store.append_journal_entry(crate::db::JournalAppendInput::new(
+        actor,
+        crate::db::ACTION_CONTROL_RESUMED,
+        "{}",
+    )) {
+        log::warn!("event_journal control.resumed append failed: {err:#}");
+    }
     log::info!(
         "halt resumed by={} at={}",
         by,
@@ -196,6 +215,28 @@ mod tests {
         let state = halt(&store, Some("   ".into()), HALT_BY_UI).await.unwrap();
         assert!(state.halted);
         assert!(state.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn halt_and_resume_append_event_journal() {
+        use crate::db::{JournalQueryFilter, ACTION_CONTROL_HALTED, ACTION_CONTROL_RESUMED};
+
+        let store = ExperienceStore::memory().unwrap();
+        halt(&store, Some("journal-check".into()), HALT_BY_UI)
+            .await
+            .unwrap();
+        resume(&store, HALT_BY_UI).await.unwrap();
+
+        let entries = store
+            .query_journal(&JournalQueryFilter {
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        let actions: Vec<&str> = entries.iter().map(|e| e.action_type.as_str()).collect();
+        assert!(actions.contains(&ACTION_CONTROL_HALTED), "{actions:?}");
+        assert!(actions.contains(&ACTION_CONTROL_RESUMED), "{actions:?}");
+        assert!(store.verify_journal_chain().unwrap().valid);
     }
 
     #[test]

@@ -1611,6 +1611,26 @@ impl Dispatcher {
         };
         self.emit_approval_cleared(&task_id, clear_reason);
 
+        let journal_action = match &vote {
+            RoutingVote::Approve | RoutingVote::ApproveLocal => {
+                crate::db::ACTION_TASK_APPROVAL_APPROVED
+            }
+            RoutingVote::Deny => crate::db::ACTION_TASK_APPROVAL_REJECTED,
+        };
+        if let Ok(conn) = self.store.conn.lock() {
+            crate::db::journal_task_lifecycle(
+                &conn,
+                &task_id,
+                journal_action,
+                "ui",
+                Some(task.project_id.clone()),
+                serde_json::json!({
+                    "vote": clear_reason,
+                    "kind": format!("{:?}", request.kind),
+                }),
+            );
+        }
+
         match vote {
             RoutingVote::Approve => {
                 if is_security_approval(&request.kind) {
