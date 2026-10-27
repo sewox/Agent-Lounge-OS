@@ -195,22 +195,32 @@ fn task_id_for_hash(task_id: &Option<String>) -> &str {
     task_id.as_deref().unwrap_or("")
 }
 
+/// Fields required to build the deterministic hash preimage.
+pub struct JournalHashParts<'a> {
+    pub seq: i64,
+    pub event_id: &'a str,
+    pub timestamp: &'a str,
+    pub actor: &'a str,
+    pub action_type: &'a str,
+    pub project_id: &'a Option<String>,
+    pub task_id: &'a Option<String>,
+    pub scrubbed_payload_json: &'a str,
+    pub prev_hash: &'a str,
+}
+
 /// Deterministic canonical preimage for `entry_hash`.
-pub fn journal_entry_preimage(
-    seq: i64,
-    event_id: &str,
-    timestamp: &str,
-    actor: &str,
-    action_type: &str,
-    project_id: &Option<String>,
-    task_id: &Option<String>,
-    scrubbed_payload_json: &str,
-    prev_hash: &str,
-) -> String {
+pub fn journal_entry_preimage(parts: &JournalHashParts<'_>) -> String {
     format!(
-        "{seq}|{event_id}|{timestamp}|{actor}|{action_type}|{}|{}|{scrubbed_payload_json}|{prev_hash}",
-        project_id_for_hash(project_id),
-        task_id_for_hash(task_id),
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        parts.seq,
+        parts.event_id,
+        parts.timestamp,
+        parts.actor,
+        parts.action_type,
+        project_id_for_hash(parts.project_id),
+        task_id_for_hash(parts.task_id),
+        parts.scrubbed_payload_json,
+        parts.prev_hash,
     )
 }
 
@@ -309,17 +319,17 @@ pub fn append_journal_entry_conn(
         }
     };
 
-    let preimage = journal_entry_preimage(
+    let preimage = journal_entry_preimage(&JournalHashParts {
         seq,
-        &event_id,
-        &timestamp,
-        &actor,
-        &action_type,
-        &project_id,
-        &task_id,
-        &payload_json,
-        &prev_hash,
-    );
+        event_id: &event_id,
+        timestamp: &timestamp,
+        actor: &actor,
+        action_type: &action_type,
+        project_id: &project_id,
+        task_id: &task_id,
+        scrubbed_payload_json: &payload_json,
+        prev_hash: &prev_hash,
+    });
     let entry_hash = compute_entry_hash(&preimage);
 
     conn.execute(
@@ -382,11 +392,10 @@ pub fn verify_journal_chain(conn: &Connection) -> Result<JournalVerificationRepo
     let rows = stmt.query_map([], map_row)?;
 
     let mut checked = 0usize;
-    let mut expected_seq: i64 = 1;
     let mut expected_prev = GENESIS_PREV_HASH.to_string();
     let mut head_hash: Option<String> = None;
 
-    for row in rows {
+    for (expected_seq, row) in (1_i64..).zip(rows) {
         let entry = row?;
         checked += 1;
 
@@ -418,17 +427,17 @@ pub fn verify_journal_chain(conn: &Connection) -> Result<JournalVerificationRepo
             });
         }
 
-        let preimage = journal_entry_preimage(
-            entry.seq,
-            &entry.event_id,
-            &entry.timestamp,
-            &entry.actor,
-            &entry.action_type,
-            &entry.project_id,
-            &entry.task_id,
-            &entry.payload_json,
-            &entry.prev_hash,
-        );
+        let preimage = journal_entry_preimage(&JournalHashParts {
+            seq: entry.seq,
+            event_id: &entry.event_id,
+            timestamp: &entry.timestamp,
+            actor: &entry.actor,
+            action_type: &entry.action_type,
+            project_id: &entry.project_id,
+            task_id: &entry.task_id,
+            scrubbed_payload_json: &entry.payload_json,
+            prev_hash: &entry.prev_hash,
+        });
         let expected_hash = compute_entry_hash(&preimage);
         if entry.entry_hash != expected_hash {
             return Ok(JournalVerificationReport {
@@ -443,7 +452,6 @@ pub fn verify_journal_chain(conn: &Connection) -> Result<JournalVerificationRepo
 
         expected_prev = entry.entry_hash.clone();
         head_hash = Some(entry.entry_hash);
-        expected_seq += 1;
     }
 
     Ok(JournalVerificationReport {
@@ -653,17 +661,17 @@ fn verify_returned_chain_slice(events: &[JournalEntry]) -> bool {
         // but each entry's hash must match recomputation.
     }
     for e in events {
-        let preimage = journal_entry_preimage(
-            e.seq,
-            &e.event_id,
-            &e.timestamp,
-            &e.actor,
-            &e.action_type,
-            &e.project_id,
-            &e.task_id,
-            &e.payload_json,
-            &e.prev_hash,
-        );
+        let preimage = journal_entry_preimage(&JournalHashParts {
+            seq: e.seq,
+            event_id: &e.event_id,
+            timestamp: &e.timestamp,
+            actor: &e.actor,
+            action_type: &e.action_type,
+            project_id: &e.project_id,
+            task_id: &e.task_id,
+            scrubbed_payload_json: &e.payload_json,
+            prev_hash: &e.prev_hash,
+        });
         if compute_entry_hash(&preimage) != e.entry_hash {
             return false;
         }

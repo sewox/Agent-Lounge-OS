@@ -2077,24 +2077,10 @@ async fn set_graph_ui_port_mode(
 #[tauri::command]
 fn query_event_journal(
     store: tauri::State<'_, ExperienceStore>,
-    task_id: Option<String>,
-    project_id: Option<String>,
-    action_type: Option<String>,
-    actor: Option<String>,
-    since: Option<String>,
-    until: Option<String>,
-    limit: Option<usize>,
+    filter: db::JournalQueryFilter,
 ) -> Result<Vec<db::JournalEntry>, String> {
     store
-        .query_journal(&db::JournalQueryFilter {
-            task_id,
-            project_id,
-            action_type,
-            actor,
-            since,
-            until,
-            limit,
-        })
+        .query_journal(&filter)
         .map_err(|err| err.to_string())
 }
 
