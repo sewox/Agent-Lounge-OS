@@ -39,13 +39,13 @@ import {
   HALT_CHANGED_EVENT,
   DEEP_LINK_OPEN_EVENT,
   type ApprovalRequest,
-  type DecisionGateStatus,
   type HaltState,
   type ServiceHealth,
   type ToolQuota,
 } from "@/lib/lounge";
 import { useAlertdialogFocusTrap } from "@/hooks/use-alertdialog-focus-trap";
 import { usePlatform } from "@/hooks/use-platform";
+import { layaDaemonLabel } from "@/lib/laya-daemon-label";
 import { paletteShortcutLabel } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -103,7 +103,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     approvalError,
     decisionGate,
     layaEngine,
-    decisionTelemetry,
     applyModel,
     enableLaya,
     declineLaya,
@@ -371,7 +370,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           data-approval-chrome="security"
         >
           <div className="relative z-[61] w-full max-w-md border border-error-container bg-surface-container-high p-5 shadow-lg pointer-events-auto">
-            <p className="font-body text-meta font-bold tracking-label text-error-dim uppercase">
+            <p
+              lang="en"
+              className="font-body text-meta font-bold tracking-label text-error-dim uppercase"
+            >
               Security · {approval.kind === "security_risky" ? "Risky" : "Critical"} ·
               PENDING_APPROVAL{countdownLabel}
             </p>
@@ -415,7 +417,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           data-approval-chrome="quota"
         >
           <div className="relative z-[61] w-full max-w-md border border-outline-variant bg-surface-container-high p-5 shadow-lg pointer-events-auto">
-            <p className="font-body text-meta font-bold tracking-label text-tertiary uppercase">
+            <p
+              lang="en"
+              className="font-body text-meta font-bold tracking-label text-tertiary uppercase"
+            >
               Quota Alert · QUOTA_BLOCKED{countdownLabel}
             </p>
             <h2
@@ -808,6 +813,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-3 px-4 font-body text-body">
             <div className="min-w-0 flex-1 whitespace-normal break-words leading-normal">
               <span
+                lang="en"
                 className={`font-semibold tracking-label uppercase ${
                   decisionGate.phase === "failed" ? "text-on-error-container" : "text-on-surface"
                 }`}
@@ -826,14 +832,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                   onClick={() => void enableLaya()}
                   className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed`}
                 >
-                  Laya&apos;ya geç
+                  {t("switchToLaya")}
                 </button>
                 <button
                   type="button"
                   onClick={() => void declineLaya()}
                   className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
                 >
-                  Şimdilik LMR
+                  {t("keepLmr")}
                 </button>
               </div>
             ) : decisionGate.phase === "failed" ? (
@@ -843,14 +849,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                   onClick={() => void enableLaya()}
                   className={`${BANNER_BTN} bg-primary-container font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed`}
                 >
-                  Yeniden dene
+                  {t("retry")}
                 </button>
                 <button
                   type="button"
                   onClick={() => setLayaDismissed(true)}
                   className={`${BANNER_BTN} border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
                 >
-                  Gizle
+                  {t("hide")}
                 </button>
               </div>
             ) : (
@@ -859,7 +865,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onClick={() => setLayaDismissed(true)}
                 className={`${BANNER_BTN} shrink-0 border border-outline-variant bg-surface-container-high text-on-surface hover:bg-surface-bright`}
               >
-                Gizle
+                {t("hide")}
               </button>
             )}
           </div>
@@ -868,23 +874,32 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       ) : null}
 
-      <header className="fixed top-0 left-0 z-40 flex h-12 w-full min-w-0 items-center gap-2 border-b border-outline-variant bg-surface px-3">
-        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-          <div className="flex min-w-0 items-center gap-2 border-r border-outline-variant pr-2">
+      <header
+        data-qa="app-header"
+        className="fixed top-0 left-0 z-40 flex h-12 w-full min-w-0 items-center gap-1.5 overflow-hidden border-b border-outline-variant bg-surface px-2 sm:gap-2 sm:px-3"
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:gap-2">
+          <div className="flex min-w-0 items-center gap-1.5 border-r border-outline-variant pr-1.5 sm:gap-2 sm:pr-2">
             <BrandMark size={22} />
-            <span className="truncate font-headline text-panel font-bold tracking-tight uppercase">
+            <span
+              lang="en"
+              className="truncate font-headline text-panel font-bold tracking-tight uppercase"
+            >
               Agent Lounge OS
             </span>
-            <span className="hidden shrink-0 rounded border border-outline-variant bg-surface-container-high px-1 py-0.5 font-body text-meta tracking-label text-primary uppercase 2xl:inline">
+            <span
+              lang="en"
+              className="hidden shrink-0 rounded border border-outline-variant bg-surface-container-high px-1 py-0.5 font-body text-meta tracking-label text-primary uppercase 2xl:inline"
+            >
               KERNEL
             </span>
           </div>
           <div className="hidden min-w-0 items-center gap-1.5 overflow-hidden font-body text-body text-on-surface-variant 2xl:flex">
             {onboarding ? (
-              <span>Overview</span>
+              <span>{t("overview")}</span>
             ) : (
               <Link href="/dashboard" className="shrink-0 hover:text-on-surface">
-                Overview
+                {t("overview")}
               </Link>
             )}
             <span className="shrink-0 text-outline">/</span>
@@ -892,10 +907,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
           {onboarding ? (
             <p className="min-w-0 flex-1 truncate font-body text-body text-on-surface-variant">
-              Yerel araçları tarayıp Lounge’a bağlayın
+              {t("onboardingSubtitle")}
             </p>
           ) : (
-            <label className="relative hidden min-w-0 max-w-sm flex-1 xl:block">
+            <label className="relative hidden min-w-0 max-w-[14rem] flex-1 xl:block 2xl:max-w-sm">
               <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-outline">
                 <Icon name="search" />
               </span>
@@ -909,20 +924,23 @@ export function AppShell({ children }: { children: ReactNode }) {
                   }
                 }}
                 className="w-full min-w-0 rounded-lg border border-outline-variant bg-surface-container-low py-1.5 pr-3 pl-8 font-body text-body text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
-                placeholder="Filter subjects, repos, experiences"
+                placeholder={t("searchPlaceholder")}
               />
             </label>
           )}
         </div>
 
-        <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+        <div
+          data-qa="header-actions"
+          className="flex max-w-[min(100%,42rem)] min-w-0 shrink items-center justify-end gap-1 overflow-hidden sm:gap-1.5"
+        >
           {onboarding ? null : (
             <>
               <button
                 type="button"
                 data-qa="halt-toggle"
                 onClick={() => setHaltDialog(haltChrome ? "resume" : "halt")}
-                className={`flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold ${
+                className={`flex shrink-0 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs font-semibold sm:px-2.5 ${
                   haltChrome
                     ? "border-error bg-error-container text-on-error-container hover:bg-error/20"
                     : "border-outline-variant bg-surface-container-high text-on-surface hover:border-error hover:text-error-dim"
@@ -936,12 +954,15 @@ export function AppShell({ children }: { children: ReactNode }) {
               </button>
               <button
                 type="button"
+                data-qa="command-palette-btn"
                 onClick={() => setOpenCommandPalette(true)}
                 className="flex shrink-0 items-center rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 hover:border-primary"
-                title="Command Palette"
-                aria-label="Open command palette"
+                title={t("commandPalette")}
+                aria-label={t("openCommandPalette")}
               >
-                <kbd className="font-mono text-meta text-on-surface-variant">{shortcutLabel}</kbd>
+                <kbd lang="en" className="font-mono text-meta text-on-surface-variant">
+                  {shortcutLabel}
+                </kbd>
               </button>
               <ModelSelect
                 model={model}
@@ -951,6 +972,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 onChange={(next) => void applyModel(next)}
               />
               <div
+                lang="en"
                 className={`hidden items-center gap-1 rounded border px-2 py-0.5 font-mono text-body 2xl:flex ${
                   serviceDegraded
                     ? "border-error-container bg-error-container/20 text-error-dim"
@@ -960,10 +982,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                 }`}
                 title={
                   serviceDegraded
-                    ? `Service Degraded · ${degradedNames.join(", ")}`
+                    ? `${t("serviceDegraded")} · ${degradedNames.join(", ")}`
                     : report?.nats.running
-                      ? "NATS bağlı"
-                      : "NATS kapalı"
+                      ? t("natsConnected")
+                      : t("natsDown")
                 }
               >
                 <span
@@ -971,18 +993,28 @@ export function AppShell({ children }: { children: ReactNode }) {
                     serviceDegraded ? "animate-pulse bg-error" : report?.nats.running ? "bg-secondary" : "bg-error"
                   }`}
                 />
-                <span>{serviceDegraded ? "DEGRADED" : "NATS"}</span>
+                <span>{serviceDegraded ? t("degraded") : "NATS"}</span>
               </div>
               <QuotaHeaderBadge quotas={quotas} LinkComponent={QuotaBadgeLink} />
-              <div className="tnum hidden shrink-0 text-body text-on-surface-variant 2xl:block">{clock} UTC+3</div>
+              <div
+                lang="en"
+                className="tnum hidden shrink-0 text-body text-on-surface-variant 2xl:block"
+              >
+                {clock} UTC+3
+              </div>
               <button
                 type="button"
+                data-qa="index-workspace-btn"
                 onClick={() => void indexWorkspace()}
                 disabled={indexing}
-                className="flex shrink-0 items-center gap-1 rounded-lg bg-primary-container px-2.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60"
+                aria-label={indexing ? t("scanning") : t("indexWorkspace")}
+                title={indexing ? t("scanning") : t("indexWorkspace")}
+                className="flex shrink-0 items-center gap-1 rounded-lg bg-primary-container px-1.5 py-1 text-xs font-semibold text-on-primary-container hover:bg-primary-dim hover:text-on-primary-fixed disabled:opacity-60 sm:px-2.5"
               >
                 <Icon name="terminal" />
-                <span className="whitespace-nowrap">{indexing ? t("scanning") : t("indexWorkspace")}</span>
+                <span className="max-w-[9rem] truncate whitespace-nowrap max-[1080px]:sr-only xl:max-w-none">
+                  {indexing ? t("scanning") : t("indexWorkspace")}
+                </span>
               </button>
             </>
           )}
@@ -990,6 +1022,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="relative shrink-0" ref={alertRef}>
             <button
               type="button"
+              data-qa="alert-history-btn"
               className="rounded-lg p-1 text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
               title={t("alertHistory")}
               aria-label={t("alertHistory")}
@@ -1015,7 +1048,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                   <ul className="max-h-64 divide-y divide-outline-variant/40 overflow-auto py-1">
                     {criticalAlerts.map((alert) => (
                       <li key={alert.id} className="px-3 py-2">
-                        <div className="font-mono text-meta font-semibold tracking-wider text-error-dim uppercase">
+                        <div
+                          lang="en"
+                          className="font-mono text-meta font-semibold tracking-wider text-error-dim uppercase"
+                        >
                           {alert.kind}
                         </div>
                         <div className="mt-0.5 font-body text-body text-on-surface">{alert.message}</div>
@@ -1032,17 +1068,20 @@ export function AppShell({ children }: { children: ReactNode }) {
       {onboarding ? null : (
       <aside
         data-qa="sidebar"
-        className="fixed top-12 bottom-0 left-0 z-30 flex w-[var(--sidebar-w)] flex-col justify-between overflow-y-auto border-r border-outline-variant bg-surface-container-low px-2 py-3"
+        className="fixed top-12 bottom-0 left-0 z-30 flex w-[var(--sidebar-w)] flex-col justify-start gap-4 overflow-y-auto border-r border-outline-variant bg-surface-container-low px-2 py-3"
       >
         <div className="space-y-4">
           <div className="border-b border-outline-variant/60 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-2">
               <BrandMark size={20} />
               <div className="min-w-0">
-                <div className="truncate font-headline text-panel font-black tracking-label text-on-surface uppercase">
+                <div
+                  lang="en"
+                  className="truncate font-headline text-panel font-black tracking-label text-on-surface uppercase"
+                >
                   {t("brand")}
                 </div>
-                <div className="font-mono text-meta text-on-surface-variant">
+                <div lang="en" className="font-mono text-meta text-on-surface-variant">
                   v0.1.0 · {serviceDegraded ? "degraded" : kernel}
                 </div>
               </div>
@@ -1113,7 +1152,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </nav>
         </div>
 
-        <div className="space-y-3 border-t border-outline-variant/60 pt-3 pb-10">
+        <div
+          data-qa="sidebar-footer"
+          className="mt-auto space-y-3 border-t border-outline-variant/60 pt-3 pb-10 [@media(min-height:60rem)]:mt-6"
+        >
           {haltState.halted || haltLoadError ? (
             <div
               className="flex flex-col gap-1 px-1"
@@ -1135,7 +1177,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               data-qa="sidebar-service-degraded"
             >
               <div className="font-bold tracking-wider uppercase">{t("serviceDegraded")}</div>
-              <div className="mt-0.5 truncate text-on-surface-variant">
+              <div lang="en" className="mt-0.5 truncate text-on-surface-variant">
                 {degradedNames.join(" · ")} {t("downLabel")}
               </div>
             </div>
@@ -1147,7 +1189,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               <div className="font-bold tracking-wider uppercase">{t("serviceOptional")}</div>
               <div className="mt-0.5 truncate">
-                {optionalMissing.join(" · ")} · {t("notInstalled")}
+                <span lang="en">{optionalMissing.join(" · ")}</span> · {t("notInstalled")}
               </div>
             </div>
           ) : null}
@@ -1170,8 +1212,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               />
             ))}
             <div
-              className="flex items-center justify-between font-mono text-body"
+              className="flex min-w-0 items-center justify-between gap-1 font-mono text-body"
               title={decisionGate?.message ?? "OpenJev Laya"}
+              data-qa="laya-daemon-row"
             >
               <div className="flex min-w-0 items-center gap-2">
                 <Pip
@@ -1184,10 +1227,13 @@ export function AppShell({ children }: { children: ReactNode }) {
                         : "warn"
                   }
                 />
-                <span className="text-on-surface">OpenJev Laya</span>
+                <span lang="en" className="truncate text-on-surface">
+                  OpenJev Laya
+                </span>
               </div>
               <span
-                className={`tnum ${
+                data-qa="laya-daemon-status"
+                className={`tnum min-w-0 truncate text-right ${
                   decisionGate?.phase === "ready"
                     ? "text-secondary"
                     : decisionGate?.phase === "failed"
@@ -1195,7 +1241,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                       : "text-on-surface-variant"
                 }`}
               >
-                {layaDaemonLabel(decisionGate, decisionTelemetry?.latency_ms)}
+                {layaDaemonLabel(decisionGate, t)}
               </span>
             </div>
           </div>
@@ -1293,19 +1339,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function modelPickerLabel(kernel: string, lmrUp: boolean, count: number): string {
-  if (kernel === "idle" || kernel === "booting") {
-    return "Modeller…";
-  }
-  if (!lmrUp) {
-    return "LMR kapalı";
-  }
-  if (count === 0) {
-    return "Kurulu model yok";
-  }
-  return "Model seç";
-}
-
 function shortModelName(name: string): string {
   const trimmed = name.replace(/^hf\.co\//, "");
   const slash = trimmed.lastIndexOf("/");
@@ -1325,20 +1358,29 @@ function ModelSelect({
   kernel: string;
   onChange: (next: string) => void;
 }) {
+  const { t } = useTranslation("shell");
   const usable = lmrUp && models.length > 0;
   const selected = models.includes(model) ? model : "";
-  const label = modelPickerLabel(kernel, lmrUp, models.length);
+  const label =
+    kernel === "idle" || kernel === "booting"
+      ? t("modelPickerLoading")
+      : !lmrUp
+        ? t("modelPickerLmrDown")
+        : models.length === 0
+          ? t("modelPickerEmpty")
+          : t("modelPickerSelect");
 
   return (
     <label
-      className="flex min-w-0 max-w-[11rem] items-center gap-1.5 rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 font-mono text-body text-on-surface-variant xl:max-w-[18rem]"
+      className="flex min-w-0 max-w-[7.5rem] items-center gap-1 rounded border border-outline-variant bg-surface-container-high px-1.5 py-0.5 font-mono text-body text-on-surface-variant sm:max-w-[11rem] sm:gap-1.5 sm:px-2 xl:max-w-[14rem]"
       title={selected || label}
     >
       <span
         className={`h-1.5 w-1.5 shrink-0 rounded-full ${usable ? "animate-pulse bg-primary" : "bg-outline"}`}
       />
       <select
-        aria-label="Kullanılan LMR modeli"
+        lang="en"
+        aria-label={t("modelPickerAria")}
         value={selected}
         disabled={!usable}
         onChange={(event) => onChange(event.target.value)}
@@ -1355,28 +1397,6 @@ function ModelSelect({
       </select>
     </label>
   );
-}
-
-function layaDaemonLabel(
-  status: DecisionGateStatus | null,
-  latencyMs?: number | null,
-): string {
-  if (!status) {
-    return "Disconnected";
-  }
-  if (status.phase === "ready") {
-    if (latencyMs != null && Number.isFinite(latencyMs)) {
-      return `${latencyMs.toFixed(1)}ms`;
-    }
-    return status.device || "Running";
-  }
-  if (status.phase === "loading") {
-    return "Checking…";
-  }
-  if (status.phase === "available") {
-    return "önerildi";
-  }
-  return "Disconnected";
 }
 
 type AlertRow = { id: string; kind: string; message: string };
@@ -1459,7 +1479,9 @@ function DaemonRow({
     <div className="space-y-0.5 font-mono text-body" title={name} data-qa={`daemon-${shortName}`}>
       <div className="flex min-w-0 items-center gap-2">
         <Pip tone={daemonTone(health)} />
-        <span className="min-w-0 truncate text-on-surface">{shortName}</span>
+        <span lang="en" className="min-w-0 truncate text-on-surface">
+          {shortName}
+        </span>
       </div>
       <div className="ml-4 space-y-0.5">
         <div

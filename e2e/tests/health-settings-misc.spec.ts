@@ -785,7 +785,7 @@ test.describe("AP / CP / misc", () => {
     await expect(page.locator('[data-qa="fleet-orchestration"]')).toBeVisible();
     await expect(page.locator('[data-qa="orchestrated-label"]').first()).toBeVisible();
     await expect(page.locator('[data-qa="orchestrated-label"]').first()).toHaveText(
-      /Orchestrated/i,
+      /Orchestrated|Orkestre/i,
     );
     const orchestratedRow = page.locator('[data-qa="fleet-session-row"][data-orchestrated="true"]');
     await expect(orchestratedRow.first()).toBeVisible();

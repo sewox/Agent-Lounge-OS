@@ -11,7 +11,7 @@
   "colTool": "Araç",
   "colKind": "Tür",
   "colUnit": "Birim",
-  "colUsedLimit": "Kullanılan / Limit",
+  "colUsedLimit": "Kullanılan / üst sınır",
   "colRemainingHosts": "Kalan / Hostlar",
   "colReset": "Sıfırlama",
   "colState": "Durum",

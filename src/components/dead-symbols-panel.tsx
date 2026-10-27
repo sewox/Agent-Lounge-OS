@@ -320,7 +320,10 @@ export function DeadSymbolsPanel({
                           {formatSymbolFileLine(symbol)}
                         </div>
                       </div>
-                      <span className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error">
+                      <span
+                        lang="en"
+                        className="shrink-0 rounded border border-error/40 px-1 text-meta uppercase text-error"
+                      >
                         {symbol.kind || "dead"}
                       </span>
                     </button>
@@ -461,7 +464,9 @@ function SymbolDetail({
         <>
           <div className="min-h-0 flex-1 space-y-2 overflow-auto font-body text-body">
             <div>
-              <div className="font-mono text-meta uppercase text-outline">{symbol.kind}</div>
+              <div lang="en" className="font-mono text-meta uppercase text-outline">
+                {symbol.kind}
+              </div>
               <div className="break-words font-mono text-panel font-semibold text-error">
                 {symbol.name}
               </div>
@@ -498,10 +503,18 @@ function SymbolDetail({
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
+  const technicalLabel = /^(last_ref|PID|ID|API|CLI|MCP|JSON|NATS|LMR|OS)$/i.test(label);
   return (
     <div>
-      <div className="font-mono text-meta uppercase tracking-wider text-outline">{label}</div>
-      <div className="break-all font-mono text-body text-on-surface">{value}</div>
+      <div
+        lang={technicalLabel ? "en" : undefined}
+        className="font-mono text-meta uppercase tracking-wider text-outline"
+      >
+        {label}
+      </div>
+      <div lang="en" className="break-all font-mono text-body text-on-surface">
+        {value}
+      </div>
     </div>
   );
 }

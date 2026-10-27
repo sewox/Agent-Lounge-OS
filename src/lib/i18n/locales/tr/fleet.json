@@ -44,7 +44,7 @@
   "decisionGate": "DecisionGate",
   "decisionGateOff": "DecisionGate kapalı",
   "orchestrationTitle": "Oturumlar ve arka plan görevleri",
-  "orchestrated": "Orchestrated",
+  "orchestrated": "Orkestre",
   "noSessions": "Ajan oturumu yok",
   "noBackgroundTasks": "Arka plan görevi yok",
   "backgroundTasksCount": "{{count}} arka plan",

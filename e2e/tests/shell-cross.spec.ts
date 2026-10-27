@@ -114,6 +114,19 @@ test.describe("SH — global shell", () => {
     expect(text).not.toMatch(/\n\s*—\s*\n/);
   });
 
+  test("SH-07b · Laya ready label is Running · Metal (EN) / Çalışıyor · Metal (TR)", async ({
+    page,
+  }) => {
+    await openRoute(page, "/dashboard", "full");
+    const laya = page.locator('[data-qa="laya-daemon-status"]');
+    await expect(laya).toBeVisible();
+    await expect(laya).toHaveText(/Running · Metal/);
+    const headerSwitch = page.locator('[data-qa="locale-switch"]').first();
+    await headerSwitch.getByRole("radio", { name: /TR|Türkçe|Turkish/i }).click();
+    await page.waitForTimeout(300);
+    await expect(laya).toHaveText(/Çalışıyor · Metal/);
+  });
+
   test("SH-08 · no header/sidebar overflow (L5)", async ({ page }) => {
     await openRoute(page, "/dashboard", "full");
     const m = await measureLayout(page, "/dashboard");
@@ -122,15 +135,26 @@ test.describe("SH — global shell", () => {
       name: /Index Workspace|Çalışma Alanını Tara/i,
     });
     await expect(indexBtn, "Index Workspace control must exist").toBeVisible();
+    await expect(page.locator('[data-qa="halt-toggle"]')).toBeVisible();
+    await expect(page.locator('[data-qa="index-workspace-btn"]')).toBeVisible();
+    await expect(page.locator('[data-qa="locale-switch"]')).toBeVisible();
+    await expect(page.locator('[data-qa="alert-history-btn"]')).toBeVisible();
+    const headerOverflow = await page.evaluate(() => {
+      const header = document.querySelector('[data-qa="app-header"]') as HTMLElement | null;
+      const bell = document.querySelector('[data-qa="alert-history-btn"]') as HTMLElement | null;
+      if (!header || !bell) return true;
+      const headerOverflowing = header.scrollWidth > header.clientWidth + 1;
+      const br = bell.getBoundingClientRect();
+      const bellOffscreen = br.right > window.innerWidth + 0.5 || br.left < -0.5;
+      return headerOverflowing || bellOffscreen;
+    });
     const indexOverflow = await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll("button")).find((b) =>
-        /Index Workspace|Çalışma Alanını Tara/i.test(b.textContent || ""),
-      );
+      const btn = document.querySelector('[data-qa="index-workspace-btn"]') as HTMLElement | null;
       if (!btn) return true;
       const br = btn.getBoundingClientRect();
       return br.right > window.innerWidth + 0.5 || br.left < -0.5;
     });
-    expect(m.l5_pass && !indexOverflow).toBe(true);
+    expect(m.l5_pass && !indexOverflow && !headerOverflow).toBe(true);
   });
 });
 
@@ -204,10 +228,27 @@ test.describe("X — cross-cutting", () => {
     await page.waitForTimeout(300);
     const lang = await page.locator("html").getAttribute("lang");
     expect(lang).toBe("tr");
-    const text = await page.locator("body").innerText();
-    const matches = text.match(/TİME|SEMANTİC|ROUTİNG|ACTİVE|CRİTİCAL|DECİSİON|FİLTER|LİMİT|KİND/g);
-    const dotted = Boolean(matches?.length);
-    expect(dotted, `dotted-İ labels with lang=${lang}: ${matches?.join(",") ?? ""}`).toBe(false);
+    const routes = [
+      "/dashboard",
+      "/stream",
+      "/health",
+      "/fleet",
+      "/telemetry",
+      "/quotas",
+      "/settings",
+    ];
+    const corruptRe =
+      /APİ|PİD|SQLİTE|CLİ|ECHOMİND|İNFO|TİME|SEMANTİC|ROUTİNG|ACTİVE|CRİTİCAL|DECİSİON|FİLTER|LİMİT|KİND|SERVİCE/;
+    for (const route of routes) {
+      await openRoute(page, route, "full");
+      await expect(page.locator("html")).toHaveAttribute("lang", "tr");
+      const text = await page.locator("body").innerText();
+      const matches = text.match(new RegExp(corruptRe.source, "g"));
+      expect(
+        matches ?? [],
+        `dotted-İ technical labels on ${route}: ${matches?.join(",") ?? ""}`,
+      ).toEqual([]);
+    }
     // Stronger than body regex alone: Latin chrome must keep lang="en" so CSS
     // text-transform:uppercase stays locale-neutral under <html lang="tr">.
     await expect(page.locator('[lang="en"]').first()).toBeVisible();
@@ -218,7 +259,7 @@ test.describe("X — cross-cutting", () => {
     // Assert the *rendered* text (post CSS), not String.toLocaleUpperCase("tr-TR")
     // which always applies Turkish rules regardless of the element's lang.
     const dottedRendered = renderedLatin.filter((s) =>
-      /TİME|SERVİCE|SEMANTİC|ROUTİNG|ACTİVE/.test(s),
+      /TİME|SERVİCE|SEMANTİC|ROUTİNG|ACTİVE|APİ|PİD|SQLİTE|CLİ|ECHOMİND|İNFO/.test(s),
     );
     expect(dottedRendered, `dotted-İ in lang=en chrome: ${dottedRendered.join("|")}`).toEqual([]);
   });
