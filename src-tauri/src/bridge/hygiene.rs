@@ -56,6 +56,10 @@ fn re_home_path() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // /Users/<u>, /home/<u>, /var/home/<u>, C:\Users\<u>, C:/Users/<u>
+        // Also matches when embedded in `file://` URIs (e.g. file:///Users/<u>/…,
+        // file:///home/<u>/…, file:///C:/Users/<u>/…, file://C:/Users/<u>/…) so the
+        // username is replaced with `<home>` and never persists in experience /
+        // MCP / journal payloads.
         // `/root` is handled separately in [`redact_unix_root_home`] (no lookaround;
         // must not touch `/rootfs`).
         Regex::new(concat!(
@@ -419,6 +423,43 @@ mod tests {
         );
         assert!(!rootfs.text.starts_with("<home>fs"), "{}", rootfs.text);
         assert_eq!(rootfs.text, "/rootfs/var/lib/data");
+    }
+
+    #[test]
+    fn masks_file_uri_home_paths() {
+        // Home roots embedded after `file://` must not leak usernames into
+        // experience records, MCP payloads, or event_journal.
+        let cases = [
+            (
+                "file:///Users/alice/proj/secret",
+                "alice",
+                "file://<home>/proj/secret",
+            ),
+            ("file:///home/bob/dev", "bob", "file://<home>/dev"),
+            (
+                "file:///C:/Users/charlie/docs",
+                "charlie",
+                "file:///<home>/docs",
+            ),
+            (
+                "file://C:/Users/charlie/docs",
+                "charlie",
+                "file://<home>/docs",
+            ),
+        ];
+        for (sample, user, expected) in cases {
+            let r = scrub(sample);
+            assert!(r.masked, "expected mask for {sample}");
+            assert_eq!(r.text, expected, "{sample}");
+            assert!(r.text.contains("<home>"), "{sample} → {}", r.text);
+            assert!(
+                !r.text.contains(user),
+                "username leaked in {sample} → {}",
+                r.text
+            );
+            assert!(!r.text.contains("/Users/"), "{sample} → {}", r.text);
+            assert!(!r.text.contains("/home/"), "{sample} → {}", r.text);
+        }
     }
 
     #[test]

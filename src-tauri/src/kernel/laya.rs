@@ -343,8 +343,6 @@ impl MultiHead {
         let chunks = qkv.chunk(3, D::Minus1)?;
         // candle-core CPU matmul rejects non-contiguous batch strides after
         // head/sequence transpose when nhead > 1 and seq_len > 1.
-        // candle-core CPU matmul rejects non-contiguous batch strides after
-        // head/sequence transpose when nhead > 1 and seq_len > 1.
         let to_heads = |t: Tensor| -> CandleResult<Tensor> {
             t.reshape((b, s, self.nhead, head))?
                 .transpose(1, 2)?
