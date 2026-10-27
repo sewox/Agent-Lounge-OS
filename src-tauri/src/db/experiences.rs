@@ -812,12 +812,7 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 .to_string(),
             )
             .with_project_id(Some(record.project_id.clone()))
-            .with_task_id(
-                record
-                    .related_task_id
-                    .clone()
-                    .unwrap_or_default(),
-            ),
+            .with_task_id(record.related_task_id.clone().unwrap_or_default()),
         );
     }
     Ok(())

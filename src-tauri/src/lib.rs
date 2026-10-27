@@ -2079,9 +2079,7 @@ fn query_event_journal(
     store: tauri::State<'_, ExperienceStore>,
     filter: db::JournalQueryFilter,
 ) -> Result<Vec<db::JournalEntry>, String> {
-    store
-        .query_journal(&filter)
-        .map_err(|err| err.to_string())
+    store.query_journal(&filter).map_err(|err| err.to_string())
 }
 
 /// Read-only hash-chain verification — callable while Halted.
@@ -2098,9 +2096,7 @@ fn explain_journal_why(
     store: tauri::State<'_, ExperienceStore>,
     target_id: String,
 ) -> Result<db::JournalWhyReport, String> {
-    store
-        .explain_why(&target_id)
-        .map_err(|err| err.to_string())
+    store.explain_why(&target_id).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

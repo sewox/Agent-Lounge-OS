@@ -540,9 +540,7 @@ fn duration_ms(a: DateTime<chrono::FixedOffset>, b: DateTime<chrono::FixedOffset
 pub fn compute_approval_wait_ms(events: &[JournalEntry]) -> u64 {
     let mut total = 0u64;
     let mut pending_at: Option<DateTime<chrono::FixedOffset>> = None;
-    let last_ts = events
-        .last()
-        .and_then(|e| parse_rfc3339_ms(&e.timestamp));
+    let last_ts = events.last().and_then(|e| parse_rfc3339_ms(&e.timestamp));
 
     for e in events {
         match e.action_type.as_str() {
@@ -552,7 +550,8 @@ pub fn compute_approval_wait_ms(events: &[JournalEntry]) -> u64 {
             ACTION_TASK_APPROVAL_APPROVED
             | ACTION_TASK_APPROVAL_REJECTED
             | ACTION_TASK_CANCELLED => {
-                if let (Some(start), Some(end)) = (pending_at.take(), parse_rfc3339_ms(&e.timestamp))
+                if let (Some(start), Some(end)) =
+                    (pending_at.take(), parse_rfc3339_ms(&e.timestamp))
                 {
                     total = total.saturating_add(duration_ms(start, end));
                 }
@@ -834,7 +833,10 @@ mod tests {
         let report = store.verify_journal_chain().unwrap();
         assert!(!report.valid);
         assert_eq!(report.broken_at_seq, Some(2));
-        assert_eq!(report.broken_event_id.as_deref(), Some(e2.event_id.as_str()));
+        assert_eq!(
+            report.broken_event_id.as_deref(),
+            Some(e2.event_id.as_str())
+        );
     }
 
     #[test]
@@ -851,15 +853,16 @@ mod tests {
             .unwrap();
 
         store
-            .exec_sql_for_tests(
-                "UPDATE event_journal SET prev_hash = 'deadbeef' WHERE seq = 3",
-            )
+            .exec_sql_for_tests("UPDATE event_journal SET prev_hash = 'deadbeef' WHERE seq = 3")
             .unwrap();
 
         let report = store.verify_journal_chain().unwrap();
         assert!(!report.valid);
         assert_eq!(report.broken_at_seq, Some(3));
-        assert_eq!(report.broken_event_id.as_deref(), Some(e3.event_id.as_str()));
+        assert_eq!(
+            report.broken_event_id.as_deref(),
+            Some(e3.event_id.as_str())
+        );
     }
 
     #[test]
@@ -882,7 +885,10 @@ mod tests {
         let report = store.verify_journal_chain().unwrap();
         assert!(!report.valid);
         assert_eq!(report.broken_at_seq, Some(3));
-        assert_eq!(report.broken_event_id.as_deref(), Some(e3.event_id.as_str()));
+        assert_eq!(
+            report.broken_event_id.as_deref(),
+            Some(e3.event_id.as_str())
+        );
     }
 
     #[test]
@@ -920,7 +926,9 @@ mod tests {
         let dump: String = {
             let conn = store.conn.lock().expect("lock");
             let mut stmt = conn
-                .prepare("SELECT payload_json || '|' || entry_hash || '|' || actor FROM event_journal")
+                .prepare(
+                    "SELECT payload_json || '|' || entry_hash || '|' || actor FROM event_journal",
+                )
                 .unwrap();
             let mut rows = stmt.query([]).unwrap();
             let mut out = String::new();
@@ -942,14 +950,7 @@ mod tests {
     fn explain_why_approval_wait_metrics() {
         let store = ExperienceStore::memory().unwrap();
         let task_id = "task-why-1";
-        append_at(
-            &store,
-            "mcp",
-            ACTION_TASK_REQUESTED,
-            task_id,
-            0,
-            "{}",
-        );
+        append_at(&store, "mcp", ACTION_TASK_REQUESTED, task_id, 0, "{}");
         append_at(
             &store,
             "kernel",
@@ -966,14 +967,7 @@ mod tests {
             4500,
             "{}",
         );
-        append_at(
-            &store,
-            "agent",
-            ACTION_TASK_COMPLETED,
-            task_id,
-            6000,
-            "{}",
-        );
+        append_at(&store, "agent", ACTION_TASK_COMPLETED, task_id, 6000, "{}");
 
         let why = store.explain_why(task_id).unwrap();
         assert_eq!(why.events.len(), 4);
@@ -1004,7 +998,12 @@ mod tests {
 
         // complete
         store
-            .complete_a2a_with_result(&task.id, TaskStatus::Completed, Some(r#"{"ok":true}"#), false)
+            .complete_a2a_with_result(
+                &task.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
             .unwrap();
 
         // experience lifecycle

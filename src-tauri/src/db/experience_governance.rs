@@ -685,7 +685,11 @@ fn undo_reject_blocking(conn: &Connection, id: &str) -> Result<()> {
     if n == 0 {
         anyhow::bail!("undo_reject: row not found or not rejected");
     }
-    journal_experience(conn, id, crate::db::journal::ACTION_EXPERIENCE_UNDO_REJECTED);
+    journal_experience(
+        conn,
+        id,
+        crate::db::journal::ACTION_EXPERIENCE_UNDO_REJECTED,
+    );
     Ok(())
 }
 

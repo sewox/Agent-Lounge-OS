@@ -121,13 +121,11 @@ pub async fn halt(store: &ExperienceStore, reason: Option<String>, by: &str) -> 
     persist(store, &state).await?;
     let reason_for_journal = state.reason.clone();
     let actor = by.to_string();
-    if let Err(err) = store.append_journal_entry(
-        crate::db::JournalAppendInput::new(
-            actor,
-            crate::db::ACTION_CONTROL_HALTED,
-            serde_json::json!({ "reason": reason_for_journal }).to_string(),
-        ),
-    ) {
+    if let Err(err) = store.append_journal_entry(crate::db::JournalAppendInput::new(
+        actor,
+        crate::db::ACTION_CONTROL_HALTED,
+        serde_json::json!({ "reason": reason_for_journal }).to_string(),
+    )) {
         log::warn!("event_journal control.halted append failed: {err:#}");
     }
     log::info!(
