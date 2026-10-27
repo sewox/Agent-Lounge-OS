@@ -74,7 +74,11 @@ export function JournalPanel({ embedded = false }: { embedded?: boolean }) {
   }, [tauriReady, t]);
 
   useEffect(() => {
-    void refresh();
+    // Defer so setState is not synchronous inside the effect body (react-hooks/set-state-in-effect).
+    const timer = window.setTimeout(() => {
+      void refresh();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [refresh]);
 
   const filtered = useMemo(() => {
