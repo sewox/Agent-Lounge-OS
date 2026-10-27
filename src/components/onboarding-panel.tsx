@@ -594,7 +594,7 @@ function LayaEngineBlock({ status }: { status: LayaEngineStatus | null }) {
     <div className="rounded-lg border border-outline-variant bg-surface-container">
       <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-3 py-2">
         <div className="min-w-0">
-          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+          <h2 lang="en" className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             OpenJev Laya
           </h2>
           <p className="mt-1 font-body text-body text-on-surface-variant">
@@ -663,7 +663,7 @@ function HfCatalogBlock({
     <div className="rounded-lg border border-outline-variant bg-surface-container">
       <div className="flex items-start justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-3 py-2">
         <div className="min-w-0">
-          <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+          <h2 lang="en" className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
             Hugging Face · LMR
           </h2>
           <p className="mt-1 font-body text-body text-on-surface-variant">
@@ -779,7 +779,7 @@ function ToolGroup({
   return (
     <div className="rounded-lg border border-outline-variant bg-surface-container">
       <div className="flex items-center justify-between border-b border-outline-variant bg-surface-container-low px-3 py-2">
-        <h2 className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
+        <h2 lang="en" className="font-mono text-xs font-bold tracking-wider text-on-surface uppercase">
           {title}
           <span className="ml-2 font-medium text-outline">{tools.length}</span>
         </h2>

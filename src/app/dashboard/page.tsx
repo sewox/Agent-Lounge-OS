@@ -93,7 +93,10 @@ function OrchestrationMiniPanel() {
               data-task-status={task.status}
               className="flex flex-wrap items-center gap-1.5 text-on-surface-variant"
             >
-              <span className="rounded border border-outline-variant px-1 py-0.5 font-body uppercase text-on-surface">
+              <span
+                lang="en"
+                className="rounded border border-outline-variant px-1 py-0.5 font-body uppercase text-on-surface"
+              >
                 {task.status}
               </span>
               <span className="truncate">{task.summary || task.id}</span>

@@ -367,7 +367,10 @@ export function CommandPalette() {
           {searching ? (
             <span className="font-mono text-meta text-outline">…</span>
           ) : mockMode ? (
-            <span className="rounded border border-outline-variant px-1.5 py-0.5 font-mono text-meta text-on-surface-variant uppercase">
+            <span
+              lang="en"
+              className="rounded border border-outline-variant px-1.5 py-0.5 font-mono text-meta text-on-surface-variant uppercase"
+            >
               mock
             </span>
           ) : (
@@ -401,7 +404,10 @@ export function CommandPalette() {
               return (
                 <div key={item.id}>
                   {showGroup ? (
-                    <div className="px-3 pt-2 pb-1 font-mono text-meta tracking-wider text-outline uppercase">
+                    <div
+                      lang="en"
+                      className="px-3 pt-2 pb-1 font-mono text-meta tracking-wider text-outline uppercase"
+                    >
                       {item.group}
                     </div>
                   ) : null}
@@ -431,7 +437,10 @@ export function CommandPalette() {
                       </div>
                     </div>
                     {item.hint ? (
-                      <span className="shrink-0 font-mono text-meta text-primary uppercase">
+                      <span
+                        lang="en"
+                        className="shrink-0 font-mono text-meta text-primary uppercase"
+                      >
                         {item.hint}
                       </span>
                     ) : null}
