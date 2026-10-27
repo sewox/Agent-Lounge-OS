@@ -2697,15 +2697,49 @@ export type JournalEntry = {
   entryHash: string;
 };
 
+/**
+ * Frontend filter input — camelCase preferred; snake_case aliases accepted
+ * (parity with ReviewQueueFilter / live Rust serde field names).
+ */
 export type JournalQueryFilter = {
   taskId?: string | null;
+  task_id?: string | null;
   projectId?: string | null;
+  project_id?: string | null;
   actionType?: string | null;
+  action_type?: string | null;
   actor?: string | null;
   since?: string | null;
   until?: string | null;
   limit?: number | null;
 };
+
+/**
+ * Nested `filter` wire shape for `query_event_journal`.
+ * Tauri renames top-level command args only — Rust `JournalQueryFilter` fields
+ * stay snake_case (no `rename_all = "camelCase"` on the struct).
+ */
+export function journalQueryFilterWire(
+  filter?: JournalQueryFilter | null,
+): {
+  task_id: string | null;
+  project_id: string | null;
+  action_type: string | null;
+  actor: string | null;
+  since: string | null;
+  until: string | null;
+  limit: number | null;
+} {
+  return {
+    task_id: filter?.taskId ?? filter?.task_id ?? null,
+    project_id: filter?.projectId ?? filter?.project_id ?? null,
+    action_type: filter?.actionType ?? filter?.action_type ?? null,
+    actor: filter?.actor ?? null,
+    since: filter?.since ?? null,
+    until: filter?.until ?? null,
+    limit: filter?.limit ?? null,
+  };
+}
 
 export type JournalVerificationReport = {
   valid: boolean;
@@ -2803,15 +2837,7 @@ export async function queryEventJournal(
   }
   const { invoke } = await import("@tauri-apps/api/core");
   const raw = await invoke<unknown>("query_event_journal", {
-    filter: {
-      taskId: filter?.taskId ?? null,
-      projectId: filter?.projectId ?? null,
-      actionType: filter?.actionType ?? null,
-      actor: filter?.actor ?? null,
-      since: filter?.since ?? null,
-      until: filter?.until ?? null,
-      limit: filter?.limit ?? null,
-    },
+    filter: journalQueryFilterWire(filter),
   });
   if (!Array.isArray(raw)) {
     return [];
