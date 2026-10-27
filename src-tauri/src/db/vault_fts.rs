@@ -135,6 +135,36 @@ pub fn fts5_available(conn: &Connection) -> Result<bool> {
 }
 
 /// Upgrade to Vault FTS schema v1: table, triggers, backfill. Idempotent.
+///
+/// # Rollback / external-tool compatibility (SQLite UDF coupling)
+///
+/// The `experiences_*_vault_fts` and `project_index_*_vault_fts` triggers call the
+/// custom scalar UDF `al_turkish_fold(...)`, which is registered on every connection
+/// open via [`register_turkish_fold_fn`] (also invoked at the start of this
+/// migration). Because that UDF is **not** part of stock SQLite, any older Agent
+/// Lounge binary — or an external SQLite CLI / tool — that opens the same database
+/// file **without** registering `al_turkish_fold` will fail on `INSERT`/`UPDATE` to
+/// `experiences` (and `project_index`) with:
+///
+/// ```text
+/// no such function: al_turkish_fold
+/// ```
+///
+/// To roll back safely (or to mutate rows from a tool that cannot register the UDF),
+/// drop the FTS triggers and virtual table first:
+///
+/// ```sql
+/// DROP TRIGGER IF EXISTS experiences_ai_vault_fts;
+/// DROP TRIGGER IF EXISTS experiences_au_vault_fts;
+/// DROP TRIGGER IF EXISTS experiences_ad_vault_fts;
+/// DROP TRIGGER IF EXISTS project_index_ai_vault_fts;
+/// DROP TRIGGER IF EXISTS project_index_au_vault_fts;
+/// DROP TRIGGER IF EXISTS project_index_ad_vault_fts;
+/// DROP TABLE IF EXISTS vault_fts;
+/// ```
+///
+/// After that, `INSERT`/`UPDATE` on `experiences` no longer invoke `al_turkish_fold`.
+/// Re-opening the DB with a current binary re-runs this migration and rebuilds FTS.
 pub fn migrate_vault_fts(conn: &Connection) -> Result<()> {
     register_turkish_fold_fn(conn)?;
 
@@ -220,6 +250,9 @@ fn create_fts_table(conn: &Connection) -> Result<()> {
 
 fn create_fts_triggers(conn: &Connection) -> Result<()> {
     // Experiences: only active rows are indexed (archived excluded at FTS layer).
+    //
+    // AI/AU triggers invoke `al_turkish_fold` (see rollback note on
+    // [`migrate_vault_fts`]). AD only deletes by row id and does not call the UDF.
     conn.execute_batch(
         r#"
         CREATE TRIGGER experiences_ai_vault_fts AFTER INSERT ON experiences BEGIN

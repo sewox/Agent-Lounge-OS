@@ -133,22 +133,6 @@ pub fn sort_scored_experiences_for_search(
     });
 }
 
-/// Convenience: attach scores then sort (tests / non-MCP callers).
-/// Prefer [`sort_scored_experiences_for_search`] when scores are already known.
-pub fn sort_experiences_for_search(
-    hits: &mut [LoungeExperience],
-    scores: &[f64],
-    prefer_project: Option<&str>,
-) {
-    debug_assert_eq!(hits.len(), scores.len());
-    let mut scored: Vec<(LoungeExperience, f64)> =
-        hits.iter().cloned().zip(scores.iter().copied()).collect();
-    sort_scored_experiences_for_search(&mut scored, prefer_project);
-    for (dst, (src, _)) in hits.iter_mut().zip(scored) {
-        *dst = src;
-    }
-}
-
 /// UI IPC must never expose pre-hygiene `original_content` (B2). MCP paths are unchanged.
 pub fn strip_original_content_for_ui(mut row: LoungeExperience) -> LoungeExperience {
     row.original_content = None;

@@ -568,6 +568,13 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(create_settings_sql())?;
     // FTS triggers (from a prior open) may fire during later migrations; the
     // fold UDF must exist on this connection before any experiences/project_index writes.
+    //
+    // Architecture: `experiences_*_vault_fts` / `project_index_*_vault_fts` triggers
+    // call `al_turkish_fold(...)` registered here via `register_turkish_fold_fn`.
+    // Opening this DB file without that UDF (older binary / stock `sqlite3` CLI)
+    // fails INSERT/UPDATE with `no such function: al_turkish_fold` unless the
+    // triggers + `vault_fts` table are dropped first — see the rollback SQL on
+    // [`crate::db::vault_fts::migrate_vault_fts`].
     crate::db::vault_fts::register_turkish_fold_fn(conn)?;
     crate::db::connected_tools::migrate_connected_tools(conn)?;
     crate::db::project_index::migrate_project_index(conn)?;

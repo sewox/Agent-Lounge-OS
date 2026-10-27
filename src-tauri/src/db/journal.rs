@@ -209,17 +209,36 @@ pub struct JournalHashParts<'a> {
 }
 
 /// Deterministic canonical preimage for `entry_hash`.
+///
+/// Every variable-length string field is length-prefixed as `len:value` (UTF-8
+/// byte length) so a literal `|` inside `actor`, `action_type`, `project_id`,
+/// `payload_json`, etc. cannot shift field boundaries. `append_journal_locked`
+/// and `verify_journal_chain` both hash this exact preimage via
+/// [`compute_entry_hash`].
+///
+/// Format:
+/// `seq|{event_id.len()}:{event_id}|{timestamp.len()}:{timestamp}|…`
 pub fn journal_entry_preimage(parts: &JournalHashParts<'_>) -> String {
+    let project_id = project_id_for_hash(parts.project_id);
+    let task_id = task_id_for_hash(parts.task_id);
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}:{}|{}:{}|{}:{}|{}:{}|{}:{}|{}:{}|{}:{}|{}:{}",
         parts.seq,
+        parts.event_id.len(),
         parts.event_id,
+        parts.timestamp.len(),
         parts.timestamp,
+        parts.actor.len(),
         parts.actor,
+        parts.action_type.len(),
         parts.action_type,
-        project_id_for_hash(parts.project_id),
-        task_id_for_hash(parts.task_id),
+        project_id.len(),
+        project_id,
+        task_id.len(),
+        task_id,
+        parts.scrubbed_payload_json.len(),
         parts.scrubbed_payload_json,
+        parts.prev_hash.len(),
         parts.prev_hash,
     )
 }
@@ -873,6 +892,66 @@ mod tests {
         assert!(report.valid, "{report:?}");
         assert_eq!(report.checked_count, 2);
         assert_eq!(report.head_hash.as_deref(), Some(e2.entry_hash.as_str()));
+    }
+
+    #[test]
+    fn length_prefixed_preimage_distinguishes_pipe_field_boundaries() {
+        // Unescaped `|` joins would collide: actor="a|b"+action="c" vs actor="a"+action="b|c".
+        let none = None;
+        let a = journal_entry_preimage(&JournalHashParts {
+            seq: 1,
+            event_id: "eid",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            actor: "a|b",
+            action_type: "c",
+            project_id: &none,
+            task_id: &none,
+            scrubbed_payload_json: r#"{"k":"v|w"}"#,
+            prev_hash: GENESIS_PREV_HASH,
+        });
+        let b = journal_entry_preimage(&JournalHashParts {
+            seq: 1,
+            event_id: "eid",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            actor: "a",
+            action_type: "b|c",
+            project_id: &none,
+            task_id: &none,
+            scrubbed_payload_json: r#"{"k":"v|w"}"#,
+            prev_hash: GENESIS_PREV_HASH,
+        });
+        assert_ne!(a, b, "preimages must differ when `|` shifts logical fields");
+        assert_ne!(
+            compute_entry_hash(&a),
+            compute_entry_hash(&b),
+            "hashes must differ for pipe-ambiguous field splits"
+        );
+        assert!(a.contains("3:a|b"), "actor length-prefix missing: {a}");
+        assert!(a.contains("1:c"), "action_type length-prefix missing: {a}");
+        assert!(b.contains("1:a"), "actor length-prefix missing: {b}");
+        assert!(
+            b.contains("3:b|c"),
+            "action_type length-prefix missing: {b}"
+        );
+
+        let store = ExperienceStore::memory().unwrap();
+        let e1 = store
+            .append_journal_entry(JournalAppendInput::new(
+                "a|b",
+                "c",
+                r#"{"note":"pipe|inside"}"#,
+            ))
+            .unwrap();
+        let e2 = store
+            .append_journal_entry(
+                JournalAppendInput::new("a", "b|c", r#"{"note":"other|pipe"}"#)
+                    .with_project_id(Some("proj|id".into())),
+            )
+            .unwrap();
+        assert_ne!(e1.entry_hash, e2.entry_hash);
+        let report = store.verify_journal_chain().unwrap();
+        assert!(report.valid, "{report:?}");
+        assert_eq!(report.checked_count, 2);
     }
 
     #[test]
