@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -276,11 +276,20 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JournalEntry> {
 
 const SELECT_COLS: &str = "seq, event_id, timestamp, actor, action_type, project_id, task_id, payload_json, prev_hash, entry_hash";
 
-/// Append one journal entry under the caller's connection (mutex / txn serialized).
-pub fn append_journal_entry_conn(
+struct PreparedJournalWrite {
+    event_id: String,
+    timestamp: String,
+    actor: String,
+    action_type: String,
+    project_id: Option<String>,
+    task_id: Option<String>,
+    payload_json: String,
+}
+
+fn prepare_journal_write(
     conn: &Connection,
     input: JournalAppendInput,
-) -> Result<JournalEntry> {
+) -> Result<PreparedJournalWrite> {
     let event_id = input
         .event_id
         .filter(|s| !s.trim().is_empty())
@@ -297,7 +306,22 @@ pub fn append_journal_entry_conn(
     let task_id = normalize_optional_id(input.task_id);
     let project_id = canonical_project_id(conn, input.project_id.as_deref());
     let payload_json = scrub_payload(&input.payload_json);
+    Ok(PreparedJournalWrite {
+        event_id,
+        timestamp,
+        actor,
+        action_type,
+        project_id,
+        task_id,
+        payload_json,
+    })
+}
 
+/// Atomic read-head + insert (caller already holds BEGIN IMMEDIATE or SAVEPOINT).
+fn append_journal_locked(
+    conn: &Connection,
+    prepared: &PreparedJournalWrite,
+) -> Result<JournalEntry> {
     let (prev_seq, prev_hash) = conn
         .query_row(
             "SELECT seq, entry_hash FROM event_journal ORDER BY seq DESC LIMIT 1",
@@ -321,13 +345,13 @@ pub fn append_journal_entry_conn(
 
     let preimage = journal_entry_preimage(&JournalHashParts {
         seq,
-        event_id: &event_id,
-        timestamp: &timestamp,
-        actor: &actor,
-        action_type: &action_type,
-        project_id: &project_id,
-        task_id: &task_id,
-        scrubbed_payload_json: &payload_json,
+        event_id: &prepared.event_id,
+        timestamp: &prepared.timestamp,
+        actor: &prepared.actor,
+        action_type: &prepared.action_type,
+        project_id: &prepared.project_id,
+        task_id: &prepared.task_id,
+        scrubbed_payload_json: &prepared.payload_json,
         prev_hash: &prev_hash,
     });
     let entry_hash = compute_entry_hash(&preimage);
@@ -341,13 +365,13 @@ pub fn append_journal_entry_conn(
         "#,
         params![
             seq,
-            event_id,
-            timestamp,
-            actor,
-            action_type,
-            project_id,
-            task_id,
-            payload_json,
+            prepared.event_id,
+            prepared.timestamp,
+            prepared.actor,
+            prepared.action_type,
+            prepared.project_id,
+            prepared.task_id,
+            prepared.payload_json,
             prev_hash,
             entry_hash,
         ],
@@ -355,16 +379,59 @@ pub fn append_journal_entry_conn(
 
     Ok(JournalEntry {
         seq,
-        event_id,
-        timestamp,
-        actor,
-        action_type,
-        project_id,
-        task_id,
-        payload_json,
+        event_id: prepared.event_id.clone(),
+        timestamp: prepared.timestamp.clone(),
+        actor: prepared.actor.clone(),
+        action_type: prepared.action_type.clone(),
+        project_id: prepared.project_id.clone(),
+        task_id: prepared.task_id.clone(),
+        payload_json: prepared.payload_json.clone(),
         prev_hash,
         entry_hash,
     })
+}
+
+/// Append one journal entry under the caller's connection (mutex / txn serialized).
+///
+/// - Autocommit connection → `BEGIN IMMEDIATE` … `COMMIT` (or `ROLLBACK` on error).
+/// - Already in a transaction → `SAVEPOINT journal_append` … `RELEASE` (or
+///   `ROLLBACK TO` + `RELEASE` on error).
+pub fn append_journal_entry_conn(
+    conn: &Connection,
+    input: JournalAppendInput,
+) -> Result<JournalEntry> {
+    let prepared = prepare_journal_write(conn, input)?;
+
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        match append_journal_locked(conn, &prepared) {
+            Ok(entry) => {
+                if let Err(err) = conn.execute_batch("COMMIT") {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(err.into());
+                }
+                Ok(entry)
+            }
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(err)
+            }
+        }
+    } else {
+        conn.execute_batch("SAVEPOINT journal_append")?;
+        match append_journal_locked(conn, &prepared) {
+            Ok(entry) => {
+                conn.execute_batch("RELEASE SAVEPOINT journal_append")?;
+                Ok(entry)
+            }
+            Err(err) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT journal_append; RELEASE SAVEPOINT journal_append;",
+                );
+                Err(err)
+            }
+        }
+    }
 }
 
 /// Best-effort append — never fails the caller.
@@ -374,15 +441,13 @@ pub fn append_journal_best_effort(conn: &Connection, input: JournalAppendInput) 
     }
 }
 
-/// Append with `BEGIN IMMEDIATE` when the caller holds only the store mutex.
+/// Append under the store mutex; delegates to [`append_journal_entry_conn`]
+/// (which opens `BEGIN IMMEDIATE` when the connection is in autocommit).
 pub fn append_journal_entry_immediate(
-    conn: &mut Connection,
+    conn: &Connection,
     input: JournalAppendInput,
 ) -> Result<JournalEntry> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let entry = append_journal_entry_conn(&tx, input)?;
-    tx.commit()?;
-    Ok(entry)
+    append_journal_entry_conn(conn, input)
 }
 
 pub fn verify_journal_chain(conn: &Connection) -> Result<JournalVerificationReport> {
@@ -728,8 +793,8 @@ pub fn timestamp_at_offset_ms(base: &str, offset_ms: i64) -> Result<String> {
 
 impl crate::db::ExperienceStore {
     pub fn append_journal_entry(&self, input: JournalAppendInput) -> Result<JournalEntry> {
-        let mut conn = self.conn.lock().expect("experience db lock");
-        append_journal_entry_immediate(&mut conn, input)
+        let conn = self.conn.lock().expect("experience db lock");
+        append_journal_entry_immediate(&conn, input)
     }
 
     pub fn verify_journal_chain(&self) -> Result<JournalVerificationReport> {
@@ -1064,6 +1129,172 @@ mod tests {
         let report = store.verify_journal_chain().unwrap();
         assert!(report.valid, "{report:?}");
         assert!(report.checked_count >= 12);
+    }
+
+    /// Real-path coverage for approval_approved / approval_rejected / cancelled /
+    /// expired_or_orphan (Dispatcher vote + cancel_a2a_task + expire_a2a_orphans).
+    #[tokio::test]
+    async fn automatic_hooks_approval_cancel_expire() {
+        use crate::kernel::{default_model_lock, Dispatcher};
+        use crate::models::{AnalysisDecision, ExperienceOutcome, RoutingVote};
+        use crate::services::MemoryBridge;
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        let store = ExperienceStore::memory().unwrap();
+        let dispatcher = Dispatcher::new(
+            "nats://127.0.0.1:4222",
+            crate::services::lounge_ollama_endpoint(),
+            default_model_lock(),
+            MemoryBridge::from_binary("/tmp/missing-codebase-memory-mcp"),
+            store.clone(),
+            PathBuf::from("/tmp"),
+        )
+        .with_approval_timeout(Duration::from_secs(5))
+        .with_skip_quota_probe()
+        .with_stub_decision(AnalysisDecision {
+            intent: "acknowledge".into(),
+            is_code_analysis: false,
+            reason: "journal-hook".into(),
+            adr_summary: "journal-hook".into(),
+            outcome: Some(ExperienceOutcome::Success),
+            target_agent: None,
+            repo_path: None,
+        });
+        dispatcher.set_gate_ready(true);
+
+        // --- approval_approved via SourceUnverified → Approve ---
+        let mut task_ok = LoungeTask::new("workflow_engine", "proj-hooks", "approve me");
+        task_ok.source_verified = false;
+        let id_ok = task_ok.id.clone();
+        let d_ok = dispatcher.clone();
+        let handle_ok = tokio::spawn(async move { d_ok.handle_task(task_ok).await });
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id_ok) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "approval_pending wait timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        dispatcher
+            .resolve_vote(id_ok.clone(), RoutingVote::Approve)
+            .unwrap();
+        assert!(handle_ok.await.unwrap().is_ok());
+
+        // --- approval_rejected via SourceUnverified → Deny ---
+        let mut task_deny = LoungeTask::new("workflow_engine", "proj-hooks", "deny me");
+        task_deny.source_verified = false;
+        let id_deny = task_deny.id.clone();
+        let d_deny = dispatcher.clone();
+        let handle_deny = tokio::spawn(async move { d_deny.handle_task(task_deny).await });
+        let started = std::time::Instant::now();
+        while !dispatcher.has_pending(&id_deny) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "deny pending wait timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        dispatcher
+            .resolve_vote(id_deny.clone(), RoutingVote::Deny)
+            .unwrap();
+        let _ = handle_deny.await.unwrap();
+
+        // --- cancelled via cancel_a2a_task ---
+        let mut task_cancel = LoungeTask::new("mcp:cursor", "proj-hooks", "cancel me");
+        task_cancel.session_id = Some("sess-cancel".into());
+        store.admit_a2a_task(&mut task_cancel, 8).unwrap();
+        store
+            .cancel_a2a_task(&task_cancel.id, "sess-cancel")
+            .unwrap();
+
+        // --- expired_or_orphan via expire_a2a_orphans (result orphan path) ---
+        let mut task_exp = LoungeTask::new("mcp:cursor", "proj-hooks", "expire me");
+        task_exp.session_id = Some("sess-exp".into());
+        store.admit_a2a_task(&mut task_exp, 8).unwrap();
+        store.mark_a2a_wait_timeout(&task_exp.id).unwrap();
+        store
+            .complete_a2a_with_result(
+                &task_exp.id,
+                TaskStatus::Completed,
+                Some(r#"{"ok":true}"#),
+                false,
+            )
+            .unwrap();
+        let (expired, _) = store
+            .expire_a2a_orphans(
+                "2099-01-01T00:11:00.000Z",
+                Duration::from_secs(600),
+                Duration::from_secs(1800),
+            )
+            .unwrap();
+        assert!(
+            expired.contains(&task_exp.id),
+            "expected result orphan expire: {expired:?}"
+        );
+
+        let actions: Vec<String> = store
+            .query_journal(&JournalQueryFilter {
+                limit: Some(1000),
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .map(|e| e.action_type)
+            .collect();
+
+        for expected in [
+            ACTION_TASK_APPROVAL_PENDING,
+            ACTION_TASK_APPROVAL_APPROVED,
+            ACTION_TASK_APPROVAL_REJECTED,
+            ACTION_TASK_CANCELLED,
+            ACTION_TASK_EXPIRED_OR_ORPHAN,
+        ] {
+            assert!(
+                actions.iter().any(|a| a == expected),
+                "missing {expected} in {actions:?}"
+            );
+        }
+
+        let report = store.verify_journal_chain().unwrap();
+        assert!(report.valid, "{report:?}");
+    }
+
+    #[test]
+    fn append_uses_immediate_txn_when_autocommit() {
+        let store = ExperienceStore::memory().unwrap();
+        {
+            let conn = store.conn.lock().expect("lock");
+            assert!(conn.is_autocommit());
+            let entry = append_journal_entry_conn(
+                &conn,
+                JournalAppendInput::new("tester", "txn.check", "{}"),
+            )
+            .unwrap();
+            assert_eq!(entry.seq, 1);
+            assert_eq!(entry.prev_hash, GENESIS_PREV_HASH);
+            assert!(conn.is_autocommit(), "must commit back to autocommit");
+        }
+        assert!(store.verify_journal_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn append_uses_savepoint_inside_outer_transaction() {
+        let store = ExperienceStore::memory().unwrap();
+        {
+            let conn = store.conn.lock().expect("lock");
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            assert!(!conn.is_autocommit());
+            let entry = append_journal_entry_conn(
+                &conn,
+                JournalAppendInput::new("tester", "savepoint.check", "{}"),
+            )
+            .unwrap();
+            assert_eq!(entry.seq, 1);
+            conn.execute_batch("COMMIT").unwrap();
+        }
+        assert!(store.verify_journal_chain().unwrap().valid);
     }
 
     #[test]
