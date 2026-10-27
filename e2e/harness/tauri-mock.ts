@@ -40,6 +40,8 @@ declare global {
       by?: string | null;
       at?: string | null;
     };
+    /** Journal-UI-1: force verify_event_journal to report a broken chain at seq 2. */
+    __QA_JOURNAL_BROKEN__?: boolean;
     __TAURI_INTERNALS__?: Record<string, unknown>;
     __TAURI_EVENT_PLUGIN_INTERNALS__?: Record<string, unknown>;
   }
@@ -1429,6 +1431,105 @@ export async function installTauriMock(page: Page, fixtureName: FixtureName = "f
         case "start_health_scan":
         case "cancel_health_scan":
           return null;
+        case "query_event_journal": {
+          const filterRaw =
+            args?.filter && typeof args.filter === "object" && !Array.isArray(args.filter)
+              ? (args.filter as Record<string, unknown>)
+              : (args ?? {});
+          const taskId = String(filterRaw.taskId ?? filterRaw.task_id ?? "").trim();
+          const projectId = String(filterRaw.projectId ?? filterRaw.project_id ?? "").trim();
+          const actionType = String(filterRaw.actionType ?? filterRaw.action_type ?? "").trim();
+          const actor = String(filterRaw.actor ?? "").trim();
+          const since = String(filterRaw.since ?? "").trim();
+          const until = String(filterRaw.until ?? "").trim();
+          const limitRaw = filterRaw.limit;
+          const limit =
+            typeof limitRaw === "number" && Number.isFinite(limitRaw)
+              ? Math.min(1000, Math.max(1, Math.floor(limitRaw)))
+              : 100;
+          const rows = (f.journalEntries ?? []).filter((row) => {
+            if (taskId && row.taskId !== taskId) return false;
+            if (projectId && row.projectId !== projectId) return false;
+            if (actionType && row.actionType !== actionType) return false;
+            if (actor && row.actor !== actor) return false;
+            if (since && row.timestamp < since) return false;
+            if (until && row.timestamp > until) return false;
+            return true;
+          });
+          return rows.slice(0, limit);
+        }
+        case "verify_event_journal": {
+          let broken = Boolean(window.__QA_JOURNAL_BROKEN__);
+          try {
+            if (sessionStorage.getItem("__QA_JOURNAL_BROKEN__") === "1") broken = true;
+          } catch {
+            /* private mode */
+          }
+          if (broken) {
+            return {
+              valid: false,
+              checkedCount: 2,
+              headHash: (f.journalEntries ?? [])[0]?.entryHash ?? null,
+              brokenAtSeq: 2,
+              brokenEventId: (f.journalEntries ?? [])[1]?.eventId ?? "jev-task-claimed",
+              reason: "entry_hash mismatch (payload or fields tampered)",
+            };
+          }
+          return (
+            f.journalVerification ?? {
+              valid: true,
+              checkedCount: (f.journalEntries ?? []).length,
+              headHash: (f.journalEntries ?? []).at(-1)?.entryHash ?? null,
+              brokenAtSeq: null,
+              brokenEventId: null,
+              reason: null,
+            }
+          );
+        }
+        case "explain_journal_why": {
+          const targetId = String(args?.targetId ?? args?.target_id ?? "").trim();
+          const all = f.journalEntries ?? [];
+          const byEvent = all.find((row) => row.eventId === targetId);
+          let events = all;
+          let taskId: string | null = null;
+          let projectId: string | null = null;
+          if (byEvent) {
+            taskId = byEvent.taskId;
+            projectId = byEvent.projectId;
+            events = taskId ? all.filter((row) => row.taskId === taskId) : [byEvent];
+          } else if (targetId) {
+            events = all.filter((row) => row.taskId === targetId);
+            if (events.length > 0) {
+              taskId = targetId;
+              projectId = events.find((row) => row.projectId)?.projectId ?? null;
+            } else {
+              events = [];
+            }
+          }
+          let broken = Boolean(window.__QA_JOURNAL_BROKEN__);
+          try {
+            if (sessionStorage.getItem("__QA_JOURNAL_BROKEN__") === "1") broken = true;
+          } catch {
+            /* private mode */
+          }
+          // Deterministic A2A demo metrics (matches Rust explain_why fixtures).
+          const isDemo =
+            taskId === "task-a2a-demo" ||
+            events.some((row) => row.taskId === "task-a2a-demo");
+          const totalDurationMs = isDemo ? 6000 : null;
+          const approvalWaitMs = isDemo ? 3500 : 0;
+          const executionMs = isDemo ? 2500 : null;
+          return {
+            targetId,
+            taskId,
+            projectId,
+            events,
+            totalDurationMs,
+            approvalWaitMs,
+            executionMs,
+            chainValid: !broken,
+          };
+        }
         // PR-4+ stubs — returning errors surfaces missing UX.
         case "delete_experience":
         case "approve_experience":

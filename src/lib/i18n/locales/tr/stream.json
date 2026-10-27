@@ -22,5 +22,20 @@
   "listenSurvives": "NATS dinleme gezinmede sürer",
   "kpiNats60s": "NATS / 60s",
   "kpiMemoryBridge": "memory_bridge",
-  "kpiVaultPersistence": "vault kalıcılık: sqlite"
+  "kpiVaultPersistence": "vault kalıcılık: sqlite",
+  "journalTitle": "Denetim Günlüğü",
+  "journalChainVerified": "Zincir Doğrulandı · {{count}} kayıt",
+  "journalChainBroken": "Zincir seq {{seq}} konumunda kırık · {{id}}",
+  "journalFiltersLabel": "Günlük filtreleri",
+  "journalFilterAll": "tümü",
+  "journalFilterTask": "task.*",
+  "journalFilterExperience": "experience.*",
+  "journalFilterControl": "control.*",
+  "journalLoading": "Günlük yükleniyor…",
+  "journalEmpty": "Henüz günlük kaydı yok",
+  "journalLoadError": "Günlük yüklenemedi",
+  "journalSelectHint": "A2A faz zaman çizelgesini açmak için bir görev veya olay seçin",
+  "journalTotalDuration": "Toplam: {{duration}}",
+  "journalApprovalWait": "Onay bekledi: {{duration}}",
+  "journalExecution": "Çalışma: {{duration}}"
 }

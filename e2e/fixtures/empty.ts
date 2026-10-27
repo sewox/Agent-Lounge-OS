@@ -1,5 +1,6 @@
 import type { FixtureDataset } from "./types";
 import { HEALTH_AGENTS_EMPTY } from "./health-agents";
+import { EMPTY_JOURNAL_ENTRIES, EMPTY_JOURNAL_VERIFICATION } from "./journal";
 
 const mkHealth = (
   id: string,
@@ -107,4 +108,6 @@ export const EMPTY_FIXTURE: FixtureDataset = {
   backgroundTasks: [],
   loungeHealth: HEALTH_AGENTS_EMPTY,
   healthScanMeta: { partial: false, indexed_at: null },
+  journalEntries: EMPTY_JOURNAL_ENTRIES,
+  journalVerification: EMPTY_JOURNAL_VERIFICATION,
 };

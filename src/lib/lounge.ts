@@ -2680,3 +2680,205 @@ export async function printAgentConnect(args: {
     workspace: args.workspace,
   });
 }
+
+// --- Journal-UI-1: event_journal IPC (Tauri camelCase wire ↔ Rust snake_case) ---
+
+/** Append-only journal row — mirrors `db::JournalEntry` after Tauri camelCase rename. */
+export type JournalEntry = {
+  seq: number;
+  eventId: string;
+  timestamp: string;
+  actor: string;
+  actionType: string;
+  projectId: string | null;
+  taskId: string | null;
+  payloadJson: string;
+  prevHash: string;
+  entryHash: string;
+};
+
+/**
+ * Frontend filter input — camelCase preferred; snake_case aliases accepted
+ * (parity with ReviewQueueFilter / live Rust serde field names).
+ */
+export type JournalQueryFilter = {
+  taskId?: string | null;
+  task_id?: string | null;
+  projectId?: string | null;
+  project_id?: string | null;
+  actionType?: string | null;
+  action_type?: string | null;
+  actor?: string | null;
+  since?: string | null;
+  until?: string | null;
+  limit?: number | null;
+};
+
+/**
+ * Nested `filter` wire shape for `query_event_journal`.
+ * Tauri renames top-level command args only — Rust `JournalQueryFilter` fields
+ * stay snake_case (no `rename_all = "camelCase"` on the struct).
+ */
+export function journalQueryFilterWire(
+  filter?: JournalQueryFilter | null,
+): {
+  task_id: string | null;
+  project_id: string | null;
+  action_type: string | null;
+  actor: string | null;
+  since: string | null;
+  until: string | null;
+  limit: number | null;
+} {
+  return {
+    task_id: filter?.taskId ?? filter?.task_id ?? null,
+    project_id: filter?.projectId ?? filter?.project_id ?? null,
+    action_type: filter?.actionType ?? filter?.action_type ?? null,
+    actor: filter?.actor ?? null,
+    since: filter?.since ?? null,
+    until: filter?.until ?? null,
+    limit: filter?.limit ?? null,
+  };
+}
+
+export type JournalVerificationReport = {
+  valid: boolean;
+  checkedCount: number;
+  headHash: string | null;
+  brokenAtSeq: number | null;
+  brokenEventId: string | null;
+  reason: string | null;
+};
+
+export type JournalWhyReport = {
+  targetId: string;
+  taskId: string | null;
+  projectId: string | null;
+  events: JournalEntry[];
+  totalDurationMs: number | null;
+  approvalWaitMs: number;
+  executionMs: number | null;
+  chainValid: boolean;
+};
+
+function asJournalEntry(raw: Record<string, unknown>): JournalEntry {
+  return {
+    seq: Number(raw.seq ?? 0) || 0,
+    eventId: String(raw.eventId ?? raw.event_id ?? ""),
+    timestamp: String(raw.timestamp ?? ""),
+    actor: String(raw.actor ?? ""),
+    actionType: String(raw.actionType ?? raw.action_type ?? ""),
+    projectId: (raw.projectId ?? raw.project_id ?? null) as string | null,
+    taskId: (raw.taskId ?? raw.task_id ?? null) as string | null,
+    payloadJson: String(raw.payloadJson ?? raw.payload_json ?? "{}"),
+    prevHash: String(raw.prevHash ?? raw.prev_hash ?? ""),
+    entryHash: String(raw.entryHash ?? raw.entry_hash ?? ""),
+  };
+}
+
+function asJournalVerification(raw: Record<string, unknown>): JournalVerificationReport {
+  const head = raw.headHash ?? raw.head_hash;
+  const brokenSeq = raw.brokenAtSeq ?? raw.broken_at_seq;
+  const brokenId = raw.brokenEventId ?? raw.broken_event_id;
+  const reason = raw.reason;
+  return {
+    valid: Boolean(raw.valid),
+    checkedCount: Number(raw.checkedCount ?? raw.checked_count ?? 0) || 0,
+    headHash: head == null ? null : String(head),
+    brokenAtSeq:
+      brokenSeq == null || brokenSeq === ""
+        ? null
+        : Number(brokenSeq) || null,
+    brokenEventId: brokenId == null ? null : String(brokenId),
+    reason: reason == null ? null : String(reason),
+  };
+}
+
+function asJournalWhy(raw: Record<string, unknown>): JournalWhyReport {
+  const eventsRaw = Array.isArray(raw.events) ? raw.events : [];
+  const total = raw.totalDurationMs ?? raw.total_duration_ms;
+  const execution = raw.executionMs ?? raw.execution_ms;
+  return {
+    targetId: String(raw.targetId ?? raw.target_id ?? ""),
+    taskId: (raw.taskId ?? raw.task_id ?? null) as string | null,
+    projectId: (raw.projectId ?? raw.project_id ?? null) as string | null,
+    events: eventsRaw
+      .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+      .map((row) => asJournalEntry(row)),
+    totalDurationMs: total == null ? null : Number(total) || 0,
+    approvalWaitMs: Number(raw.approvalWaitMs ?? raw.approval_wait_ms ?? 0) || 0,
+    executionMs: execution == null ? null : Number(execution) || 0,
+    chainValid: Boolean(raw.chainValid ?? raw.chain_valid ?? true),
+  };
+}
+
+/** Format journal durations for EN (`6.0s`) / TR (`6.0sn`). */
+export function formatJournalDurationMs(
+  ms: number | null | undefined,
+  locale: string,
+): string {
+  if (ms == null || !Number.isFinite(ms)) {
+    return "—";
+  }
+  const seconds = (ms / 1000).toFixed(1);
+  return locale.startsWith("tr") ? `${seconds}sn` : `${seconds}s`;
+}
+
+export function shortJournalHash(hash: string | null | undefined, len = 8): string {
+  if (!hash) return "—";
+  return hash.length <= len ? hash : hash.slice(0, len);
+}
+
+export async function queryEventJournal(
+  filter?: JournalQueryFilter | null,
+): Promise<JournalEntry[]> {
+  if (!isTauri()) {
+    return [];
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const raw = await invoke<unknown>("query_event_journal", {
+    filter: journalQueryFilterWire(filter),
+  });
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === "object")
+    .map((row) => asJournalEntry(row));
+}
+
+export async function verifyEventJournal(): Promise<JournalVerificationReport> {
+  if (!isTauri()) {
+    return {
+      valid: true,
+      checkedCount: 0,
+      headHash: null,
+      brokenAtSeq: null,
+      brokenEventId: null,
+      reason: null,
+    };
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const raw = await invoke<Record<string, unknown>>("verify_event_journal");
+  return asJournalVerification(raw && typeof raw === "object" ? raw : {});
+}
+
+export async function explainJournalWhy(targetId: string): Promise<JournalWhyReport> {
+  if (!isTauri()) {
+    return {
+      targetId,
+      taskId: null,
+      projectId: null,
+      events: [],
+      totalDurationMs: null,
+      approvalWaitMs: 0,
+      executionMs: null,
+      chainValid: true,
+    };
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  const raw = await invoke<Record<string, unknown>>("explain_journal_why", {
+    targetId,
+  });
+  return asJournalWhy(raw && typeof raw === "object" ? raw : { targetId });
+}
