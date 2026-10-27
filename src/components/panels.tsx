@@ -414,7 +414,10 @@ export function EventStreamPanel({ embedded = false }: { embedded?: boolean }) {
                     {event.payload}
                   </td>
                   <td className="px-2.5 py-1.5 text-right">
-                    <span className={`rounded border px-1.5 py-0.5 font-body text-meta tracking-label uppercase ${eventToneClass(tone)}`}>
+                    <span
+                      lang="en"
+                      className={`rounded border px-1.5 py-0.5 font-body text-meta tracking-label uppercase ${eventToneClass(tone)}`}
+                    >
                       {natsToneLabel(tone)}
                     </span>
                   </td>
@@ -1641,7 +1644,10 @@ export function HealthPanel() {
           <span className="text-primary">
             <Icon name="rule" />
           </span>
-          <h3 className="font-body text-panel font-semibold tracking-label text-on-surface uppercase">
+          <h3
+            lang="en"
+            className="font-body text-panel font-semibold tracking-label text-on-surface uppercase"
+          >
             PROJECT HEALTH: INDEXING + DEAD CODE
           </h3>
         </div>
@@ -1762,6 +1768,7 @@ export function QuotaMiniCard() {
                 {row.tool}
               </span>
               <span
+                lang="en"
                 className={`inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 font-body text-meta tracking-label uppercase ${quotaToneClass(row.tone)}`}
               >
                 {row.label}
@@ -1834,7 +1841,10 @@ export function QuotaPanel() {
             {t("title")}
           </h2>
           {amberAlert ? (
-            <span className="rounded border border-error-container bg-error-container/20 px-1.5 py-0.5 font-mono text-meta font-semibold text-error-dim uppercase">
+            <span
+              lang="en"
+              className="rounded border border-error-container bg-error-container/20 px-1.5 py-0.5 font-mono text-meta font-semibold text-error-dim uppercase"
+            >
               {t("amberAlert", { tools: amberTools.join(", ") || t("amberAlertDefault") })}
             </span>
           ) : (
@@ -2452,8 +2462,15 @@ export function FleetPanel() {
               <tr className="sticky top-0 border-b border-outline-variant bg-surface-container-low/95 text-meta text-outline uppercase">
                 <th className="w-[22%] px-3 py-2 font-medium">{t("colWorker")}</th>
                 <th className="w-[12%] px-2 py-2 font-medium">{t("colStatus")}</th>
-                <th className="hidden w-[12%] px-2 py-2 font-medium sm:table-cell">{t("colHeartbeat")}</th>
-                <th className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">{t("colPid")}</th>
+                <th
+                  lang="en"
+                  className="hidden w-[12%] px-2 py-2 font-medium sm:table-cell"
+                >
+                  {t("colHeartbeat")}
+                </th>
+                <th lang="en" className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">
+                  {t("colPid")}
+                </th>
                 <th className="hidden w-[10%] px-2 py-2 font-medium md:table-cell">{t("colUptime")}</th>
                 <th className="hidden w-[10%] px-2 py-2 font-medium lg:table-cell">{t("colRestarts")}</th>
                 <th className="px-3 py-2 font-medium">{t("colEndpoint")}</th>
@@ -2530,11 +2547,15 @@ export function FleetPanel() {
                 </dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">{t("detailHeartbeat")}</dt>
+                <dt lang="en" className="text-meta text-outline uppercase">
+                  {t("detailHeartbeat")}
+                </dt>
                 <dd className="text-on-surface-variant">{translateFleetToken(t, selected.heartbeat)}</dd>
               </div>
               <div>
-                <dt className="text-meta text-outline uppercase">{t("detailPid")}</dt>
+                <dt lang="en" className="text-meta text-outline uppercase">
+                  {t("detailPid")}
+                </dt>
                 <dd className="text-on-surface-variant">{translateFleetToken(t, selected.pid)}</dd>
               </div>
               <div>
@@ -2622,7 +2643,10 @@ export function FleetPanel() {
                   className="flex min-w-0 flex-col gap-0.5 text-on-surface-variant"
                 >
                   <span className="flex flex-wrap items-center gap-1.5">
-                    <span className="rounded border border-outline-variant px-1 py-0.5 font-body uppercase text-on-surface">
+                    <span
+                      lang="en"
+                      className="rounded border border-outline-variant px-1 py-0.5 font-body uppercase text-on-surface"
+                    >
                       {task.status}
                     </span>
                     <span className="truncate" title={task.id}>
@@ -2743,7 +2767,7 @@ export function TelemetryPanel() {
     <section data-qa="panel" className="flex h-full min-h-0 w-full min-w-0 flex-col gap-3 overflow-hidden">
       <div className="grid shrink-0 gap-3 md:grid-cols-2">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div className="text-body tracking-wider text-on-surface-variant uppercase">
+          <div lang="en" className="text-body tracking-wider text-on-surface-variant uppercase">
             {t("layaDecision")}
           </div>
           <div
@@ -2767,7 +2791,9 @@ export function TelemetryPanel() {
           </div>
         </div>
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-outline-variant bg-surface-container p-3 font-mono text-body">
-          <div className="text-body tracking-wider text-on-surface-variant uppercase">{t("msgPerMin")}</div>
+          <div lang="en" className="text-body tracking-wider text-on-surface-variant uppercase">
+            {t("msgPerMin")}
+          </div>
           <div
             key={decisionMsgPerMin}
             className="kpi-tick mt-2 tnum text-2xl font-bold text-on-surface"

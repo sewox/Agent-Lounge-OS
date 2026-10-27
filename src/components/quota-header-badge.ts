@@ -29,6 +29,7 @@ export type QuotaBadgeLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
   href: string;
   children?: ReactNode;
   "data-testid"?: string;
+  "data-qa"?: string;
   "data-amber-count"?: string;
   "data-badge-index"?: string;
   "data-paused"?: string;
@@ -252,6 +253,7 @@ export function QuotaHeaderBadge({ quotas, LinkComponent }: QuotaHeaderBadgeProp
       title: tooltip,
       "aria-label": ariaLabel,
       "data-testid": "quota-header-badge",
+      "data-qa": "quota-header-badge",
       "data-amber-count": String(amberRows.length),
       "data-badge-index": String(safeIndex),
       "data-paused": paused ? "1" : "0",

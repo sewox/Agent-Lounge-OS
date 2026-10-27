@@ -12,6 +12,8 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
+  // Hide the floating Next.js dev indicator so it never overlays bottom-left UI.
+  devIndicators: false,
   // Must track PORT (default 3000) — same source as scripts/next-dev.mjs.
   assetPrefix: resolveDevAssetPrefix({
     isProd,

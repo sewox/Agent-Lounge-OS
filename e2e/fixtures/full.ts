@@ -512,7 +512,7 @@ export const FULL_FIXTURE: FixtureDataset = {
     title: "DecisionGate",
     message: "Ready",
     detail: null,
-    device: "metal",
+    device: "Metal",
     reason: null,
   },
   layaEngine: {
