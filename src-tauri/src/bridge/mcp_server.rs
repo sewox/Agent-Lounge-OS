@@ -610,6 +610,14 @@ impl McpServer {
                 Ok(v) => (v, false),
                 Err(err) => (json!({ "error": err.to_string() }), true),
             },
+            "lounge_query_journal" => match self.tool_query_journal(&args).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
+            "lounge_explain_why" => match self.tool_explain_why(&args).await {
+                Ok(v) => (v, false),
+                Err(err) => (json!({ "error": err.to_string() }), true),
+            },
             other => (
                 json!({ "error": format!("bilinmeyen tool: {other}") }),
                 true,
@@ -1212,6 +1220,43 @@ impl McpServer {
         self.orchestrator.skips_nats()
     }
 
+    async fn tool_query_journal(&self, args: &Value) -> Result<Value> {
+        let filter = crate::db::JournalQueryFilter {
+            task_id: arg_str(args, "task_id").map(str::to_string),
+            project_id: arg_str(args, "project_id").map(str::to_string),
+            action_type: arg_str(args, "action_type").map(str::to_string),
+            actor: arg_str(args, "actor").map(str::to_string),
+            since: arg_str(args, "since").map(str::to_string),
+            until: arg_str(args, "until").map(str::to_string),
+            limit: args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
+        };
+        let entries = self.store.query_journal(&filter)?;
+        let mut out = json!({ "entries": entries, "count": entries.len() });
+        if args
+            .get("verify_chain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            let report = self.store.verify_journal_chain()?;
+            out["chain"] = serde_json::to_value(report)?;
+        }
+        Ok(out)
+    }
+
+    async fn tool_explain_why(&self, args: &Value) -> Result<Value> {
+        let target = arg_str(args, "target_id")
+            .or_else(|| arg_str(args, "task_id"))
+            .or_else(|| arg_str(args, "event_id"))
+            .ok_or_else(|| {
+                anyhow!("lounge_explain_why: target_id (veya task_id/event_id) gerekli")
+            })?;
+        let report = self.store.explain_why(target)?;
+        Ok(serde_json::to_value(report)?)
+    }
+
     async fn tool_lounge_health(&self, args: &Value) -> Result<Value> {
         let args = if args.is_null() {
             json!({})
@@ -1566,6 +1611,16 @@ yoksa ADR boş kalır (UI: No ADR). `tags` ajan etiketleridir (normalize edilir;
             "Health-1b birleşik sağlık (şema 1.1.0): dead symbols, ajan lounge-mcp config (salt okunur; her config yolu ayrı rapor), title/LMR backlog, CBM daemon + 18749 pollution tespiti (düzeltmez). URL-only girişler unverified. Ev yolları ~/… maskeli. Ayar/config yazmaz. Not: title.queue_backlog ve last_error_type bu süreçte localdir — standalone lounge-mcp'te 0/null; Tauri lounge_health canlı worker değerlerini verir. db_backlog/give_ups SQLite.",
             include_schema("mcp_lounge_health.schema.json"),
         ),
+        tool_def(
+            "lounge_query_journal",
+            "Salt okunur event journal sorgusu (SHA-256 hash zinciri). Filtre: task_id, project_id, action_type, actor, since, until, limit. İsteğe bağlı verify_chain=true ile zincir doğrulama. Halt altında da çalışır.",
+            include_schema("mcp_query_journal.schema.json"),
+        ),
+        tool_def(
+            "lounge_explain_why",
+            "Görev veya event için nedensel iz (lifecycle eventleri + approval_wait_ms / execution_ms). target_id olarak task_id veya event_id verin. Halt altında da çalışır.",
+            include_schema("mcp_explain_why.schema.json"),
+        ),
     ]
 }
 
@@ -1601,6 +1656,36 @@ fn include_schema(file: &str) -> Value {
         }
         "mcp_lounge_health.schema.json" => {
             include_str!("../../../shared/lounge_protocol/schemas/mcp_lounge_health.schema.json")
+        }
+        // Inline under src-tauri ownership boundary (shared/schemas deferred).
+        "mcp_query_journal.schema.json" => {
+            r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "task_id": { "type": "string" },
+    "project_id": { "type": "string" },
+    "action_type": { "type": "string" },
+    "actor": { "type": "string" },
+    "since": { "type": "string" },
+    "until": { "type": "string" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "verify_chain": { "type": "boolean" }
+  }
+}"#
+        }
+        "mcp_explain_why.schema.json" => {
+            r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "target_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "event_id": { "type": "string" }
+  }
+}"#
         }
         other => panic!("bilinmeyen schema: {other}"),
     };
@@ -3298,5 +3383,77 @@ mod tests {
             "strong BM25 hybrid must lead at MCP tool level: {experiences:?}"
         );
         assert_eq!(experiences[1]["id"].as_str(), Some("mcp-weak"));
+    }
+
+    /// Journal MCP probe — tools/list + query/explain while Halted.
+    #[tokio::test]
+    async fn lounge_mcp_probe_journal_tools_halt_safe() {
+        use crate::db::{
+            JournalAppendInput, ACTION_TASK_APPROVAL_APPROVED, ACTION_TASK_APPROVAL_PENDING,
+            ACTION_TASK_COMPLETED, ACTION_TASK_REQUESTED,
+        };
+        use crate::services::halt::{halt, HALT_BY_UI};
+
+        let store = ExperienceStore::memory().expect("db");
+        let base = "2026-03-01T12:00:00.000Z";
+        for (action, offset, tid) in [
+            (ACTION_TASK_REQUESTED, 0i64, "j-mcp-1"),
+            (ACTION_TASK_APPROVAL_PENDING, 1000, "j-mcp-1"),
+            (ACTION_TASK_APPROVAL_APPROVED, 4500, "j-mcp-1"),
+            (ACTION_TASK_COMPLETED, 6000, "j-mcp-1"),
+        ] {
+            let ts = crate::db::timestamp_at_offset_ms(base, offset).unwrap();
+            store
+                .append_journal_entry(
+                    JournalAppendInput::new("probe", action, "{}")
+                        .with_task_id(tid)
+                        .with_timestamp(ts),
+                )
+                .unwrap();
+        }
+
+        halt(&store, Some("journal-probe".into()), HALT_BY_UI)
+            .await
+            .unwrap();
+
+        let mut server = McpServer::new(store, "nats://127.0.0.1:9").with_skip_nats(true);
+
+        let listed = server
+            .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            listed.contains("lounge_query_journal") && listed.contains("lounge_explain_why"),
+            "journal tools missing from tools/list: {listed}"
+        );
+
+        let query = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lounge_query_journal","arguments":{"task_id":"j-mcp-1","verify_chain":true}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let qv: Value = serde_json::from_str(&query).unwrap();
+        assert_ne!(qv["result"]["isError"], true, "{qv}");
+        let body = &qv["result"]["structuredContent"];
+        assert_eq!(body["count"], 4);
+        assert_eq!(body["chain"]["valid"], true);
+
+        let why = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lounge_explain_why","arguments":{"target_id":"j-mcp-1"}}}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let wv: Value = serde_json::from_str(&why).unwrap();
+        assert_ne!(wv["result"]["isError"], true, "{wv}");
+        let report = &wv["result"]["structuredContent"];
+        assert_eq!(report["approval_wait_ms"], 3500);
+        assert_eq!(report["total_duration_ms"], 6000);
+        assert_eq!(report["execution_ms"], 2500);
+        assert_eq!(report["chain_valid"], true);
     }
 }

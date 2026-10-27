@@ -711,6 +711,18 @@ fn admit_task_atomic_inner(
     }
 
     tx.commit().map_err(storage_err)?;
+    crate::db::journal::journal_task_lifecycle(
+        conn,
+        &task.id,
+        crate::db::journal::ACTION_TASK_REQUESTED,
+        task.source_agent.trim(),
+        Some(task.project_id.clone()),
+        serde_json::json!({
+            "status": task.status.as_str(),
+            "summary": task.summary,
+            "target_agent": task.target_agent,
+        }),
+    );
     Ok(AdmitOutcome::Accepted(task.clone()))
 }
 
@@ -866,6 +878,16 @@ pub fn claim_task(conn: &Connection, task_id: &str, session_id: &str) -> Result<
                 "UPDATE a2a_tasks SET claimed_by = ?1, updated_at = ?2 WHERE id = ?3 AND claimed_by IS NULL",
                 params![session_id, now, task_id],
             )?;
+            if n > 0 {
+                crate::db::journal::journal_task_lifecycle(
+                    conn,
+                    task_id,
+                    crate::db::journal::ACTION_TASK_CLAIMED,
+                    session_id,
+                    None,
+                    serde_json::json!({ "claimed_by": session_id }),
+                );
+            }
             Ok(n > 0)
         }
         Some(ref owner) if owner == session_id => Ok(true),
@@ -974,6 +996,19 @@ pub fn yield_task_result(
     }
     if matches!(status, TaskStatus::Failed) {
         let _ = release_idempotency_for_task(conn, task_id);
+    }
+    if let Some(action) = crate::db::journal::action_for_task_status(&status) {
+        crate::db::journal::journal_task_lifecycle(
+            conn,
+            task_id,
+            action,
+            session_id,
+            Some(task.project_id.clone()),
+            serde_json::json!({
+                "status": status.as_str(),
+                "via": "yield",
+            }),
+        );
     }
     Ok(())
 }
@@ -1102,13 +1137,27 @@ pub(crate) fn update_task_status(conn: &Connection, id: &str, status: TaskStatus
         );
         return Ok(());
     }
-    if let Some(mut task) = load_task_row(conn, id)? {
-        task.status = status;
+    let project_id = if let Some(mut task) = load_task_row(conn, id)? {
+        let project_id = Some(task.project_id.clone());
+        task.status = status.clone();
         let payload = serde_json::to_string(&task)?;
         conn.execute(
             "UPDATE a2a_tasks SET payload_json = ?1 WHERE id = ?2",
             params![payload, id],
         )?;
+        project_id
+    } else {
+        crate::db::journal::load_task_project_id(conn, id)
+    };
+    if let Some(action) = crate::db::journal::action_for_task_status(&status) {
+        crate::db::journal::journal_task_lifecycle(
+            conn,
+            id,
+            action,
+            "kernel",
+            project_id,
+            serde_json::json!({ "status": status.as_str() }),
+        );
     }
     Ok(())
 }
@@ -2044,6 +2093,19 @@ impl crate::db::ExperienceStore {
         }
         if release_idempotency {
             let _ = release_idempotency_for_task(&tx, task_id);
+        }
+        if let Some(action) = crate::db::journal::action_for_task_status(&status) {
+            crate::db::journal::journal_task_lifecycle(
+                &tx,
+                task_id,
+                action,
+                "kernel",
+                None,
+                serde_json::json!({
+                    "status": status.as_str(),
+                    "via": "complete_a2a_with_result",
+                }),
+            );
         }
         tx.commit()?;
         Ok(())

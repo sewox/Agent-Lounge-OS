@@ -38,7 +38,8 @@ fn re_token() -> &'static Regex {
         Regex::new(concat!(
             r"(?i)\b(?:",
             r"bearer\s+[A-Za-z0-9\-._~+/]+=*|",
-            r"sk-[A-Za-z0-9]{16,}|",
+            // OpenAI-style keys include hyphens (e.g. sk-proj-…).
+            r"sk-[A-Za-z0-9-]{16,}|",
             r"ghp_[A-Za-z0-9]{20,}|",
             r"xox[baprs]-[A-Za-z0-9-]{10,}|",
             r"SU[A-Za-z0-9]{48,}|",

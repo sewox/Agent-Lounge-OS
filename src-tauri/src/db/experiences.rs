@@ -574,6 +574,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
     crate::db::project_identity::migrate_project_identity(conn)?;
     crate::db::feedback::migrate_feedback(conn)?;
     crate::db::a2a::migrate_a2a(conn)?;
+    crate::db::journal::migrate_journal(conn)?;
     let exists = table_exists(conn, "experiences")?;
     if !exists {
         conn.execute_batch(create_experiences_sql())?;
@@ -798,6 +799,21 @@ fn insert_record_blocking(conn: &Connection, record: &ExperienceRecord) -> Resul
                 source,
             ],
         )?;
+        crate::db::journal::append_journal_best_effort(
+            conn,
+            crate::db::journal::JournalAppendInput::new(
+                record.agent_id.clone(),
+                crate::db::journal::ACTION_EXPERIENCE_RECORDED,
+                serde_json::json!({
+                    "experience_id": record.id,
+                    "topic": record.topic,
+                    "source": source,
+                })
+                .to_string(),
+            )
+            .with_project_id(Some(record.project_id.clone()))
+            .with_task_id(record.related_task_id.clone().unwrap_or_default()),
+        );
     }
     Ok(())
 }

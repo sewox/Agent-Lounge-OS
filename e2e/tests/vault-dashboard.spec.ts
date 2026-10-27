@@ -44,6 +44,9 @@ async function openVaultProject(page: import("@playwright/test").Page, name: str
   );
   // Experiences live in the inspector slot (drawer on one/two modes).
   await revealVaultExperiences(page);
+  // D3 portrait renders inspector inline immediately — wait for the scoped
+  // list_experiences fetch before callers snapshot main.innerText() (EX-14/15).
+  await expect(page.locator('[data-qa="experience-card"]').first()).toBeVisible();
 }
 
 test.describe("DB — dashboard", () => {
@@ -457,6 +460,7 @@ test.describe("EX — vault experiences", () => {
     );
     const treeEdges = Number((projectText.match(/(\d+)\s*edges/i) || [])[1] || 0);
     await openVaultProject(page, "Agent-Lounge-OS");
+    await expect(page.locator('[data-qa="experience-card"]').first()).toBeVisible();
     const text = await page.locator("main").innerText();
     const bridge = text.match(/nodes=(\d+)\s+edges=(\d+)/i);
     expect(bridge, "bridge stats appear in experience content").toBeTruthy();
@@ -471,6 +475,7 @@ test.describe("EX — vault experiences", () => {
   }) => {
     await openRoute(page, "/vault", "full");
     await openVaultProject(page, "Agent-Lounge-OS");
+    await expect(page.locator('[data-qa="experience-card"]').first()).toBeVisible();
     const text = await page.locator("main").innerText();
     expect(text).not.toMatch(/##\s*Cross-Project Memory/i);
     expect(text).not.toMatch(/###\s*Tecrübeler/i);
